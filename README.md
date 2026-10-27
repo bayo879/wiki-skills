@@ -84,6 +84,20 @@ sh ~/.dsh/skills/llm-wiki/bin/bootstrap.sh
 `bin/vendor/<triple>/`，否则 `bootstrap` 会退出码 2 并指名缺哪个 triple。
 `tests/skills_install.rs` 会把这个流程当验收项跑（复制包 → 清空环境 → bootstrap → 跑通）。
 
+#### 从 Release 取现成产物
+
+本机打不出 Linux / Windows 的二进制（缺目标平台的 C 工具链，`libsqlite3-sys` 是 bundled C）。
+这三个平台由 CI 出：推一个 tag，`Release` workflow 会在三个原生 runner 上各打一份包，
+并挂到 Release 页：
+
+```bash
+git tag v0.1.0 && git push --tags
+```
+
+产物是 `llm-wiki-skills-<version>-<triple>.tar.gz`，解压后把 `skills/*` 复制进对方技能根目录即可，
+里面的 `bin/vendor/` 已经是对应平台的二进制，不需要再跑 `vendor.sh`。没有 tag 时也可以去
+Actions 页面手动跑 `Release` workflow（`workflow_dispatch`）。
+
 | skill | 管什么 |
 |---|---|
 | `llm-wiki` | 总纲：判断该调谁、把 `--json` 翻成人话、决策门四选项 |
