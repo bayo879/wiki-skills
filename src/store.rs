@@ -431,6 +431,46 @@ impl Store {
         Ok(())
     }
 
+    /// One value of the `sync_state` table, or `None` when the key is unset.
+    ///
+    /// The table is the engine's scratch memory between rounds: stable streaks,
+    /// last-seen raw hashes and the auto-ingest gate live here rather than in
+    /// `wiki.toml`, because the CLI never rewrites the human's configuration.
+    pub fn sync_state_get(&self, key: &str) -> Result<Option<String>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+
+    /// Sets a `sync_state` value, replacing any previous one.
+    pub fn sync_state_set(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO sync_state(key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Every `sync_state` entry, ordered by key.
+    pub fn sync_state_entries(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM sync_state ORDER BY key")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Every raw file in the ledger, ordered by key.
     pub fn all_raws(&self) -> Result<Vec<RawRow>> {
         let sql = format!("SELECT {RAW_COLUMNS} FROM raws ORDER BY key");

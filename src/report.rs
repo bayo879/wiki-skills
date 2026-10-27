@@ -24,7 +24,6 @@ pub enum Exit {
     /// The command stopped and needs a human decision.
     NeedsConfirm = 3,
     /// Another process holds the repository lock.
-    #[allow(dead_code)] // Constructed once the write commands take the lock.
     Busy = 4,
 }
 

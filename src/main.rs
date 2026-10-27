@@ -22,6 +22,7 @@ use llm_wiki::paths;
 use llm_wiki::report::{self, Exit};
 use llm_wiki::scan::{self, ChangeKind};
 use llm_wiki::store::Store;
+use llm_wiki::sync;
 use llm_wiki::version::{self, ApproveOutcome};
 
 /// Characters of parsed markdown echoed by `parse`.
@@ -69,6 +70,11 @@ fn dispatch(cli: Cli) -> ! {
         Command::Defer => run_defer(),
         Command::Archive { command } => run_archive(command),
         Command::Recall { query, full } => run_recall(query, full),
+        Command::Sync {
+            limit,
+            dry_run,
+            force,
+        } => run_sync(limit, dry_run, force),
     }
 }
 
@@ -121,6 +127,68 @@ fn run_init(force: bool) -> ! {
         Ok(outcome) => report::emit("init", outcome),
         Err(err) => report::fail("init", Exit::Usage, "E_IO", &err.to_string()),
     }
+}
+
+/// `sync` runs one unattended round under the repository lock.
+///
+/// A round that converted some sources and failed others still ran: the
+/// failures are findings (exit 1), and the caller can read them off the report.
+/// A held lock is exit 4, so a scheduler can tell "someone else is working" from
+/// "this round found problems". Anything else is an environment error (exit 2).
+fn run_sync(limit: Option<usize>, dry_run: bool, force: bool) -> ! {
+    let root = wiki_root("sync");
+    let cfg = load_config("sync", &root);
+    let mut store = open_store("sync", &root, &cfg);
+    let args = sync::SyncArgs {
+        limit: limit.unwrap_or(cfg.sync.max_per_run),
+        dry_run,
+        force,
+    };
+    match sync::run(&root, &cfg, &mut store, &args) {
+        Ok(report) => {
+            let exit = if report.failures > 0 {
+                Exit::Error
+            } else {
+                Exit::Ok
+            };
+            report::emit_with("sync", report, exit, human_sync)
+        }
+        Err(err) => {
+            // The envelope carries the code, so the message is the hint alone:
+            // the library's `Display` prefixes the code for log lines.
+            let message = match &err {
+                sync::SyncError::Lock(lock_err) => lock_err.hint(),
+                _ => err.to_string(),
+            };
+            let exit = if err.code() == "E_LOCKED" {
+                Exit::Busy
+            } else {
+                Exit::Usage
+            };
+            report::fail("sync", exit, err.code(), &message)
+        }
+    }
+}
+
+/// Human rendering of a sync round: the counters first, then the warnings that
+/// explain them.
+fn human_sync(report: &sync::SyncReport) -> String {
+    let mut out = format!("run_id: {}\n", report.run_id);
+    out.push_str(&format!("converted: {}\n", report.converted));
+    out.push_str(&format!(
+        "ingested: {}\n",
+        if report.ingested.is_empty() {
+            String::from("(none)")
+        } else {
+            report.ingested.join(", ")
+        }
+    ));
+    out.push_str(&format!("queued: {}\n", report.queued));
+    out.push_str(&format!("failures: {}\n", report.failures));
+    for warning in &report.warnings {
+        out.push_str(&format!("warning: {warning}\n"));
+    }
+    out.trim_end().to_string()
 }
 
 /// `scan` compares `source/` with the ledger and reports the classified changes.

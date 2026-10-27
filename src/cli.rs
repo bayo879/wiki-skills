@@ -102,6 +102,18 @@ pub enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Run one unattended round: scan, convert, gate and audit.
+    Sync {
+        /// Convert at most this many sources; defaults to `sync.max_per_run`.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Report what the round would do and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Ignore the settle window and the stable-streak gate.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// The three verbs of the archive layer.
