@@ -9,6 +9,7 @@
 //! Backend ids are stable strings because they end up in the raw frontmatter and
 //! in command output.
 
+pub mod asset;
 pub mod html;
 pub mod text;
 
@@ -132,11 +133,17 @@ pub type Result<T> = std::result::Result<T, ParseError>;
 
 /// The backends available for `cfg`, in the order they are tried.
 ///
-/// Later tasks append the html, pdf, asset and external backends here; `cfg`
-/// decides which ones are enabled, which is why it is part of the signature even
-/// though only the text backend exists today.
+/// Order is specificity, not preference: text and html each claim a distinct set
+/// of extensions, and asset only claims image extensions, so no two builtin
+/// backends compete for the same file. Later tasks append the pdf and external
+/// backends here; `cfg` decides which ones are enabled, which is why it is part
+/// of the signature even though every builtin backend is always on.
 pub fn registry(_cfg: &Config) -> Vec<Box<dyn Parser>> {
-    vec![Box::new(text::TextParser::new())]
+    vec![
+        Box::new(text::TextParser::new()),
+        Box::new(html::HtmlParser::new()),
+        Box::new(asset::AssetParser::new()),
+    ]
 }
 
 /// Parses `src` with the first backend that claims its extension.

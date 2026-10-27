@@ -455,9 +455,10 @@ fn invalid_utf8_is_replaced_with_a_warning() {
 fn text_backend_claims_markdown_and_txt_only() {
     let cfg = Config::default();
     let backends = parse::registry(&cfg);
-    assert_eq!(backends.len(), 1);
-    let backend = backends.first().unwrap();
-    assert_eq!(backend.id(), "builtin-text");
+    let backend = backends
+        .into_iter()
+        .find(|backend| backend.id() == "builtin-text")
+        .expect("the text backend must be registered");
     for ext in ["md", "MD", "markdown", "Markdown", "txt", "TXT"] {
         assert!(backend.can_handle(ext), "{ext} must be claimed");
     }
@@ -472,6 +473,23 @@ fn text_backend_claims_markdown_and_txt_only() {
 
     let err = parse::parse_with(&cfg, &parse::Source::inline("a.pdf", b"%PDF")).unwrap_err();
     assert_eq!(err.code(), "E_NO_PARSER");
+}
+
+#[test]
+fn registry_binds_the_html_and_asset_backends() {
+    let cfg = Config::default();
+
+    let (extracted, id) =
+        parse::parse_with(&cfg, &parse::Source::inline("x.html", b"<p>hi</p>")).unwrap();
+    assert_eq!(id, "builtin-html");
+    assert_eq!(extracted.markdown, "hi");
+    assert!(!extracted.asset);
+
+    let (extracted, id) =
+        parse::parse_with(&cfg, &parse::Source::inline("a.png", b"\x89PNG")).unwrap();
+    assert_eq!(id, "builtin-asset");
+    assert!(extracted.asset);
+    assert_eq!(extracted.markdown, "![](../source/a.png)");
 }
 
 #[test]
