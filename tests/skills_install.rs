@@ -7,10 +7,18 @@
 //! if they fail, the failure text says what to vendor.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Output};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+// Only the unix cases boot the packaged CLI: Windows has no shell bootstrap, so
+// the helpers below would be dead code there (and `-D warnings` in CI is right
+// to reject that).
+#[cfg(unix)]
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// A PATH with the ordinary system tools but without a globally installed
@@ -22,6 +30,7 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+#[cfg(unix)]
 fn scratch(name: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -35,6 +44,7 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+#[cfg(unix)]
 fn copy_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).expect("create directory");
     for entry in fs::read_dir(from).expect("read directory") {
@@ -50,6 +60,7 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 /// The triple `bin/platform.sh` reports here, kept in sync with that script.
+#[cfg(unix)]
 fn host_triple() -> &'static str {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "aarch64-apple-darwin"
