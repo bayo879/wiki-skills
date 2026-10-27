@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 pub mod convert;
 pub mod hash;
+pub mod ingest;
 pub mod init;
 pub mod page;
 pub mod parse;

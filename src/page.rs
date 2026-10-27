@@ -32,6 +32,9 @@ const UPDATED: &str = "updated";
 /// Frontmatter key of the lifecycle state.
 const STATUS: &str = "status";
 
+/// Frontmatter key of the cited source references.
+const SOURCES: &str = "sources";
+
 /// Page lifecycle state, written as `draft` / `stable` / `stale`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -223,6 +226,161 @@ pub fn set_status(p: &Path, s: Status) -> Result<()> {
             )
         }
     }
+}
+
+/// Appends `items` to the `sources` list and returns how many were added.
+///
+/// The write is a splice, not a re-serialization: only the `sources` field
+/// changes, so comments, quoting style, key order and the body survive byte for
+/// byte. Four shapes are handled: an inline array (`sources: [a, b]`), a block
+/// sequence (`sources:` followed by `- a` lines), a single scalar
+/// (`sources: a`), and no field at all. A lone scalar becomes a block sequence
+/// rather than an inline array, because a scalar may already carry a trailing
+/// comment that has to stay attached to the line it was written on.
+///
+/// Items are always double-quoted: a `#` or a space in a path would otherwise
+/// start a comment or split the scalar. This appends without deduplicating; the
+/// caller decides which references a page is missing.
+pub fn append_sources(p: &Path, items: &[String]) -> Result<usize> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let bytes = read_bytes(p)?;
+    let block = find_block(&bytes)?;
+    let eol: &[u8] = if bytes[..block.content_start].ends_with(b"\r\n") {
+        b"\r\n"
+    } else {
+        b"\n"
+    };
+
+    let Some((start, end, line)) = find_field_line(&bytes, &block, SOURCES) else {
+        let mut inserted = Vec::new();
+        inserted.extend_from_slice(SOURCES.as_bytes());
+        inserted.push(b':');
+        inserted.extend_from_slice(eol);
+        for item in items {
+            push_item(&mut inserted, b"  ", item, eol);
+        }
+        write_bytes(
+            p,
+            splice(&bytes, block.content_start, block.content_start, &inserted),
+        )?;
+        return Ok(items.len());
+    };
+
+    let colon = start + SOURCES.len();
+    let mut value_start = colon + 1;
+    while value_start < end && (bytes[value_start] == b' ' || bytes[value_start] == b'\t') {
+        value_start += 1;
+    }
+
+    if bytes.get(value_start) == Some(&b'[') {
+        let Some(close) = bytes[value_start..end]
+            .iter()
+            .rposition(|&byte| byte == b']')
+            .map(|offset| value_start + offset)
+        else {
+            return Err(bad(line, "unterminated inline array in `sources`"));
+        };
+        let inner = &bytes[value_start + 1..close];
+        let has_items = !inner.iter().all(u8::is_ascii_whitespace);
+        let mut needs_comma = has_items
+            && inner
+                .iter()
+                .rev()
+                .find(|byte| !byte.is_ascii_whitespace())
+                .is_some_and(|byte| *byte != b',');
+        let mut inserted = Vec::new();
+        for item in items {
+            if needs_comma {
+                inserted.extend_from_slice(b", ");
+            }
+            inserted.extend_from_slice(quote_item(item).as_bytes());
+            needs_comma = true;
+        }
+        write_bytes(p, splice(&bytes, close, close, &inserted))?;
+        return Ok(items.len());
+    }
+
+    let blank = value_start >= end
+        || bytes[value_start..end]
+            .iter()
+            .all(|byte| *byte == b' ' || *byte == b'\t');
+    if !blank {
+        let scalar = bytes[value_start..end].to_vec();
+        let mut inserted = Vec::new();
+        inserted.extend_from_slice(eol);
+        inserted.extend_from_slice(b"  - ");
+        inserted.extend_from_slice(&scalar);
+        for item in items {
+            inserted.extend_from_slice(eol);
+            inserted.extend_from_slice(b"  - ");
+            inserted.extend_from_slice(quote_item(item).as_bytes());
+        }
+        write_bytes(p, splice(&bytes, colon + 1, end, &inserted))?;
+        return Ok(items.len());
+    }
+
+    let mut insert_at = if bytes.get(end) == Some(&b'\r') {
+        end + 2
+    } else {
+        end + 1
+    };
+    let mut indent: Vec<u8> = b"  ".to_vec();
+    let mut pos = insert_at;
+    let mut seen = false;
+    while pos < block.content_end {
+        let Some((line_end, next)) = line_at(&bytes, pos) else {
+            break;
+        };
+        let line_end = trim_line_end(&bytes, pos, line_end);
+        let text = &bytes[pos..line_end];
+        let lead = text
+            .iter()
+            .take_while(|byte| **byte == b' ' || **byte == b'\t')
+            .count();
+        let body = &text[lead..];
+        let item_line = body == b"-" || body.starts_with(b"- ") || body.starts_with(b"-\t");
+        if !item_line {
+            break;
+        }
+        if !seen {
+            indent = text[..lead].to_vec();
+            seen = true;
+        }
+        insert_at = next;
+        pos = next;
+    }
+
+    let mut inserted = Vec::new();
+    for item in items {
+        push_item(&mut inserted, &indent, item, eol);
+    }
+    write_bytes(p, splice(&bytes, insert_at, insert_at, &inserted))?;
+    Ok(items.len())
+}
+
+/// Appends one `- "item"` line to `buf`, indented and terminated by `eol`.
+fn push_item(buf: &mut Vec<u8>, indent: &[u8], item: &str, eol: &[u8]) {
+    buf.extend_from_slice(indent);
+    buf.extend_from_slice(b"- ");
+    buf.extend_from_slice(quote_item(item).as_bytes());
+    buf.extend_from_slice(eol);
+}
+
+/// Quotes one list item as a YAML double-quoted scalar.
+fn quote_item(item: &str) -> String {
+    let mut out = String::with_capacity(item.len() + 2);
+    out.push('"');
+    for c in item.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Reads the whole page, treating every OS error as [`PageError::Io`].

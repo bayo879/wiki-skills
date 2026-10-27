@@ -238,65 +238,82 @@ pub fn append_log(path: &Path, e: &LogEntry) -> Result<()> {
 }
 
 /// Regenerates `wiki/index.md` from the pages on disk and returns the count.
-///
-/// Every `.md` page under the wiki directory is read for its frontmatter.
-/// `index.md` and `log.md` at the wiki root are the bookkeeping files
-/// themselves and are skipped, and so is everything under `audit/`: audit
-/// reports are not catalogue entries. An empty or missing wiki directory still
-/// produces a valid, header-only index.
-///
-/// The catalogue is built from the pages on disk, not from the ledger, so no
-/// store handle is needed.
 pub fn write_index(root: &Path, cfg: &Config) -> Result<usize> {
-    let wiki = root.join(&cfg.paths.wiki);
-    let mut pages = Vec::new();
+    write_index_in(&root.join(&cfg.paths.wiki), &cfg.schema.types)
+}
 
-    if wiki.is_dir() {
-        for entry in WalkDir::new(&wiki).follow_links(false) {
-            let entry = entry.map_err(|err| {
-                let path = err
-                    .path()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| wiki.clone());
-                let source = err.io_error().map_or_else(
-                    || std::io::Error::other("cannot walk the wiki directory"),
-                    |io| std::io::Error::new(io.kind(), io.to_string()),
-                );
-                RenderError::Io { path, source }
-            })?;
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-                continue;
-            }
-            let rel = path.strip_prefix(&wiki).unwrap_or(path);
-            if is_bookkeeping(rel) {
-                continue;
-            }
-            let (front, _body) = page::read(path)?;
-            pages.push(PageMeta {
-                id: if front.id.is_empty() {
-                    file_stem(path)
-                } else {
-                    front.id
-                },
-                title: front.title,
-                typ: if front.typ.is_empty() {
-                    parent_name(path)
-                } else {
-                    front.typ
-                },
-                summary: front.summary,
-                status: front.status.to_string(),
-            });
-        }
+/// Regenerates `index.md` inside `wiki_dir` from the pages on disk.
+///
+/// Every `.md` page under the directory is read for its frontmatter, so an
+/// empty or missing directory still produces a valid, header-only index. The
+/// catalogue is built from the pages on disk rather than from the ledger, so no
+/// store handle is needed, and the directory is a parameter rather than a
+/// config lookup so the staging directory can be indexed the same way the wiki
+/// directory is.
+pub fn write_index_in(wiki_dir: &Path, types: &[String]) -> Result<usize> {
+    let mut pages = Vec::new();
+    for path in page_files(wiki_dir)? {
+        let (front, _body) = page::read(&path)?;
+        pages.push(PageMeta {
+            id: if front.id.is_empty() {
+                file_stem(&path)
+            } else {
+                front.id
+            },
+            title: front.title,
+            typ: if front.typ.is_empty() {
+                parent_name(&path)
+            } else {
+                front.typ
+            },
+            summary: front.summary,
+            status: front.status.to_string(),
+        });
     }
 
-    let index = render_index(&pages, &cfg.schema.types);
-    write_atomic(&wiki.join("index.md"), index.as_bytes())?;
+    let index = render_index(&pages, types);
+    write_atomic(&wiki_dir.join("index.md"), index.as_bytes())?;
     Ok(pages.len())
+}
+
+/// Every page file under `dir`, sorted by path.
+///
+/// A missing directory has no pages: a wiki that has not been populated yet
+/// still produces a valid, header-only index. `index.md` and `log.md` at the
+/// root are the bookkeeping files themselves and are skipped, and so is
+/// everything under `audit/`: audit reports are not catalogue entries.
+pub fn page_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    if !dir.is_dir() {
+        return Ok(files);
+    }
+    for entry in WalkDir::new(dir).follow_links(false) {
+        let entry = entry.map_err(|err| {
+            let path = err
+                .path()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| dir.to_path_buf());
+            let source = err.io_error().map_or_else(
+                || std::io::Error::other("cannot walk the directory"),
+                |io| std::io::Error::new(io.kind(), io.to_string()),
+            );
+            RenderError::Io { path, source }
+        })?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let rel = path.strip_prefix(dir).unwrap_or(path);
+        if is_bookkeeping(rel) {
+            continue;
+        }
+        files.push(path.to_path_buf());
+    }
+    files.sort();
+    Ok(files)
 }
 
 /// Whether a path relative to the wiki root is a bookkeeping file or audit

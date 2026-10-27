@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use serde::Serialize;
 
-use llm_wiki::cli::{Cli, Command};
+use llm_wiki::cli::{Cli, Command, IngestCommand};
 use llm_wiki::config::Config;
 use llm_wiki::convert;
+use llm_wiki::ingest;
 use llm_wiki::init;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
@@ -55,6 +56,7 @@ fn dispatch(cli: Cli) -> ! {
         Command::Scan => run_scan(),
         Command::Convert { key, limit } => run_convert(key, limit),
         Command::Parse { key } => run_parse(key),
+        Command::Ingest { command } => run_ingest(command),
     }
 }
 
@@ -205,6 +207,58 @@ fn run_parse(key: String) -> ! {
             backend,
         },
     );
+}
+
+/// `ingest` drives one round: `begin` opens it, `commit`/`abort` close it.
+///
+/// A round never publishes: `commit` refreshes the candidates under staging and
+/// regenerates the staging index, and approval is what moves pages into `wiki/`.
+fn run_ingest(command: IngestCommand) -> ! {
+    let cmd = match &command {
+        IngestCommand::Begin { .. } => "ingest.begin",
+        IngestCommand::Commit { .. } => "ingest.commit",
+        IngestCommand::Abort => "ingest.abort",
+    };
+    let root = wiki_root(cmd);
+    let cfg = load_config(cmd, &root);
+    let mut store = open_store(cmd, &root, &cfg);
+
+    match command {
+        IngestCommand::Begin {
+            sources,
+            pages,
+            dry_run,
+        } => {
+            let input = ingest::BeginInput {
+                sources,
+                pages,
+                dry_run,
+            };
+            match ingest::begin(&root, &cfg, &mut store, &input) {
+                Ok(outcome) => report::emit(cmd, outcome),
+                Err(err) => fail_ingest(cmd, &err),
+            }
+        }
+        IngestCommand::Commit { pages } => match ingest::commit(&root, &cfg, &mut store, &pages) {
+            Ok(outcome) => report::emit(cmd, outcome),
+            Err(err) => fail_ingest(cmd, &err),
+        },
+        IngestCommand::Abort => match ingest::abort(&root, &cfg, &mut store) {
+            Ok(outcome) => report::emit(cmd, outcome),
+            Err(err) => fail_ingest(cmd, &err),
+        },
+    }
+}
+
+/// A named-but-missing source, page or round is the caller's mistake (exit 2);
+/// a damaged staging directory or ledger is a finding (exit 1).
+fn fail_ingest(cmd: &str, err: &ingest::IngestError) -> ! {
+    let exit = if err.code().starts_with("E_NO_") {
+        Exit::Usage
+    } else {
+        Exit::Error
+    };
+    report::fail(cmd, exit, err.code(), &err.to_string())
 }
 
 /// Payload of the `version` success envelope.

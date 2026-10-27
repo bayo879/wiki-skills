@@ -261,3 +261,75 @@ fn quoted_date_keeps_its_quotes() {
         "---\nupdated: \"2026-10-27\"\n---\nbody\n"
     );
 }
+
+#[test]
+fn append_sources_grows_an_inline_array() {
+    let d = tempdir().unwrap();
+    let text = "---\nid: x\nsources: [raw/a.md, raw/b.md]\nupdated: 2026-01-01\n---\nbody\n";
+    let p = write_page(&d, "a.md", text);
+    page::append_sources(&p, &[String::from("raw/c.md")]).unwrap();
+    assert_eq!(
+        fs::read_to_string(&p).unwrap(),
+        "---\nid: x\nsources: [raw/a.md, raw/b.md, \"raw/c.md\"]\nupdated: 2026-01-01\n---\nbody\n"
+    );
+
+    let empty = write_page(
+        &d,
+        "b.md",
+        "---\nid: x\nsources: []\nupdated: 2026-01-01\n---\nbody\n",
+    );
+    page::append_sources(&empty, &[String::from("raw/c.md")]).unwrap();
+    assert_eq!(
+        fs::read_to_string(&empty).unwrap(),
+        "---\nid: x\nsources: [\"raw/c.md\"]\nupdated: 2026-01-01\n---\nbody\n"
+    );
+}
+
+#[test]
+fn append_sources_keeps_a_block_list_indent_and_crlf() {
+    let d = tempdir().unwrap();
+    let text = "---\r\nid: x\r\nsources:\r\n  - raw/a.md  # 保留\r\n  - raw/b.md\r\nupdated: 2026-01-01\r\n---\r\nbody\r\n";
+    let p = write_page(&d, "a.md", text);
+    page::append_sources(&p, &[String::from("raw/c.md")]).unwrap();
+    assert_eq!(
+        fs::read_to_string(&p).unwrap(),
+        "---\r\nid: x\r\nsources:\r\n  - raw/a.md  # 保留\r\n  - raw/b.md\r\n  - \"raw/c.md\"\r\nupdated: 2026-01-01\r\n---\r\nbody\r\n"
+    );
+    let (front, _) = page::read(&p).unwrap();
+    assert_eq!(
+        front.sources,
+        vec![
+            String::from("raw/a.md"),
+            String::from("raw/b.md"),
+            String::from("raw/c.md")
+        ]
+    );
+}
+
+#[test]
+fn append_sources_converts_a_scalar_to_a_list() {
+    let d = tempdir().unwrap();
+    let text = "---\nid: x\nsources: raw/a.md  # 保留\nupdated: 2026-01-01\n---\nbody\n";
+    let p = write_page(&d, "a.md", text);
+    page::append_sources(&p, &[String::from("raw/b.md")]).unwrap();
+    assert_eq!(
+        fs::read_to_string(&p).unwrap(),
+        "---\nid: x\nsources:\n  - raw/a.md  # 保留\n  - \"raw/b.md\"\nupdated: 2026-01-01\n---\nbody\n"
+    );
+}
+
+#[test]
+fn append_sources_inserts_a_missing_field() {
+    let d = tempdir().unwrap();
+    let p = write_page(&d, "a.md", "---\nid: x\nupdated: 2026-01-01\n---\nbody\n");
+    page::append_sources(&p, &[String::from("raw/a.md")]).unwrap();
+    assert_eq!(
+        fs::read_to_string(&p).unwrap(),
+        "---\nsources:\n  - \"raw/a.md\"\nid: x\nupdated: 2026-01-01\n---\nbody\n"
+    );
+    assert_eq!(
+        page::append_sources(&p, &[]).unwrap(),
+        0,
+        "no items, no write"
+    );
+}

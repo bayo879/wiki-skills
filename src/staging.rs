@@ -129,8 +129,11 @@ fn manifest_path(root: &Path) -> PathBuf {
 
 /// Whether staging already holds candidate pages.
 ///
-/// Only regular files count: an empty directory left behind by a deleted
-/// candidate is not a review queue worth refusing to rebuild.
+/// Only regular page files count: an empty directory left behind by a deleted
+/// candidate is not a review queue worth refusing to rebuild, and neither are
+/// the directory's own bookkeeping files. `pending.json` in particular is
+/// written by `ingest begin` *before* the first candidate exists, so counting it
+/// would make every round look torn.
 fn has_candidates(staging: &Path) -> Result<bool> {
     if !staging.is_dir() {
         return Ok(false);
@@ -138,7 +141,8 @@ fn has_candidates(staging: &Path) -> Result<bool> {
     for entry in WalkDir::new(staging).follow_links(false).min_depth(1) {
         let entry = entry?;
         let relative = entry.path().strip_prefix(staging).unwrap_or(entry.path());
-        if paths::is_ignored(&paths::to_slash(relative)) {
+        let relative = paths::to_slash(relative);
+        if paths::is_ignored(&relative) || is_bookkeeping(&relative) {
             continue;
         }
         if entry.file_type().is_file() {
@@ -146,6 +150,20 @@ fn has_candidates(staging: &Path) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// Whether a staging-relative path is the directory's own bookkeeping.
+///
+/// `manifest.json` and `pending.json` are ledgers, `index.md` and `log.md` at
+/// the root are generated summaries, and `audit/` holds audit output: none of
+/// them is a candidate page awaiting review.
+fn is_bookkeeping(relative: &str) -> bool {
+    let relative = relative.trim_start_matches("./");
+    relative == MANIFEST
+        || relative == PENDING
+        || relative == "index.md"
+        || relative == "log.md"
+        || relative.starts_with("audit/")
 }
 
 /// Serialise one manifest entry, sorted by source key.
@@ -232,6 +250,20 @@ impl Manifest {
         let path = manifest_path(root);
         let body = encode(manifest, &path)?;
         write_atomic(&path, &body)
+    }
+
+    /// Create the ledger if it does not exist yet, leaving it alone if it does.
+    ///
+    /// The ledger has to exist before the first candidate page, so that a
+    /// candidate never looks like a ledger that was lost. `ingest begin` calls
+    /// this before writing the round's pending list, because the agent writes
+    /// the round's first candidate only after `begin` returns.
+    pub fn ensure(root: &Path) -> Result<()> {
+        let manifest = Manifest::load(root)?;
+        if manifest_path(root).is_file() {
+            return Ok(());
+        }
+        Manifest::save(root, &manifest)
     }
 }
 
@@ -341,37 +373,47 @@ fn page_path(id: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Source keys named by a page's `sources`, normalised to raw-relative keys.
+/// One page source reference as a raw-relative key.
 ///
-/// A source such as `raw/concept/x.md#p=3` becomes `x.md`-style
-/// `concept/x.md`: the fragment locates a passage, the configured raw prefix is
-/// presentation, and the manifest keys on the source file itself.
-fn source_keys(sources: &[String], raw_prefix: &str) -> Vec<String> {
+/// `raw/concept/x.md#p=3` becomes `concept/x.md`: the fragment locates a
+/// passage and the configured raw prefix is presentation, while the manifest
+/// keys on the source file itself. `None` when the reference names no file
+/// (empty, or exactly the raw prefix).
+pub fn source_key(source: &str, raw_prefix: &str) -> Option<String> {
     let prefix = raw_prefix.trim_start_matches("./").trim_end_matches('/');
-    let mut keys: Vec<String> = Vec::new();
-    for source in sources {
-        let mut text = source
-            .split_once('#')
-            .map_or(source.as_str(), |(head, _)| head);
-        while let Some(rest) = text.strip_prefix("./") {
+    let mut text = source.split_once('#').map_or(source, |(head, _)| head);
+    while let Some(rest) = text.strip_prefix("./") {
+        text = rest;
+    }
+    if text == prefix {
+        return None;
+    }
+    if !prefix.is_empty() {
+        if let Some(rest) = text
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
             text = rest;
         }
-        if text == prefix {
+    }
+    if text.is_empty() {
+        return None;
+    }
+    Some(String::from(text))
+}
+
+/// Source keys named by a page's `sources`, normalised to raw-relative keys.
+///
+/// Order is preserved and duplicates are dropped, so a round's key list reads
+/// the way the page wrote it.
+pub fn source_keys(sources: &[String], raw_prefix: &str) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for source in sources {
+        let Some(key) = source_key(source, raw_prefix) else {
             continue;
-        }
-        if !prefix.is_empty() {
-            if let Some(rest) = text
-                .strip_prefix(prefix)
-                .and_then(|rest| rest.strip_prefix('/'))
-            {
-                text = rest;
-            }
-        }
-        if text.is_empty() {
-            continue;
-        }
-        if !keys.iter().any(|key| key == text) {
-            keys.push(String::from(text));
+        };
+        if !keys.iter().any(|seen| seen == &key) {
+            keys.push(key);
         }
     }
     keys
@@ -405,14 +447,6 @@ pub fn write_page(root: &Path, cfg: &Config, id: &str, content: &str) -> Result<
     Manifest::save(root, &manifest)
 }
 
-/// Sources that still need agent work this round.
-///
-/// `ingest begin` writes `pending.json` for the round it is driving; while that
-/// file exists it is authoritative, because it names the exact sources the
-/// round read. Otherwise the answer is derived from the ledger: every source
-/// with a current hash different from its baseline has moved since the last
-/// merge. Sources with no current hash are not built at all, so they are not
-/// pending.
 /// Reads the current round's pending sources from `pending.json`.
 ///
 /// Missing file means no round is open, which is an empty map rather than an
@@ -425,6 +459,39 @@ pub fn pending_hashes(root: &Path) -> Result<BTreeMap<String, String>> {
             message: source.to_string(),
         }),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(source) => Err(StagingError::Io { path, source }),
+    }
+}
+
+/// Encodes a round's pending sources exactly as `pending.json` stores them.
+///
+/// The digest of these bytes is the round's `pending_hash`, so the encoder is
+/// public: a caller that reports a hash has to hash the same bytes the file
+/// will contain, whether or not it writes them.
+pub fn encode_pending(hashes: &BTreeMap<String, String>) -> Result<Vec<u8>> {
+    let mut body = serde_json::to_vec_pretty(hashes).map_err(|source| StagingError::Corrupt {
+        path: PathBuf::from(PENDING),
+        message: format!("cannot encode pending list: {source}"),
+    })?;
+    body.push(b'\n');
+    Ok(body)
+}
+
+/// Opens a round by writing its pending sources to `pending.json`.
+pub fn write_pending(root: &Path, hashes: &BTreeMap<String, String>) -> Result<()> {
+    let body = encode_pending(hashes)?;
+    write_atomic(&dir(root).join(PENDING), &body)
+}
+
+/// Closes the current round, if any.
+///
+/// A missing file is success: closing a round that is already closed is not an
+/// error, so a retried `commit` fails on its own terms rather than here.
+pub fn clear_pending(root: &Path) -> Result<()> {
+    let path = dir(root).join(PENDING);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(StagingError::Io { path, source }),
     }
 }
