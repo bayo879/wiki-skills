@@ -21,6 +21,7 @@
 //! a reader never observes a half-written catalogue, and a crash leaves either
 //! the old file or the new one.
 
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use chrono::NaiveDate;
@@ -415,10 +416,13 @@ fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
     let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
 
     let written = (|| -> std::io::Result<()> {
-        std::fs::write(&tmp, body)?;
-        let file = std::fs::File::open(&tmp)?;
-        file.sync_all()?;
-        Ok(())
+        // Write through the handle we created and flush that same handle.
+        // Re-opening the temporary for reading and calling `sync_all` on it
+        // works on unix but fails on Windows, where `FlushFileBuffers` needs a
+        // handle with write access and returns "access is denied" otherwise.
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(body)?;
+        file.sync_all()
     })();
     if let Err(source) = written {
         let _ = std::fs::remove_file(&tmp);
