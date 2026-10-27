@@ -154,11 +154,9 @@ fn external_mode_sends_multipart_and_returns_markdown() {
         "the file name must be the basename of the source key"
     );
     assert!(body.contains("%PDF-1.4 fake body"), "missing file bytes");
-    assert!(body.contains("name=\"fileFlag\""), "missing extra field");
-    assert!(body.contains("\r\n\r\nN\r\n"), "extra field value missing");
-    assert!(body.contains("name=\"system\""), "missing extra field");
+    assert!(body.contains("name=\"mode\""), "missing extra field");
     assert!(
-        body.contains("\r\n\r\nBSS\r\n"),
+        body.contains("\r\n\r\nfull\r\n"),
         "extra field value missing"
     );
 }

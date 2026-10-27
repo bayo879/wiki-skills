@@ -178,8 +178,7 @@ pub fn external_at(url: &str) -> ExternalCfg {
         auth_env: String::from("WIKI_PARSE_TOKEN"),
         fields: BTreeMap::from([
             (String::from("file"), String::from("@file")),
-            (String::from("fileFlag"), String::from("N")),
-            (String::from("system"), String::from("BSS")),
+            (String::from("mode"), String::from("full")),
         ]),
         response: ExternalResponse {
             text: String::from("data"),

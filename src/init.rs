@@ -136,7 +136,7 @@ min_chars        = 200      # below this a builtin result may fall back to the e
 # type      = "http"
 # url       = "http://host/api/parse"
 # auth_env  = "WIKI_PARSE_TOKEN"
-# fields    = { file = "@file", fileFlag = "N", system = "BSS" }
+# fields    = { file = "@file" }   # 服务端要的附加表单字段都写在这里
 # response  = { text = "data", ok_code = 200 }
 # timeout_s = 120
 

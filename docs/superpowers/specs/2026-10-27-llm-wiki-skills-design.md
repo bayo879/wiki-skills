@@ -111,9 +111,9 @@ min_chars = 200                  # 内置产出低于此值视为不达标，可
 
 [parse.external]                 # 可选：接入外部文件解析服务
 type     = "http"
-url      = "http://<host>/api-data-pre/dcoos/parseFile"
+url      = "https://<your-parse-service>/parse"   # 地址由使用方填，仓库里不记录任何内网地址
 auth_env = "WIKI_PARSE_TOKEN"    # 只写环境变量名，禁止把 token 写进仓库
-fields   = { file = "@file", fileFlag = "N", system = "BSS" }
+fields   = { file = "@file" }    # @file 表示取文件内容；服务端要的其它字段照填
 response = { text = "data", ok_code = 200 }
 timeout_s = 120
 
@@ -247,9 +247,10 @@ trait Parser {
   **两条都失败才报错，且同时列出两个原因**，不假装成功。
 - `builtin` / `external`：强制单一后端，失败即失败。
 
-外部服务按内部 `dcoos/parseFile` 的真实契约抽象：multipart 上传 `file` + 若干附加表单字段
-（`fileFlag`、`system` 之类），`Authorization: Bearer` 从**环境变量**读，响应里 `data` 字段即 markdown。
-它是通用适配器，不是为某个接口写死：url / 表单字段 / 响应路径都可配。
+外部服务是**通用适配器**，只约定一类协议，不绑定任何具体接口：POST multipart，一个文件字段
+（`@file` 取文件内容）+ 任意附加表单字段；`Authorization: Bearer` 从**环境变量**读；响应是 JSON，
+按点分路径取一段字符串当 markdown。url、表单字段名、成功状态码、响应路径、超时全部写在
+`wiki.toml` 里，仓库不记录任何内网地址或私有字段名——换一个服务只改配置，不改代码。
 
 - `convert` 落盘 `raw/<同源相对路径>.md`，返回 `{raw_path, chars, backend, duration_ms, warnings}`；
   `parse` 只打印同样的结构。分块中间态在 `.wiki/cache/<hash>/`，不是产物。

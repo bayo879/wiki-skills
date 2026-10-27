@@ -67,7 +67,7 @@ Content-Type: multipart/form-data; boundary=...
 type      = "http"
 url       = "http://host/api/parse"
 auth_env  = "WIKI_PARSE_TOKEN"          # 变量名，不是 token
-fields    = { file = "@file", fileFlag = "N", system = "BSS" }
+fields    = { file = "@file" }          # 附加字段按服务端要求填
 response  = { text = "data", ok_code = 200 }
 timeout_s = 120
 ```

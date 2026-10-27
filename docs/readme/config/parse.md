@@ -50,7 +50,8 @@ primary          = "auto"
 type      = "http"
 url       = "http://host/api/parse"
 auth_env  = "WIKI_PARSE_TOKEN"
-fields    = { file = "@file", fileFlag = "N", system = "BSS" }
+fields    = { file = "@file" }
+# 服务端要求的附加字段照写，例如 fields = { file = "@file", mode = "full" }
 response  = { text = "data", ok_code = 200 }
 timeout_s = 120
 ```

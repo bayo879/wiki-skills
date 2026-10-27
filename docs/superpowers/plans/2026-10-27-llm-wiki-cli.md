@@ -899,7 +899,7 @@ Expected: FAIL，模块不存在。
 
 - [ ] **Step 3: 实现适配器与回退**
 
-外部服务：`ureq` multipart，字段顺序与名字来自 `cfg.parse.external.fields`（`{file="@file", fileFlag="N", system="BSS"}` 里的 `@file` 表示取文件内容）；header `Authorization: Bearer ${std::env::var(auth_env)?}`，环境变量缺失报 `E_NO_AUTH_ENV` 且**不含 token 值**；`timeout_s` 用 `ureq::Agent` 的全局超时（`config_builder().timeout_global(..)`）；响应 `resp.status()` 非 2xx 视为失败，正文用 `resp.body_mut().read_to_string()` 读取，再按 JSON 路径（如 `data`）取 markdown。注意 ureq 3 与 2.x API 不同，不要照抄旧片段。
+外部服务：`ureq` multipart，字段顺序与名字来自 `cfg.parse.external.fields`（`{file="@file", mode="full"}` 里的 `@file` 表示取文件内容，其它键是服务端要的附加字段）；header `Authorization: Bearer ${std::env::var(auth_env)?}`，环境变量缺失报 `E_NO_AUTH_ENV` 且**不含 token 值**；`timeout_s` 用 `ureq::Agent` 的全局超时（`config_builder().timeout_global(..)`）；响应 `resp.status()` 非 2xx 视为失败，正文用 `resp.body_mut().read_to_string()` 读取，再按 JSON 路径（如 `data`）取 markdown。注意 ureq 3 与 2.x API 不同，不要照抄旧片段。
 
 `pick_backend` 规则：`auto` 下 `md|txt` 只走内置；`pdf|html` 走内置 + （`external` 已配置时才加）外部；图片只走 `builtin-asset`，永不进外部。`auto` 的内置产出不达标（`chars < min_chars` 或 `needs_ocr`）时才试外部；外部失败把两个原因都放进 `Error::BothFailed { builtin: String, external: String }`。
 
