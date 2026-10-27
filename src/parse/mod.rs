@@ -10,6 +10,7 @@
 //! in command output.
 
 pub mod asset;
+pub mod external;
 pub mod html;
 pub mod pdf;
 pub mod text;
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::config::Config;
+use crate::config::{Config, Primary};
 
 /// One source handed to a backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +147,21 @@ pub enum ParseError {
     /// A backend claimed the source and then could not decode it.
     #[error("cannot parse source {key:?}: {message}")]
     Bad { key: String, message: String },
+    /// The external service is configured incompletely.
+    #[error("external parser configuration is incomplete: {message}")]
+    ExternalConfig { message: String },
+    /// The environment variable named by `auth_env` is not set.
+    #[error("external parser token variable {name} is not set")]
+    NoAuthEnv { name: String },
+    /// The external service could not be reached or returned an unusable answer.
+    #[error("external parser failed: {message}")]
+    External { message: String },
+    /// The external service answered with an unexpected HTTP status.
+    #[error("external parser returned HTTP {status}: {body}")]
+    ExternalStatus { status: u16, body: String },
+    /// In `auto` mode both the builtin and the external backend failed.
+    #[error("builtin backend failed ({builtin}); external backend failed ({external})")]
+    BothFailed { builtin: String, external: String },
 }
 
 impl ParseError {
@@ -155,6 +171,11 @@ impl ParseError {
             ParseError::NoParser { .. } => "E_NO_PARSER",
             ParseError::Io { .. } => "E_IO",
             ParseError::Bad { .. } => "E_BAD_SOURCE",
+            ParseError::ExternalConfig { .. } => "E_BAD_CONFIG",
+            ParseError::NoAuthEnv { .. } => "E_NO_AUTH_ENV",
+            ParseError::External { .. } => "E_EXTERNAL",
+            ParseError::ExternalStatus { .. } => "E_EXTERNAL",
+            ParseError::BothFailed { .. } => "E_BOTH_FAILED",
         }
     }
 }
@@ -162,13 +183,13 @@ impl ParseError {
 /// Result of the parsing helpers.
 pub type Result<T> = std::result::Result<T, ParseError>;
 
-/// The backends available for `cfg`, in the order they are tried.
+/// The builtin backends available to `cfg`, in the order they are tried.
 ///
 /// Order is specificity, not preference: text and html each claim a distinct set
 /// of extensions, asset only claims image extensions, and pdf only claims `pdf`,
-/// so no two builtin backends compete for the same file. External backends are
-/// appended here by later tasks; `cfg` decides which ones are enabled, which is
-/// why it is part of the signature even though every builtin backend is on.
+/// so no two backends compete for the same file. External backends are not part
+/// of this list: they are network calls, so [`parse_with`] builds one only when
+/// [`pick_backend`] says it should run.
 pub fn registry(_cfg: &Config) -> Vec<Box<dyn Parser>> {
     vec![
         Box::new(text::TextParser::new()),
@@ -178,20 +199,150 @@ pub fn registry(_cfg: &Config) -> Vec<Box<dyn Parser>> {
     ]
 }
 
-/// Parses `src` with the first backend that claims its extension.
-///
-/// The second value is the id of the backend that ran, so the caller can record
-/// it in the raw frontmatter without asking the parser again.
-pub fn parse_with(cfg: &Config, src: &Source) -> Result<(Extracted, String)> {
-    for backend in registry(cfg) {
-        if !backend.can_handle(&src.ext) {
-            continue;
-        }
-        let id = backend.id();
-        return Ok((backend.parse(src)?, String::from(id)));
+/// The id a builtin backend would claim `ext` under, if any.
+fn builtin_id(ext: &str) -> Option<&'static str> {
+    if text::TextParser::new().can_handle(ext) {
+        return Some(text::ID);
     }
-    Err(ParseError::NoParser {
-        key: src.key.clone(),
-        ext: src.ext.clone(),
-    })
+    if html::HtmlParser::new().can_handle(ext) {
+        return Some(html::ID);
+    }
+    if asset::AssetParser::new().can_handle(ext) {
+        return Some(asset::ID);
+    }
+    if pdf::PdfParser::new().can_handle(ext) {
+        return Some(pdf::ID);
+    }
+    None
+}
+
+/// Backend ids to try for `ext`, in order, under `cfg.parse.primary`.
+///
+/// This is the whole policy in one place, so the tests can assert it without a
+/// network and `parse_with` never invents a second copy of the rules:
+///
+/// - `auto`: the builtin backend first; the external service only for documents
+///   that can be too thin (`html` and `pdf`), and only when it is configured.
+/// - `builtin`: the builtin backend alone, even if an external service exists.
+/// - `external`: the external service for text-like formats. Images stay local
+///   because a parser service cannot produce a useful markdown body for them.
+pub fn pick_backend(cfg: &Config, ext: &str) -> Vec<&'static str> {
+    let ext = ext.to_ascii_lowercase();
+    let builtin = builtin_id(&ext);
+    let has_external = cfg.parse.external.is_some();
+    match cfg.parse.primary {
+        Primary::Auto => {
+            let Some(builtin) = builtin else {
+                return Vec::new();
+            };
+            let mut order = vec![builtin];
+            if has_external && matches!(ext.as_str(), "html" | "htm" | "pdf") {
+                order.push(external::ID);
+            }
+            order
+        }
+        Primary::Builtin => builtin.into_iter().collect(),
+        Primary::External => {
+            if matches!(
+                ext.as_str(),
+                "md" | "markdown" | "txt" | "html" | "htm" | "pdf"
+            ) {
+                vec![external::ID]
+            } else {
+                builtin.into_iter().collect()
+            }
+        }
+    }
+}
+
+/// Parses `src` with the backends [`pick_backend`] names, applying the fallback.
+///
+/// The second value is the id of the backend that produced the result, so the
+/// caller can record it in the raw frontmatter without asking the parser again.
+///
+/// In `auto` mode the builtin result is kept unless it is thin (fewer than
+/// `[parse].min_chars` characters) or it has no text layer at all; only then is
+/// the external service tried. A failed external attempt never loses the builtin
+/// result: it is returned with an `external_failed` warning instead. Only when
+/// both backends fail is there no result, and then both reasons travel together
+/// in [`ParseError::BothFailed`].
+pub fn parse_with(cfg: &Config, src: &Source) -> Result<(Extracted, String)> {
+    let order = pick_backend(cfg, &src.ext);
+    let Some(&first) = order.first() else {
+        return Err(ParseError::NoParser {
+            key: src.key.clone(),
+            ext: src.ext.clone(),
+        });
+    };
+
+    if first == external::ID {
+        let parser = external::ExternalParser::from_config(&cfg.parse.external)?;
+        let extracted = parser.parse(src)?;
+        return Ok((extracted, String::from(external::ID)));
+    }
+
+    let builtin = registry(cfg)
+        .into_iter()
+        .find(|backend| backend.id() == first)
+        .expect("pick_backend only names registered builtin backends");
+    if !order.contains(&external::ID) {
+        return Ok((builtin.parse(src)?, String::from(first)));
+    }
+    let external_parser = external::ExternalParser::from_config(&cfg.parse.external)?;
+
+    let extracted = match builtin.parse(src) {
+        Ok(extracted) => extracted,
+        Err(builtin_error) => {
+            return match external_parser.parse(src) {
+                Ok(extracted) => Ok((
+                    with_warning(
+                        extracted,
+                        "external_used",
+                        format!(
+                            "the builtin backend failed ({builtin_error}), used the external one"
+                        ),
+                    ),
+                    String::from(external::ID),
+                )),
+                Err(external_error) => Err(ParseError::BothFailed {
+                    builtin: builtin_error.to_string(),
+                    external: external_error.to_string(),
+                }),
+            };
+        }
+    };
+
+    let chars = extracted.markdown.chars().count();
+    let too_thin = !extracted.asset && chars < cfg.parse.min_chars;
+    if !extracted.asset && !too_thin {
+        return Ok((extracted, String::from(first)));
+    }
+
+    match external_parser.parse(src) {
+        Ok(extracted) => Ok((
+            with_warning(
+                extracted,
+                "external_used",
+                if chars < cfg.parse.min_chars {
+                    format!(
+                        "the builtin backend produced only {chars} characters (min_chars {}), used the external one",
+                        cfg.parse.min_chars
+                    )
+                } else {
+                    String::from("the source has no text layer, used the external one")
+                },
+            ),
+            String::from(external::ID),
+        )),
+        Err(error) => Ok((
+            with_warning(extracted, "external_failed", error.to_string()),
+            String::from(first),
+        )),
+    }
+}
+
+/// Appends one warning to a result without disturbing the rest of it.
+fn with_warning(mut extracted: Extracted, code: &str, message: impl Into<String>) -> Extracted {
+    extracted.warnings.push(Warning::new(code, message));
+    extracted
 }

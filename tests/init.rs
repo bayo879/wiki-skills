@@ -113,6 +113,7 @@ fn init_template_loads_and_validates() {
     assert_eq!(cfg.parse.max_source_bytes, 100 * 1024 * 1024);
     assert_eq!(cfg.parse.chunk_threshold, 2 * 1024 * 1024);
     assert_eq!(cfg.parse.chunk_target, 64 * 1024);
+    assert_eq!(cfg.parse.min_chars, 200);
     assert!(cfg.parse.external.is_none());
 
     assert_eq!(cfg.ingest.max_pages_per_source, 12);
@@ -128,6 +129,25 @@ fn init_template_loads_and_validates() {
     assert_eq!(cfg.sync.read_retries, 3);
     assert_eq!(cfg.sync.lag_warn_rounds, 3);
     assert_eq!(cfg.sync.on_missing, "mark_stale");
+}
+
+#[test]
+fn init_template_documents_min_chars() {
+    let d = tempdir().unwrap();
+    run(d.path(), &["init"]);
+    let body = std::fs::read_to_string(d.path().join("wiki.toml")).unwrap();
+    assert!(
+        body.contains("min_chars"),
+        "the template must document the fallback threshold"
+    );
+    let cfg = llm_wiki::config::Config::load(d.path()).unwrap();
+    assert_eq!(cfg.parse.min_chars, 200);
+}
+
+#[test]
+fn min_chars_can_be_overridden() {
+    let cfg = load_with("[parse]\nmin_chars = 500\n");
+    assert_eq!(cfg.parse.min_chars, 500);
 }
 
 #[test]
@@ -227,6 +247,20 @@ fn validate_rejects_token_in_auth_env() {
         "eyJhbGciOi",
         &"x".repeat(41),
     ] {
+        let cfg = load_with(&format!(
+            "[parse.external]\nurl = \"http://127.0.0.1:9/parse\"\nauth_env = \"{value}\"\n"
+        ));
+        assert_eq!(
+            cfg.validate().unwrap_err().code(),
+            "E_TOKEN_IN_CONFIG",
+            "value {value:?}"
+        );
+    }
+}
+
+#[test]
+fn validate_rejects_a_bearer_literal_in_auth_env() {
+    for value in ["Bearer abc123", "bearer abc", "  Bearer   token"] {
         let cfg = load_with(&format!(
             "[parse.external]\nurl = \"http://127.0.0.1:9/parse\"\nauth_env = \"{value}\"\n"
         ));

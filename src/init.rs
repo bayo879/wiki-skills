@@ -128,6 +128,7 @@ primary          = "auto"   # auto | builtin | external
 chunk_threshold  = "2MB"    # above this a source is always chunked
 max_source_bytes = "100MB"  # above this a source is rejected, needs --force-large
 chunk_target     = "64KB"   # target size of one text chunk
+min_chars        = 200      # below this a builtin result may fall back to the external service
 
 # Optional external parse service. Only ever write the *name* of the environment
 # variable that holds the token, never the token itself.

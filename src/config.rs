@@ -243,6 +243,9 @@ pub struct ParseCfg {
     /// Target size of one text chunk. Stored as bytes.
     #[serde(deserialize_with = "de_size")]
     pub chunk_target: u64,
+    /// Below this many markdown characters the builtin result counts as too thin
+    /// and `auto` mode may fall back to the external service.
+    pub min_chars: usize,
     /// Optional external HTTP parsing service.
     pub external: Option<ExternalCfg>,
 }
@@ -254,6 +257,7 @@ impl Default for ParseCfg {
             chunk_threshold: 2 * 1024 * 1024,
             max_source_bytes: 100 * 1024 * 1024,
             chunk_target: 64 * 1024,
+            min_chars: 200,
             external: None,
         }
     }
@@ -491,12 +495,15 @@ where
 }
 
 /// Heuristic for a credential written where an environment variable name
-/// belongs: a known token prefix, or a long whitespace-free blob.
+/// belongs: a known token prefix, an `Authorization` header value pasted whole,
+/// or a long whitespace-free blob.
 fn looks_like_token(value: &str) -> bool {
     const TOKEN_PREFIXES: [&str; 3] = ["sk-", "ghp_", "eyJ"];
     let value = value.trim();
+    let lowered = value.to_ascii_lowercase();
     TOKEN_PREFIXES
         .iter()
         .any(|prefix| value.starts_with(prefix))
+        || lowered.starts_with("bearer ")
         || (value.chars().count() > 40 && !value.chars().any(char::is_whitespace))
 }
