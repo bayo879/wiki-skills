@@ -360,6 +360,140 @@ pub fn append_sources(p: &Path, items: &[String]) -> Result<usize> {
     Ok(items.len())
 }
 
+/// Rewrites the `sources` field: drops every entry matching `remove`, appends
+/// the entries in `add` that are not already there.
+///
+/// This is what a seal needs and [`append_sources`] cannot do: re-hanging a page
+/// off a session record means both directions in one write, and doing it as two
+/// writes would leave the page momentarily citing neither the old record nor the
+/// summary. Only the `sources` field is replaced; every other byte of the page,
+/// including its comments, key order, unknown keys and body, is spliced around.
+///
+/// The field is emitted as a block sequence even when it was an inline array,
+/// because a block sequence is the only shape that survives a fragment `#p=..`
+/// in the path without a quoting ambiguity. Matching ignores a `#` fragment:
+/// `raw/big.md` matches `raw/big.md#p=12-40`, so a caller does not have to know
+/// which fragment a page happened to cite.
+///
+/// Returns how many entries were removed and how many were added; a call that
+/// would change nothing does not write the file at all.
+pub fn replace_sources(p: &Path, remove: &[String], add: &[String]) -> Result<(usize, usize)> {
+    let bytes = read_bytes(p)?;
+    let block = find_block(&bytes)?;
+    let (front, _body) = parse(&bytes)?;
+
+    let mut items = front.sources.clone();
+    let before = items.len();
+    items.retain(|item| !remove.iter().any(|drop| same_reference(item, drop)));
+    let removed = before - items.len();
+    let mut added = 0;
+    for item in add {
+        if !items.iter().any(|cur| same_reference(cur, item)) {
+            items.push(item.clone());
+            added += 1;
+        }
+    }
+    if removed == 0 && added == 0 {
+        return Ok((0, 0));
+    }
+
+    let eol: &[u8] = if bytes[..block.content_start].ends_with(b"\r\n") {
+        b"\r\n"
+    } else {
+        b"\n"
+    };
+
+    // The region to replace: the key line plus the list lines under it. With no
+    // field at all the region is empty and sits at the top of the frontmatter,
+    // so the new field leads the block, exactly as `append_sources` writes it.
+    let (region_start, region_end, comment, indent) = match find_field_line(&bytes, &block, SOURCES)
+    {
+        None => (
+            block.content_start,
+            block.content_start,
+            String::new(),
+            b"  ".to_vec(),
+        ),
+        Some((start, end, _line)) => {
+            let colon = start + SOURCES.len();
+            let mut value_start = colon + 1;
+            while value_start < end && (bytes[value_start] == b' ' || bytes[value_start] == b'\t') {
+                value_start += 1;
+            }
+            let blank = value_start >= end
+                || bytes[value_start..end]
+                    .iter()
+                    .all(|byte| *byte == b' ' || *byte == b'\t');
+            // A trailing comment on a bare `sources:` line belongs to the field,
+            // so it is carried over; a comment inside an inline array is not,
+            // because the array itself is what is being replaced.
+            let mut comment = String::new();
+            if blank {
+                let rest = String::from_utf8_lossy(&bytes[value_start..end])
+                    .trim()
+                    .to_string();
+                if rest.starts_with('#') {
+                    comment = rest;
+                }
+            }
+            let mut cursor = if bytes.get(end) == Some(&b'\r') {
+                end + 2
+            } else {
+                end + 1
+            };
+            let mut indent: Vec<u8> = b"  ".to_vec();
+            let mut seen = false;
+            while cursor < block.content_end {
+                let Some((line_end, next)) = line_at(&bytes, cursor) else {
+                    break;
+                };
+                let line_end = trim_line_end(&bytes, cursor, line_end);
+                let text = &bytes[cursor..line_end];
+                let lead = text
+                    .iter()
+                    .take_while(|byte| **byte == b' ' || **byte == b'\t')
+                    .count();
+                let body = &text[lead..];
+                if !(body == b"-" || body.starts_with(b"- ") || body.starts_with(b"-\t")) {
+                    break;
+                }
+                if !seen {
+                    indent = text[..lead].to_vec();
+                    seen = true;
+                }
+                cursor = next;
+            }
+            (start, cursor, comment, indent)
+        }
+    };
+
+    let mut inserted = Vec::new();
+    inserted.extend_from_slice(SOURCES.as_bytes());
+    inserted.push(b':');
+    if !comment.is_empty() {
+        inserted.push(b' ');
+        inserted.extend_from_slice(comment.as_bytes());
+    }
+    inserted.extend_from_slice(eol);
+    for item in &items {
+        push_item(&mut inserted, &indent, item, eol);
+    }
+    write_bytes(p, splice(&bytes, region_start, region_end, &inserted))?;
+    Ok((removed, added))
+}
+
+/// Whether two `sources` entries name the same reference, ignoring a fragment.
+///
+/// `raw/big.md#p=12-40` and `raw/big.md` are the same underlying file: the
+/// fragment only selects a slice of it, and a seal replacing the whole source
+/// does not care which slice a page quoted.
+fn same_reference(a: &str, b: &str) -> bool {
+    fn base(s: &str) -> &str {
+        s.split('#').next().unwrap_or(s).trim()
+    }
+    base(a) == base(b)
+}
+
 /// Appends one `- "item"` line to `buf`, indented and terminated by `eol`.
 fn push_item(buf: &mut Vec<u8>, indent: &[u8], item: &str, eol: &[u8]) {
     buf.extend_from_slice(indent);

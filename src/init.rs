@@ -10,13 +10,15 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 /// Directories that must exist after `init`, parents before children.
-const DIRS: [&str; 8] = [
+const DIRS: [&str; 10] = [
     "source",
     "raw",
     "wiki",
+    "wiki/archive",
     "wiki/audit",
     ".wiki",
     ".wiki/cache",
+    ".wiki/sessions",
     ".wiki/staging",
     ".wiki/versions",
 ];
@@ -136,6 +138,16 @@ stable_streak       = 3
 read_retries        = 3
 lag_warn_rounds     = 3
 on_missing          = "mark_stale"
+
+[memory]
+# Live session records before the agent is asked to distil them.
+session_soft_cap = 50
+# Days a sealed summary may sit unread before it counts as idle.
+idle_days        = 60
+# A summary is only purged when the archive is BOTH over purge_cap and past
+# purge_days, so a quiet wiki never loses its history.
+purge_cap        = 200
+purge_days       = 180
 "#;
 
 /// Default `SCHEMA.md`: the conventions the CLI enforces, for humans and agents.

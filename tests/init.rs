@@ -257,3 +257,34 @@ fn validate_accepts_env_var_name_for_external() {
     assert_eq!(ext.response.text, "data");
     assert_eq!(ext.response.ok_code, 200);
 }
+
+#[test]
+fn init_creates_archive_and_session_dirs() {
+    let d = tempdir().unwrap();
+    let out = run(d.path(), &["init"]);
+    assert_eq!(out.status.code(), Some(0));
+    // The archive holds sealed summaries (in git); the session directory is the
+    // scratch space the layering fills and clears, so both must exist up front.
+    for p in ["wiki/archive", ".wiki/sessions"] {
+        assert!(d.path().join(p).is_dir(), "missing {p}");
+    }
+}
+
+#[test]
+fn generated_contract_carries_the_memory_defaults() {
+    let d = tempdir().unwrap();
+    run(d.path(), &["init"]);
+    let cfg = llm_wiki::config::Config::load(d.path()).unwrap();
+    assert_eq!(cfg.memory.session_soft_cap, 50);
+    assert_eq!(cfg.memory.idle_days, 60);
+    assert_eq!(cfg.memory.purge_cap, 200);
+    assert_eq!(cfg.memory.purge_days, 180);
+}
+
+#[test]
+fn memory_section_overrides_one_field_and_keeps_the_rest() {
+    let cfg = load_with("[paths]\nsource = \"source\"\n\n[memory]\nidle_days = 7\n");
+    assert_eq!(cfg.memory.idle_days, 7);
+    assert_eq!(cfg.memory.session_soft_cap, 50);
+    assert_eq!(cfg.memory.purge_cap, 200);
+}

@@ -66,6 +66,7 @@ pub struct Config {
     pub audit: AuditCfg,
     pub versions: VersionsCfg,
     pub sync: SyncCfg,
+    pub memory: MemoryCfg,
 }
 
 impl Config {
@@ -390,6 +391,33 @@ impl Default for SyncCfg {
             read_retries: 3,
             lag_warn_rounds: 3,
             on_missing: String::from("mark_stale"),
+        }
+    }
+}
+
+/// `[memory]`: the session-memory water marks from §5.11.
+///
+/// `session_soft_cap` counts the live session records that make the agent ask
+/// for a distillation; `idle_days` is how long a sealed summary may go without a
+/// `recall` before it becomes a purge candidate. `purge_cap` and `purge_days` are
+/// the second condition: a summary is only cleared when the archive is both over
+/// its capacity and past the deadline, so a quiet wiki never loses anything.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MemoryCfg {
+    pub session_soft_cap: usize,
+    pub idle_days: u32,
+    pub purge_cap: usize,
+    pub purge_days: u32,
+}
+
+impl Default for MemoryCfg {
+    fn default() -> Self {
+        Self {
+            session_soft_cap: 50,
+            idle_days: 60,
+            purge_cap: 200,
+            purge_days: 180,
         }
     }
 }

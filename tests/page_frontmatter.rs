@@ -333,3 +333,61 @@ fn append_sources_inserts_a_missing_field() {
         "no items, no write"
     );
 }
+
+#[test]
+fn replace_sources_drops_and_appends_in_one_write() {
+    let d = tempdir().unwrap();
+    let text = "---\n# 注释也要保留\nid: sync\nsources:\n  - \"raw/queries/a.md\"\n  - \"raw/queries/b.md\"\nstatus: stable\nupdated: 2026-01-01\n---\n正文\n";
+    let p = write_page(&d, "sync.md", text);
+    let (removed, added) = page::replace_sources(
+        &p,
+        &[String::from("raw/queries/a.md")],
+        &[String::from("wiki/archive/2026-05.md")],
+    )
+    .unwrap();
+    assert_eq!((removed, added), (1, 1));
+    assert_eq!(
+        fs::read_to_string(&p).unwrap(),
+        "---\n# 注释也要保留\nid: sync\nsources:\n  - \"raw/queries/b.md\"\n  - \"wiki/archive/2026-05.md\"\nstatus: stable\nupdated: 2026-01-01\n---\n正文\n"
+    );
+}
+
+#[test]
+fn replace_sources_is_a_no_op_when_nothing_changes() {
+    let d = tempdir().unwrap();
+    let text = "---\nid: sync\nsources:\n  - \"raw/a.md\"\nupdated: 2026-01-01\n---\nbody\n";
+    let p = write_page(&d, "sync.md", text);
+    let same = String::from("raw/a.md");
+    let (removed, added) =
+        page::replace_sources(&p, &[String::from("raw/gone.md")], &[same]).unwrap();
+    assert_eq!((removed, added), (0, 0), "既没删到也没新增时不该重写");
+    assert_eq!(fs::read_to_string(&p).unwrap(), text);
+}
+
+#[test]
+fn replace_sources_rewrites_an_inline_array_as_a_list() {
+    let d = tempdir().unwrap();
+    let text =
+        "---\nid: x\nsources: [\"raw/a.md\", \"raw/b.md\"]\nupdated: 2026-01-01\n---\nbody\n";
+    let p = write_page(&d, "a.md", text);
+    page::replace_sources(
+        &p,
+        &[String::from("raw/a.md"), String::from("raw/b.md")],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(&p).unwrap(),
+        "---\nid: x\nsources:\nupdated: 2026-01-01\n---\nbody\n"
+    );
+}
+
+#[test]
+fn replace_sources_matches_a_reference_with_its_fragment() {
+    let d = tempdir().unwrap();
+    let text = "---\nid: x\nsources:\n  - \"raw/big.md#p=12-40\"\nupdated: 2026-01-01\n---\nbody\n";
+    let p = write_page(&d, "a.md", text);
+    // 封存重挂时引用方常常只记得原文件，片段要在匹配时被忽略。
+    let (removed, _) = page::replace_sources(&p, &[String::from("raw/big.md")], &[]).unwrap();
+    assert_eq!(removed, 1);
+}
