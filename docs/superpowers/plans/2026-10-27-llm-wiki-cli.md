@@ -741,7 +741,7 @@ Expected: FAIL。
 
 - [ ] **Step 3: 实现链接生成与转义**
 
-相对路径固定为 `../../source/<source_key>`——`raw/<…>.md` 与 `wiki/<type>/<id>.md` 都在根下两级，这个前缀对两者都成立。
+相对路径按**源 key 的层级深度**计算：前缀是 `../` 重复「key 的路径分量数」次（含文件名）。`raw/` 镜像 `source/` 的相对结构，所以 `raw/<key 去扩展名>.md` 的深度恰好等于 key 的分量数。例：key `dir/a.png` → 深度 2 → `../../source/dir/a.png`；key `scan.pdf` → 深度 1 → `../source/scan.pdf`。原计划写的「固定 `../../`」在 key 只有一层时是错的（会指到仓库外）。
 
 转义规则：目标路径含空格、`(`、`)`、`#`、`%`、`<`、`>` 中任一 → 用 `<...>` 包裹；否则原样。空文件仍然产出链接，追加 `empty` warning。
 
@@ -771,7 +771,9 @@ git commit -m "feat: asset parser emitting link-only markdown"
 - Produces:
   - `parse::pdf::PdfParser`，`id() == "builtin-pdf"`，`can_handle` 认 `pdf`
   - `parse::pdf::has_text_layer(path: &Path) -> Result<bool>`——抽样头 2 + 中 2 + 尾 2 页
-  - `tests::common::make_pdf(path: &Path, body: &str, pages: usize)`、`make_scanned_pdf(path: &Path, pages: usize)`（后者内容流里不含文本操作符）
+  - `tests::common::make_pdf(path: &Path, body: &str, pages: usize)`、`make_scanned_pdf(path: &Path, pages: usize)`（后者内容流里不含文本操作符）、`make_mixed_pdf(path: &Path)`（第 1 页无文本、第 5 页有）
+  - `parse::Source::path(p: &Path) -> Result<Source>`（读文件字节，`key` 取文件名、`ext` 取扩展名）——测试用到，若 Task 6 没建就本任务补在 `src/parse/mod.rs`
+  - 探针内部用 `Document::load_mem(&bytes)`，对外仍暴露 `has_text_layer(path: &Path)`，两者共用一个接收 `&[u8]` 的内部函数
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -802,7 +804,7 @@ fn scanned_pdf_degrades_to_asset_link() {
     let out = PdfParser::new().parse(&Source::path(&p)).unwrap();
     assert!(out.asset);
     assert!(out.no_text_layer);
-    assert!(out.markdown.contains("](../../source/scan.pdf)"));
+    assert!(out.markdown.contains("](../source/scan.pdf)"), "key 只有一层，前缀是一个 ../");
 }
 
 #[test]
@@ -1047,7 +1049,9 @@ CREATE TABLE raws(key TEXT PRIMARY KEY, hash TEXT NOT NULL,
 
 `scan_raw` 遍历 `raw/`，跳过 `is_ignored`，算内容哈希，与 `raws` 比对，产出 `New / Changed / Missing` 三种（B 段不需要 `moved`/`duplicate`——raw 的路径由 convert 决定，不会漂移；出现同哈希两份说明 convert 有 bug，报 `duplicate`）。
 
-被 `pin: true` 的 raw 在 `Changed` 时额外附 warning `pinned`，让下游知道这份差异是人手改的。
+被 `pin: true` 的 raw 的漂移判定**不放在这里**：`convert` 已经会跳过 pinned 的 raw（`skip_reason = "pinned"`），`scan_raw` 只如实报 `Changed`；「pin 之后被人手改过」由 T17 lint 的专门条目负责，本任务不给 `Change` 加字段。
+
+**本任务还要改 `src/convert.rs`**：转换成功后同时 `store.upsert_raw(&RawRow{ ... })`，否则 `raws` 表永远是空的，`scan_raw` 每轮都报 New。
 
 - [ ] **Step 4: 跑测试确认通过**
 
