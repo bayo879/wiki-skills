@@ -801,8 +801,10 @@ Claude Code 硬约束：frontmatter 只有 `name`(≤64) 与 `description`(≤10
 （`~/.dsh/skills/`、`~/.claude/skills/` 等），此后必须能直接工作——那台机器不装 Rust、
 不联网、也没有本仓库的 `target/`。所以包里必须自己带 CLI：
 
-- `skills/llm-wiki/bin/vendor/<target-triple>/llm-wiki`：预编译二进制，按 triple 分目录。
-  `scripts/vendor.sh` 负责把 `target/release/llm-wiki` 放进去（strip 后约 8 MB/平台）。
+- `skills/llm-wiki/bin/vendor/<target-triple>/llm-wiki`：预编译二进制，按 triple 分目录，
+  **不进 git**（`.gitignore` 已排除）。本地用 `scripts/vendor.sh` 从 `target/release/`
+  填充（strip 后约 8 MB/平台），发布由 `.github/workflows/release.yml` 在三个原生
+  runner 上生成 `llm-wiki-skills-<版本>-<triple>.tar.gz` 挂到 Release。
 - `bin/platform.sh`：把 `uname -s`/`uname -m` 映射成 triple，启动器与安装器共用这一份。
 - `bin/llm-wiki`（POSIX）与 `bin/llm-wiki.cmd`（Windows）：自定位启动器，选中本平台的
   vendor 二进制后 `exec`，一个参数都不改。
@@ -983,9 +985,12 @@ query skill（CLI 的 `query` 已在 v1 实现，v2 只加 skill 包装）；向
     反过来，`source/`、`raw/`、`wiki/audit/`、`wiki/archive/` 与整个引擎目录属于**派生态**：
     每次命令入口按需创建，否则「克隆下来直接跑」就不可能（引擎目录被 gitignore）。
     判据是「工具不创建就没法继续 vs. 用户没做过的决定」，不是「init 建了哪些目录」。
-50. **skill 包自带 CLI，二进制进 git**：`skills/` 是分发单位，复制到别的 agent 即成活，
-   所以 `skills/llm-wiki/bin/vendor/<triple>/llm-wiki` 提交进仓库（strip 后约 8 MB/平台），
-   而不是让接收方 `cargo install`。代价：仓库体积按平台线性增长，新平台必须补 vendor
-   再同步；换来的是「同步技能」不再等于「同步一堆 markdown 死链」。
-   拒绝的方案：让 SKILL.md 教人装 Rust（接收方没有工具链）；发布时下载二进制（要求联网，
-   且内部无 release 流水线）。
+50. **skill 包自带 CLI，但二进制不进 git**：`skills/` 是分发单位，复制到别的 agent
+   必须即成活，所以包里要带 `bin/vendor/<triple>/llm-wiki`；但这份二进制不提交进仓库，
+   一律由 Release 流程产出（推 tag → 三平台原生 runner 构建 → 打 tar.gz 挂 Release）。
+   理由：① 本机交叉不出 linux/windows（`libsqlite3-sys` 是 bundled C，缺目标平台工具链），
+   提交一个平台等于暗示支持它；② 每平台 8 MB 进 git 不可回收。代价：**本地 clone 后跑
+   `cargo test` 前要先 `cargo build --release && ./scripts/vendor.sh`**，否则
+   `tests/skills_install.rs` 会失败并指名这条命令——这是有意的门，不是噪音。
+   拒绝的方案：让 SKILL.md 教人装 Rust（接收方没有工具链）；把 vendored 二进制提交进 git
+   （仓库随平台线性膨胀，且只有开发者那一个平台是真的）。

@@ -72,7 +72,16 @@ llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"c
 #### 把 skill 包同步给别人
 
 `skills/` 可以直接整个复制进对方的技能根目录（`~/.dsh/skills/`、`~/.claude/skills/` 等），
-那台机器**不需要 Rust、不需要联网、不需要本仓库**——包里带着当前平台的预编译二进制：
+那台机器**不需要 Rust、不需要联网、不需要本仓库**——包里带着当前平台的预编译二进制。
+
+二进制本身**不进 git**（见下节 Release）。本地要自己产一份，跑一次：
+
+```bash
+cargo build --release && ./scripts/vendor.sh
+```
+
+这也是本地跑测试的前提：`tests/skills_install.rs` 会复制整包并执行它，缺二进制就失败，
+报错会直接告诉你要跑上面这条命令。
 
 ```bash
 # 在包内技能目录，跑一次就把 CLI 装到 PATH；幂等，重复跑不覆盖可用安装

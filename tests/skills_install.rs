@@ -168,8 +168,12 @@ fn a_package_without_the_host_binary_explains_itself() {
     let root = scratch("missing");
     let skills = root.join("skills");
     copy_tree(&repo_root().join("skills"), &skills);
+    // The vendored binaries are not committed, so on a fresh clone this
+    // directory may already be absent: that is the same scenario.
     let vendored = skills.join("llm-wiki/bin/vendor").join(triple);
-    fs::remove_dir_all(&vendored).expect("remove vendored binary");
+    if vendored.exists() {
+        fs::remove_dir_all(&vendored).expect("remove vendored binary");
+    }
 
     let home = root.join("home");
     fs::create_dir_all(&home).expect("create home");

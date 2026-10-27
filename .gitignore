@@ -8,3 +8,6 @@
 # Rust
 /target
 /.cargo-home
+
+# 平台二进制不进 git：发布走 Release，见 README「从 Release 取现成产物」
+skills/llm-wiki/bin/vendor/
