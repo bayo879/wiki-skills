@@ -11,9 +11,10 @@
 
 pub mod asset;
 pub mod html;
+pub mod pdf;
 pub mod text;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -42,6 +43,28 @@ impl Source {
             ext: extension_of(key),
             bytes: bytes.to_vec(),
         }
+    }
+
+    /// Reads `path` as one source, naming it after the file itself.
+    ///
+    /// The key is the file name, not the path from the working directory: a
+    /// source is identified by what it is called, and the directory it happened
+    /// to sit in is not part of its identity. The extension is derived from that
+    /// same name, so `Image.PNG` is still claimed by the asset backend.
+    pub fn path(path: &Path) -> Result<Source> {
+        let bytes = std::fs::read(path).map_err(|err| ParseError::Io {
+            path: path.to_path_buf(),
+            message: err.to_string(),
+        })?;
+        let key = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok(Source {
+            ext: extension_of(&key),
+            key,
+            bytes,
+        })
     }
 }
 
@@ -117,6 +140,12 @@ pub enum ParseError {
     /// No registered backend claims the extension.
     #[error("no parser handles the extension {ext:?} of source {key:?}")]
     NoParser { key: String, ext: String },
+    /// The file behind a source could not be read.
+    #[error("cannot read {}: {message}", path.display())]
+    Io { path: PathBuf, message: String },
+    /// A backend claimed the source and then could not decode it.
+    #[error("cannot parse source {key:?}: {message}")]
+    Bad { key: String, message: String },
 }
 
 impl ParseError {
@@ -124,6 +153,8 @@ impl ParseError {
     pub fn code(&self) -> &'static str {
         match self {
             ParseError::NoParser { .. } => "E_NO_PARSER",
+            ParseError::Io { .. } => "E_IO",
+            ParseError::Bad { .. } => "E_BAD_SOURCE",
         }
     }
 }
@@ -134,15 +165,16 @@ pub type Result<T> = std::result::Result<T, ParseError>;
 /// The backends available for `cfg`, in the order they are tried.
 ///
 /// Order is specificity, not preference: text and html each claim a distinct set
-/// of extensions, and asset only claims image extensions, so no two builtin
-/// backends compete for the same file. Later tasks append the pdf and external
-/// backends here; `cfg` decides which ones are enabled, which is why it is part
-/// of the signature even though every builtin backend is always on.
+/// of extensions, asset only claims image extensions, and pdf only claims `pdf`,
+/// so no two builtin backends compete for the same file. External backends are
+/// appended here by later tasks; `cfg` decides which ones are enabled, which is
+/// why it is part of the signature even though every builtin backend is on.
 pub fn registry(_cfg: &Config) -> Vec<Box<dyn Parser>> {
     vec![
         Box::new(text::TextParser::new()),
         Box::new(html::HtmlParser::new()),
         Box::new(asset::AssetParser::new()),
+        Box::new(pdf::PdfParser::new()),
     ]
 }
 

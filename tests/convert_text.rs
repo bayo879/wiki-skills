@@ -471,7 +471,7 @@ fn text_backend_claims_markdown_and_txt_only() {
     assert_eq!(id, "builtin-text");
     assert_eq!(extracted.markdown, "# hi\n");
 
-    let err = parse::parse_with(&cfg, &parse::Source::inline("a.pdf", b"%PDF")).unwrap_err();
+    let err = parse::parse_with(&cfg, &parse::Source::inline("a.docx", b"PK")).unwrap_err();
     assert_eq!(err.code(), "E_NO_PARSER");
 }
 
