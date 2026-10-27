@@ -43,11 +43,18 @@ fn builtin_mode_never_tries_external() {
 #[test]
 fn external_500_falls_back_and_reports_both_reasons() {
     let srv = mock_http::serve_once(500, "boom");
+    let mut external = mock_http::external_at(&srv.url);
+    external.auth_env = String::from("WIKI_PARSE_TOKEN_T11_500");
+    std::env::set_var("WIKI_PARSE_TOKEN_T11_500", "test-token-abc");
+
     let mut cfg = Config::default();
     cfg.parse.primary = Primary::External;
-    cfg.parse.external = Some(mock_http::external_at(&srv.url));
+    cfg.parse.external = Some(external);
     let err = parse::parse_with(&cfg, &Source::inline("a.pdf", b"%PDF")).unwrap_err();
-    assert!(err.to_string().contains("500"));
+    assert!(
+        err.to_string().contains("500"),
+        "the status must survive into the message: {err}"
+    );
 }
 
 #[test]
