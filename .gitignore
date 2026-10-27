@@ -4,3 +4,7 @@ superpowers
 
 # DSH
 .dsh
+
+# Rust
+/target
+/.cargo-home
