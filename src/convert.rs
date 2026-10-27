@@ -12,8 +12,10 @@
 //!   a crash cannot leave a half-written raw file that `ingest` would accept;
 //! - an existing raw file is only overwritten when its `source` field names the
 //!   same source, so `a.md` and `a.txt` cannot silently fight over `raw/a.md`;
-//! - the ledger is updated only after the file is in place, and only its
-//!   `raw_key` / `converted_at` columns change.
+//! - the ledgers are updated only after the file is in place: the `sources` row
+//!   only gains `raw_key` / `converted_at`, and the `raws` row records the digest
+//!   of the bytes actually written, so `scan_raw` does not report the conversion
+//!   as pending work.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -27,7 +29,7 @@ use crate::config::Config;
 use crate::hash;
 use crate::parse::{self, Extracted, Source, Warning};
 use crate::paths;
-use crate::store::{SourceRow, Store, StoreError};
+use crate::store::{RawRow, SourceRow, Store, StoreError};
 
 /// What one conversion produced, as reported by `convert` and `sync`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -156,9 +158,14 @@ pub fn convert_one(
         &converted_at,
         &extracted,
     );
+    // Digest the rendered document, not the source: `scan_raw` hashes the bytes
+    // on disk, frontmatter included, and the two must agree.
+    let raw_hash = hash::hash_bytes(document.as_bytes());
     write_atomic(&raw_path, document.as_bytes())?;
 
     record_conversion(store, cfg, key, &source_path, &raw_key, &converted_at)?;
+    // The `raws` key space is relative to `raw/`, like `scan_raw` reports it.
+    record_raw(store, key, &raw_rel, &raw_hash, &converted_at)?;
 
     Ok(ConvertOutcome {
         raw_path: raw_key,
@@ -392,6 +399,29 @@ fn unquote(value: &str) -> String {
         }
     }
     out
+}
+
+/// Writes the `raws` row for the file this conversion just put on disk.
+///
+/// `hash` digests the written bytes, frontmatter included, because that is what
+/// [`crate::scan::scan_raw`] recomputes; hashing the body alone would leave every
+/// conversion looking like pending work on the next scan. `source_key` is the
+/// plain source key, in the same key space as the `sources` ledger; the raw key is
+/// relative to `raw/`, which is the key space `scan_raw` walks and reports.
+fn record_raw(
+    store: &mut Store,
+    source_key: &str,
+    raw_key: &str,
+    hash: &str,
+    converted_at: &str,
+) -> Result<()> {
+    store.upsert_raw(&RawRow {
+        key: String::from(raw_key),
+        hash: String::from(hash),
+        source_key: String::from(source_key),
+        converted_at: String::from(converted_at),
+    })?;
+    Ok(())
 }
 
 /// Writes `raw_key` and `converted_at` into the ledger, keeping every other

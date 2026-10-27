@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// DDL for version 1, applied once per database.
 const MIGRATION_1: &str = r#"
@@ -59,6 +59,19 @@ CREATE VIRTUAL TABLE fts USING fts5(
 );
 "#;
 
+/// DDL for version 2: the normalised raw layer's ledger.
+///
+/// Version 1 is left untouched; this only adds the table, so an in-place upgrade
+/// keeps every `sources` row and its page mapping.
+const MIGRATION_2: &str = r#"
+CREATE TABLE raws(
+    key TEXT PRIMARY KEY,
+    hash TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    converted_at TEXT NOT NULL
+);
+"#;
+
 /// Column order shared by the `sources` reader helpers.
 const SOURCE_COLUMNS: &str = "key, hash, size, mtime, raw_key, converted_at";
 
@@ -77,6 +90,39 @@ pub struct SourceRow {
     pub raw_key: Option<String>,
     /// When the most recent conversion finished, if it has.
     pub converted_at: Option<String>,
+}
+
+/// Column order shared by the `raws` reader helpers.
+const RAW_COLUMNS: &str = "key, hash, source_key, converted_at";
+
+/// One row of the `raws` ledger: a normalised markdown file under `raw/`.
+///
+/// `hash` digests the bytes that are actually on disk, frontmatter included, so
+/// a hand edit — even one that only changes a line ending — is visible to
+/// [`crate::scan::scan_raw`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRow {
+    /// Path identity key of the raw file relative to `raw/`, `/`-separated and
+    /// NFC-normalised.
+    pub key: String,
+    /// `blake3:` digest of the raw file's final bytes.
+    pub hash: String,
+    /// Key of the source this raw markdown was converted from.
+    pub source_key: String,
+    /// When the most recent conversion wrote this file.
+    pub converted_at: String,
+}
+
+impl RawRow {
+    /// Reads one `raws` row in [`RAW_COLUMNS`] order.
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
+        Ok(RawRow {
+            key: row.get(0)?,
+            hash: row.get(1)?,
+            source_key: row.get(2)?,
+            converted_at: row.get(3)?,
+        })
+    }
 }
 
 impl SourceRow {
@@ -163,15 +209,15 @@ impl Store {
         })
     }
 
-    /// Brings the schema up to [`SCHEMA_VERSION`].
+    /// Brings the schema up to [`SCHEMA_VERSION`], one version at a time.
     ///
-    /// Idempotent: a database already at the current version is left untouched.
-    /// A database from a newer build is refused instead of being written under
+    /// Idempotent: a database already at the current version is left untouched,
+    /// and every step applies only when the file is still behind it, so a
+    /// version-1 database becomes version 2 without touching the v1 tables. A
+    /// database from a newer build is refused instead of being written under
     /// assumptions that no longer hold.
     pub fn migrate(&mut self) -> Result<()> {
-        let version: i64 = self
-            .conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let mut version = self.user_version()?;
         if version > SCHEMA_VERSION {
             return Err(StoreError::SchemaTooNew {
                 path: self.path.clone(),
@@ -182,11 +228,32 @@ impl Store {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
-        // DDL and the version stamp move together, so an interrupted migration
-        // leaves a version-0 file that the next run can retry from scratch.
+        if version < 1 {
+            self.apply_migration(MIGRATION_1, 1)?;
+            version = 1;
+        }
+        if version < 2 {
+            self.apply_migration(MIGRATION_2, 2)?;
+        }
+        Ok(())
+    }
+
+    /// Reads `PRAGMA user_version`, the schema generation of the file.
+    fn user_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))?)
+    }
+
+    /// Runs one migration's DDL and stamps its version in the same transaction.
+    ///
+    /// DDL and the stamp move together, so an interrupted migration leaves the
+    /// file at the previous version and the next run retries from there instead
+    /// of finding half a schema it believes is current.
+    fn apply_migration(&mut self, sql: &str, version: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute_batch(MIGRATION_1)?;
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.execute_batch(sql)?;
+        tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
         Ok(())
     }
@@ -240,6 +307,41 @@ impl Store {
         Ok(())
     }
 
+    /// Every raw file in the ledger, ordered by key.
+    pub fn all_raws(&self) -> Result<Vec<RawRow>> {
+        let sql = format!("SELECT {RAW_COLUMNS} FROM raws ORDER BY key");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], RawRow::from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// The ledger row for the raw key `key`, or `None` when it is unknown.
+    pub fn get_raw(&self, key: &str) -> Result<Option<RawRow>> {
+        let sql = format!("SELECT {RAW_COLUMNS} FROM raws WHERE key = ?1");
+        let row = self
+            .conn
+            .query_row(&sql, [key], RawRow::from_row)
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Inserts `row`, or replaces the existing row with the same key.
+    pub fn upsert_raw(&mut self, row: &RawRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO raws(key, hash, source_key, converted_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(key) DO UPDATE SET \
+                 hash = excluded.hash, source_key = excluded.source_key, \
+                 converted_at = excluded.converted_at",
+            params![row.key, row.hash, row.source_key, row.converted_at],
+        )?;
+        Ok(())
+    }
+
     /// Page ids generated from the raw markdown `raw_key`, ordered by page id.
     pub fn pages_for_source(&self, raw_key: &str) -> Result<Vec<String>> {
         let mut stmt = self
@@ -286,5 +388,115 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// A database exactly as the previous build left it: schema v1 with one
+    /// converted source, written without going through [`Store::migrate`].
+    fn write_v1_database(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(MIGRATION_1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO sources(key, hash, size, mtime, raw_key, converted_at) \
+             VALUES ('a.pdf', 'blake3:aa', 10, 1, 'raw/a.md', '2026-10-27T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source_pages(raw_key, page_id) VALUES ('raw/a.md', 'page/a')",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn raw_row(key: &str, hash: &str) -> RawRow {
+        RawRow {
+            key: String::from(key),
+            hash: String::from(hash),
+            source_key: String::from("a.pdf"),
+            converted_at: String::from("2026-10-27T10:00:00Z"),
+        }
+    }
+
+    fn user_version(store: &Store) -> i64 {
+        store
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_v1_database_is_upgraded_in_place() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("state.db");
+        write_v1_database(&p);
+
+        let mut s = Store::open(&p).unwrap();
+        assert_eq!(user_version(&s), 1);
+        s.migrate().unwrap();
+        assert_eq!(user_version(&s), SCHEMA_VERSION);
+
+        // The v1 tables and their rows survive: nothing is dropped or rebuilt.
+        let row = s.get_source("a.pdf").unwrap().unwrap();
+        assert_eq!(row.hash, "blake3:aa");
+        assert_eq!(row.raw_key.as_deref(), Some("raw/a.md"));
+        assert_eq!(row.converted_at.as_deref(), Some("2026-10-27T10:00:00Z"));
+        assert_eq!(s.pages_for_source("raw/a.md").unwrap(), ["page/a"]);
+
+        // The new table exists and behaves.
+        s.upsert_raw(&raw_row("a.md", "blake3:ab")).unwrap();
+        assert_eq!(s.get_raw("a.md").unwrap().unwrap().hash, "blake3:ab");
+    }
+
+    #[test]
+    fn migrating_a_v1_database_twice_stays_at_v2() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("state.db");
+        write_v1_database(&p);
+
+        let mut s = Store::open(&p).unwrap();
+        s.migrate().unwrap();
+        s.upsert_raw(&raw_row("a.md", "blake3:ab")).unwrap();
+        s.migrate().unwrap();
+        assert_eq!(user_version(&s), SCHEMA_VERSION);
+        assert_eq!(s.get_source("a.pdf").unwrap().unwrap().hash, "blake3:aa");
+        assert_eq!(s.all_raws().unwrap(), vec![raw_row("a.md", "blake3:ab")]);
+
+        // Reopening an already-upgraded file is a no-op as well.
+        drop(s);
+        let mut s = Store::open(&p).unwrap();
+        s.migrate().unwrap();
+        assert_eq!(user_version(&s), SCHEMA_VERSION);
+        assert_eq!(s.all_raws().unwrap(), vec![raw_row("a.md", "blake3:ab")]);
+    }
+
+    #[test]
+    fn a_database_from_a_newer_build_is_refused() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("state.db");
+        {
+            let conn = Connection::open(&p).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .unwrap();
+        }
+
+        let mut s = Store::open(&p).unwrap();
+        match s.migrate() {
+            Err(StoreError::SchemaTooNew {
+                found, supported, ..
+            }) => {
+                assert_eq!(found, SCHEMA_VERSION + 1);
+                assert_eq!(supported, SCHEMA_VERSION);
+            }
+            other => panic!("expected SchemaTooNew, got {other:?}"),
+        }
+        // A refused migration must leave the file alone.
+        assert_eq!(user_version(&s), SCHEMA_VERSION + 1);
     }
 }

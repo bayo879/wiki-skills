@@ -1,9 +1,17 @@
-//! Source-layer scan: classify what changed under `source/`.
+//! Layer scans: classify what changed under `source/` and under `raw/`.
 //!
-//! The scan compares the files currently in `source/` with the `sources` ledger
-//! in `state.db` and reports one [`Change`] per affected key. It is read-only:
-//! nothing is written to the store, so `sync` can decide what to do with the
-//! report (and can call the scan twice without side effects).
+//! [`scan_source`] compares the files currently in `source/` with the `sources`
+//! ledger in `state.db`; [`scan_raw`] does the same for the normalised markdown
+//! in `raw/` against the `raws` ledger. Both report one [`Change`] per affected
+//! key, and both are read-only: nothing is written to the store, so `sync` can
+//! decide what to do with the report (and can call a scan twice without side
+//! effects).
+//!
+//! The raw layer is written by `convert`, which records the digest of the exact
+//! bytes it put on disk. `scan_raw` recomputes the full digest of every file —
+//! raw files are text, so sampling would hide hand edits — and reports a file
+//! whose digest no longer matches its row as `Changed`, even when the frontmatter
+//! says `pin: true` (the pin belongs to `convert` and to lint, not to this scan).
 //!
 //! Classification runs in a fixed order, because the steps constrain each other:
 //!
@@ -38,7 +46,7 @@ use walkdir::WalkDir;
 use crate::config::Config;
 use crate::hash;
 use crate::paths;
-use crate::store::{SourceRow, Store, StoreError};
+use crate::store::{RawRow, SourceRow, Store, StoreError};
 
 /// How one key differs from the ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -132,6 +140,115 @@ pub fn scan_source(root: &Path, cfg: &Config, store: &Store) -> Result<ScanRepor
     })
 }
 
+/// Scans `raw/` under `root` and classifies every key against the `raws` ledger.
+///
+/// `store` is only read; the function never writes to it. The raw layer has no
+/// extension whitelist or size cap — `convert` owns everything under `raw/` — so
+/// `ignored_count` is always zero.
+pub fn scan_raw(root: &Path, cfg: &Config, store: &Store) -> Result<ScanReport> {
+    let raw_root = root.join(&cfg.paths.raw);
+    let disk = walk_raw(&raw_root)?;
+    let ledger = store.all_raws()?;
+    Ok(ScanReport {
+        changes: classify_raw(&disk, &ledger),
+        ignored_count: 0,
+    })
+}
+
+/// One raw file found under `raw/`, with the digest of its full content.
+struct RawFile {
+    /// Path identity key relative to `raw/`.
+    key: String,
+    /// `blake3:` digest of every byte on disk, frontmatter included.
+    hash: String,
+}
+
+/// Walks `raw/` and digests every file completely.
+///
+/// A missing `raw/` directory is treated as an empty one: every ledger key is
+/// then missing, which is what a deleted tree means.
+fn walk_raw(raw_root: &Path) -> Result<Vec<RawFile>> {
+    let mut disk = Vec::new();
+    if raw_root.is_dir() {
+        let walker = WalkDir::new(raw_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| !is_ignored_path(raw_root, entry));
+        for entry in walker {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            disk.push(RawFile {
+                key: paths::identity_key(raw_root, entry.path())?,
+                hash: hash::hash_file(entry.path(), true)?,
+            });
+        }
+    }
+    // Walk order is filesystem order; every later step wants a stable one.
+    disk.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(disk)
+}
+
+/// Applies the raw-layer comparison to the walked files and the ledger.
+///
+/// A key the ledger knows is judged by its digest alone: `converted_at` moving
+/// forward is not a change. A key the ledger does not know is `New`, unless
+/// another new file already carries the same digest — then the lexicographically
+/// first key is kept and the rest are `Duplicate`.
+///
+/// Deduplication deliberately ignores files the ledger already tracks, the same
+/// way [`classify`] restricts its own duplicate rule to the `New` candidates: a
+/// tracked raw that still matches its row is never demoted, so a duplicated
+/// content pair cannot make `sync` delete and re-convert the same file forever.
+fn classify_raw(disk: &[RawFile], ledger: &[RawRow]) -> Vec<Change> {
+    let mut changes: Vec<Change> = Vec::new();
+    let mut by_key: HashMap<&str, &RawRow> = HashMap::new();
+    for row in ledger {
+        by_key.insert(row.key.as_str(), row);
+    }
+
+    let mut new_candidates: Vec<&RawFile> = Vec::new();
+    for file in disk {
+        match by_key.get(file.key.as_str()) {
+            None => new_candidates.push(file),
+            Some(row) if row.hash == file.hash => {}
+            Some(_) => changes.push(change(
+                ChangeKind::Changed,
+                &file.key,
+                Some(file.hash.clone()),
+                None,
+            )),
+        }
+    }
+
+    // `disk` is sorted, so the first key seen for a digest is the smallest one.
+    let mut canonical: HashMap<&str, &str> = HashMap::new();
+    for file in &new_candidates {
+        canonical
+            .entry(file.hash.as_str())
+            .or_insert(file.key.as_str());
+    }
+    for file in new_candidates {
+        let kind = match canonical.get(file.hash.as_str()) {
+            Some(canonical_key) if *canonical_key == file.key.as_str() => ChangeKind::New,
+            _ => ChangeKind::Duplicate,
+        };
+        changes.push(change(kind, &file.key, Some(file.hash.clone()), None));
+    }
+
+    let present: BTreeSet<&str> = disk.iter().map(|file| file.key.as_str()).collect();
+    for row in ledger {
+        if !present.contains(row.key.as_str()) {
+            changes.push(change(ChangeKind::Missing, &row.key, None, None));
+        }
+    }
+
+    // One key can only carry one change, so the sort is total.
+    changes.sort_by(|a, b| a.key.cmp(&b.key));
+    changes
+}
+
 /// What one pass over `source/` found.
 struct Walked {
     /// Allowed files, sorted by key.
@@ -191,8 +308,8 @@ fn walk_source(source_root: &Path, cfg: &Config) -> Result<Walked> {
 
 /// Whether the walker should skip this entry and, for directories, not descend
 /// into it: any relative component starting with `.` marks a dot-path.
-fn is_ignored_path(source_root: &Path, entry: &walkdir::DirEntry) -> bool {
-    match entry.path().strip_prefix(source_root) {
+fn is_ignored_path(root: &Path, entry: &walkdir::DirEntry) -> bool {
+    match entry.path().strip_prefix(root) {
         Ok(rel) => paths::is_ignored(&paths::to_slash(rel)),
         Err(_) => false,
     }
