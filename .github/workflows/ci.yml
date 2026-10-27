@@ -48,7 +48,9 @@ jobs:
         shell: bash
         run: |
           set +e
-          cargo test --locked > test-output.log 2>&1
+          # --no-fail-fast so one run reports every platform-specific failure,
+          # instead of stopping at the first test binary that breaks.
+          cargo test --locked --no-fail-fast > test-output.log 2>&1
           status=$?
           if [ "$status" -ne 0 ]; then
             sed -n '/^failures:$/,/^test result:/p' test-output.log | head -80 | while IFS= read -r line; do

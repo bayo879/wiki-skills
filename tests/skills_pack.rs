@@ -21,10 +21,10 @@ const SKILLS_DIR: &str = "skills";
 fn parse_frontmatter(text: &str) -> (BTreeMap<String, String>, &str) {
     let rest = text
         .strip_prefix("---\n")
-        .unwrap_or_else(|| panic!("must open with the `---` fence:\\n{text}"));
+        .unwrap_or_else(|| panic!("must open with the `---` fence:\n{text}"));
     let end = rest
         .find("\n---\n")
-        .unwrap_or_else(|| panic!("frontmatter is never closed:\\n{text}"));
+        .unwrap_or_else(|| panic!("frontmatter is never closed:\n{text}"));
     let mut map = BTreeMap::new();
     for line in rest[..end].lines() {
         if let Some((key, value)) = line.split_once(':') {
@@ -45,6 +45,13 @@ fn skills() -> Vec<(String, String)> {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = PathBuf::from(SKILLS_DIR).join(&name).join("SKILL.md");
         let text = fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path:?}: {err}"));
+        // A checkout without `.gitattributes` can hand us CRLF (and a hand-edited
+        // file can carry a BOM). The tools only ever write LF, and the fence is
+        // compared byte for byte, so normalise once here.
+        let text = text
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&text)
+            .replace("\r\n", "\n");
         found.push((name, text));
     }
     found.sort();
