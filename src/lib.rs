@@ -9,6 +9,7 @@ pub mod config;
 pub mod convert;
 pub mod hash;
 pub mod init;
+pub mod page;
 pub mod parse;
 pub mod paths;
 pub mod report;
