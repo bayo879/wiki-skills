@@ -142,8 +142,16 @@ pub type Result<T> = std::result::Result<T, PageError>;
 /// missing frontmatter block is an error — a page without a date cannot be
 /// audited, so it is rejected rather than silently dated today.
 pub fn read(p: &Path) -> Result<(FrontMatter, String)> {
-    let bytes = read_bytes(p)?;
-    let block = find_block(&bytes)?;
+    parse(&read_bytes(p)?)
+}
+
+/// Parses page bytes already in memory.
+///
+/// Split out of [`read`] so a caller holding candidate content — the staging
+/// writer, which must validate before it stores anything — can use the same
+/// parser without a temporary file.
+pub fn parse(bytes: &[u8]) -> Result<(FrontMatter, String)> {
+    let block = find_block(bytes)?;
     let header = std::str::from_utf8(&bytes[block.content_start..block.content_end])
         .map_err(|_| bad(1, "frontmatter is not valid UTF-8"))?;
     let body = std::str::from_utf8(&bytes[block.body_start..])

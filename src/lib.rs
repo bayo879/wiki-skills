@@ -15,4 +15,5 @@ pub mod paths;
 pub mod render;
 pub mod report;
 pub mod scan;
+pub mod staging;
 pub mod store;
