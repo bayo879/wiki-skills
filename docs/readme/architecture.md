@@ -24,6 +24,7 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
                        │
                        ├── sync：scan → convert → 门槛 → 审计（wiki/audit/<date>-sync.md）
                        ├── query：FTS5 索引（wiki/ 与 wiki/archive/）
+                       ├── graph：链接图（只读派生，不落库）
                        └── archive seal → recall：分层记忆
 ```
 
@@ -31,7 +32,7 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
 2. **convert** 把源交给解析后端（`src/parse/`），写 `raw/<key>.md` 并登记 `raws` 表，同时记录 `source_pages` 反查。
 3. **ingest** 一轮读写：`begin` 把涉及的源与预判页面写进 `pending` 表，`commit` 把候选页与暂存清单对齐，`abort` 丢弃本轮但保留已写候选页。
 4. **staging → wiki**：候选页放在 `.wiki/staging/<type>/<id>.md`；`approve` 只在 `--confirm` 下合并进 `wiki/` 并写 `log.md`、重建 `index.md`，`reject` 记录原因后清空暂存。
-5. **lint** 跑十二条规则（`L1`–`L12`），`--fix` 只修不需要判断的机械缺陷，`--strict` 把警告也算失败。
+5. **lint** 跑十三条规则（`L1`–`L13`），`--fix` 只修不需要判断的机械缺陷，`--strict` 把警告也算失败。
 6. **checkpoint** 把 `wiki/` 拷进 `.wiki/versions/vNNN/`，只保留最近 `[versions].keep` 份。
 7. **sync** 无人值守串起 scan → convert → 稳定门槛 → lint，并把本轮写进审计文件；`--dry-run` 不写任何文件。
 8. **archive / recall** 是分层记忆：agent 先写 `wiki/archive/<YYYY-MM>.md` 摘要，`seal` 校验账本、改写引用页的 `sources`、登记 `archive` 表；`recall` 子串检索摘要，`query` 用 FTS5 检索全库。
@@ -54,13 +55,14 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
 | `src/render.rs` | `index.md`、`log.md` 与人类可读渲染 |
 | `src/ingest.rs` | 一轮 ingest 的账本操作 |
 | `src/staging.rs` | 暂存区与清单 `pending.json` |
-| `src/lint.rs` | 十二条规则与 `--fix` |
+| `src/lint.rs` | 十三条规则与 `--fix` |
 | `src/version.rs` | 版本快照与保留策略 |
 | `src/lock.rs` | 仓库锁（TTL 600s） |
 | `src/store.rs` | SQLite 账本、schema 迁移、FTS5 |
 | `src/sync.rs` | 无人值守一轮 |
 | `src/query.rs` | FTS5 索引与检索 |
 | `src/archive.rs` | 摘要封存、清理与召回 |
+| `src/graph.rs` | `[[wikilink]]` 结构：出入度、边、孤立页、断链 |
 | `src/doctor.rs` | 十一项健康检查 |
 | `src/hash.rs` | blake3 内容哈希 |
 | `src/report.rs` | JSON / 人类输出信封与退出码 |
