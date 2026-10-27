@@ -42,6 +42,10 @@ pub struct ConvertOutcome {
     pub duration_ms: u64,
     /// Non-fatal problems the backend reported.
     pub warnings: Vec<Warning>,
+    /// Whether the raw file was deliberately left untouched.
+    pub skipped: bool,
+    /// Why the conversion was skipped, when it was.
+    pub skip_reason: Option<String>,
 }
 
 /// Why a source could not be converted.
@@ -98,6 +102,10 @@ pub type Result<T> = std::result::Result<T, ConvertError>;
 /// the row and written back with a new `raw_key` and `converted_at`; a source
 /// the ledger does not know yet (a direct `convert --key`, or a conversion that
 /// runs before a scan) gets a row built from the file itself.
+///
+/// A raw file whose frontmatter says `pin: true` is hand-maintained: it is
+/// reported as skipped and both the file and the ledger are left alone. A raw
+/// file that belongs to another source is an error, not a skip.
 pub fn convert_one(
     root: &Path,
     cfg: &Config,
@@ -117,7 +125,27 @@ pub fn convert_one(
     let raw_path = paths::join_key(root, &raw_key);
     let source_ref = slash_join(&cfg.paths.source, key);
 
-    ensure_no_other_owner(&raw_path, &raw_key, &source_ref)?;
+    match inspect_raw(&raw_path, &source_ref)? {
+        RawState::Absent | RawState::Overwritable => {}
+        RawState::Pinned { parser } => {
+            return Ok(ConvertOutcome {
+                raw_path: raw_key,
+                chars: 0,
+                backend: parser.unwrap_or_default(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                warnings: Vec::new(),
+                skipped: true,
+                skip_reason: Some(String::from("pinned")),
+            });
+        }
+        RawState::Foreign { source } => {
+            return Err(ConvertError::RawCollision {
+                raw_path: raw_key,
+                existing: source,
+                key: source_ref,
+            });
+        }
+    }
 
     let (extracted, backend) = parse::parse_with(cfg, &Source::inline(key, &bytes))?;
     let converted_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -138,6 +166,8 @@ pub fn convert_one(
         backend,
         duration_ms: started.elapsed().as_millis() as u64,
         warnings: extracted.warnings,
+        skipped: false,
+        skip_reason: None,
     })
 }
 
@@ -156,30 +186,53 @@ fn slash_join(base: &str, rel: &str) -> String {
     }
 }
 
-/// Refuses to write `raw_path` when it already belongs to a different source.
+/// What already sits at the raw path, judged by its own frontmatter.
+enum RawState {
+    /// Nothing has been written there yet.
+    Absent,
+    /// Ours, and not pinned: safe to replace.
+    Overwritable,
+    /// Ours, but pinned: hand-maintained, so leave it alone.
+    Pinned { parser: Option<String> },
+    /// Another source's file, or one that cannot prove it is ours.
+    Foreign { source: String },
+}
+
+/// Reads the raw file's ownership and pin state, if it exists.
 ///
-/// The owner is whatever the existing file's `source` field says, not the
-/// ledger: a raw file is the authority on where it came from, and a file with no
-/// readable `source` cannot prove it is ours, so it is treated as a collision
-/// rather than being overwritten.
-fn ensure_no_other_owner(raw_path: &Path, raw_key: &str, source_ref: &str) -> Result<()> {
+/// The file is the authority on where it came from, not the ledger: a raw file
+/// with no readable `source` cannot prove it is ours, so it counts as foreign
+/// and is never overwritten.
+fn inspect_raw(raw_path: &Path, source_ref: &str) -> Result<RawState> {
     if !raw_path.exists() {
-        return Ok(());
+        return Ok(RawState::Absent);
     }
-    let owner = read_field(raw_path, SOURCE_FIELD)?;
-    match owner {
-        Some(ref found) if found == source_ref => Ok(()),
-        Some(found) => Err(ConvertError::RawCollision {
-            raw_path: String::from(raw_key),
-            existing: found,
-            key: String::from(source_ref),
-        }),
-        None => Err(ConvertError::RawCollision {
-            raw_path: String::from(raw_key),
-            existing: String::from("an unknown source (no `source` field)"),
-            key: String::from(source_ref),
+    let bytes = std::fs::read(raw_path).map_err(|source| ConvertError::Io {
+        path: raw_path.to_path_buf(),
+        source,
+    })?;
+    let text = String::from_utf8_lossy(&bytes);
+
+    match frontmatter_field(&text, SOURCE_FIELD) {
+        Some(found) if found == source_ref => {
+            if is_pinned(&text) {
+                Ok(RawState::Pinned {
+                    parser: frontmatter_field(&text, "parser"),
+                })
+            } else {
+                Ok(RawState::Overwritable)
+            }
+        }
+        Some(found) => Ok(RawState::Foreign { source: found }),
+        None => Ok(RawState::Foreign {
+            source: String::from("an unknown source (no `source` field)"),
         }),
     }
+}
+
+/// Whether the raw file's `pin` field is `true`.
+fn is_pinned(text: &str) -> bool {
+    frontmatter_field(text, "pin").is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 /// Frontmatter key that records the source path.
@@ -288,24 +341,11 @@ fn yaml_scalar(value: &str) -> String {
     out
 }
 
-/// Reads one leading-frontmatter field from a file, undoing [`yaml_scalar`].
-///
-/// The bytes are decoded lossily: an unreadable *encoding* must not turn into an
-/// I/O error here, because the caller's response to an unrecognised owner is the
-/// same either way — refuse to overwrite.
-fn read_field(path: &Path, name: &str) -> Result<Option<String>> {
-    let bytes = std::fs::read(path).map_err(|source| ConvertError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(frontmatter_field(&String::from_utf8_lossy(&bytes), name))
-}
-
 /// The value of `name` in the first frontmatter block of `text`.
 ///
 /// Only top-level `key: value` lines are understood, which is all this module
 /// writes; anything else (indented children, block scalars, single quotes) is
-/// reported as absent, and the caller treats that as "owner unknown".
+/// reported as absent, and [`inspect_raw`] treats that as "owner unknown".
 fn frontmatter_field(text: &str, name: &str) -> Option<String> {
     let body = text.strip_prefix("---\n")?;
     for line in body.split_inclusive('\n') {

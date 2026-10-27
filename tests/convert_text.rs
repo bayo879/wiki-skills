@@ -265,8 +265,66 @@ fn reconverting_a_changed_source_overwrites_its_own_raw() {
     let second = convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
 
     assert_eq!(first.raw_path, second.raw_path);
+    assert!(!first.skipped);
+    assert!(
+        !second.skipped,
+        "an unpinned raw of the same source is replaced"
+    );
     let raw = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
     assert_eq!(body_of(&raw), "# 第二版\n");
+    assert_eq!(frontmatter_value(&raw, "pin").as_deref(), Some("false"));
+}
+
+#[test]
+fn a_pinned_raw_file_is_left_alone() {
+    let (d, mut s, cfg) = setup();
+    fs::write(d.path().join("source/a.md"), "# 生成版\n").unwrap();
+    convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
+    let converted_at = s.get_source("a.md").unwrap().unwrap().converted_at;
+
+    // A human pins the raw file and edits its body; a later conversion must not
+    // undo that edit, because the pinned body is now the source of truth.
+    let pinned = fs::read_to_string(d.path().join("raw/a.md"))
+        .unwrap()
+        .replace("pin: false", "pin: true")
+        .replace("# 生成版", "# 手改版");
+    fs::write(d.path().join("raw/a.md"), &pinned).unwrap();
+
+    fs::write(d.path().join("source/a.md"), "# 又改版\n").unwrap();
+    let out = convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
+
+    assert!(out.skipped, "a pinned raw must not be rewritten");
+    assert_eq!(out.skip_reason.as_deref(), Some("pinned"));
+    assert_eq!(out.chars, 0);
+    assert_eq!(out.backend, "builtin-text");
+    assert_eq!(
+        fs::read_to_string(d.path().join("raw/a.md")).unwrap(),
+        pinned,
+        "the pinned file must be byte-for-byte untouched"
+    );
+    let row = s.get_source("a.md").unwrap().unwrap();
+    assert_eq!(row.converted_at, converted_at, "a skip must not re-stamp");
+    assert_eq!(row.raw_key.as_deref(), Some("raw/a.md"));
+}
+
+#[test]
+fn a_pinned_raw_of_another_source_is_still_a_collision() {
+    let (d, mut s, cfg) = setup();
+    fs::write(d.path().join("source/a.md"), "# md\n").unwrap();
+    fs::write(d.path().join("source/a.txt"), "# txt\n").unwrap();
+    convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
+    let pinned = fs::read_to_string(d.path().join("raw/a.md"))
+        .unwrap()
+        .replace("pin: false", "pin: true");
+    fs::write(d.path().join("raw/a.md"), &pinned).unwrap();
+
+    // Pin protects the body, not the owner: another source still cannot take it.
+    let err = convert::convert_one(d.path(), &cfg, &mut s, "a.txt").unwrap_err();
+    assert_eq!(err.code(), "E_RAW_COLLISION");
+    assert_eq!(
+        fs::read_to_string(d.path().join("raw/a.md")).unwrap(),
+        pinned
+    );
 }
 
 #[test]
@@ -474,13 +532,10 @@ fn cli_parse_truncates_the_head_to_200_chars() {
 
 #[test]
 fn cli_convert_emits_converted_array_and_respects_limit() {
-    let (d, mut s, _cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# A\n").unwrap();
-    fs::write(d.path().join("source/b.md"), "# B\n").unwrap();
-    s.upsert_source(&ledger_row("a.md", "blake3:aa", 4))
-        .unwrap();
-    s.upsert_source(&ledger_row("b.md", "blake3:bb", 4))
-        .unwrap();
+    let (d, _s, _cfg) = setup();
+    for key in ["a.md", "b.md", "c.md"] {
+        fs::write(d.path().join("source").join(key), format!("# {key}\n")).unwrap();
+    }
 
     let first = Command::cargo_bin("llm-wiki")
         .unwrap()
@@ -499,19 +554,77 @@ fn cli_convert_emits_converted_array_and_respects_limit() {
     assert!(converted[0]["chars"].is_number());
     assert!(converted[0]["duration_ms"].is_number());
     assert!(converted[0]["warnings"].is_array());
+    assert_eq!(converted[0]["skipped"], false);
+    assert!(converted[0]["skip_reason"].is_null());
     assert!(Path::new(&d.path().join("raw/a.md")).is_file());
     assert!(!Path::new(&d.path().join("raw/b.md")).exists());
 
+    // Each run takes the next source in key order, and a converted source stops
+    // being pending, so the limit moves the frontier forward instead of redoing
+    // the same file.
     let second = Command::cargo_bin("llm-wiki")
         .unwrap()
-        .args(["--json", "convert"])
+        .args(["--json", "convert", "--limit", "1"])
         .current_dir(d.path())
         .output()
         .unwrap();
     assert_eq!(second.status.code(), Some(0), "{second:?}");
     let value = json_of(&second);
-    assert_eq!(value["data"]["converted"].as_array().unwrap().len(), 1);
+    let converted = value["data"]["converted"].as_array().unwrap();
+    assert_eq!(converted.len(), 1);
+    assert_eq!(converted[0]["raw_path"], "raw/b.md");
+    assert!(!Path::new(&d.path().join("raw/c.md")).exists());
+
+    let third = Command::cargo_bin("llm-wiki")
+        .unwrap()
+        .args(["--json", "convert"])
+        .current_dir(d.path())
+        .output()
+        .unwrap();
+    assert_eq!(third.status.code(), Some(0), "{third:?}");
+    let value = json_of(&third);
+    let converted = value["data"]["converted"].as_array().unwrap();
+    assert_eq!(converted.len(), 1);
+    assert_eq!(converted[0]["raw_path"], "raw/c.md");
+    assert!(Path::new(&d.path().join("raw/c.md")).is_file());
+}
+
+#[test]
+fn convert_without_a_key_discovers_new_sources_by_scanning() {
+    let (d, _s, _cfg) = setup();
+    fs::write(d.path().join("source/a.md"), "# A\n").unwrap();
+    fs::write(d.path().join("source/b.md"), "# B\n").unwrap();
+
+    // No ledger rows exist: the pending set has to come from the filesystem, or
+    // the first `convert` of a repository would find nothing to do.
+    let out = Command::cargo_bin("llm-wiki")
+        .unwrap()
+        .args(["--json", "convert", "--limit", "10"])
+        .current_dir(d.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let value = json_of(&out);
+    let converted = value["data"]["converted"].as_array().unwrap();
+    assert_eq!(converted.len(), 2, "{value}");
+    assert_eq!(converted[0]["raw_path"], "raw/a.md");
+    assert_eq!(converted[1]["raw_path"], "raw/b.md");
+    assert!(Path::new(&d.path().join("raw/a.md")).is_file());
     assert!(Path::new(&d.path().join("raw/b.md")).is_file());
+
+    let scan = Command::cargo_bin("llm-wiki")
+        .unwrap()
+        .args(["--json", "scan"])
+        .current_dir(d.path())
+        .output()
+        .unwrap();
+    assert_eq!(scan.status.code(), Some(0), "{scan:?}");
+    let value = json_of(&scan);
+    assert_eq!(
+        value["data"]["changes"].as_array().unwrap().len(),
+        0,
+        "converting must leave nothing new or changed behind: {value}"
+    );
 }
 
 #[test]
@@ -557,4 +670,22 @@ fn cli_convert_reports_a_raw_collision() {
     let value = json_of(&err);
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "E_RAW_COLLISION");
+}
+
+#[test]
+fn cli_parse_of_a_missing_source_is_a_runtime_error() {
+    let (d, _s, _cfg) = setup();
+
+    let out = Command::cargo_bin("llm-wiki")
+        .unwrap()
+        .args(["--json", "parse", "--key", "nope.md"])
+        .current_dir(d.path())
+        .output()
+        .unwrap();
+    // A missing file is discovered at runtime, so it is a finding (exit 1), not
+    // a malformed invocation (exit 2).
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let value = json_of(&out);
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["error"]["code"], "E_IO");
 }

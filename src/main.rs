@@ -16,8 +16,8 @@ use llm_wiki::init;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
 use llm_wiki::report::{self, Exit};
-use llm_wiki::scan;
-use llm_wiki::store::{self, Store};
+use llm_wiki::scan::{self, ChangeKind};
+use llm_wiki::store::Store;
 
 /// Characters of parsed markdown echoed by `parse`.
 const HEAD_CHARS: usize = 200;
@@ -123,17 +123,18 @@ fn run_scan() -> ! {
 /// `convert` turns pending sources into the raw layer.
 ///
 /// With `--key` the named source is converted whether or not the ledger has seen
-/// it; without it, the first `--limit` sources lacking a `raw_key` are taken in
-/// ledger order. A failed conversion is a finding (exit 1), not an environment
-/// error, so that one bad source does not look like a broken invocation.
+/// it; without it, a scan decides what is pending — sources classified as new or
+/// changed — and the first `--limit` of them, in key order, are converted. A
+/// failed conversion is a finding (exit 1), not an environment error, so that one
+/// bad source does not look like a broken invocation.
 fn run_convert(key: Option<String>, limit: usize) -> ! {
     let root = wiki_root("convert");
     let cfg = load_config("convert", &root);
     let mut store = open_store("convert", &root, &cfg);
 
-    let keys = match conversion_targets(&store, key.as_deref(), limit) {
+    let keys = match conversion_targets(&root, &cfg, &store, key.as_deref(), limit) {
         Ok(keys) => keys,
-        Err(err) => report::fail("convert", Exit::Usage, "E_DB", &err.to_string()),
+        Err(err) => report::fail("convert", Exit::Usage, "E_IO", &err.to_string()),
     };
 
     let mut converted = Vec::with_capacity(keys.len());
@@ -147,21 +148,30 @@ fn run_convert(key: Option<String>, limit: usize) -> ! {
 }
 
 /// The source keys `convert` should hand to [`convert::convert_one`].
+///
+/// `--key` names one source directly, so it works before the first scan. Without
+/// it the pending set comes from a scan: the ledger alone cannot answer the
+/// question, because a new source only gains a row once something converts it.
 fn conversion_targets(
+    root: &Path,
+    cfg: &Config,
     store: &Store,
     key: Option<&str>,
     limit: usize,
-) -> store::Result<Vec<String>> {
+) -> std::result::Result<Vec<String>, scan::ScanError> {
     if let Some(key) = key {
         return Ok(vec![String::from(key)]);
     }
-    let pending = store
-        .all_sources()?
+    let scan_report = scan::scan_source(root, cfg, store)?;
+    let mut keys: Vec<String> = scan_report
+        .changes
         .into_iter()
-        .filter(|row| row.raw_key.is_none())
-        .map(|row| row.key)
-        .take(limit);
-    Ok(pending.collect())
+        .filter(|change| matches!(change.kind, ChangeKind::New | ChangeKind::Changed))
+        .map(|change| change.key)
+        .collect();
+    keys.sort();
+    keys.truncate(limit);
+    Ok(keys)
 }
 
 /// `parse` shows what one source parses to.
@@ -176,7 +186,7 @@ fn run_parse(key: String) -> ! {
         Ok(bytes) => bytes,
         Err(err) => report::fail(
             "parse",
-            Exit::Usage,
+            Exit::Error,
             "E_IO",
             &format!("cannot read {}: {err}", source_path.display()),
         ),
