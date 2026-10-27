@@ -48,6 +48,12 @@ pub enum Command {
         /// Source key, relative to `source/`.
         #[arg(long)]
         key: String,
+        /// Return one chunk by number (1-based); materialized on demand.
+        #[arg(long, conflicts_with = "range")]
+        chunk: Option<usize>,
+        /// Return chunks `A-B` (1-based, inclusive), joined.
+        #[arg(long, conflicts_with = "chunk")]
+        range: Option<String>,
     },
     /// Drive one ingest round: open it, close it, or drop it.
     Ingest {

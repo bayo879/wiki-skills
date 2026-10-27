@@ -162,6 +162,9 @@ pub enum ParseError {
     /// In `auto` mode both the builtin and the external backend failed.
     #[error("builtin backend failed ({builtin}); external backend failed ({external})")]
     BothFailed { builtin: String, external: String },
+    /// The source is above `parse.max_source_bytes` and is refused.
+    #[error("source is {size} bytes, above parse.max_source_bytes ({limit} bytes)")]
+    Oversize { size: u64, limit: u64 },
 }
 
 impl ParseError {
@@ -176,12 +179,45 @@ impl ParseError {
             ParseError::External { .. } => "E_EXTERNAL",
             ParseError::ExternalStatus { .. } => "E_EXTERNAL",
             ParseError::BothFailed { .. } => "E_BOTH_FAILED",
+            ParseError::Oversize { .. } => "E_OVERSIZE",
         }
     }
 }
 
 /// Result of the parsing helpers.
 pub type Result<T> = std::result::Result<T, ParseError>;
+
+/// How a source of one size is delivered by `parse`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Small enough to return in one piece.
+    Whole,
+    /// Large enough that the text must be chunked; `target` is the requested
+    /// chunk size in bytes.
+    Chunked { target: usize },
+}
+
+/// Classifies a source size against `parse.chunk_threshold` and
+/// `parse.max_source_bytes`.
+///
+/// A source at or below the chunk threshold keeps the whole-document behaviour.
+/// Above it the text is chunked, and above `max_source_bytes` the source is
+/// refused rather than silently truncated.
+pub fn delivery(cfg: &Config, size: u64) -> Result<Delivery> {
+    if size > cfg.parse.max_source_bytes {
+        return Err(ParseError::Oversize {
+            size,
+            limit: cfg.parse.max_source_bytes,
+        });
+    }
+    if size <= cfg.parse.chunk_threshold {
+        Ok(Delivery::Whole)
+    } else {
+        Ok(Delivery::Chunked {
+            target: cfg.parse.chunk_target as usize,
+        })
+    }
+}
 
 /// The builtin backends available to `cfg`, in the order they are tried.
 ///

@@ -5,6 +5,7 @@
 //! wiring and dispatch.
 
 pub mod archive;
+pub mod chunk;
 pub mod cli;
 pub mod config;
 pub mod convert;

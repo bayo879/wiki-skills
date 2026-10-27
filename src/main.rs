@@ -11,9 +11,11 @@ use serde::Serialize;
 use serde_json::json;
 
 use llm_wiki::archive;
+use llm_wiki::chunk;
 use llm_wiki::cli::{ArchiveCommand, Cli, Command, IngestCommand};
 use llm_wiki::config::Config;
 use llm_wiki::convert;
+use llm_wiki::hash;
 use llm_wiki::ingest;
 use llm_wiki::init;
 use llm_wiki::lint;
@@ -60,7 +62,7 @@ fn dispatch(cli: Cli) -> ! {
         Command::Init { force } => run_init(force),
         Command::Scan => run_scan(),
         Command::Convert { key, limit } => run_convert(key, limit),
-        Command::Parse { key } => run_parse(key),
+        Command::Parse { key, chunk, range } => run_parse(key, chunk, range),
         Command::Ingest { command } => run_ingest(command),
         Command::Lint { strict, fix } => run_lint(strict, fix),
         Command::Checkpoint { label } => run_checkpoint(label),
@@ -259,8 +261,12 @@ fn conversion_targets(
 /// `parse` shows what one source parses to.
 ///
 /// It is the safe counterpart of `convert`: the same backend and the same
-/// warnings, but nothing is written and the ledger is never opened.
-fn run_parse(key: String) -> ! {
+/// warnings, but nothing is written except the chunk cache of a large source.
+/// Sources at or below `parse.chunk_threshold` keep the whole-document shape; a
+/// larger source is materialized as chunk files under `.wiki/cache/<hash>/` and
+/// reported by `chunks_dir`, so later reads can pick one chunk (`--chunk`) or a
+/// window of chunks (`--range`) instead of loading the whole text again.
+fn run_parse(key: String, chunk_wanted: Option<usize>, range: Option<String>) -> ! {
     let root = wiki_root("parse");
     let cfg = load_config("parse", &root);
     let source_path = paths::join_key(&root.join(&cfg.paths.source), &key);
@@ -274,19 +280,110 @@ fn run_parse(key: String) -> ! {
         ),
     };
 
+    let delivery = match parse::delivery(&cfg, bytes.len() as u64) {
+        Ok(delivery) => delivery,
+        Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
+    };
+
     let (extracted, backend) = match parse::parse_with(&cfg, &parse::Source::inline(&key, &bytes)) {
         Ok(result) => result,
         Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
     };
+
+    if delivery == parse::Delivery::Whole && chunk_wanted.is_none() && range.is_none() {
+        report::emit(
+            "parse",
+            ParseData::Full {
+                backend,
+                chars: extracted.markdown.chars().count(),
+                warnings: extracted.warnings,
+                markdown_head: extracted.markdown.chars().take(HEAD_CHARS).collect(),
+            },
+        );
+    }
+
+    let target = match delivery {
+        parse::Delivery::Chunked { target } => target,
+        parse::Delivery::Whole => cfg.parse.chunk_target as usize,
+    };
+    let digest = hash::hash_bytes(extracted.markdown.as_bytes());
+    let hash = digest.strip_prefix("blake3:").unwrap_or(&digest);
+    let cache_root = root.join(&cfg.paths.engine).join("cache");
+    let chunks = match chunk::materialize(&cache_root, hash, &extracted.markdown, target) {
+        Ok(chunks) => chunks,
+        Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
+    };
+    let count = chunks.len();
+    let chunks_rel = paths::to_slash(&Path::new(&cfg.paths.engine).join("cache").join(hash));
+
+    if let Some(number) = chunk_wanted {
+        let text = match chunk::read_range(&cache_root, hash, number, number) {
+            Ok(text) => text,
+            Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
+        };
+        report::emit(
+            "parse",
+            ParseData::Chunk {
+                backend,
+                chars: text.chars().count(),
+                warnings: extracted.warnings,
+                chunks: count,
+                chunk: number,
+                markdown: text,
+            },
+        );
+    }
+
+    if let Some(spec) = range {
+        let (from, to) = match parse_chunk_range(&spec) {
+            Ok(range) => range,
+            Err(message) => report::fail("parse", Exit::Usage, "E_BAD_ARGS", &message),
+        };
+        let text = match chunk::read_range(&cache_root, hash, from, to) {
+            Ok(text) => text,
+            Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
+        };
+        report::emit(
+            "parse",
+            ParseData::Range {
+                backend,
+                chars: text.chars().count(),
+                warnings: extracted.warnings,
+                chunks: count,
+                from,
+                to,
+                markdown: text,
+            },
+        );
+    }
+
     report::emit(
         "parse",
-        ParseData {
-            markdown_head: extracted.markdown.chars().take(HEAD_CHARS).collect(),
+        ParseData::Chunked {
+            backend,
             chars: extracted.markdown.chars().count(),
             warnings: extracted.warnings,
-            backend,
+            chunks: count,
+            chunks_dir: chunks_rel,
         },
     );
+}
+
+/// Parses a `A-B` chunk range into 1-based inclusive bounds.
+fn parse_chunk_range(spec: &str) -> std::result::Result<(usize, usize), String> {
+    let (from, to) = spec
+        .split_once('-')
+        .ok_or_else(|| format!("chunk range {spec:?} must be written as A-B"))?;
+    let from: usize = from
+        .parse()
+        .map_err(|_| format!("chunk range {spec:?} must start with a number"))?;
+    let to: usize = to
+        .parse()
+        .map_err(|_| format!("chunk range {spec:?} must end with a number"))?;
+    if from == 0 || to < from {
+        return Err(format!("chunk range {spec:?} must be 1-based with A <= B"));
+    }
+    Ok((from, to))
 }
 
 /// `ingest` drives one round: `begin` opens it, `commit`/`abort` close it.
@@ -698,13 +795,44 @@ struct ConvertData {
     converted: Vec<convert::ConvertOutcome>,
 }
 
-/// Payload of the `parse` success envelope.
+/// Payload of the `parse` success envelope, tagged by delivery mode.
 #[derive(Serialize)]
-struct ParseData {
-    backend: String,
-    chars: usize,
-    warnings: Vec<Warning>,
-    markdown_head: String,
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum ParseData {
+    /// A source small enough to return whole.
+    Full {
+        backend: String,
+        chars: usize,
+        warnings: Vec<Warning>,
+        markdown_head: String,
+    },
+    /// A chunked source: where the chunks live, one file per range.
+    Chunked {
+        backend: String,
+        chars: usize,
+        warnings: Vec<Warning>,
+        chunks: usize,
+        chunks_dir: String,
+    },
+    /// One chunk requested with `--chunk`.
+    Chunk {
+        backend: String,
+        chars: usize,
+        warnings: Vec<Warning>,
+        chunks: usize,
+        chunk: usize,
+        markdown: String,
+    },
+    /// A window of chunks requested with `--range`.
+    Range {
+        backend: String,
+        chars: usize,
+        warnings: Vec<Warning>,
+        chunks: usize,
+        from: usize,
+        to: usize,
+        markdown: String,
+    },
 }
 
 /// Payload of the `archive status` success envelope.
