@@ -951,3 +951,9 @@ query skill（CLI 的 `query` 已在 v1 实现，v2 只加 skill 包装）；向
 48. **`--force-large` 只是 `parse` 的诊断口**：超过 `max_source_bytes` 的源永不进账本（`scan` 报 `oversize`、
     `convert` 跳过），但完全没法看它抽出来什么就没法判断「该拆分还是该调大上限」。所以只给 `parse` 一个
     强行出口，`convert`/`sync` 恒为 false，不提供任何「悄悄塞进 wiki」的路径。
+49. **未初始化直接拒绝，不猜不补**：`wiki.toml` 或 `wiki/` 缺失时，所有仓库命令在入口处
+    以 `E_NOT_INITIALISED`（exit 2）拒绝，`detail` 带 `missing`/`kind`/`hint`；只有 `init`、
+    `doctor`、`version` 例外。`SCHEMA.md` 只由 `doctor` 报，因为没有任何代码路径读它。
+    反过来，`source/`、`raw/`、`wiki/audit/`、`wiki/archive/` 与整个引擎目录属于**派生态**：
+    每次命令入口按需创建，否则「克隆下来直接跑」就不可能（引擎目录被 gitignore）。
+    判据是「工具不创建就没法继续 vs. 用户没做过的决定」，不是「init 建了哪些目录」。

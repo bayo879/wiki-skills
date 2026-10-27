@@ -20,6 +20,7 @@ pub mod moves;
 pub mod page;
 pub mod parse;
 pub mod paths;
+pub mod precondition;
 pub mod query;
 pub mod render;
 pub mod report;

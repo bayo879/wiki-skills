@@ -220,6 +220,7 @@ fn read_range_reads_only_the_requested_chunks() {
 /// A repo whose parse budget is small enough that a few kilobytes are "large".
 fn tiny_repo() -> tempfile::TempDir {
     let d = tempdir().unwrap();
+    fs::create_dir_all(d.path().join("wiki")).unwrap();
     fs::create_dir(d.path().join("source")).unwrap();
     fs::write(
         d.path().join("wiki.toml"),
@@ -272,8 +273,11 @@ fn cli_small_source_stays_whole() {
     assert_eq!(value["data"]["chars"], 5);
     assert_eq!(value["data"]["markdown_head"], "hello");
     assert!(value["data"]["warnings"].is_array());
+    // The engine directory itself is provisioned by every command, so the
+    // assertion is about chunk files, not about `.wiki` being absent.
+    let cache = d.path().join(".wiki/cache");
     assert!(
-        !d.path().join(".wiki").exists(),
+        !cache.exists() || fs::read_dir(&cache).unwrap().next().is_none(),
         "a whole-source parse must not materialize chunks"
     );
 }

@@ -82,6 +82,14 @@ llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"c
 
 ## 服务操作说明
 
+第一次使用先初始化；其余命令在未初始化的仓库里会直接以 `E_NOT_INITIALISED`
+（exit 2）拒绝，并告诉你缺的是 `wiki.toml` 还是 `wiki/`：
+
+```bash
+llm-wiki init          # 写 wiki.toml / SCHEMA.md，建目录；可重复跑，已有文件不覆盖
+llm-wiki doctor        # 在 init 前后都能跑，用来诊断
+```
+
 日常一轮，按顺序：
 
 ```bash

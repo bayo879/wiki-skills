@@ -24,6 +24,7 @@ use llm_wiki::lint;
 use llm_wiki::moves;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
+use llm_wiki::precondition;
 use llm_wiki::query::{self, Scope as QueryScope};
 use llm_wiki::report::{self, Exit};
 use llm_wiki::scan::{self, ChangeKind};
@@ -113,9 +114,42 @@ fn wiki_root(cmd: &str) -> PathBuf {
     }
 }
 
-/// Reads `wiki.toml` under `root`; a missing or invalid contract is a usage
-/// error carrying the configuration's own code.
-fn load_config(cmd: &str, root: &Path) -> Config {
+/// Opens the repository for a command: proves it was initialised, provisions
+/// the derived directories, then loads the contract.
+///
+/// The order matters. `init` is the only way to create `wiki.toml`, `SCHEMA.md`
+/// and `wiki/`, so a command that finds one of them missing refuses with
+/// `E_NOT_INITIALISED` and a hint instead of failing later on a symptom (a
+/// missing database, an empty scan, a staging area with nothing to compare).
+/// Everything else in the layout is derived, so it is created here rather than
+/// demanded from the caller.
+fn open_repo(cmd: &str, root: &Path) -> Config {
+    if let Err(missing) = precondition::check(root) {
+        report::fail_detail(
+            cmd,
+            Exit::Usage,
+            precondition::CODE,
+            &format!(
+                "the repository at {} is not initialised: {} `{}` is missing",
+                root.display(),
+                missing.kind(),
+                missing.path()
+            ),
+            Some(serde_json::json!({
+                "missing": missing.path(),
+                "kind": missing.kind(),
+                "hint": precondition::HINT,
+            })),
+        );
+    }
+    if let Err(err) = precondition::provision(root) {
+        report::fail(
+            cmd,
+            Exit::Usage,
+            "E_IO",
+            &format!("cannot create the engine directories: {err}"),
+        );
+    }
     match Config::load(root) {
         Ok(cfg) => cfg,
         Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
@@ -189,7 +223,7 @@ fn human_doctor(data: &DoctorData) -> String {
 /// "this round found problems". Anything else is an environment error (exit 2).
 fn run_sync(limit: Option<usize>, dry_run: bool, force: bool) -> ! {
     let root = wiki_root("sync");
-    let cfg = load_config("sync", &root);
+    let cfg = open_repo("sync", &root);
     let mut store = open_store("sync", &root, &cfg);
     let args = sync::SyncArgs {
         limit: limit.unwrap_or(cfg.sync.max_per_run),
@@ -252,7 +286,7 @@ fn human_sync(report: &sync::SyncReport) -> String {
 /// is clean.
 fn run_scan(apply_moves: bool) -> ! {
     let root = wiki_root("scan");
-    let cfg = load_config("scan", &root);
+    let cfg = open_repo("scan", &root);
     let mut store = open_store("scan", &root, &cfg);
     let outcome = match scan::scan_all(&root, &cfg, &store) {
         Ok(outcome) => outcome,
@@ -345,7 +379,7 @@ struct ScanData {
 /// immediate failure path (`ok: false`, exit 1).
 fn run_convert(key: Option<String>, limit: usize) -> ! {
     let root = wiki_root("convert");
-    let cfg = load_config("convert", &root);
+    let cfg = open_repo("convert", &root);
     let mut store = open_store("convert", &root, &cfg);
     let named = key.is_some();
 
@@ -441,7 +475,7 @@ fn run_parse(
     force_large: bool,
 ) -> ! {
     let root = wiki_root("parse");
-    let cfg = load_config("parse", &root);
+    let cfg = open_repo("parse", &root);
     let source_path = paths::join_key(&root.join(&cfg.paths.source), &key);
     let bytes = match std::fs::read(&source_path) {
         Ok(bytes) => bytes,
@@ -570,7 +604,7 @@ fn run_ingest(command: IngestCommand) -> ! {
         IngestCommand::Abort => "ingest.abort",
     };
     let root = wiki_root(cmd);
-    let cfg = load_config(cmd, &root);
+    let cfg = open_repo(cmd, &root);
     let mut store = open_store(cmd, &root, &cfg);
 
     match command {
@@ -614,7 +648,7 @@ fn fail_ingest(cmd: &str, err: &ingest::IngestError) -> ! {
 /// `checkpoint` snapshots the approved wiki as a new version.
 fn run_checkpoint(label: String) -> ! {
     let root = wiki_root("checkpoint");
-    let cfg = load_config("checkpoint", &root);
+    let cfg = open_repo("checkpoint", &root);
     let mut store = open_store("checkpoint", &root, &cfg);
     match version::checkpoint(&root, &cfg, &mut store, &label) {
         Ok(version) => report::emit("checkpoint", CheckpointData { version }),
@@ -629,7 +663,7 @@ fn run_checkpoint(label: String) -> ! {
 /// the human decision is a third outcome with its own code.
 fn run_approve(confirm: bool) -> ! {
     let root = wiki_root("approve");
-    let cfg = load_config("approve", &root);
+    let cfg = open_repo("approve", &root);
     let mut store = open_store("approve", &root, &cfg);
     match version::approve(&root, &cfg, &mut store, confirm) {
         Ok(ApproveOutcome::Applied { version }) => report::emit("approve", ApproveData { version }),
@@ -647,7 +681,7 @@ fn run_approve(confirm: bool) -> ! {
 /// `reject` discards the candidates and keeps the reason in the log.
 fn run_reject(reason: String) -> ! {
     let root = wiki_root("reject");
-    let cfg = load_config("reject", &root);
+    let cfg = open_repo("reject", &root);
     let mut store = open_store("reject", &root, &cfg);
     match version::reject(&root, &cfg, &mut store, &reason) {
         Ok(()) => report::emit("reject", RejectData { reason }),
@@ -658,7 +692,7 @@ fn run_reject(reason: String) -> ! {
 /// `instruct` writes guidance for the next agent session.
 fn run_instruct(text: String) -> ! {
     let root = wiki_root("instruct");
-    let cfg = load_config("instruct", &root);
+    let cfg = open_repo("instruct", &root);
     let mut store = open_store("instruct", &root, &cfg);
     match version::instruct(&root, &cfg, &mut store, &text) {
         Ok(()) => report::emit("instruct", InstructData { text }),
@@ -669,7 +703,7 @@ fn run_instruct(text: String) -> ! {
 /// `defer` keeps the queue for later and changes nothing else.
 fn run_defer() -> ! {
     let root = wiki_root("defer");
-    let cfg = load_config("defer", &root);
+    let cfg = open_repo("defer", &root);
     let mut store = open_store("defer", &root, &cfg);
     match version::defer(&root, &cfg, &mut store) {
         Ok(()) => report::emit("defer", json!({})),
@@ -696,7 +730,7 @@ fn fail_version(cmd: &str, err: &version::VersionError) -> ! {
 fn run_archive(command: ArchiveCommand) -> ! {
     let cmd = "archive";
     let root = wiki_root(cmd);
-    let cfg = load_config(cmd, &root);
+    let cfg = open_repo(cmd, &root);
     let mut store = open_store(cmd, &root, &cfg);
 
     match command {
@@ -786,7 +820,7 @@ fn run_archive(command: ArchiveCommand) -> ! {
 fn run_recall(query: String, full: bool) -> ! {
     let cmd = "recall";
     let root = wiki_root(cmd);
-    let cfg = load_config(cmd, &root);
+    let cfg = open_repo(cmd, &root);
     let mut store = open_store(cmd, &root, &cfg);
     let req = archive::RecallRequest { query, full };
     match archive::recall(&root, &mut store, &req) {
@@ -815,7 +849,7 @@ fn run_query(
 ) -> ! {
     let cmd = "query";
     let root = wiki_root(cmd);
-    let cfg = load_config(cmd, &root);
+    let cfg = open_repo(cmd, &root);
     let mut store = open_store(cmd, &root, &cfg);
     let text = text.unwrap_or_default();
     let empty = text.trim().is_empty();
@@ -1013,7 +1047,7 @@ fn human_recall(data: &RecallData) -> String {
 /// any finding under `--strict`) is exit 1 even though the command succeeded.
 fn run_graph() -> ! {
     let root = wiki_root("graph");
-    let cfg = load_config("graph", &root);
+    let cfg = open_repo("graph", &root);
     match graph::build(&root, &cfg) {
         Ok(report_data) => report::emit_with("graph", report_data, Exit::Ok, human_graph),
         Err(err) => report::fail("graph", Exit::Usage, err.code(), &err.to_string()),
@@ -1046,7 +1080,7 @@ fn human_graph(data: &graph::Graph) -> String {
 
 fn run_lint(strict: bool, fix: bool) -> ! {
     let root = wiki_root("lint");
-    let cfg = load_config("lint", &root);
+    let cfg = open_repo("lint", &root);
     let mut store = open_store("lint", &root, &cfg);
 
     if fix {

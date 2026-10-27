@@ -72,6 +72,6 @@ timeout_s = 120
 
 | 码 | 触发 |
 |---|---|
-| `E_NO_CONFIG` | 仓库根目录没有 `wiki.toml` |
+| `E_NO_CONFIG` | `wiki.toml` 读不出来（缺失会在更早的入口检查里变成 `E_NOT_INITIALISED`） |
 | `E_BAD_CONFIG` | 非法 TOML、类型/单位错误、数值不变量不满足 |
 | `E_TOKEN_IN_CONFIG` | `auth_env` 里写的是 token 字面量 |
