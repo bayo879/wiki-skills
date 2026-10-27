@@ -458,8 +458,10 @@ Expected: FAIL，`unresolved import llm_wiki::scan`。
 3. 文件 size > `cfg.parse.max_source_bytes` → `Oversize`，不读内容。
 4. 算哈希（≤ `chunk_threshold` 全量，否则 `Fingerprint`）。
 5. 用 key 查账本：无记录 → `New`；有且哈希相同 → 无变更（不产生 Change）；有且不同 → `Changed`。
-6. 第 5 步判成 `New` 的，再在账本里找同哈希的其它 key → 命中则改判 `Moved`，填 `moved_from`。
-7. 同一哈希在本轮出现多次 → 第一份算正常，其余 `Duplicate`（按 key 字典序取第一）。
+6. 本轮所有 `New` 候选按哈希分组：同一哈希按 key 字典序保留第一份，其余改判 `Duplicate`
+   （必须先做这一步，否则同哈希的第二个副本会被误判成 `Moved`）。
+7. 剩下的 `New` 候选，若账本里存在同哈希、且本轮磁盘上已消失的 key（即别的记录会判成 `Missing`），
+   改判 `Moved`，`moved_from` 填那个 key。**一个账本 key 只能被认领一次**，被认领后不再参与匹配。
 8. 账本里有、磁盘上没有 → `Missing`。
 
 `scan` 只读 state（streak 计数在 Task 19 的 sync 里做），测试里连续调用两次必须得到相同结果。
