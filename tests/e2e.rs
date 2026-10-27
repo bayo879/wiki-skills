@@ -254,8 +254,10 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
     );
     let index = read(root, "wiki/index.md");
     assert!(
-        index.contains("wiki/concept/alpha.md") && index.contains("重试与熔断"),
-        "the index lists the page: {index}"
+        index.contains("concept/alpha.md")
+            && index.contains("重试与熔断")
+            && !index.contains("](wiki/"),
+        "the index lists the page with a wiki-relative link: {index}"
     );
     let log = read(root, "wiki/log.md");
     assert!(
