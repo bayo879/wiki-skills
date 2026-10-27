@@ -158,7 +158,7 @@ purge_days       = 180        # 且距最后触达超过此天数；两个条件
 | `doctor` | 自检：版本、外部后端、权限、大小写敏感性、裸 token |
 | `scan` | 差分：`new / changed / moved / missing / duplicate / ignored`，每条带 `layer`；`--apply-moves` 迁移改名账本（见 §5.1 两段） |
 | `convert` | 原始层 → 规范化层：把 `source/` 转成 `raw/*.md`；`--limit` 分段；单个失败不中断，收在 `data.failures` |
-| `parse` | 单文件调试入口：跑指定后端看 markdown 产出，不落 `raw/` |
+| `parse` | 单文件调试入口：跑指定后端看 markdown 产出，不落 `raw/`；`--force-large` 越过 `max_source_bytes` 只为看一眼，同样不落盘、不进账本 |
 | `sync` | 无人值守入口：差分 → 写 staging → 变更报告（见 §5.5） |
 | `ingest begin` | 开事务，返回候选页 |
 | `ingest commit` | 校验 + 落账：给候选页刷 `updated`、补 `sources`、写进 `.wiki/staging/`；**发布由 `approve` 统一做** |
@@ -798,7 +798,7 @@ Claude Code 硬约束：frontmatter 只有 `name`(≤64) 与 `description`(≤10
 | index 被手改 | commit 比对哈希报 `E_MANUAL_EDIT`；L4 兜底 |
 | agent 绕过 CLI 写 log | 总纲明文禁止 + L5 抓格式 |
 | 源更新、旧结论过期 | L6/L11 标 `stale`，agent 决定改页还是改 status |
-| 页面爆炸 | `max_pages_per_source`，超限 exit 3 要人确认 |
+| 页面爆炸 | `max_pages_per_source`：一轮 commit 写的页面数超限时**不拦**，在报告 `warnings` 里点名（CLI 拿不到「这页由哪个源生出」的可靠归属，硬拦会误伤多源批量；点名的用途是被 sync 的 audit 收走，让漂移可见） |
 | 扫描件 PDF | 探针（头中尾六页）判无文本层 → 产出 asset 型 raw 并标 `no_text_layer`，不建知识页，**不 OCR** |
 | 图片 | 产出 asset 型 raw（只有链接），不识别、不复制、不建独立页 |
 | 外部解析服务不可用 | 回退内置并留 warning；两者都失败则同时报出两因 |

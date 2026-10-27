@@ -526,3 +526,51 @@ fn begin_reports_orphan_pages() {
 
     assert_eq!(report.orphan_pages, args(&["stale"]));
 }
+
+#[test]
+fn commit_warns_when_a_round_writes_more_pages_than_the_cap() {
+    let (d, cfg) = setup();
+    let root = d.path();
+    let mut store = open(root);
+    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+
+    staging::write_page(root, &cfg, "concept/one", &page_bare("one", "一")).unwrap();
+    staging::write_page(root, &cfg, "concept/two", &page_bare("two", "二")).unwrap();
+
+    let mut capped = cfg.clone();
+    capped.ingest.max_pages_per_source = 1;
+    let report = ingest::commit(
+        root,
+        &capped,
+        &mut store,
+        &args(&["concept/one", "concept/two"]),
+    )
+    .unwrap();
+
+    assert_eq!(report.pages_written.len(), 2, "the round still commits");
+    assert_eq!(
+        report.warnings.len(),
+        1,
+        "but it says so: {:?}",
+        report.warnings
+    );
+    assert!(
+        report.warnings[0].contains("max_pages_per_source"),
+        "the warning names the knob: {}",
+        report.warnings[0]
+    );
+}
+
+#[test]
+fn a_round_within_the_cap_has_no_warning() {
+    let (d, cfg) = setup();
+    let root = d.path();
+    let mut store = open(root);
+    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    staging::write_page(root, &cfg, "concept/one", &page_bare("one", "一")).unwrap();
+
+    let mut capped = cfg.clone();
+    capped.ingest.max_pages_per_source = 12;
+    let report = ingest::commit(root, &capped, &mut store, &args(&["concept/one"])).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+}

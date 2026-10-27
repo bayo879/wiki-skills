@@ -16,6 +16,7 @@ use llm_wiki::cli::{ArchiveCommand, Cli, Command, IngestCommand, ScopeArg};
 use llm_wiki::config::Config;
 use llm_wiki::convert;
 use llm_wiki::doctor::{self, Check, Level};
+use llm_wiki::graph;
 use llm_wiki::hash;
 use llm_wiki::ingest;
 use llm_wiki::init;
@@ -66,7 +67,12 @@ fn dispatch(cli: Cli) -> ! {
         Command::Doctor => run_doctor(),
         Command::Scan { apply_moves } => run_scan(apply_moves),
         Command::Convert { key, limit } => run_convert(key, limit),
-        Command::Parse { key, chunk, range } => run_parse(key, chunk, range),
+        Command::Parse {
+            key,
+            chunk,
+            range,
+            force_large,
+        } => run_parse(key, chunk, range, force_large),
         Command::Ingest { command } => run_ingest(command),
         Command::Lint { strict, fix } => run_lint(strict, fix),
         Command::Checkpoint { label } => run_checkpoint(label),
@@ -83,6 +89,7 @@ fn dispatch(cli: Cli) -> ! {
             scope,
             reindex,
         } => run_query(text, limit, expand, scope, reindex),
+        Command::Graph => run_graph(),
         Command::Sync {
             limit,
             dry_run,
@@ -427,7 +434,12 @@ fn conversion_targets(
 /// larger source is materialized as chunk files under `.wiki/cache/<hash>/` and
 /// reported by `chunks_dir`, so later reads can pick one chunk (`--chunk`) or a
 /// window of chunks (`--range`) instead of loading the whole text again.
-fn run_parse(key: String, chunk_wanted: Option<usize>, range: Option<String>) -> ! {
+fn run_parse(
+    key: String,
+    chunk_wanted: Option<usize>,
+    range: Option<String>,
+    force_large: bool,
+) -> ! {
     let root = wiki_root("parse");
     let cfg = load_config("parse", &root);
     let source_path = paths::join_key(&root.join(&cfg.paths.source), &key);
@@ -441,7 +453,7 @@ fn run_parse(key: String, chunk_wanted: Option<usize>, range: Option<String>) ->
         ),
     };
 
-    let delivery = match parse::delivery(&cfg, bytes.len() as u64) {
+    let delivery = match parse::delivery_with(&cfg, bytes.len() as u64, force_large) {
         Ok(delivery) => delivery,
         Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
     };
@@ -999,6 +1011,39 @@ fn human_recall(data: &RecallData) -> String {
 ///
 /// The exit code is decided by the findings, not by the command: an error (or
 /// any finding under `--strict`) is exit 1 even though the command succeeded.
+fn run_graph() -> ! {
+    let root = wiki_root("graph");
+    let cfg = load_config("graph", &root);
+    match graph::build(&root, &cfg) {
+        Ok(report_data) => report::emit_with("graph", report_data, Exit::Ok, human_graph),
+        Err(err) => report::fail("graph", Exit::Usage, err.code(), &err.to_string()),
+    }
+}
+
+/// One line per page with its degrees, then the orphans and the broken links.
+fn human_graph(data: &graph::Graph) -> String {
+    let mut out = String::new();
+    for node in &data.nodes {
+        out.push_str(&format!(
+            "{:>3} {:>3}  {}\n",
+            node.in_degree, node.out_degree, node.page
+        ));
+    }
+    if !data.orphans.is_empty() {
+        out.push_str(&format!("\n孤立页 ({})\n", data.orphans.len()));
+        for page in &data.orphans {
+            out.push_str(&format!("  {page}\n"));
+        }
+    }
+    if !data.broken.is_empty() {
+        out.push_str(&format!("\n断链 ({})\n", data.broken.len()));
+        for target in &data.broken {
+            out.push_str(&format!("  [[{target}]]\n"));
+        }
+    }
+    out
+}
+
 fn run_lint(strict: bool, fix: bool) -> ! {
     let root = wiki_root("lint");
     let cfg = load_config("lint", &root);

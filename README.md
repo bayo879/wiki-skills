@@ -118,7 +118,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `init [--force]` | 写契约文件、建引擎目录 |
 | `scan [--apply-moves]` | 报告 `source/`、`raw/` 与账本的差异；`--apply-moves` 一并迁移改名 |
 | `convert [--key <KEY>] [--limit <N>]` | 转换待处理源（默认 10）；单个失败不中断 |
-| `parse --key <KEY> [--chunk <N>] [--range <A-B>]` | 只显示解析结果，不写文件；大文件按需分块 |
+| `parse --key <KEY> [--chunk <N>] [--range <A-B>] [--force-large]` | 只显示解析结果，不写文件；大文件按需分块；`--force-large` 越过尺寸上限只为看一眼 |
 | `ingest begin [--sources <K>]... [--pages <P>]... [--dry-run]` | 开一轮，报告受影响的页面 |
 | `ingest commit [--pages <P>]...` | 关闭本轮，刷新候选页与暂存清单 |
 | `ingest abort` | 丢弃本轮，保留已写候选页 |

@@ -67,6 +67,10 @@ pub enum Command {
         /// Return chunks `A-B` (1-based, inclusive), joined.
         #[arg(long, conflicts_with = "chunk")]
         range: Option<String>,
+        /// Extract a source above `parse.max_source_bytes` anyway, for diagnosis.
+        /// Nothing is written: an oversize source never enters the ledger.
+        #[arg(long)]
+        force_large: bool,
     },
     /// Drive one ingest round: open it, close it, or drop it.
     Ingest {
@@ -138,6 +142,8 @@ pub enum Command {
         #[arg(long)]
         reindex: bool,
     },
+    /// Print the `[[wikilink]]` structure of `wiki/`: degrees, edges, orphans, broken links.
+    Graph,
     /// Run one unattended round: scan, convert, gate and audit.
     Sync {
         /// Convert at most this many sources; defaults to `sync.max_per_run`.
