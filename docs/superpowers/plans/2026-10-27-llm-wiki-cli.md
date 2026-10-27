@@ -1818,6 +1818,25 @@ git commit -m "feat: doctor checks, e2e fixtures and cross-platform ci"
 
 ---
 
+## 计划外补充（执行中发现的缺口）
+
+原计划 21 个 Task 完成后，实现与计划/spec 的对照又暴露了四个缺口，已作为 T22–T25 追加执行，不另开计划：
+
+- **T22 归档接线**（`1ec8de8`）：`archive` / `recall` 接进 CLI，`index` 跳过归档页，lint 加 L13 与归档豁免。
+  原因：spec v10 §5.11 是一个并行会话先落地了一半，接管后必须接线才算可用。
+- **T23 契约对齐**（进行中）：`scan` 接线 `scan_raw` 并给每条变更加 `layer`；`convert` 单源失败不中断
+  （`data.failures`）；`moved` 在 `sync` / `scan --apply-moves` 里迁移账本与页面 `sources`；
+  `on_missing="mark_stale"` 落地。原因：这三项 spec 写了、代码没接线。
+- **T24 三个真实缺陷**（`15bbc76`）：`index.md` 链接写成 `](wiki/concept/x.md)` 在 `wiki/` 内解析成死链；
+  `below_min_chars` 从未发出（技能文档却写了）；`lint --help` 写死「twelve」。由控制器亲手做。
+- **T25 收口**（未开始）：`graph` 接进 CLI（`src/graph.rs` 已就位）、`parse --force-large`、
+  `ingest commit` 的 `max_pages_per_source` 超限 exit 3 要 `--confirm`。
+
+教训（已写进后续 brief）：spec 与代码的缺口不是「实现偷懒」，是**计划把接口写得太细却漏了接线点**；
+每完成一个 Task 后应立刻跑一次「spec 声称的子命令/字段 → grep 代码」的对照，而不是等到最后。
+
+---
+
 ## Execution Handoff
 
 计划到此完成，共 21 个 Task。执行时有两条路：
