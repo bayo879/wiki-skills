@@ -3,16 +3,13 @@
 //! No business logic lives here; each command handler ends in
 //! `report::emit` or `report::fail`.
 
-mod cli;
-mod report;
-
 use std::ffi::OsStr;
 
 use clap::Parser;
 use serde::Serialize;
 
-use crate::cli::{Cli, Command};
-use crate::report::Exit;
+use llm_wiki::cli::{Cli, Command};
+use llm_wiki::report::{self, Exit};
 
 fn main() {
     // Tell the reporter the format before parsing, so that usage errors are
