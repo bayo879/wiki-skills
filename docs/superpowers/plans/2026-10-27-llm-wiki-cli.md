@@ -1829,8 +1829,17 @@ git commit -m "feat: doctor checks, e2e fixtures and cross-platform ci"
   `on_missing="mark_stale"` 落地。原因：这三项 spec 写了、代码没接线。
 - **T24 三个真实缺陷**（`15bbc76`）：`index.md` 链接写成 `](wiki/concept/x.md)` 在 `wiki/` 内解析成死链；
   `below_min_chars` 从未发出（技能文档却写了）；`lint --help` 写死「twelve」。由控制器亲手做。
-- **T25 收口**（未开始）：`graph` 接进 CLI（`src/graph.rs` 已就位）、`parse --force-large`、
-  `ingest commit` 的 `max_pages_per_source` 超限 exit 3 要 `--confirm`。
+- **T25 收口**（`2388555`）：`graph` 接进 CLI（`src/graph.rs` 已就位）；`parse --force-large` 接线
+  （`parse::delivery_with` 跳过 `max_source_bytes` 门，仍不落盘、不进账本）；`ingest commit` 的
+  `max_pages_per_source` **改成警告而非 exit 3**——CLI 拿不到「这页由哪个源生出」的可靠归属，硬拦会误伤
+  多源批量；超限时在报告 `warnings` 里点名，由 `sync` 的 audit 收走。spec §9 同步改口径，并删掉
+  「`ingest commit --confirm` 缺失」这条伪缺口。
+- **执行中撞到的两个真坑**（都已修）：
+  1. `tests/parse_external.rs` 的 500 状态测试**不设 token 环境变量**，靠同进程别的测试 `set_var` 泄漏
+     才通过——单跑必红（报 `NoAuthEnv` 而非含 500），是顺序依赖 flake，已给该测试独立的 `WIKI_PARSE_TOKEN_T11_500`（`edf58b5`）。
+  2. `ingest` 的正确顺序是 **begin → 写候选页 → commit**。先写页后 begin 会命中
+     `E_STAGING_CORRUPT`（manifest 缺失但已有候选页）且没有出口。守门逻辑保留（不静默重建，避免丢
+     baseline 哈希），但错误文案补了恢复指引：先 `ingest begin`，或用后删 `.wiki/staging` 重开。
 
 教训（已写进后续 brief）：spec 与代码的缺口不是「实现偷懒」，是**计划把接口写得太细却漏了接线点**；
 每完成一个 Task 后应立刻跑一次「spec 声称的子命令/字段 → grep 代码」的对照，而不是等到最后。

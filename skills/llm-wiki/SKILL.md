@@ -45,6 +45,7 @@ description: 当用户提到知识库、wiki、摄取材料、解析文件、体
 | 「这份 PDF 解析得不对」 | `wiki-parse` | 解析失败、抽不出文本、要换后端 |
 | 「把这份材料写进 wiki」 | `wiki-ingest` | 读源、议要点、建页、收尾 `checkpoint` |
 | 「查一下有没有矛盾」「体检」 | `wiki-audit` | 跑 `lint`、读报告、做判断层分析 |
+| 「哪些页是孤岛」「知识结构长什么样」 | `wiki-audit` | 先 `graph --json` 看入度、孤立页与断链，再决定要不要建页 |
 | 「搜一下」「上次那个结论在哪」 | 直接 `llm-wiki query` | 检索不需要下级 skill |
 | 「上次那批怎么样了」 | 停在这里，走决策门 | 不转；等人在四个选项里选 |
 | 「源文件删了 / 改名了」 | `wiki-sync` | 走 `scan` 的 `missing` / `moved`，别手工删页 |

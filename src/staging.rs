@@ -244,7 +244,9 @@ impl Manifest {
                     return Err(StagingError::Corrupt {
                         path,
                         message: String::from(
-                            "manifest is missing but staging holds candidates; refusing to rebuild it",
+                            "manifest is missing but staging holds candidates; refusing to rebuild it. \
+                             A round must be opened before its pages are written: run `ingest begin` first. \
+                             If the candidates are leftovers, delete `.wiki/staging` and start the round again.",
                         ),
                     });
                 }
