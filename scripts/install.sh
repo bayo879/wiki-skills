@@ -79,6 +79,13 @@ echo "==> 安装 $BIN_NAME 到 $BIN_DST"
 run mkdir -p "$BIN_DST"
 run install -m 0755 "$BIN_SRC" "$BIN_DST/$BIN_NAME"
 
+# 3.5 把二进制塞进 skill 包：skill 目录要能整包同步给别人，对方没有 target/ 也不装 Rust
+if [ "$DRY_RUN" = "1" ]; then
+  echo "  [dry-run] 将执行 scripts/vendor.sh 打包 $BIN_NAME"
+elif ! bash "$REPO_DIR/scripts/vendor.sh" >/dev/null; then
+  echo "警告：打包二进制失败，同步出去的 skill 目录会缺少 CLI" >&2
+fi
+
 # 4. 安装 skill（先删旧目录，避免残留已删除的子文件）
 echo "==> 安装 ${#names[@]} 个 skill 到 $SKILLS_DST"
 run mkdir -p "$SKILLS_DST"

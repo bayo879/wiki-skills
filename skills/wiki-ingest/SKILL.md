@@ -5,6 +5,8 @@ description: 当需要把已转换的 raw 源并进 wiki 时使用。它驱动 i
 
 # wiki-ingest
 
+命令 `llm-wiki` 由 llm-wiki 技能包提供；报 command not found 时先跑该包的 `bin/bootstrap.sh`。
+
 把**已经转成 `raw/*.md` 的源**写成 wiki 页。本 skill 只做两件别人不做的事：驱动 `ingest begin/commit/abort`，以及**亲手写页面正文**。
 
 边界：源没进来回 `wiki-scan`，页读不对回 `wiki-parse`，发布前的审计回 `wiki-audit`。

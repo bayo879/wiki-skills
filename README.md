@@ -67,7 +67,22 @@ llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"c
 .\scripts\install.ps1           # windows
 ```
 
-脚本做两件事：`cargo build --release --locked` 后把二进制装到 `~/.local/bin/llm-wiki`（Windows 为 `%LOCALAPPDATA%\Programs\llm-wiki`），再把 `skills/*` 复制到 `~/.claude/skills/`。安装目录可用 `CLAUDE_SKILLS_DIR` / `WIKI_BIN_DIR` 覆盖，`--dry-run` 只打印动作不落盘，`--skip-build` 复用已有的 `target/release/llm-wiki`。
+脚本做三件事：`cargo build --release --locked` 后把二进制装到 `~/.local/bin/llm-wiki`（Windows 为 `%LOCALAPPDATA%\Programs\llm-wiki`）；用 `scripts/vendor.sh` 把同一个二进制打进 `skills/llm-wiki/bin/vendor/<triple>/`；再把 `skills/*` 复制到 `~/.claude/skills/`。安装目录可用 `CLAUDE_SKILLS_DIR` / `WIKI_BIN_DIR` 覆盖，`--dry-run` 只打印动作不落盘，`--skip-build` 复用已有的 `target/release/llm-wiki`。
+
+#### 把 skill 包同步给别人
+
+`skills/` 可以直接整个复制进对方的技能根目录（`~/.dsh/skills/`、`~/.claude/skills/` 等），
+那台机器**不需要 Rust、不需要联网、不需要本仓库**——包里带着当前平台的预编译二进制：
+
+```bash
+# 在包内技能目录，跑一次就把 CLI 装到 PATH；幂等，重复跑不覆盖可用安装
+sh ~/.dsh/skills/llm-wiki/bin/bootstrap.sh
+```
+
+`bin/llm-wiki` 是免安装启动器，直接 `sh <包路径>/bin/llm-wiki version` 也能跑。
+换平台时先在对应平台上 `cargo build --release && ./scripts/vendor.sh` 补齐
+`bin/vendor/<triple>/`，否则 `bootstrap` 会退出码 2 并指名缺哪个 triple。
+`tests/skills_install.rs` 会把这个流程当验收项跑（复制包 → 清空环境 → bootstrap → 跑通）。
 
 | skill | 管什么 |
 |---|---|

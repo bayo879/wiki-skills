@@ -793,8 +793,34 @@ Claude Code 硬约束：frontmatter 只有 `name`(≤64) 与 `description`(≤10
 - 大小写不归一：`doctor` 检测文件系统是否 case-insensitive 并警告「同名不同大小写会打架」。
 - 符号链接默认不跟随；`.` 开头文件忽略；`source/` 与 `raw/` 下都允许嵌套目录（`raw/` 镜像 `source/` 的相对路径）。
 - 安装按**内部使用**处理：不建 release 流水线。`cargo build --release` 出单二进制，
-  `install.sh` / `install.ps1` 负责复制到 PATH + 可选把 skill 软链进 `.claude/skills/`。
-  团队机器之间可以直接传二进制，`doctor` 打印 version 与 git commit 便于对齐。
+  `install.sh` / `install.ps1` 负责复制到 PATH 并把 skill 目录同步到技能根目录。
+
+### 8.1 skill 包必须自足
+
+`skills/` 是**分发的单位**，不是源码的附属品：它被整个复制进另一个 agent 的技能根目录
+（`~/.dsh/skills/`、`~/.claude/skills/` 等），此后必须能直接工作——那台机器不装 Rust、
+不联网、也没有本仓库的 `target/`。所以包里必须自己带 CLI：
+
+- `skills/llm-wiki/bin/vendor/<target-triple>/llm-wiki`：预编译二进制，按 triple 分目录。
+  `scripts/vendor.sh` 负责把 `target/release/llm-wiki` 放进去（strip 后约 8 MB/平台）。
+- `bin/platform.sh`：把 `uname -s`/`uname -m` 映射成 triple，启动器与安装器共用这一份。
+- `bin/llm-wiki`（POSIX）与 `bin/llm-wiki.cmd`（Windows）：自定位启动器，选中本平台的
+  vendor 二进制后 `exec`，一个参数都不改。
+- `bin/bootstrap.sh` / `bin/bootstrap.ps1`：把 vendor 二进制复制到 PATH
+  （`WIKI_BIN_DIR`，默认 `~/.local/bin`），幂等、离线、不需要编译器、不 sudo；
+  已有可用安装时不覆盖，除非 `--force`。
+
+三条纪律：
+
+1. SKILL.md 第 0 步写清「报 command not found 就跑 `bin/bootstrap.sh`」，六份 SKILL.md
+   都要写这一句——下级 skill 可能被单独加载，不能只知道 `llm-wiki` 这个名字。
+2. `bootstrap` 只做复制，**不 build、不下载**。拿不到本平台二进制时退出码 2 并指名
+   `scripts/vendor.sh <triple> <path>`，不让接收方掉进编译需求。
+3. 每个平台都要先 vendor 再同步；`tests/skills_install.rs` 把这件事变成硬门禁——它复制
+   整个 `skills/` 到临时目录、清空环境（`PATH=/usr/bin:/bin`、`HOME` 指向临时目录）、
+   跑 `bootstrap.sh`，然后要求装出来的二进制能 `version`。CI 三步矩阵先
+   `cargo build --release` + `scripts/vendor.sh` 再跑测试，所以 linux/windows 上这条
+   也是真的。
 
 ---
 
@@ -957,3 +983,9 @@ query skill（CLI 的 `query` 已在 v1 实现，v2 只加 skill 包装）；向
     反过来，`source/`、`raw/`、`wiki/audit/`、`wiki/archive/` 与整个引擎目录属于**派生态**：
     每次命令入口按需创建，否则「克隆下来直接跑」就不可能（引擎目录被 gitignore）。
     判据是「工具不创建就没法继续 vs. 用户没做过的决定」，不是「init 建了哪些目录」。
+50. **skill 包自带 CLI，二进制进 git**：`skills/` 是分发单位，复制到别的 agent 即成活，
+   所以 `skills/llm-wiki/bin/vendor/<triple>/llm-wiki` 提交进仓库（strip 后约 8 MB/平台），
+   而不是让接收方 `cargo install`。代价：仓库体积按平台线性增长，新平台必须补 vendor
+   再同步；换来的是「同步技能」不再等于「同步一堆 markdown 死链」。
+   拒绝的方案：让 SKILL.md 教人装 Rust（接收方没有工具链）；发布时下载二进制（要求联网，
+   且内部无 release 流水线）。

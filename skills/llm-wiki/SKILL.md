@@ -27,11 +27,20 @@ description: 当用户提到知识库、wiki、摄取材料、解析文件、体
 
 ## 开场第一步
 
-1. `llm-wiki version` 确认命令在 PATH 上；跑不起来就先装，别拿别的办法拼凑。
-2. `llm-wiki doctor --json`：取 `data.root` 当仓库根（未提供时就是当前目录），读 `data.checks` 看健康。
-3. 没有 `wiki.toml` / `SCHEMA.md` 就 `llm-wiki init`；不要手工造目录、手写契约。
-4. 所有命令都在这个根目录下跑——CLI 的根就是当前目录，它不向上查找。
-5. `doctor` 有 Fail 就先修那一项；只有 Warn 可以带着往下走。
+0. 先确认命令在 PATH 上：
+
+       llm-wiki version
+
+   报 command not found 说明这台机器还没装。本技能包里带着当前平台的预编译二进制，
+   跑一次下面这条即可（幂等、离线、不需要 Rust；不要自己 build，也不要另找下载）：
+
+       sh ~/.dsh/skills/llm-wiki/bin/bootstrap.sh || sh ~/.claude/skills/llm-wiki/bin/bootstrap.sh
+
+   两条路径都不存在就换成你所在 agent 的技能根目录再试，装好后重跑 `llm-wiki version` 验证。
+1. `llm-wiki doctor --json`：读 `data.checks` 看健康。CLI 的根就是当前目录，它不向上查找。
+2. 没有 `wiki.toml` / `SCHEMA.md` 就 `llm-wiki init`；不要手工造目录、手写契约。
+3. 所有命令都在这个根目录下跑。
+4. `doctor` 有 Fail 就先修那一项；只有 Warn 可以带着往下走。
    - Fail 在 `config` / `schema`：`llm-wiki init --force` 重写两份契约（不动 `source/` 与页面）。
    - Fail 在 `paths` / `db`：多半目录被挪过或账本坏了，重跑 `llm-wiki init` 补齐目录再看。
    - Fail 在 `lock`：另一个进程正在跑，等它结束，别删 `.wiki/lock`。

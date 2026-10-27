@@ -1,0 +1,33 @@
+#!/bin/sh
+# Runs the prebuilt llm-wiki binary that ships inside this skill package.
+#
+# This exists so the package works the moment it is copied into another agent's
+# skills directory: no compiler, no network, no PATH setup. It only selects
+# `bin/vendor/<target-triple>/llm-wiki` and hands over every argument.
+#
+# Install it onto PATH once with `bin/bootstrap.sh` if you prefer bare
+# `llm-wiki ...` invocations in later steps.
+set -eu
+
+# Resolve this script's directory. `readlink -f` is not portable enough, so a
+# launcher reached through a symlink falls back to the symlink's own directory.
+self=$0
+case $self in
+  */*) dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd) ;;
+  *)   dir=$(pwd) ;;
+esac
+
+if ! triple=$(sh "$dir/platform.sh"); then
+  echo "llm-wiki: this package does not support this machine." >&2
+  echo "llm-wiki: build a binary on it with \`scripts/vendor.sh\` in the source repository." >&2
+  exit 2
+fi
+
+bin=$dir/vendor/$triple/llm-wiki
+if [ ! -x "$bin" ]; then
+  echo "llm-wiki: package has no $triple binary (looked in $bin)." >&2
+  echo "llm-wiki: run \`scripts/vendor.sh $triple <path-to-binary>\` where the package is built." >&2
+  exit 2
+fi
+
+exec "$bin" "$@"

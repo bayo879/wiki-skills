@@ -71,6 +71,15 @@ Write-Host "==> 安装 $BinName 到 $BinDst"
 Invoke-Step { New-Item -ItemType Directory -Force -Path $BinDst | Out-Null } "mkdir $BinDst"
 Invoke-Step { Copy-Item -Force -Path $BinSrc -Destination (Join-Path $BinDst $BinName) } "copy $BinName -> $BinDst"
 
+# 3.5 把二进制塞进 skill 包：skill 目录要能整包同步给别人，对方没有 target/ 也不装 Rust
+if ($DryRun) {
+    Write-Host "  [dry-run] 将把 $BinSrc 打包进 skills/llm-wiki/bin/vendor/"
+} else {
+    $vendorDir = Join-Path $RepoDir 'skills\llm-wiki\bin\vendor\x86_64-pc-windows-msvc'
+    Invoke-Step { New-Item -ItemType Directory -Force -Path $vendorDir | Out-Null } "mkdir $vendorDir"
+    Invoke-Step { Copy-Item -Force -Path $BinSrc -Destination (Join-Path $vendorDir $BinName) } "vendor $BinName"
+}
+
 # 4. 安装 skill（先删旧目录，避免残留已删除的子文件）
 Write-Host "==> 安装 $($names.Count) 个 skill 到 $SkillsDst"
 Invoke-Step { New-Item -ItemType Directory -Force -Path $SkillsDst | Out-Null } "mkdir $SkillsDst"

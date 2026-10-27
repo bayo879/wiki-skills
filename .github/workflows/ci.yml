@@ -31,6 +31,15 @@ jobs:
       - name: Build
         run: cargo build --locked
 
+      # The distributable skill package carries a release binary. Vendoring it
+      # here keeps `tests/skills_install.rs` honest: that test would otherwise
+      # only ever prove the macOS developer's checkout works.
+      - name: Vendor the binary into the skill package
+        shell: bash
+        run: |
+          cargo build --release --locked
+          ./scripts/vendor.sh
+
       - name: Test
         run: cargo test --locked
 

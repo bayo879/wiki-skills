@@ -5,6 +5,8 @@ description: 当用户要求给知识库做体检、问「有没有说法不一�
 
 # wiki-audit
 
+命令 `llm-wiki` 由 llm-wiki 技能包提供；报 command not found 时先跑该包的 `bin/bootstrap.sh`。
+
 ## 何时用
 
 - 用户说「体检」「查一下 wiki 有没有问题」「有没有说法不一致的地方」
