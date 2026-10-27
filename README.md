@@ -20,7 +20,7 @@
 2. **解析**：`convert` 把源交给解析后端，写 `raw/<key>.md`，frontmatter 记录来源、`source_hash`、`parser` 与 `pin`。
 3. **成页**：agent 读 `raw/`，把候选页写进 `.wiki/staging/<type>/<id>.md`；`ingest begin / commit / abort` 管住一轮的读写。
 4. **发布**：`approve --confirm` 把候选合并进 `wiki/` 并重建 `index.md`、追加 `log.md`；`reject` 记录原因后丢弃。
-5. **校验**：`lint` 跑十二条规则，`--fix` 修掉不需要判断的机械缺陷。
+5. **校验**：`lint` 跑十三条规则，`--fix` 修掉不需要判断的机械缺陷。
 6. **留痕**：`checkpoint` 给 `wiki/` 拍版本快照；`sync` 把「扫描 → 转换 → 稳定门槛 → 审计」串成无人值守的一轮。
 7. **检索与续命**：`query` 用 FTS5 检索全库；`archive seal` 把会话摘要封存，`recall` 检索摘要，`archive purge` 按容量与时限清理。
 
@@ -97,6 +97,7 @@ llm-wiki lint --fix                        # 先修机械缺陷，再报告剩�
 llm-wiki approve --confirm                 # 合并候选进 wiki/
 llm-wiki checkpoint --label "after alpha"
 
+llm-wiki graph                            # 链接图：枢纽页、孤立页、断链
 llm-wiki query 熔断                        # FTS5 检索，命中数 0 也是 exit 0
 llm-wiki query --reindex                   # 全量重建索引后再搜
 llm-wiki sync --dry-run                    # 演练一轮：只报告，不转换、不写审计
@@ -115,13 +116,13 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `version` | 打印版本 |
 | `doctor` | 检查契约、目录、账本、FTS5、gitignore、锁、暂存区、token、外部后端 |
 | `init [--force]` | 写契约文件、建引擎目录 |
-| `scan` | 报告 `source/` 与账本的差异 |
-| `convert [--key <KEY>] [--limit <N>]` | 转换待处理源（默认 10） |
+| `scan [--apply-moves]` | 报告 `source/`、`raw/` 与账本的差异；`--apply-moves` 一并迁移改名 |
+| `convert [--key <KEY>] [--limit <N>]` | 转换待处理源（默认 10）；单个失败不中断 |
 | `parse --key <KEY> [--chunk <N>] [--range <A-B>]` | 只显示解析结果，不写文件；大文件按需分块 |
 | `ingest begin [--sources <K>]... [--pages <P>]... [--dry-run]` | 开一轮，报告受影响的页面 |
 | `ingest commit [--pages <P>]...` | 关闭本轮，刷新候选页与暂存清单 |
 | `ingest abort` | 丢弃本轮，保留已写候选页 |
-| `lint [--strict] [--fix]` | 十二条规则；`--strict` 让警告也失败 |
+| `lint [--strict] [--fix]` | 十三条规则；`--strict` 让警告也失败 |
 | `checkpoint --label <LABEL>` | 把 `wiki/` 拍成新版本快照 |
 | `approve [--confirm]` | 发布候选；不带 `--confirm` 只报告（exit 3） |
 | `reject --reason <REASON>` | 丢弃候选并记录原因 |
@@ -131,6 +132,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `archive seal --sources <K>... [--id] [--title] [--period-start] [--period-end] [--by]` | 登记 agent 写好的摘要，并改写引用页的 `sources` |
 | `archive purge [--dry-run] [--yes]` | 删除同时满足「超容量」与「超时限」的摘要 |
 | `recall <QUERY> [--full]` | 子串检索摘要；无命中 exit 1 |
+| `graph` | 链接图：节点出入度、边、孤立页、断链（只读） |
 | `query [TEXT] [--limit <N>] [--expand <N>] [--scope all\|wiki\|archive] [--reindex]` | FTS5 检索页面；无命中 exit 0 |
 | `sync [--limit <N>] [--dry-run] [--force]` | 无人值守一轮：scan → convert → 门槛 → 审计 |
 

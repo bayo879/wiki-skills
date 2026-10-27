@@ -8,8 +8,8 @@
 |---|---|---|---|
 | `primary` | `"auto"` \| `"builtin"` \| `"external"` | `"auto"` | 后端选择模式 |
 | `chunk_threshold` | 尺寸 | `2MB` | 计算源指纹时的分界：不超过它全量哈希，超过它采样哈希（见 `src/convert.rs:432`） |
-| `max_source_bytes` | 尺寸 | `100MB` | 超过它的源拒绝转换；`--force-large` 尚未实现，目前没有放行开关 |
-| `chunk_target` | 尺寸 | `64KB` | 单个文本块的目标大小；目前只参与校验，还没有代码读取它 |
+| `max_source_bytes` | 尺寸 | `100MB` | 超过它的源不进入转换流水线（`scan` 报 `oversize`）；只有 `parse --force-large` 能强行抽一份看，但不会进账本 |
+| `chunk_target` | 尺寸 | `64KB` | 单个文本块的目标大小；`parse --chunk N` 按它切分，分块视图只落 `.wiki/cache/`，`raw/` 仍是一份完整 markdown（决策 43） |
 | `min_chars` | 整数 | `200` | 内置结果字符数低于它时，`auto` 才可能回退外部 |
 | `[parse.external]` | 表 | 无 | 可选的外部解析服务；不写就是没有 |
 

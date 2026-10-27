@@ -170,7 +170,8 @@ purge_days       = 180        # 且距最后触达超过此天数；两个条件
 | `recall` | 归档层唯一读口：摘要 + 入口，`--full` 才给蒸馏正文（见 §5.11） |
 | `approve` / `reject` / `instruct` / `defer` | 决策门四个选项，语义见 §5.6 |
 | `lint` | 机械审计；`--fix` 只修机械项；`--strict` 让 warning 也失败 |
-| `index` / `graph` / `query` | 重建目录 / 链接图 / 检索（FTS5，索引 `wiki/` 含 `archive/` 摘要，见 §5.9） |
+| `graph` | 链接图：节点出入度、边、孤立页、断链（只读，供判断层找枢纽与孤岛） |
+| `query` | 检索（FTS5，索引 `wiki/` 含 `archive/` 摘要，见 §5.9） |
 
 **CLI 永不写页面正文**，也不做任何交互提问——需要人确认时用退出码 3 交还给 agent。
 
@@ -308,7 +309,7 @@ lint 会抓到「写了但没账」的孤儿。
 [实现触点交底](../plans/2026-10-27-llm-wiki-memory-touchpoints.md) §0。
 
 判断层（skill）：跨页矛盾、被新源推翻的结论、反复出现却没建页的概念、跨源缺口、
-下一步该找什么源。CLI 只给料：`graph` 的未链接提及、孤立簇、高扇入页。
+下一步该找什么源。CLI 只给料：`graph` 的孤立页（零入零出）、高扇入页（可能是枢纽）、`broken`（声称有链接但指向不存在的页）。
 
 输出：`wiki/audit/YYYY-MM-DD.md`（进 git，`--no-write` 可关）+ `--json`。
 `--fix` 只做 100% 确定的修复：重建 index、修 log 头、补 `id`。语义问题一律不自动改。
@@ -560,6 +561,27 @@ L6（源不存在或哈希不符）必须在 `ingest commit` 就挡住，不能�
 1. `wiki/` 正文 > 200 MB → 换 bigram 分词
 2. 需要搜 `raw/` 全文 > 500 MB → 换 Tantivy
 3. 单查询 P95 > 100 ms → 先查查询构造，再谈换引擎
+
+### 5.9.1 链接图 `graph`
+
+`query` 回答「哪页讲了这个」，`graph` 回答「这页在结构里是什么位置」。它只读、不落盘、不建缓存：
+一次目录遍历，产出节点（出入度）、边、孤立页、断链。
+
+```json
+{"nodes":[{"page":"wiki/concept/order-timeout.md","in_degree":7,"out_degree":3}],
+ "edges":[{"from":"wiki/concept/order-timeout.md","to":"wiki/entity/order.md"}],
+ "orphans":["wiki/concept/scratch.md"],
+ "broken":["concept/not-written-yet"]}
+```
+
+- 链接可以是 `[[concept/a]]`、`[[a]]` 或 `[[wiki/concept/a.md]]`，三种写法解析到同一条边；代码块里的 `[[` 不算。
+- 一条边只出现一次，但出入度按提及次数算——同一页里写两遍 `[[b]]` 是更强的信号，不是两条边。
+- 自指不算边；指向自己的链接不构成孤立的补集，孤立页的判据是出入度都为 0。
+- `broken` 与 lint 的 L2 重叠，这里再列一次是因为消费场景不同：lint 报给人修，`graph` 报给 agent 判断
+  「这条关系是不是本来该有、只是还没写」。
+
+用途落在判断层：高扇入页是枢纽（改它要谨慎），孤立页是候选（可能是没接进网络的死内容），
+`broken` 是被声称但不存在的知识缺口。三者都是审计者的线索，不是结论。
 
 ---
 
@@ -915,6 +937,8 @@ query skill（CLI 的 `query` 已在 v1 实现，v2 只加 skill 包装）；向
 46. **`doctor` 不返回 `data.root`**：它按当前目录工作，`data` 只有 `checks`。
     skill 里写「在仓库根目录执行」，不假装有根路径字段。
     不做「query 为空才提示归档」——那等于记住了却想不起来；由 agent 自主决定追溯哪一篇。
-43. **分块是读取层派生物，不改存储形态**：`raw/` 每个源仍只有一份完整 markdown，分块视图缓存在
-    `.wiki/cache/<hash>/`（`chunk-NNNN.md`）可重建，`convert` 不为大文件加分支。否则账本/变更判据/lint 要多一条路径，
-    片段引用 `raw/big.md#p=12-40` 也可能指向不存在的块文件。
+47. **`graph` 是只读派生视图**：一次目录遍历，不落库、不缓存。只给节点出入度、边、孤立页、断链；
+    **不做「未链接提及」**——那要靠标题模糊匹配，误报率高且代价 O(页数²)，审计者自己读两页比信这个准。
+48. **`--force-large` 只是 `parse` 的诊断口**：超过 `max_source_bytes` 的源永不进账本（`scan` 报 `oversize`、
+    `convert` 跳过），但完全没法看它抽出来什么就没法判断「该拆分还是该调大上限」。所以只给 `parse` 一个
+    强行出口，`convert`/`sync` 恒为 false，不提供任何「悄悄塞进 wiki」的路径。

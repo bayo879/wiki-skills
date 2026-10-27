@@ -783,7 +783,7 @@ fn repo_key(root: &Path, path: &Path) -> String {
 }
 
 /// `[[target]]` values in `body`, skipping fenced code blocks.
-fn wikilinks(body: &str) -> Vec<String> {
+pub(crate) fn wikilinks(body: &str) -> Vec<String> {
     let mut text = String::new();
     let mut fence = false;
     for line in body.lines() {
@@ -814,7 +814,7 @@ fn wikilinks(body: &str) -> Vec<String> {
 }
 
 /// A link target as the set of page names it may mean.
-fn normalise_link(target: &str, wiki_prefix: &str) -> String {
+pub(crate) fn normalise_link(target: &str, wiki_prefix: &str) -> String {
     let mut text = target
         .split_once('#')
         .map_or(target, |(head, _)| head)

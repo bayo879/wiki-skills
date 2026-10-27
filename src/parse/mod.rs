@@ -204,7 +204,18 @@ pub enum Delivery {
 /// Above it the text is chunked, and above `max_source_bytes` the source is
 /// refused rather than silently truncated.
 pub fn delivery(cfg: &Config, size: u64) -> Result<Delivery> {
-    if size > cfg.parse.max_source_bytes {
+    delivery_with(cfg, size, false)
+}
+
+/// [`delivery`] with an explicit override for the size ceiling.
+///
+/// `force_large` exists only for `parse`, the debugging entry point: a source
+/// above `parse.max_source_bytes` never enters the ledger, so being able to look
+/// at what a backend extracts from it is the difference between "refused" and
+/// "refused and undiagnosable". The pipeline itself (`convert`, `sync`) always
+/// passes `false`.
+pub fn delivery_with(cfg: &Config, size: u64, force_large: bool) -> Result<Delivery> {
+    if size > cfg.parse.max_source_bytes && !force_large {
         return Err(ParseError::Oversize {
             size,
             limit: cfg.parse.max_source_bytes,
