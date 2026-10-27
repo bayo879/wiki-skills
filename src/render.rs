@@ -251,6 +251,24 @@ pub fn write_index(root: &Path, cfg: &Config) -> Result<usize> {
 /// config lookup so the staging directory can be indexed the same way the wiki
 /// directory is.
 pub fn write_index_in(wiki_dir: &Path, types: &[String]) -> Result<usize> {
+    let pages = index_pages(wiki_dir)?;
+    let index = render_index(&pages, types);
+    write_atomic(&wiki_dir.join("index.md"), index.as_bytes())?;
+    Ok(pages.len())
+}
+
+/// The index [`write_index`] would write for `root`, as text.
+///
+/// `lint --fix` compares this with the file on disk to decide whether the
+/// index is stale, so the two paths must agree byte for byte: both build the
+/// catalogue with [`index_pages`] and render it with [`render_index`].
+pub fn index_text(root: &Path, cfg: &Config) -> Result<String> {
+    let pages = index_pages(&root.join(&cfg.paths.wiki))?;
+    Ok(render_index(&pages, &cfg.schema.types))
+}
+
+/// Reads every page under `wiki_dir` into the catalogue rows `index.md` shows.
+fn index_pages(wiki_dir: &Path) -> Result<Vec<PageMeta>> {
     let mut pages = Vec::new();
     for path in page_files(wiki_dir)? {
         let (front, _body) = page::read(&path)?;
@@ -270,10 +288,7 @@ pub fn write_index_in(wiki_dir: &Path, types: &[String]) -> Result<usize> {
             status: front.status.to_string(),
         });
     }
-
-    let index = render_index(&pages, types);
-    write_atomic(&wiki_dir.join("index.md"), index.as_bytes())?;
-    Ok(pages.len())
+    Ok(pages)
 }
 
 /// Every page file under `dir`, sorted by path.

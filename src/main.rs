@@ -14,6 +14,7 @@ use llm_wiki::config::Config;
 use llm_wiki::convert;
 use llm_wiki::ingest;
 use llm_wiki::init;
+use llm_wiki::lint;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
 use llm_wiki::report::{self, Exit};
@@ -57,6 +58,7 @@ fn dispatch(cli: Cli) -> ! {
         Command::Convert { key, limit } => run_convert(key, limit),
         Command::Parse { key } => run_parse(key),
         Command::Ingest { command } => run_ingest(command),
+        Command::Lint { strict, fix } => run_lint(strict, fix),
     }
 }
 
@@ -259,6 +261,70 @@ fn fail_ingest(cmd: &str, err: &ingest::IngestError) -> ! {
         Exit::Error
     };
     report::fail(cmd, exit, err.code(), &err.to_string())
+}
+
+/// `lint` audits the wiki; with `--fix` it repairs the mechanical defects
+/// first, then reports what is left.
+///
+/// The exit code is decided by the findings, not by the command: an error (or
+/// any finding under `--strict`) is exit 1 even though the command succeeded.
+fn run_lint(strict: bool, fix: bool) -> ! {
+    let root = wiki_root("lint");
+    let cfg = load_config("lint", &root);
+    let mut store = open_store("lint", &root, &cfg);
+
+    if fix {
+        match lint::fix(&root, &cfg, &mut store) {
+            Ok(outcome) => {
+                let exit = if lint::fails(&outcome.remaining, strict) {
+                    Exit::Error
+                } else {
+                    Exit::Ok
+                };
+                report::emit_with("lint", outcome, exit, human_fix)
+            }
+            Err(err) => report::fail("lint", Exit::Usage, err.code(), &err.to_string()),
+        }
+    } else {
+        match lint::lint(&root, &cfg, &store) {
+            Ok(findings) => {
+                let exit = if lint::fails(&findings, strict) {
+                    Exit::Error
+                } else {
+                    Exit::Ok
+                };
+                let payload = LintData { findings };
+                report::emit_with("lint", payload, exit, human_lint)
+            }
+            Err(err) => report::fail("lint", Exit::Usage, err.code(), &err.to_string()),
+        }
+    }
+}
+
+/// One finding per line, or a single `clean` line when there is nothing to
+/// report.
+fn human_lint(data: &LintData) -> String {
+    if data.findings.is_empty() {
+        return String::from("lint: clean");
+    }
+    data.findings
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What `--fix` changed, then the findings it could not repair.
+fn human_fix(outcome: &lint::FixReport) -> String {
+    let mut lines = vec![format!("fixed: {}", outcome.fixed)];
+    lines.extend(outcome.remaining.iter().map(ToString::to_string));
+    lines.join("\n")
+}
+
+/// Payload of the `lint` success envelope.
+#[derive(Serialize)]
+struct LintData {
+    findings: Vec<lint::Finding>,
 }
 
 /// Payload of the `version` success envelope.

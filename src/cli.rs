@@ -54,6 +54,15 @@ pub enum Command {
         #[command(subcommand)]
         command: IngestCommand,
     },
+    /// Audit the wiki against the twelve lint rules.
+    Lint {
+        /// Fail on warnings as well as errors.
+        #[arg(long)]
+        strict: bool,
+        /// Repair the defects that need no judgement, in place.
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 /// The three verbs of an ingest round.

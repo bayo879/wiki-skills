@@ -71,6 +71,26 @@ struct ErrorBody<'a> {
 
 /// Reports a successful command and exits 0.
 pub fn emit<T: Serialize>(cmd: &str, data: T) -> ! {
+    emit_with(cmd, data, Exit::Ok, |data| {
+        match serde_json::to_value(data) {
+            Ok(value) => render_human(cmd, &value),
+            Err(_) => cmd.to_string(),
+        }
+    })
+}
+
+/// Reports a successful command whose payload decides the exit code.
+///
+/// `exit` is `Exit::Error` when the command ran to completion but found
+/// error-level problems (lint under `--strict`, for one). `human` renders the
+/// text form, because a payload like a finding list reads better as one line
+/// per item than as a `key: value` blob.
+pub fn emit_with<T: Serialize>(
+    cmd: &str,
+    data: T,
+    exit: Exit,
+    human: impl FnOnce(&T) -> String,
+) -> ! {
     if json_mode() {
         let envelope = Success {
             ok: true,
@@ -87,13 +107,9 @@ pub fn emit<T: Serialize>(cmd: &str, data: T) -> ! {
             ),
         }
     } else {
-        let text = match serde_json::to_value(&data) {
-            Ok(value) => render_human(cmd, &value),
-            Err(_) => cmd.to_string(),
-        };
-        write_line(&text);
+        write_line(&human(&data));
     }
-    std::process::exit(Exit::Ok.code())
+    std::process::exit(exit.code())
 }
 
 /// Reports a failed command and exits with `exit`. Human-readable diagnostics

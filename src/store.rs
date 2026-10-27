@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// DDL for version 1, applied once per database.
 const MIGRATION_1: &str = r#"
@@ -72,8 +72,51 @@ CREATE TABLE raws(
 );
 "#;
 
+/// DDL for version 3: what each page looked like when the CLI last wrote it.
+///
+/// The table is what lets `lint` tell "body edited but `updated` left alone"
+/// apart from "page written before this build existed". An empty table is the
+/// normal state of a fresh clone, so a missing record is silent.
+const MIGRATION_3: &str = r#"
+CREATE TABLE page_meta(
+    page_key TEXT PRIMARY KEY,
+    hash TEXT NOT NULL,
+    updated TEXT NOT NULL
+);
+"#;
+
 /// Column order shared by the `sources` reader helpers.
 const SOURCE_COLUMNS: &str = "key, hash, size, mtime, raw_key, converted_at";
+
+/// Column order shared by the `page_meta` reader helpers.
+const PAGE_META_COLUMNS: &str = "page_key, hash, updated";
+
+/// One `page_meta` record: what one page looked like when the CLI last wrote it.
+///
+/// `page_key` is the repository-relative path (`wiki/concept/a.md`), `hash` the
+/// `blake3:` digest of the file's bytes and `updated` the frontmatter date it
+/// carried. `lint` compares the record with the file on disk to notice a body
+/// edit that never touched `updated`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageMetaRow {
+    /// Repository-relative, `/`-separated page path.
+    pub page_key: String,
+    /// `blake3:` digest of the page bytes at write time.
+    pub hash: String,
+    /// Frontmatter `updated` value at write time, `YYYY-MM-DD`.
+    pub updated: String,
+}
+
+impl PageMetaRow {
+    /// Reads one `page_meta` row in [`PAGE_META_COLUMNS`] order.
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageMetaRow> {
+        Ok(PageMetaRow {
+            page_key: row.get(0)?,
+            hash: row.get(1)?,
+            updated: row.get(2)?,
+        })
+    }
+}
 
 /// One row of the `sources` ledger: a file that exists under `source/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +277,10 @@ impl Store {
         }
         if version < 2 {
             self.apply_migration(MIGRATION_2, 2)?;
+            version = 2;
+        }
+        if version < 3 {
+            self.apply_migration(MIGRATION_3, 3)?;
         }
         Ok(())
     }
@@ -375,6 +422,39 @@ impl Store {
         Ok(())
     }
 
+    /// Every `page_meta` record, ordered by page key.
+    pub fn all_page_metas(&self) -> Result<Vec<PageMetaRow>> {
+        let sql = format!("SELECT {PAGE_META_COLUMNS} FROM page_meta ORDER BY page_key");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], PageMetaRow::from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// The `page_meta` record for `page_key`, or `None` when never written.
+    pub fn get_page_meta(&self, page_key: &str) -> Result<Option<PageMetaRow>> {
+        let sql = format!("SELECT {PAGE_META_COLUMNS} FROM page_meta WHERE page_key = ?1");
+        let row = self
+            .conn
+            .query_row(&sql, [page_key], PageMetaRow::from_row)
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Inserts `row`, or replaces the record for the same page key.
+    pub fn upsert_page_meta(&mut self, row: &PageMetaRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO page_meta(page_key, hash, updated) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(page_key) DO UPDATE SET \
+                 hash = excluded.hash, updated = excluded.updated",
+            params![row.page_key, row.hash, row.updated],
+        )?;
+        Ok(())
+    }
+
     /// Whether the linked SQLite was built with the FTS5 extension.
     ///
     /// The full-text index in the schema is useless without it, and the bundled
@@ -474,6 +554,45 @@ mod tests {
         s.migrate().unwrap();
         assert_eq!(user_version(&s), SCHEMA_VERSION);
         assert_eq!(s.all_raws().unwrap(), vec![raw_row("a.md", "blake3:ab")]);
+    }
+
+    /// A row recording one page's content hash at write time.
+    fn page_meta(page_key: &str, hash: &str, updated: &str) -> PageMetaRow {
+        PageMetaRow {
+            page_key: String::from(page_key),
+            hash: String::from(hash),
+            updated: String::from(updated),
+        }
+    }
+
+    #[test]
+    fn page_meta_is_added_by_migration_v3_and_round_trips() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("state.db");
+        {
+            let conn = Connection::open(&p).unwrap();
+            conn.execute_batch(MIGRATION_1).unwrap();
+            conn.execute_batch(MIGRATION_2).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+
+        let mut s = Store::open(&p).unwrap();
+        s.migrate().unwrap();
+        assert_eq!(user_version(&s), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 3);
+
+        let first = page_meta("wiki/concept/a.md", "blake3:aa", "2026-10-27");
+        s.upsert_page_meta(&first).unwrap();
+        assert_eq!(
+            s.get_page_meta("wiki/concept/a.md").unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(s.get_page_meta("wiki/concept/missing.md").unwrap(), None);
+
+        // Upsert replaces the row rather than adding a second one.
+        let second = page_meta("wiki/concept/a.md", "blake3:bb", "2026-10-28");
+        s.upsert_page_meta(&second).unwrap();
+        assert_eq!(s.all_page_metas().unwrap(), vec![second]);
     }
 
     #[test]

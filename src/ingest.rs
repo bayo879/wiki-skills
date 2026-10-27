@@ -30,7 +30,7 @@ use crate::page;
 use crate::paths;
 use crate::render;
 use crate::staging;
-use crate::store::{Store, StoreError};
+use crate::store::{PageMetaRow, Store, StoreError};
 
 /// What `begin` was asked to do.
 #[derive(Debug, Clone, Default)]
@@ -127,6 +127,9 @@ pub enum IngestError {
     /// The ledger could not be read.
     #[error(transparent)]
     Db(#[from] StoreError),
+    /// A candidate could not be digested.
+    #[error(transparent)]
+    Hash(#[from] hash::HashError),
     /// The wiki directory could not be walked.
     #[error("cannot walk {}: {source}", path.display())]
     Walk {
@@ -152,6 +155,7 @@ impl IngestError {
             IngestError::Render(err) => err.code(),
             IngestError::Page(err) => err.code(),
             IngestError::Db(_) => "E_DB",
+            IngestError::Hash(_) => "E_IO",
             IngestError::Walk { .. } => "E_IO",
         }
     }
@@ -293,7 +297,7 @@ pub fn begin(
 pub fn commit(
     root: &Path,
     cfg: &Config,
-    _store: &mut Store,
+    store: &mut Store,
     pages: &[String],
 ) -> Result<CommitReport> {
     if pages.is_empty() {
@@ -334,6 +338,19 @@ pub fn commit(
             page::append_sources(path, &references)?;
         }
         written.push(rel.clone());
+    }
+
+    // Record what the round wrote: `lint` compares these digests with the files
+    // on disk to notice a body edit that never moved `updated`. Only the
+    // candidates written above are recorded; the record hashes the bytes after
+    // the date and the source references were stamped.
+    let prefix = cfg.paths.wiki.trim_end_matches('/');
+    for (rel, path) in &targets {
+        store.upsert_page_meta(&PageMetaRow {
+            page_key: format!("{prefix}/{rel}.md"),
+            hash: hash::hash_file(path, true)?,
+            updated: today.to_string(),
+        })?;
     }
 
     render::write_index_in(&staging_dir, &cfg.schema.types)?;

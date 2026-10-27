@@ -10,6 +10,7 @@ pub mod convert;
 pub mod hash;
 pub mod ingest;
 pub mod init;
+pub mod lint;
 pub mod page;
 pub mod parse;
 pub mod paths;
