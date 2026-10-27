@@ -40,8 +40,34 @@ jobs:
           cargo build --release --locked
           ./scripts/vendor.sh
 
+      # Cargo's failure text only exists in the step log, which needs repo
+      # admin rights to download. Re-emitting the interesting lines as
+      # workflow commands puts them in the public annotations, so a failing
+      # Windows run can be diagnosed without credentials.
       - name: Test
-        run: cargo test --locked
+        shell: bash
+        run: |
+          set +e
+          cargo test --locked > test-output.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            sed -n '/^failures:$/,/^test result:/p' test-output.log | head -80 | while IFS= read -r line; do
+              echo "::error title=failing test::$line"
+            done
+            grep -A3 -E "^thread '" test-output.log | head -60 | while IFS= read -r line; do
+              echo "::error title=panic::$line"
+            done
+          fi
+          tail -40 test-output.log
+          exit $status
+
+      - name: Upload the test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-${{ matrix.os }}
+          path: test-output.log
+          if-no-files-found: ignore
 
       # The optimized profile is verified separately: overflow behaviour,
       # `debug_assertions` and optimizer-sensitive code differ from debug.
