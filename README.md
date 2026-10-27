@@ -58,6 +58,28 @@ llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"c
 
 `init` 生成的 `.wiki/.gitignore` 只忽略可重建的状态（`cache/`、`staging/`、`sessions/`、`state.db*`、`lock`）；`wiki/`、`raw/`、`source/` 与 `.wiki/versions/` 都进 git。CI 在 Ubuntu / macOS / Windows 三平台跑 `build`、`test`、`test --release`、`fmt --check`、`clippy -D warnings`，不安装 poppler/pandoc（PDF 测试用模板现造）。
 
+### Agent skills 安装
+
+6 个 skill 是给 Claude Code 用的薄指令层，所有簿记与判定逻辑都在 `llm-wiki` 里。一次装好：
+
+```bash
+./scripts/install.sh            # mac / linux
+.\scripts\install.ps1           # windows
+```
+
+脚本做两件事：`cargo build --release --locked` 后把二进制装到 `~/.local/bin/llm-wiki`（Windows 为 `%LOCALAPPDATA%\Programs\llm-wiki`），再把 `skills/*` 复制到 `~/.claude/skills/`。安装目录可用 `CLAUDE_SKILLS_DIR` / `WIKI_BIN_DIR` 覆盖，`--dry-run` 只打印动作不落盘，`--skip-build` 复用已有的 `target/release/llm-wiki`。
+
+| skill | 管什么 |
+|---|---|
+| `llm-wiki` | 总纲：判断该调谁、把 `--json` 翻成人话、决策门四选项 |
+| `wiki-scan` | `scan` / `convert`，解释七种变更 |
+| `wiki-parse` | 单文件解析诊断、后端选择、外部服务配置 |
+| `wiki-ingest` | `ingest begin/commit/abort`，唯一要 agent 写正文的环节 |
+| `wiki-audit` | `lint` 与判断层分析（矛盾、过时、孤儿、重复） |
+| `wiki-sync` | 定时同步、读变更报告、失败退避 |
+
+装完在目标仓库根目录跑 `llm-wiki doctor` 自检。
+
 ## 服务操作说明
 
 日常一轮，按顺序：

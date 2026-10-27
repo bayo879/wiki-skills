@@ -161,7 +161,7 @@ purge_days       = 180        # 且距最后触达超过此天数；两个条件
 | `parse` | 单文件调试入口：跑指定后端看 markdown 产出，不落 `raw/` |
 | `sync` | 无人值守入口：差分 → 写 staging → 变更报告（见 §5.5） |
 | `ingest begin` | 开事务，返回候选页 |
-| `ingest commit` | 校验 + 落账 + 追加 log + 重建 index |
+| `ingest commit` | 校验 + 落账：给候选页刷 `updated`、补 `sources`、写进 `.wiki/staging/`；**发布由 `approve` 统一做** |
 | `ingest abort` | 丢弃事务 |
 | `checkpoint` | 人工会话收尾：把当前 `wiki/` 登记为新版本（见 §5.6） |
 | `archive status` | 会话记忆水位：活跃会话 / 可封存候选 / 可清理 / 封存后仍被引用数（见 §5.11） |
@@ -264,12 +264,16 @@ trait Parser {
    `state.db` 的 pending 表（**同时只允许一个**，第二个 begin 报错）。
    返回候选受影响页（graph + title/tags 匹配）——**候选只是建议，不是约束**。
 2. agent 读源、汇报要点（`review_before_write` 时）、写页面。
-3. `ingest commit <src> --pages a,b,c`：
-   - `raw/*.md` 的内容哈希与 begin 时不一致 → **硬失败**，要求重新 begin（转换产物又变了）；
-   - `index.md` / `log.md` 哈希与 begin 时不一致 → `E_MANUAL_EDIT`（有人手改了）；
-   - 全库反查 `sources` 含该源的页面，若 `--pages` 未覆盖 → `E_PAGE_MISSING_REF`；
-   - 每个声明的页必须存在且 L1 合法；
-   - 通过 → 清 pending、写 `sources[path].pages`、追加 log、重建 index。
+3. `ingest commit --pages a,b,c`：
+   - `--pages` 必须显式给出（空列表报错），且必须有 pending，否则报错；
+   - 每个 id 必须能在 `.wiki/staging/` 里找到，找不到即失败；
+   - 通过 → 给候选页刷 `updated`、把 pending 里的 `raw/<key>` 补进页面 `sources`（已存在则跳过）、
+     记 `page_meta` 哈希、重建 **staging** 的 `index.md`、盖 manifest、清 pending。
+   - **不写 `wiki/index.md`、不追加 `wiki/log.md`**：这两件事只在 `approve` 时做。因为
+     `wiki/` 必须永远等于「已批准」，中间产物全部留在 staging（见 §5.6）。
+   - 全库反查 `sources` 覆盖情况、以及「begin 之后源又被重新转换」的复核，**前移到 `approve` 之前**
+     （`check_sources` → `staging_stale`，exit 1）。发布前一次性挡住，agent 不会在 commit 阶段
+     被一个它改不了的哈希卡住。
 
 失败时 state 不前进，返回 `{page, rule, detail}` 清单。页面已写一半是可接受的——
 lint 会抓到「写了但没账」的孤儿。
@@ -394,8 +398,8 @@ staging 跟着变，「库内状态不更新」直接失效。复制必须是真
 
 **为什么候选必须隔离**：`defer` 的语义是「库内状态不更新合并」。候选一旦就地写进 `wiki/`，
 即使用代码回滚，用户看到的也已经是「合并了」。所以定时任务的产出只写 `.wiki/staging/`，
-`approve` 时才做一次 `rename` 原子替换。这条同时把原来的「事务态」问题一起解决了：`ingest begin/commit` 的实现改成「写 staging → 立即提升」，
-不再需要第二套事务机制。
+`approve` 时才做一次 `rename` 原子替换。这条同时把原来的「事务态」问题一起解决了：`ingest begin/commit`
+也只写 staging，**`approve` 是唯一的发布动作**，不再需要第二套事务机制。
 
 **checkpoint**：人工会话结束时由 skill 调用 `llm-wiki checkpoint`，把当前 `wiki/` 登记为一个版本。
 会话结束没有可靠钩子（用户可能直接关窗口），所以忘了调用时，下一轮 `sync` 报 `baseline_dirty`，
@@ -899,6 +903,15 @@ query skill（CLI 的 `query` 已在 v1 实现，v2 只加 skill 包装）；向
 41. **清理只删 L0，L2 永久保留**；封存时 CLI 把页面 `sources` 重挂到归档页，
     L6 对归档来源豁免、L9 对 `archived: true` 豁免。不重挂就必然断链，这是整套机制唯一的硬依赖。
 42. **归档摘要进 `query` 索引**：摘要可搜，`recall --full` 才取蒸馏正文，永不返回 L0 原文。
+43. **分块是读取层的派生物**：`convert` 不改，`raw/` 永远是一份完整 markdown；
+    `parse --chunk/--range` 按需从原件切，缓存 `.wiki/cache/<hash>/` 可随时重建。
+44. **`approve` 是唯一的发布门**：`ingest commit` 只把候选页写进 `.wiki/staging/` 并记账，
+    不写 `wiki/index.md`、不追加 `wiki/log.md`。这样「`wiki/` = 已批准」是一条可验证的不变式，
+    而不是靠每个写路径自觉维护；代价是交互式摄取也要先 `approve` 再 `checkpoint`。
+45. **`checkpoint` 只拍已发布状态**：它快照当前 `wiki/`，不提升 staging。所以正确顺序是
+    `ingest commit → approve --confirm → checkpoint`，漏掉 `approve` 会让新页游离在 staging 里。
+46. **`doctor` 不返回 `data.root`**：它按当前目录工作，`data` 只有 `checks`。
+    skill 里写「在仓库根目录执行」，不假装有根路径字段。
     不做「query 为空才提示归档」——那等于记住了却想不起来；由 agent 自主决定追溯哪一篇。
 43. **分块是读取层派生物，不改存储形态**：`raw/` 每个源仍只有一份完整 markdown，分块视图缓存在
     `.wiki/cache/<hash>/`（`chunk-NNNN.md`）可重建，`convert` 不为大文件加分支。否则账本/变更判据/lint 要多一条路径，
