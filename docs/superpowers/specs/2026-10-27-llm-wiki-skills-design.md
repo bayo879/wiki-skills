@@ -1,6 +1,6 @@
-# LLM Wiki Skills —— 设计稿 v9（同步 + 检索收口）
+# LLM Wiki Skills —— 设计稿 v10（同步 + 检索 + 会话记忆）
 
-日期：2026-10-27 ｜ 状态：**已定稿 v9**（36 条决策） ｜ 形态：Claude Code skill 包 + Rust CLI（`llm-wiki`）
+日期：2026-10-27 ｜ 状态：**已定稿 v10**（42 条决策） ｜ 形态：Claude Code skill 包 + Rust CLI（`llm-wiki`）
 
 ---
 
@@ -26,6 +26,7 @@ LLM 只负责页面的正文、摘要、以及「该不该建这页」这类判�
 - 四件事各自可独立调用、单独验收：扫描、解析、摄取、审计。
 - 跨平台：macOS(arm64/x64)、Linux(x64/arm64)、Windows(x64)。
 - 源文件只读；wiki 就是一堆 markdown，`git`、`Obsidian` 直接可用。
+- 会话这种「高频、低增量、话题重复」的来源有收口办法：分层封存，源数不随会话量线性膨胀（§5.11）。
 
 **非目标（v1 明确不做）**
 - 向量检索、关系库、任何常驻服务。
@@ -38,6 +39,7 @@ LLM 只负责页面的正文、摘要、以及「该不该建这页」这类判�
 - 同一个源被摄取两次、产生两张重复页。
 - 审计报告很长，但没有一条可执行的结论。
 - CLI 必须联网，或必须编译五分钟才能装。
+- 会话记忆只进不出：`sources` 只增不减，一年后单页挂几十条引用，没人读得动。
 
 ---
 
@@ -53,11 +55,13 @@ repo/
 │   ├── index.md         # 由 CLI 生成，禁止手写
 │   ├── log.md           # 由 CLI 追加，禁止手写
 │   ├── audit/           # 审计报告，进 git
+│   ├── archive/         # 会话封存摘要，进 git，不进 index，只由 recall 读（§5.11）
 │   └── <type>/<id>.md
 └── .wiki/               # 引擎目录：契约之外的一切机器产物
     ├── state.db         # 索引：源账本 + 哈希（可重建，不进 git）
     ├── versions/        # 已批准版本快照 v1/ v2/ ...（不可重建，进 git）
     ├── staging/         # 候选快照，未批准（不进 git）
+    ├── sessions/        # 原始会话记录，未封存（不进 git，可丢）
     ├── cache/           # 分块与解析中间态（不进 git）
     └── lock             # 进程锁（不进 git）
 ```
@@ -82,8 +86,11 @@ PDF 重新下载但正文没变、解析器只是把换行重排，都不会触�
 
 `versions/` 里的页面内容与 `wiki/` 相同，git 按 blob 去重，磁盘代价接近零，只多一倍 inode。
 
+`.wiki/sessions/` 不属于这两档：它既不可重建、也不该留——封存成归档摘要后即可丢弃（§5.11）。
+
 三层：**源层**（不可变事实）→ **wiki 层**（派生知识）→ **状态层**（机器账本）。
-索引层、界面层刻意推迟到 v2，但接口在 v1 留好。
+`wiki/archive/` 不是第四层，是 wiki 层的**历史侧**：已经蒸馏完毕、退出主视图的页面，
+不进 `index.md`，生命周期绑在 §5.11 的会话记忆上。索引层、界面层刻意推迟到 v2，但接口在 v1 留好。
 
 ```toml
 [paths]
@@ -129,6 +136,12 @@ stable_streak  = 3            # 连续几次扫描一致才准自动摄取
 read_retries    = 3           # 读不一致时的重试次数
 lag_warn_rounds = 3           # 连续几轮追不上就降优先级
 on_missing     = "mark_stale"
+
+[memory]                      # 会话记忆分层，见 §5.11
+session_soft_cap = 50         # .wiki/sessions/ 超过此数，汇报里喊「该总结了」，不自动动作
+idle_days        = 60         # 未触达多少天进入封存候选
+purge_cap        = 200        # 会话文件数超过此数
+purge_days       = 180        # 且距最后触达超过此天数；两个条件同时满足才准清原文
 ```
 
 ---
@@ -151,9 +164,13 @@ on_missing     = "mark_stale"
 | `ingest commit` | 校验 + 落账 + 追加 log + 重建 index |
 | `ingest abort` | 丢弃事务 |
 | `checkpoint` | 人工会话收尾：把当前 `wiki/` 登记为新版本（见 §5.6） |
+| `archive status` | 会话记忆水位：活跃会话 / 可封存候选 / 可清理 / 封存后仍被引用数（见 §5.11） |
+| `archive seal` | 封存一组会话为归档摘要：重挂 `sources`、出 index、进 FTS、记版本；需 `--confirm` |
+| `archive purge` | 只清 `.wiki/sessions/` 原文，永不删归档页；需 `--confirm` |
+| `recall` | 归档层唯一读口：摘要 + 入口，`--full` 才给蒸馏正文（见 §5.11） |
 | `approve` / `reject` / `instruct` / `defer` | 决策门四个选项，语义见 §5.6 |
 | `lint` | 机械审计；`--fix` 只修机械项；`--strict` 让 warning 也失败 |
-| `index` / `graph` / `query` | 重建目录 / 链接图 / 检索（FTS5，只索引 `wiki/`，见 §5.9） |
+| `index` / `graph` / `query` | 重建目录 / 链接图 / 检索（FTS5，索引 `wiki/` 含 `archive/` 摘要，见 §5.9） |
 
 **CLI 永不写页面正文**，也不做任何交互提问——需要人确认时用退出码 3 交还给 agent。
 
@@ -268,13 +285,14 @@ lint 会抓到「写了但没账」的孤儿。
 | L3 | 孤儿页（除 index 外无入链） | warning |
 | L4 | index 漂移：磁盘页面集合 ≠ index.md 条目 | error |
 | L5 | log 格式非法、时间倒退 | warning |
-| L6 | `sources` 指向的文件不存在，或哈希与账本不符（→ `stale` 候选） | error |
+| L6 | `sources` 指向的文件不存在，或哈希与账本不符（→ `stale` 候选）；**归档层来源豁免**：指向 `wiki/archive/` 的引用不要求进 raw 账本（见 §5.11） | error |
 | L7 | 无 `sources` 的页面（无源声称） | warning |
 | L8 | 近似重复：标题归一化相同，或 summary 的 token Jaccard ≥ 0.7 | info |
-| L9 | 空页/占位（正文 < `min_page_chars` 或只剩模板）；`asset: true` 的 raw 豁免 | warning |
+| L9 | 空页/占位（正文 < `min_page_chars` 或只剩模板）；`asset: true` 的 raw、`archived: true` 的归档页豁免 | warning |
 | L10 | 账本说已摄取，但无页面引用该源 | warning |
 | L11 | 页面 `updated` 早于新版的源 | warning |
 | L12 | 未被任何页面引用的 asset（图片等） | info |
+| L13 | 归档页零入链且超 `idle_days` 未被检索（→ 可提前清理的候选） | info |
 
 判断层（skill）：跨页矛盾、被新源推翻的结论、反复出现却没建页的概念、跨源缺口、
 下一步该找什么源。CLI 只给料：`graph` 的未链接提及、孤立簇、高扇入页。
@@ -317,6 +335,8 @@ streak 是**跨轮**观察，`settle_seconds` 是**同一时刻**的写入检查
 1. 允许建页、改页、追加 log、重建 index；**禁止删页、禁止合并页、禁止删源**。不可逆动作一律进 review 队列。
 2. 自动写出的页面一律 `status: draft`，人审后改 `stable`。复用现有字段，不新增 schema。
 3. 每轮产出一份 `wiki/audit/<日期>-sync.md`：变了什么、动了哪些页、哪些进了队列。
+4. **永不封存、永不清理归档层**：封存 = 合并 + 删原文，正是第 1 条禁止的不可逆动作。
+   `sync` 收到此类请求直接以退出码 `2` 拒绝（见 §5.11）。
 
 **并发与断点**
 
@@ -456,6 +476,10 @@ staging 跟着变，「库内状态不更新」直接失效。复制必须是真
 而 query 要回答的是「我们记过什么」，不是「原文第几页出现过这个词」。需要原文时按命中里的
 `sources` 路径直接读（见下），不需要全文索引。
 
+**`wiki/archive/` 参与索引**（§5.11）：归档摘要是「原先那组会话文档」的位置替代物，
+不索引它等于把历史从记忆里抹掉。但进索引的只有蒸馏摘要，`recall --full` 才取正文，
+原文（`.wiki/sessions/`）永不进上下文。
+
 **引擎**：SQLite FTS5，与 `state.db` 同库同事务。中文按**单字预切分**（入库前把 `订单处理` 写成
 `订 单 处 理`），`tokenize='unicode61'`；查询侧用短语 `"订 单"`，天然是位置相邻匹配。
 
@@ -499,6 +523,7 @@ staging 跟着变，「库内状态不更新」直接失效。复制必须是真
 | `links` | 跳到相邻页：这个问题还有第二半 |
 | `sources` | `read` 原文，路径**已拼好**，不用它自己查账本 |
 | `backlinks` | 引用数；扇入高的是枢纽页，优先读 |
+| `archived` / `recall` | 归档命中：摘要占位，`recall <id>` 才展开蒸馏正文（§5.11） |
 
 **只给一跳，展开是 agent 的权限**：默认不内联邻居正文，`--expand 1` 才带邻居摘要。
 检索结果要省上下文，不是把图灌进去——10 条命中各带 3 个邻居正文，几万 token 就没了。
@@ -578,6 +603,80 @@ no_text_layer: true          # 说明为什么它没有正文
 
 ---
 
+### 5.11 会话记忆分层 `archive` / `recall`
+
+**问题在哪**：会话是最高产的知识来源，也是最快把 wiki 撑爆的。1000 次对话可能只沉淀 30 条事实——
+高频、低增量、话题高度重复。若一次会话产一份 `raw/`：
+
+- 源数线性膨胀，而 `scan` 每轮对全部 raw 做全量哈希（`src/scan.rs:184`），成本随会话数线性上涨；
+- 更早爆的是**页面侧**：同一事实被反复撰写，`sources` 只增不减，一年后单页挂几十条引用，没人读得动；
+- 每轮 sync 都在改同一批页面，决策门退化成审批疲劳。
+
+**所以会话不进 `raw/`**。`raw/` 的定义是「规范化后的源文件」，会话不是那东西。
+新增的是**封存层** `wiki/archive/`：存的不是原文，是「对过去一段时间的事实源留存」。
+
+| 层 | 位置 | 进 git | 内容 | 谁能读 |
+|---|---|---|---|---|
+| L0 活跃会话 | `.wiki/sessions/<id>.md` | 否 | 原始会话记录，可丢 | 只有写蒸馏文时 |
+| L1 主题页 | `wiki/<type>/<id>.md` | 是 | 当前结论，正常参与 index/lint/query | 所有人 |
+| L2 封存摘要 | `wiki/archive/<period>/<topic>.md` | 是 | 自包含蒸馏文，替代它原先那组会话的位置 | `query` 见摘要，`recall` 取正文 |
+| L3 清理 | 只删 L0 | — | L2 永久保留 | — |
+
+这四层对应 billion-context 的三条理念——分层摘要、只给入口不给正文、摘要必须自包含——
+但**它的生命周期不能照搬**：那边块的生命周期绑在对话上（敢删是因为原文只对当前任务有用），
+这里的生命周期必须绑在「这条事实是否还被引用」。
+
+**三条判定**（缺一条就会误封存或误清理）
+
+1. **封存必须人工指导**，不做自动封存。它同时是「合并」和「删原文」，两条都是不可逆的。
+2. **触发是三轴，不是单一时间**。使用强度因人而异，纯时间阈值对不同强度的人不公平；
+   但只用「未触达时长」又会封存掉最该留的东西——稳定结论（如「VIP 才重试」）本来就长期没人改，
+   未触达恰恰因为它是靠得住的事实。所以：
+   - 容量水位：`.wiki/sessions/` 超过 `memory.session_soft_cap` → 只喊「该总结了」，不动作；
+   - 未触达时间：超 `memory.idle_days`；
+   - 引用度：`graph` 的 backlinks 为 0。**零引用 + 长期未触达**才进候选，仍被引用的一律不动。
+3. **清理双条件取较晚者**：容量（`purge_cap`）与期限（`purge_days`）同时满足才清 L0。
+   高强度使用者不会因期限被误清，低频使用者也不会攒下几千个死文件。
+
+**封存时的簿记**（全由 CLI 做，agent 只写蒸馏正文）
+
+1. 校验：会话存在、未封存、归档 `id` 不与现有页冲突；
+2. 落 L2：`archived: true`、`period`、`origin: conversation`，`sources` 记原会话路径；
+3. **重挂 `sources`**：原本引用这组会话的页面，其 `sources` 改指 L2 路径——不重挂就等于清理时断链；
+4. 出 `index.md`、进 FTS（摘要可搜）、追加 `log.md`；
+5. `state.db` 增 `archive(key, level, sealed_at, last_touched, refs)`；
+6. 记一次 `checkpoint`：归档是不可逆变更，必须有版本可回滚。
+
+**`query` 怎么看待归档**：正常参与索引，命中与普通页同构，多两个字段。
+
+```json
+{"page": "wiki/archive/2026-Q4/vip-retry.md", "archived": true, "period": "2026-Q4",
+ "recall": "llm-wiki recall vip-retry", "origin": "conversation"}
+```
+
+不采用「query 为空时才提示归档」：那等于记住了却想不起来，agent 根本不知道要去看。
+正确形态是归档摘要**占据它原先那组会话的位置**，在 `links` / `sources` 关系里正常出现，
+由 agent 自主决定要不要顺着 `recall` 追溯、追溯哪一篇。正文仍然不注入，一条命中一行入口。
+
+**`recall`：归档层唯一读口**
+
+- 输入归档 `id` 或话题词；输出摘要 + 路径 + 被哪些页引用 + 原文是否还在。
+- 默认只给摘要与入口，`--full` 才返回蒸馏正文；**永不返回 L0 原文**（已过期或已清理，读了就是幻觉来源）。
+- 与 `raw_available` 同风格：取不到时给 `hint`，不让 agent 撞 ENOENT。
+
+**成本要记账**：`archive status` 输出四个数——活跃会话 / 可封存候选 / 可清理 / **封存后仍被引用的归档数**。
+最后一个是这套机制唯一的自证指标：长期为 0，说明归档只是把噪声从 `raw/` 挪到了 `wiki/archive/`，
+该收紧蒸馏标准，而不是继续封存。
+
+**与既有约定的关系**
+
+- CLI 仍不写正文：蒸馏文由 agent 写，CLI 只做搬运、重挂、记账、校验。
+- L6 加豁免：`sources` 指向已封存或已清理的来源时按归档状态判定，不报 error（见 §5.4）。
+- 归档页不进 `index.md`：目录是「当前知识」的视图，归档是「历史证据」，混排会让人误读。
+- 不做向量检索、不做自动摘要：v1 只有「人工指导 + 机械簿记」，蒸馏质量由 skill 纪律负责。
+
+---
+
 ## 6. 文件约定
 
 **页面 frontmatter**
@@ -591,12 +690,17 @@ tags: [支付, 后台]
 sources: [raw/2026-03-01-x.md]
 status: draft|stable|stale
 updated: 2026-10-27         # 只由 CLI 写
+origin: document            # document（缺省）| conversation（会话蒸馏而来）
+archived: false             # 仅 wiki/archive/ 下为 true，替代它原先那组会话来源
 ```
 
 - **机制层固定**（id/title/type/summary/sources/status/updated 必填，类型固定）；
   **枚举层可配**（`types`）。共演进落在 type 集合与正文规范上，校验器不会变成不设防。
 - `sources` 是审计骨架：没有它就是「无源声称」。
+- `origin` 区分来源可信度：缺省 `document`；`conversation` 表示结论来自会话蒸馏，判断层复核时优先看这些页。
 - `updated` 由 CLI **行级替换**写入，保留注释、键序、引号风格、未知字段（不做全量 round-trip）。
+- `SCHEMA.md` 要写清三件事：`archive/` 不进 `index.md`、`../../source/...` 的相对深度、
+  `origin` 与 `archived` 的语义。`init` 模板同步这三行（代码侧由另一程序在写，本稿只定约定）。
 
 **`.wiki/state.db`**（SQLite，不进 git）：`sources(path, hash, size, ingested_at)` + `source_pages` + `versions`
 + `fts`（页面全文索引，单字预切分）。
@@ -617,9 +721,12 @@ updated: 2026-10-27         # 只由 CLI 写
 | `llm-wiki` | 没有 `wiki.toml`；问用法；需要路由；收到决策门 | 初始化、约定解读、调度、纪律、**四选项怎么问** | 任何具体内容 |
 | `wiki-scan` | 「有哪些新文件/哪些没进 wiki」 | 调 `scan`、解释差分、给下一步 | 解析、写页 |
 | `wiki-parse` | 源不是 md、要抽文本 | 调 `parse`、处理失败、图片只登记不识别 | 写 wiki 页 |
-| `wiki-ingest` | 「把这个加进 wiki」 | 读源、讨论要点、写页、commit、会话收尾 `checkpoint` | 手写 index/log/日期 |
+| `wiki-ingest` | 「把这个加进 wiki」 | 读源、讨论要点、写页、commit、会话收尾 `checkpoint`、**会话封存**（写蒸馏文 + `archive seal --confirm`，§5.11） | 手写 index/log/日期；不做自动封存与自动清理 |
 | `wiki-audit` | 「体检」「有没有矛盾」 | 跑 lint、读报告、判断层分析 | 机械修复（交 `--fix`） |
-| `wiki-sync` | 「定时跑」「上游又同步了一批」 | 编排 scan→parse→ingest→lint、产出 staging、汇报决策门、退避 | 初始化、直接合并 |
+| `wiki-sync` | 「定时跑」「上游又同步了一批」 | 编排 scan→parse→ingest→lint、产出 staging、汇报决策门、退避 | 初始化、直接合并、封存与清理归档 |
+
+封存不单独开 skill：它只在人工会话收尾时发生，和 `checkpoint` 同一时刻；塞进 `wiki-sync`
+就会违反「无人值守不合并」那条。
 
 共享约定放在被操作的仓库（`wiki.toml` + `SCHEMA.md`），**不放在 skill 包里**。
 理由：Karpathy 说 schema 是人机共同演进——它属于那个知识库，不属于工具。
@@ -679,6 +786,11 @@ Claude Code 硬约束：frontmatter 只有 `name`(≤64) 与 `description`(≤10
 | 源文件没转换 / 转换失败 | 不进 `raw/`，报 `unconverted`，不阻塞其他源 |
 | 人手改过 `raw/` | 与转换产物哈希不符报 `raw_drift`；`pin: true` 不覆盖，否则重转前列出将被覆盖的文件 |
 | `source/` 改名 | 两层各做一次 `moved` 迁移，`raw/*.md` 的 `source:` 字段同步改 |
+| 会话数量线性膨胀 | 会话不进 `raw/`，只进 `.wiki/sessions/`；超 `session_soft_cap` 只喊「该总结了」，不自动动作 |
+| 清理原文导致溯源断裂 | 封存时把页面 `sources` 重挂到归档页；L6 对归档来源豁免（§5.11） |
+| 封存落进无人值守循环 | `sync` 硬拒（退出码 2），封存只在人工会话里显式执行 |
+| 归档被当成事实源直读 | `recall` 默认只给摘要与入口，`--full` 才给正文，永不返回 L0 原文 |
+| 归档摘要无人回查 | `archive status` 输出「封存后仍被引用的归档数」，长期为 0 就收紧蒸馏标准 |
 
 ---
 
@@ -704,6 +816,9 @@ Claude Code 硬约束：frontmatter 只有 `name`(≤64) 与 `description`(≤10
 - 图片与降级剧本：3 张 png + 1 份扫描件 PDF → `convert` 产出 **4 份** raw，全部 `asset: true`；
   3 份正文是图片链接，扫描件那份带 `no_text_layer: true` 且正文是普通链接 →
   页面引用图片 → lint 0 error（L9 不误报）→ 删掉引用后 L12 报 4 条 info。
+- 会话记忆剧本：造 3 个会话 → `archive status` 报 3 活跃 / 0 候选 → 封存 1 个（agent 写蒸馏文 + `--confirm`）→
+  断言 L2 出现、`index.md` 不含它、`query` 能命中摘要且 hit 带 `recall` → `recall --full` 返回正文且不含 L0 原文 →
+  清掉 L0 后 `lint` 0 error（证明 L6 豁免生效）→ 再删掉主线页里的引用 → L13 报 info。
 - CI 三平台，**不装 poppler/pandoc** 也要绿。
 
 ---
@@ -711,7 +826,7 @@ Claude Code 硬约束：frontmatter 只有 `name`(≤64) 与 `description`(≤10
 ## 11. 推迟到 v2+
 
 query skill（CLI 的 `query` 已在 v1 实现，v2 只加 skill 包装）；向量/关系库后端（替换 `query` 实现，不动上层）；交互界面；docx/xlsx；
-页面级 diff 与「结论演化史」。
+页面级 diff 与「结论演化史」；会话记忆的**自动**蒸馏与自动封存（v1 只有人工指导封存，见 §5.11）。
 
 ---
 
@@ -766,3 +881,13 @@ query skill（CLI 的 `query` 已在 v1 实现，v2 只加 skill 包装）；向
 37. **`min_chars` 是配置项**：§5.2 依赖它判定「内置产出不达标」，但 §3 的 wiki.toml 漏写。
     现补 `[parse].min_chars = 200`，随 T11 落到 `config.rs` 与 `init` 模板；不做成常量，
     因为不同语料（短笔记 vs 长文档）的达标线不同。
+38. **会话不进 `raw/`，进封存层 `wiki/archive/`**：`raw/` 的定义是「规范化后的源文件」，会话不是那东西。
+    归档存蒸馏摘要，替代它原先那组会话的位置；原文放 `.wiki/sessions/`，不进 git，可丢。
+39. **封存必须人工指导，`sync` 硬拒**：封存 = 合并 + 删原文，两条都是 §5.5 禁止的不可逆动作，
+    收到请求即以退出码 `2` 拒绝。v1 不做自动蒸馏，只做人工指导 + 机械簿记。
+40. **封存触发三轴**：容量水位 + 未触达时间 + 引用度为 0。纯时间阈值对使用强度不公平；
+    纯「未触达」会封存掉最靠得住的稳定结论。清理用「容量 + 期限」双条件同时满足，取较晚者。
+41. **清理只删 L0，L2 永久保留**；封存时 CLI 把页面 `sources` 重挂到归档页，
+    L6 对归档来源豁免、L9 对 `archived: true` 豁免。不重挂就必然断链，这是整套机制唯一的硬依赖。
+42. **归档摘要进 `query` 索引**：摘要可搜，`recall --full` 才取蒸馏正文，永不返回 L0 原文。
+    不做「query 为空才提示归档」——那等于记住了却想不起来；由 agent 自主决定追溯哪一篇。
