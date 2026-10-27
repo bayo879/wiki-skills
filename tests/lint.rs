@@ -454,8 +454,8 @@ fn fails_is_strict_about_warnings_only() {
         msg: String::from("x"),
     };
 
-    assert!(!lint::fails(&[info.clone()], true));
-    assert!(!lint::fails(&[warning.clone()], false));
+    assert!(!lint::fails(std::slice::from_ref(&info), true));
+    assert!(!lint::fails(std::slice::from_ref(&warning), false));
     assert!(lint::fails(&[warning], true));
     assert!(lint::fails(&[error], false));
 }
@@ -741,7 +741,7 @@ fn seal_archive(f: &mut Fixture, key: &str, age: i64, recalled: Option<i64>) {
             sources: vec![String::from("queries/a.md")],
             sealed_at: days_ago(age),
             sealed_by: String::from("agent"),
-            last_recalled_at: recalled.map(|days| days_ago(days)),
+            last_recalled_at: recalled.map(days_ago),
             recall_count: i64::from(recalled.is_some()),
         })
         .unwrap();

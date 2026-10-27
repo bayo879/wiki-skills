@@ -218,12 +218,18 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
         .map(|row| (row.page_key.clone(), row))
         .collect();
     let current: BTreeSet<String> = pages.iter().map(|(key, _)| key.clone()).collect();
+    // A `page_meta` row alone does not prove a page is searchable: publishing
+    // through `approve`, `ingest commit` or `archive` records the digest
+    // without touching the FTS table. The digest only counts when the index
+    // also holds the page, or such a page would stay invisible until
+    // `query --reindex`.
+    let indexed: BTreeSet<String> = store.fts_page_ids()?.into_iter().collect();
 
     let mut upserts: Vec<(String, String, String)> = Vec::new();
     let mut metas: Vec<PageMetaRow> = Vec::new();
     for (key, path) in &pages {
         let digest = hash::hash_file(path, true)?;
-        if known.get(key).is_some_and(|row| row.hash == digest) {
+        if known.get(key).is_some_and(|row| row.hash == digest) && indexed.contains(key) {
             continue;
         }
         let Ok((front, body)) = page::read(path) else {
@@ -248,9 +254,9 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
         .filter(|key| !current.contains(*key))
         .cloned()
         .collect();
-    for page_id in store.fts_page_ids()? {
-        if !current.contains(&page_id) {
-            deletes.insert(page_id);
+    for page_id in &indexed {
+        if !current.contains(page_id) {
+            deletes.insert(page_id.clone());
         }
     }
     let deletes: Vec<String> = deletes.into_iter().collect();

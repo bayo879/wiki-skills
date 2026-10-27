@@ -150,8 +150,11 @@ pub fn acquire_with_ttl(root: &Path, ttl_secs: u64) -> Result<Lock> {
 
     let mut reclaimed = false;
     loop {
+        // The body is read first (to detect a takeover) and truncated by
+        // hand afterwards, so the file must not be truncated at open time.
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)

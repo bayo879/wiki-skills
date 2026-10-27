@@ -388,10 +388,8 @@ fn raw_children(parent: ElementRef<'_>, out: &mut String) {
     for child in parent.children() {
         match child.value() {
             Node::Text(text) => out.push_str(&text.text),
-            Node::Element(element) => {
-                if !is_dropped(element.name()) {
-                    raw_children(ElementRef::wrap(child).expect("element nodes wrap"), out);
-                }
+            Node::Element(element) if !is_dropped(element.name()) => {
+                raw_children(ElementRef::wrap(child).expect("element nodes wrap"), out);
             }
             _ => {}
         }

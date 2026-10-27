@@ -434,7 +434,7 @@ fn prune(root: &Path, keep: usize) -> Result<()> {
             owned.push((seq, name));
         }
     }
-    owned.sort_by(|left, right| right.0.cmp(&left.0));
+    owned.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq));
     for (_, name) in owned.into_iter().skip(keep) {
         let victim = dir.join(&name);
         fs::remove_dir_all(&victim).map_err(|source| io(&victim, source))?;

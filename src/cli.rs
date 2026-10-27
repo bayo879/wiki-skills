@@ -26,6 +26,10 @@ pub struct Cli {
 pub enum Command {
     /// Print the version of this binary.
     Version,
+    /// Check the repository's health without changing anything.
+    ///
+    /// Every check runs; the exit code is 1 when one of them fails.
+    Doctor,
     /// Write the contract files and create the engine directories.
     Init {
         /// Rewrite `wiki.toml` and `SCHEMA.md` even if they already exist.

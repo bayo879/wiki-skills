@@ -15,6 +15,7 @@ use llm_wiki::chunk;
 use llm_wiki::cli::{ArchiveCommand, Cli, Command, IngestCommand, ScopeArg};
 use llm_wiki::config::Config;
 use llm_wiki::convert;
+use llm_wiki::doctor::{self, Check, Level};
 use llm_wiki::hash;
 use llm_wiki::ingest;
 use llm_wiki::init;
@@ -61,6 +62,7 @@ fn dispatch(cli: Cli) -> ! {
             },
         ),
         Command::Init { force } => run_init(force),
+        Command::Doctor => run_doctor(),
         Command::Scan => run_scan(),
         Command::Convert { key, limit } => run_convert(key, limit),
         Command::Parse { key, chunk, range } => run_parse(key, chunk, range),
@@ -137,6 +139,38 @@ fn run_init(force: bool) -> ! {
         Ok(outcome) => report::emit("init", outcome),
         Err(err) => report::fail("init", Exit::Usage, "E_IO", &err.to_string()),
     }
+}
+
+/// `doctor` runs the pre-flight checks and reports all of them.
+///
+/// A contract that cannot be loaded is not an invocation error here: the
+/// contract is one of the things being checked, so `doctor` still runs and the
+/// `config` row carries the reason. Any `FAIL` exits 1; warnings and passes
+/// exit 0.
+fn run_doctor() -> ! {
+    let root = wiki_root("doctor");
+    let cfg = Config::load(&root).ok();
+    let checks = doctor::run(&root, cfg.as_ref());
+    let failed = checks.iter().any(|check| check.level == Level::Fail);
+    let exit = if failed { Exit::Error } else { Exit::Ok };
+    report::emit_with("doctor", DoctorData { checks }, exit, human_doctor)
+}
+
+/// Human rendering of the checks: one aligned row each, no summary line (the
+/// exit code is the summary).
+fn human_doctor(data: &DoctorData) -> String {
+    data.checks
+        .iter()
+        .map(|check| {
+            format!(
+                "{:<4}  {:<16}  {}",
+                check.level.label(),
+                check.name,
+                check.detail
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `sync` runs one unattended round under the repository lock.
@@ -1052,6 +1086,12 @@ struct QueryHitsData {
 #[derive(Serialize)]
 struct QueryReindexData {
     indexed: usize,
+}
+
+/// Payload of the `doctor` envelope: every check, in report order.
+#[derive(Serialize)]
+struct DoctorData {
+    checks: Vec<Check>,
 }
 
 /// Maps a clap failure onto the CLI contract: help stays plain text on stdout

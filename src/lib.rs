@@ -9,6 +9,7 @@ pub mod chunk;
 pub mod cli;
 pub mod config;
 pub mod convert;
+pub mod doctor;
 pub mod hash;
 pub mod ingest;
 pub mod init;

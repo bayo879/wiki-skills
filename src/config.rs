@@ -497,7 +497,7 @@ where
 /// Heuristic for a credential written where an environment variable name
 /// belongs: a known token prefix, an `Authorization` header value pasted whole,
 /// or a long whitespace-free blob.
-fn looks_like_token(value: &str) -> bool {
+pub fn looks_like_token(value: &str) -> bool {
     const TOKEN_PREFIXES: [&str; 3] = ["sk-", "ghp_", "eyJ"];
     let value = value.trim();
     let lowered = value.to_ascii_lowercase();

@@ -359,8 +359,10 @@ fn external_parser_rejects_incomplete_configuration() {
         ExternalParser::from_config(&None).unwrap_err().code(),
         "E_BAD_CONFIG"
     );
-    let mut external = ExternalCfg::default();
-    external.url = String::new();
+    let mut external = ExternalCfg {
+        url: String::new(),
+        ..Default::default()
+    };
     assert_eq!(
         ExternalParser::from_config(&Some(external.clone()))
             .unwrap_err()

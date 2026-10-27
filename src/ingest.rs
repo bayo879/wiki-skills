@@ -460,7 +460,7 @@ fn find_staged(staged: &[(String, PathBuf)], id: &str) -> Result<(String, PathBu
     let wanted = strip_md(id);
     let mut hits: Vec<&(String, PathBuf)> = staged
         .iter()
-        .filter(|(rel, _path)| rel == &wanted || page_stem(rel) == wanted)
+        .filter(|(rel, _path)| rel.as_str() == wanted || page_stem(rel) == wanted)
         .collect();
     match hits.len() {
         0 => Err(IngestError::NoStagedPage {

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// DDL for version 1, applied once per database.
 const MIGRATION_1: &str = r#"
@@ -314,6 +314,23 @@ pub enum StoreError {
 /// Result of the store helpers.
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// Whether the linked SQLite was built with FTS5.
+///
+/// The probe opens a private in-memory connection, so it answers a question
+/// about the build rather than about one repository, and it writes nothing.
+/// `doctor` needs that shape: it must be able to say "this binary cannot keep
+/// the index" before a `state.db` exists.
+pub fn fts5_supported() -> Result<bool> {
+    let conn = Connection::open_in_memory()?;
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_compile_options \
+         WHERE compile_options = 'ENABLE_FTS5'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 /// A connection to one `state.db` file.
 pub struct Store {
     conn: Connection,
@@ -390,7 +407,10 @@ impl Store {
     }
 
     /// Reads `PRAGMA user_version`, the schema generation of the file.
-    fn user_version(&self) -> Result<i64> {
+    ///
+    /// Public because `doctor` reports a database left behind by a newer build
+    /// without opening a migration on it.
+    pub fn user_version(&self) -> Result<i64> {
         Ok(self
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))?)
@@ -708,13 +728,7 @@ impl Store {
     /// build is expected to carry it, so a false here is a hard failure for the
     /// query commands rather than something to work around.
     pub fn fts5_available(&self) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT count(*) FROM pragma_compile_options \
-             WHERE compile_options = 'ENABLE_FTS5'",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
+        fts5_supported()
     }
 
     /// Replaces the whole full-text index with `rows` in one transaction.

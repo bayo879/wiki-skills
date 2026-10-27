@@ -820,7 +820,7 @@ fn normalise_link(target: &str, wiki_prefix: &str) -> String {
         .map_or(target, |(head, _)| head)
         .trim();
     loop {
-        let stripped = text.strip_prefix("./").map(|rest| rest).unwrap_or(text);
+        let stripped = text.strip_prefix("./").unwrap_or(text);
         if stripped == text {
             break;
         }

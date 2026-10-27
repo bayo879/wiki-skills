@@ -127,6 +127,19 @@ fn manifest_path(root: &Path) -> PathBuf {
     dir(root).join(MANIFEST)
 }
 
+/// Whether `root`'s staging holds candidate pages waiting for review.
+///
+/// A public face on the walker below, for `doctor`: the ledger's own load path
+/// stays the only place that decides a torn staging is fatal.
+pub fn candidates_present(root: &Path) -> Result<bool> {
+    has_candidates(&dir(root))
+}
+
+/// Whether `root`'s staging ledger file exists.
+pub fn manifest_present(root: &Path) -> bool {
+    manifest_path(root).is_file()
+}
+
 /// Whether staging already holds candidate pages.
 ///
 /// Only regular page files count: an empty directory left behind by a deleted
