@@ -156,8 +156,8 @@ purge_days       = 180        # 且距最后触达超过此天数；两个条件
 |---|---|
 | `init` | 写 `wiki.toml`、`SCHEMA.md`、建目录 |
 | `doctor` | 自检：版本、外部后端、权限、大小写敏感性、裸 token |
-| `scan` | 差分：`new / changed / moved / missing / duplicate / ignored`（见 §5.1 两段） |
-| `convert` | 原始层 → 规范化层：把 `source/` 转成 `raw/*.md`；`--limit` 分段 |
+| `scan` | 差分：`new / changed / moved / missing / duplicate / ignored`，每条带 `layer`；`--apply-moves` 迁移改名账本（见 §5.1 两段） |
+| `convert` | 原始层 → 规范化层：把 `source/` 转成 `raw/*.md`；`--limit` 分段；单个失败不中断，收在 `data.failures` |
 | `parse` | 单文件调试入口：跑指定后端看 markdown 产出，不落 `raw/` |
 | `sync` | 无人值守入口：差分 → 写 staging → 变更报告（见 §5.5） |
 | `ingest begin` | 开事务，返回候选页 |
@@ -195,8 +195,10 @@ purge_days       = 180        # 且距最后触达超过此天数；两个条件
 - 身份键 = 相对仓库根、`/` 分隔、NFC 归一、保留原始大小写。
 - 变更判定 = 内容哈希（blake3）。
 - 输出：`new` / `changed` / `moved` / `missing` / `duplicate` / `ignored`（白名单外只计数）。
+- 每条变更带 `layer`：「`source`」（A 段）或「`raw`」（B 段）——两次扫描输出的形状一致，调用方不用猜是哪个账本给出的。
 - `changed` / `missing` **不自动删页**，只标记，由审计与人决定。
-- 幂等：反复跑不改 state（streak 计数在 sync 里做）。
+- 幂等：反复跑不改 state（streak 计数在 sync 里做）。`moved` 的账本迁移是唯一例外，因此要显式 `--apply-moves`
+  （`sync` 内部自动应用），迁移时若目标键已被另一个账本行占用则报 `E_MOVED_COLLISION` 停下，不覆盖。
 
 `raw/*.md` 的 frontmatter：
 
