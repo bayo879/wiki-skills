@@ -12,6 +12,7 @@
 //! while `dir/a.png` sits two levels down and needs `../../`.
 
 use super::{Extracted, Parser, Result, Source, Warning};
+use crate::paths;
 
 /// Backend id recorded in the raw frontmatter and in command output.
 pub const ID: &str = "builtin-asset";
@@ -19,14 +20,6 @@ pub const ID: &str = "builtin-asset";
 /// Extensions this backend claims, in addition to `svg` (which is text but is
 /// still only linked, because the wiki never inlines it).
 const EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
-
-/// Characters that break a bare markdown link destination.
-///
-/// A destination containing any of them is wrapped in `<...>`, which is the
-/// markdown way to quote a path that would otherwise end the link early
-/// (`#` starts a fragment, `%` an escape, space ends the target, and the angle
-/// brackets themselves would be read as the quoting form).
-const NEEDS_ANGLE: [char; 7] = [' ', '(', ')', '#', '%', '<', '>'];
 
 /// The `builtin-asset` backend.
 pub struct AssetParser;
@@ -94,7 +87,7 @@ pub fn link_for(source_key: &str) -> String {
         .filter(|component| !component.is_empty())
         .count();
     let target = format!("{}source/{source_key}", "../".repeat(depth));
-    if target.chars().any(|ch| NEEDS_ANGLE.contains(&ch)) {
+    if paths::needs_angle(&target) {
         format!("![](<{target}>)")
     } else {
         format!("![]({target})")

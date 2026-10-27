@@ -303,6 +303,34 @@ pub fn pick_backend(cfg: &Config, ext: &str) -> Vec<&'static str> {
 /// both backends fail is there no result, and then both reasons travel together
 /// in [`ParseError::BothFailed`].
 pub fn parse_with(cfg: &Config, src: &Source) -> Result<(Extracted, String)> {
+    let (mut extracted, backend) = parse_with_backend(cfg, src)?;
+    append_below_min_chars(cfg, &mut extracted, &backend);
+    Ok((extracted, backend))
+}
+
+/// Warns when a backend that had to interpret a format produced almost nothing.
+///
+/// A thin result from `html`, `pdf` or the external service usually means the
+/// extraction failed rather than that the source is short, so it is worth
+/// surfacing. `builtin-text` is exempt: it copies the bytes, so a short note is
+/// short on purpose. Assets are exempt too: they are links by design.
+fn append_below_min_chars(cfg: &Config, extracted: &mut Extracted, backend: &str) {
+    if extracted.asset || backend == text::ID {
+        return;
+    }
+    let chars = extracted.markdown.chars().count();
+    if chars < cfg.parse.min_chars {
+        extracted.warnings.push(Warning::new(
+            "below_min_chars",
+            format!(
+                "the {backend} backend produced only {chars} characters (min_chars {})",
+                cfg.parse.min_chars
+            ),
+        ));
+    }
+}
+
+fn parse_with_backend(cfg: &Config, src: &Source) -> Result<(Extracted, String)> {
     let order = pick_backend(cfg, &src.ext);
     let Some(&first) = order.first() else {
         return Err(ParseError::NoParser {

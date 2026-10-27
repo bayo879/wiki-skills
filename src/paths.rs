@@ -118,3 +118,15 @@ pub fn join_key(root: &Path, key: &str) -> PathBuf {
     }
     out
 }
+
+/// Characters that make a bare Markdown link destination ambiguous.
+///
+/// `#` starts a fragment, `%` an escape, a space ends the target, and the angle
+/// brackets themselves would be read as the quoting form. Anything containing
+/// one of these must be wrapped in `<...>`.
+const NEEDS_ANGLE: [char; 7] = [' ', '(', ')', '#', '%', '<', '>'];
+
+/// Whether a relative path needs `<...>` quoting inside a Markdown link.
+pub fn needs_angle(target: &str) -> bool {
+    target.chars().any(|ch| NEEDS_ANGLE.contains(&ch))
+}

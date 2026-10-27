@@ -29,6 +29,7 @@ use walkdir::WalkDir;
 use crate::archive;
 use crate::config::Config;
 use crate::page;
+use crate::paths;
 
 /// First line of every `index.md`.
 const INDEX_TITLE: &str = "# 索引";
@@ -167,11 +168,9 @@ pub fn render_index(pages: &[PageMeta], types: &[String]) -> String {
         for page in section {
             out.push_str("- [");
             push_escaped(&mut out, &page.title);
-            out.push_str("](wiki/");
-            out.push_str(typ);
-            out.push('/');
-            out.push_str(&page.id);
-            out.push_str(".md) — ");
+            out.push_str("](");
+            push_link_target(&mut out, &format!("{}/{}.md", page.typ, page.id));
+            out.push_str(") — ");
             push_truncated(&mut out, &page.summary);
             if page.status == "draft" {
                 out.push_str(DRAFT_MARK);
@@ -180,6 +179,20 @@ pub fn render_index(pages: &[PageMeta], types: &[String]) -> String {
         }
     }
     out
+}
+
+/// Appends a link destination, quoting it when the path would end the link early.
+///
+/// The target is relative to the directory the index lives in, so the same
+/// document works for `wiki/index.md` and `.wiki/staging/index.md`.
+fn push_link_target(out: &mut String, target: &str) {
+    if paths::needs_angle(target) {
+        out.push('<');
+        out.push_str(target);
+        out.push('>');
+    } else {
+        out.push_str(target);
+    }
 }
 
 /// Appends `text` with Markdown link brackets escaped, so a title cannot close

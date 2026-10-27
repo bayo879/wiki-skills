@@ -121,8 +121,18 @@ fn square_brackets_in_titles_are_escaped() {
     let pages = vec![meta("x", "A[B]C", "concept", "stable")];
     let out = render::render_index(&pages, &[String::from("concept")]);
     assert!(
-        out.contains(r"[A\[B\]C](wiki/concept/x.md)"),
+        out.contains(r"[A\[B\]C](concept/x.md)"),
         "link text must escape brackets, got: {out}"
+    );
+}
+
+#[test]
+fn link_targets_that_would_break_are_angle_quoted() {
+    let pages = vec![meta("x", "页", "a b", "stable")];
+    let out = render::render_index(&pages, &[String::from("a b")]);
+    assert!(
+        out.contains("(<a b/x.md>)"),
+        "a space in the target must be quoted, got: {out}"
     );
 }
 
