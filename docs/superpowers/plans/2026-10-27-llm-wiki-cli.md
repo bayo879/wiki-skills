@@ -743,6 +743,8 @@ Expected: FAIL。
 
 相对路径按**源 key 的层级深度**计算：前缀是 `../` 重复「key 的路径分量数」次（含文件名）。`raw/` 镜像 `source/` 的相对结构，所以 `raw/<key 去扩展名>.md` 的深度恰好等于 key 的分量数。例：key `dir/a.png` → 深度 2 → `../../source/dir/a.png`；key `scan.pdf` → 深度 1 → `../source/scan.pdf`。原计划写的「固定 `../../`」在 key 只有一层时是错的（会指到仓库外）。
 
+**本任务还要把后端接线进 `parse::registry`**：Task 8 的 html 后端没有注册，`parse_with("x.html")` 目前报 `E_NO_PARSER`。改为返回 `[text, html, asset]`，并把 `tests/convert_text.rs` 里 `registry().len() == 1` 的断言改成按 id 查找。pdf 由 T10 接、external 由 T11 接。
+
 转义规则：目标路径含空格、`(`、`)`、`#`、`%`、`<`、`>` 中任一 → 用 `<...>` 包裹；否则原样。空文件仍然产出链接，追加 `empty` warning。
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -1003,7 +1005,7 @@ git commit -m "feat: utf8-safe chunking with on-demand ranges"
 - Produces:
   - `store::RawRow { key: String, hash: String, source_key: String, converted_at: String }`
   - `Store::all_raws(&self) -> Result<Vec<RawRow>>`、`get_raw(&self, key: &str) -> Result<Option<RawRow>>`、`upsert_raw(&mut self, row: &RawRow) -> Result<()>`
-  - `scan::scan_raw(root, cfg, store) -> Result<Vec<Change>>`
+  - `scan::scan_raw(root, cfg, store) -> Result<ScanReport>`（与 `scan_source` 一致，测试取 `.changes`）
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1061,7 +1063,7 @@ Expected: PASS。
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/store.rs src/scan.rs src/lib.rs tests/scan_raw.rs
+git add src/store.rs src/scan.rs src/convert.rs src/lib.rs tests/scan_raw.rs
 git commit -m "feat: raw layer scan and migration v2"
 ```
 
