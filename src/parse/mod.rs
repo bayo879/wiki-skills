@@ -9,6 +9,7 @@
 //! Backend ids are stable strings because they end up in the raw frontmatter and
 //! in command output.
 
+pub mod html;
 pub mod text;
 
 use std::path::Path;
