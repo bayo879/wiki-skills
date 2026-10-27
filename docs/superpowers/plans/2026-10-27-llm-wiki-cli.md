@@ -1152,6 +1152,10 @@ git commit -m "feat: isolated staging snapshot with manifest"
 
 ### Task 15: ingest 三段（begin / commit / abort）
 
+> **执行顺序：T16 先于 T15。** `commit` 要调 `render::write_index`，而 render 在 T16，依赖倒挂。先做 T16（渲染），再做本任务。
+
+> 接口补充：`ingest::begin(root, cfg, store, input: &BeginInput) -> Result<BeginReport>`；`PageRef { id: String, path: String }`（`path` 是相对仓库根的页面路径，如 `wiki/concept/retry.md`）。
+
 **Files:**
 - Create: `src/ingest.rs`
 - Modify: `src/lib.rs`, `src/cli.rs`
