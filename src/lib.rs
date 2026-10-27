@@ -10,3 +10,4 @@ pub mod hash;
 pub mod init;
 pub mod paths;
 pub mod report;
+pub mod store;
