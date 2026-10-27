@@ -40,6 +40,7 @@ use chrono::{Local, NaiveDate};
 use serde::Serialize;
 use walkdir::WalkDir;
 
+use crate::archive;
 use crate::config::Config;
 use crate::hash;
 use crate::page::{self, PageError};
@@ -185,6 +186,7 @@ pub fn lint(root: &Path, cfg: &Config, store: &Store) -> Result<Vec<Finding>> {
     check_page_meta(root, store, &pages, &mut found)?;
     check_log(root, cfg, &mut found);
     check_unreferenced_assets(store, &cited, &mut found)?;
+    check_idle_summaries(root, cfg, store, &pages, &mut found)?;
 
     found.sort_by(|a, b| {
         b.level
@@ -422,10 +424,18 @@ fn check_duplicate_ids(pages: &[PageInfo], found: &mut Vec<Finding>) {
 }
 
 /// `L6`: a page's `sources` must name a file that exists.
+///
+/// A summary reference is exempt: after a seal re-hangs `sources` onto
+/// `wiki/archive/<id>.md`, the summary is read through `recall` and its file may
+/// legitimately leave the tree with a purge, so requiring it to exist would make
+/// a clean archive look broken.
 fn check_missing_sources(root: &Path, cfg: &Config, pages: &[PageInfo], found: &mut Vec<Finding>) {
     let raw_prefix = cfg.paths.raw.trim_start_matches("./").trim_end_matches('/');
     for info in pages {
         for source in &info.front.sources {
+            if is_archive_reference(source, cfg) {
+                continue;
+            }
             let base = source
                 .split_once('#')
                 .map_or(source.as_str(), |(head, _)| head);
@@ -456,9 +466,14 @@ fn check_missing_sources(root: &Path, cfg: &Config, pages: &[PageInfo], found: &
 ///
 /// Whitespace around the body does not count, and characters are `char`s, not
 /// bytes: a nine-character Chinese body is nine, however many bytes it takes.
+/// An archived summary is exempt: it is a distillation, and two sentences about a
+/// month are all it promises.
 fn check_short_pages(cfg: &Config, pages: &[PageInfo], found: &mut Vec<Finding>) {
     let minimum = cfg.audit.min_page_chars;
     for info in pages {
+        if is_archived(&info.front) {
+            continue;
+        }
         let chars = info.body.trim().chars().count();
         if chars < minimum {
             found.push(Finding::new(
@@ -507,11 +522,21 @@ fn check_unledgered_raws(
 }
 
 /// Which raws each page cites, as raw-relative keys.
+///
+/// A summary reference is not a raw file, so it never enters the ledger
+/// accounting the caller builds on this map.
 fn cited_raws(cfg: &Config, pages: &[PageInfo]) -> BTreeMap<String, Vec<String>> {
     let prefix = cfg.paths.raw.clone();
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for info in pages {
-        for key in staging::source_keys(&info.front.sources, &prefix) {
+        let sources: Vec<String> = info
+            .front
+            .sources
+            .iter()
+            .filter(|source| !is_archive_reference(source, cfg))
+            .cloned()
+            .collect();
+        for key in staging::source_keys(&sources, &prefix) {
             out.entry(key).or_default().push(info.key.clone());
         }
     }
@@ -630,6 +655,105 @@ fn is_asset(front: &page::FrontMatter) -> bool {
         .extra
         .iter()
         .any(|(key, value)| key == "asset" && value.trim() == "true")
+}
+
+/// Whether a page is an archived summary (`archived: true`), whose body is a
+/// distillation and whose citations were re-hung by a seal.
+fn is_archived(front: &page::FrontMatter) -> bool {
+    front
+        .extra
+        .iter()
+        .any(|(key, value)| key == "archived" && value.trim() == "true")
+}
+
+/// Whether a `sources` entry names a conversation summary rather than a raw
+/// file.
+fn is_archive_reference(source: &str, cfg: &Config) -> bool {
+    resolved_reference(source, cfg).starts_with(&format!("{}/", archive::DIR))
+}
+
+/// The wiki-relative name a reference resolves to.
+///
+/// A summary citation is written from the page, so it may arrive as
+/// `../../wiki/archive/x.md`, `wiki/archive/x.md` or `archive/x.md`; dropping the
+/// leading `.` segments and the wiki prefix leaves one name to compare.
+fn resolved_reference(target: &str, cfg: &Config) -> String {
+    let mut text = target
+        .split_once('#')
+        .map_or(target, |(head, _)| head)
+        .trim();
+    while let Some(rest) = text.strip_prefix("./").or_else(|| text.strip_prefix("../")) {
+        text = rest;
+    }
+    normalise_link(text, &cfg.paths.wiki)
+}
+
+/// `L13`: a summary nothing cites and nobody recalled is dead weight.
+///
+/// The age counts from the last `recall`, falling back to the seal: a summary no
+/// page points at and no session has read is invisible to the wiki, and the next
+/// purge is the only thing that will make it disappear.
+///
+/// Inbound references are the whole wiki's `sources` and `[[links]]`; a summary
+/// citing another summary does not keep it alive, which is the same rule
+/// `archive::purge` applies to the pages it may delete.
+fn check_idle_summaries(
+    root: &Path,
+    cfg: &Config,
+    store: &Store,
+    pages: &[PageInfo],
+    found: &mut Vec<Finding>,
+) -> Result<()> {
+    let archives = store.all_archives()?;
+    if archives.is_empty() {
+        return Ok(());
+    }
+    let archive_dir = archive::dir(root, cfg);
+    let mut inbound: BTreeSet<String> = BTreeSet::new();
+    for info in pages {
+        if root.join(&info.key).starts_with(&archive_dir) {
+            continue;
+        }
+        for source in &info.front.sources {
+            let name = resolved_reference(source, cfg);
+            if name.starts_with(&format!("{}/", archive::DIR)) {
+                inbound.insert(name);
+            }
+        }
+        for link in wikilinks(&info.body) {
+            inbound.insert(resolved_reference(&link, cfg));
+        }
+    }
+
+    let today = Local::now().date_naive();
+    for row in &archives {
+        let rel = rel_page(&row.key, &cfg.paths.wiki);
+        let stem = rel.rsplit('/').next().unwrap_or(&rel);
+        if inbound.contains(&rel) || inbound.contains(stem) {
+            continue;
+        }
+        let Some(last) = row
+            .last_recalled_at
+            .as_deref()
+            .and_then(archive::parse_date)
+            .or_else(|| archive::parse_date(&row.sealed_at))
+        else {
+            // An unreadable timestamp cannot prove the summary is idle, and the
+            // safe direction for an advisory finding is silence.
+            continue;
+        };
+        let idle = (today - last).num_days();
+        if idle <= i64::from(cfg.memory.idle_days) {
+            continue;
+        }
+        found.push(Finding::new(
+            "L13",
+            Level::Info,
+            Some(row.key.clone()),
+            format!("no page cites this summary and it has not been recalled in {idle} days"),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a raw file behaves like an asset: an image by extension, on either

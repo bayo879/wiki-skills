@@ -10,7 +10,8 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
-use llm_wiki::cli::{Cli, Command, IngestCommand};
+use llm_wiki::archive;
+use llm_wiki::cli::{ArchiveCommand, Cli, Command, IngestCommand};
 use llm_wiki::config::Config;
 use llm_wiki::convert;
 use llm_wiki::ingest;
@@ -66,6 +67,8 @@ fn dispatch(cli: Cli) -> ! {
         Command::Reject { reason } => run_reject(reason),
         Command::Instruct { text } => run_instruct(text),
         Command::Defer => run_defer(),
+        Command::Archive { command } => run_archive(command),
+        Command::Recall { query, full } => run_recall(query, full),
     }
 }
 
@@ -347,6 +350,186 @@ fn fail_version(cmd: &str, err: &version::VersionError) -> ! {
     report::fail(cmd, exit, err.code(), &err.to_string())
 }
 
+/// `archive` inspects, seals or clears the conversation summaries.
+///
+/// The summary body is never written here: the agent writes
+/// `wiki/archive/<id>.md` first, and `seal` only records it and re-hangs the
+/// pages that cited the sealed sources.
+fn run_archive(command: ArchiveCommand) -> ! {
+    let cmd = "archive";
+    let root = wiki_root(cmd);
+    let cfg = load_config(cmd, &root);
+    let mut store = open_store(cmd, &root, &cfg);
+
+    match command {
+        ArchiveCommand::Status => match archive::status(&root, &cfg, &store) {
+            Ok(outcome) => report::emit_with(
+                cmd,
+                ArchiveStatusData {
+                    action: "status",
+                    archives: outcome.archives,
+                    live_sessions: outcome.live_sessions,
+                    purge_candidates: outcome.purge_candidates,
+                    still_referenced: outcome.still_referenced,
+                    note: outcome.note,
+                },
+                Exit::Ok,
+                human_archive_status,
+            ),
+            Err(err) => fail_archive(cmd, &err),
+        },
+        ArchiveCommand::Seal {
+            sources,
+            id,
+            title,
+            period_start,
+            period_end,
+            by,
+        } => {
+            // `sealed_by` is a closed vocabulary; a third value would make the
+            // record unfalsifiable.
+            if by != "human" && by != "agent" {
+                report::fail(
+                    cmd,
+                    Exit::Usage,
+                    "E_USAGE",
+                    &format!("`--by` is `human` or `agent`, not `{by}`"),
+                );
+            }
+            let req = archive::SealRequest {
+                sources,
+                id,
+                title,
+                period_start,
+                period_end,
+                by,
+            };
+            match archive::seal(&root, &cfg, &mut store, &req) {
+                Ok(outcome) => report::emit_with(
+                    cmd,
+                    ArchiveSealData {
+                        action: "seal",
+                        key: outcome.key,
+                        sources: outcome.sources,
+                        pages: outcome.pages,
+                        updated_pages: outcome.updated_pages,
+                    },
+                    Exit::Ok,
+                    human_archive_seal,
+                ),
+                Err(err) => fail_archive(cmd, &err),
+            }
+        }
+        ArchiveCommand::Purge { dry_run, yes } => {
+            let req = archive::PurgeRequest { dry_run, yes };
+            match archive::purge(&root, &cfg, &mut store, &req) {
+                Ok(outcome) => report::emit_with(
+                    cmd,
+                    ArchivePurgeData {
+                        action: "purge",
+                        candidates: outcome.candidates,
+                        sources: outcome.sources,
+                        deleted: outcome.deleted,
+                        dry_run: outcome.dry_run,
+                    },
+                    Exit::Ok,
+                    human_archive_purge,
+                ),
+                Err(err) => fail_archive(cmd, &err),
+            }
+        }
+    }
+}
+
+/// `recall` searches the sealed summaries.
+///
+/// Configuration is loaded only to find the ledger: the search itself depends on
+/// nothing the config could change.
+fn run_recall(query: String, full: bool) -> ! {
+    let cmd = "recall";
+    let root = wiki_root(cmd);
+    let cfg = load_config(cmd, &root);
+    let mut store = open_store(cmd, &root, &cfg);
+    let req = archive::RecallRequest { query, full };
+    match archive::recall(&root, &mut store, &req) {
+        Ok(outcome) => report::emit_with(
+            cmd,
+            RecallData {
+                hits: outcome.hits.into_iter().map(RecallHitData::from).collect(),
+                missing: outcome.missing,
+            },
+            Exit::Ok,
+            human_recall,
+        ),
+        Err(err) => fail_archive(cmd, &err),
+    }
+}
+
+/// A purge that needs a human is a third outcome (exit 3), a recall that matched
+/// nothing is a finding (exit 1), and every other refusal — an unledgered key, an
+/// already sealed one, a missing summary, a bad query, a broken ledger — is the
+/// caller's or the environment's mistake (exit 2).
+fn fail_archive(cmd: &str, err: &archive::ArchiveError) -> ! {
+    let exit = match err {
+        archive::ArchiveError::NeedsConfirmation => Exit::NeedsConfirm,
+        archive::ArchiveError::NoHit => Exit::Error,
+        _ => Exit::Usage,
+    };
+    report::fail(cmd, exit, err.code(), &err.to_string())
+}
+
+/// The four numbers, one per line, so a diff between two runs reads as a diff.
+fn human_archive_status(data: &ArchiveStatusData) -> String {
+    [
+        format!("summaries: {}", data.archives),
+        format!("live sessions: {}", data.live_sessions),
+        format!("purge candidates: {}", data.purge_candidates),
+        format!("still referenced: {}", data.still_referenced),
+    ]
+    .join("\n")
+}
+
+/// One line: what was sealed, and how many pages moved to cite it.
+fn human_archive_seal(data: &ArchiveSealData) -> String {
+    format!("sealed {} ({} pages re-hung)", data.key, data.updated_pages)
+}
+
+/// The candidates first, then the counts that explain them.
+fn human_archive_purge(data: &ArchivePurgeData) -> String {
+    let mut lines: Vec<String> = data
+        .candidates
+        .iter()
+        .map(|key| format!("candidate: {key}"))
+        .collect();
+    lines.push(format!("deleted: {}", data.deleted));
+    lines.push(format!("sources: {}", data.sources));
+    lines.push(format!("dry run: {}", data.dry_run));
+    lines.join("\n")
+}
+
+/// Each hit as `title [period] key` with its body indented beneath, so a human
+/// can tell the hit from the summary it quotes.
+fn human_recall(data: &RecallData) -> String {
+    let mut lines = Vec::new();
+    for hit in &data.hits {
+        lines.push(format!(
+            "{} [{}..{}] {}",
+            hit.title, hit.period_start, hit.period_end, hit.key
+        ));
+        for line in hit.body.lines() {
+            if line.is_empty() {
+                lines.push(String::new());
+            } else {
+                lines.push(format!("    {line}"));
+            }
+        }
+    }
+    if data.missing > 0 {
+        lines.push(format!("missing summaries: {}", data.missing));
+    }
+    lines.join("\n")
+}
+
 /// `lint` audits the wiki; with `--fix` it repairs the mechanical defects
 /// first, then reports what is left.
 ///
@@ -454,6 +637,66 @@ struct ParseData {
     chars: usize,
     warnings: Vec<Warning>,
     markdown_head: String,
+}
+
+/// Payload of the `archive status` success envelope.
+#[derive(Serialize)]
+struct ArchiveStatusData {
+    action: &'static str,
+    archives: usize,
+    live_sessions: usize,
+    purge_candidates: usize,
+    still_referenced: usize,
+    note: String,
+}
+
+/// Payload of the `archive seal` success envelope.
+#[derive(Serialize)]
+struct ArchiveSealData {
+    action: &'static str,
+    key: String,
+    sources: Vec<String>,
+    pages: Vec<String>,
+    updated_pages: usize,
+}
+
+/// Payload of the `archive purge` success envelope.
+#[derive(Serialize)]
+struct ArchivePurgeData {
+    action: &'static str,
+    candidates: Vec<String>,
+    sources: usize,
+    deleted: usize,
+    dry_run: bool,
+}
+
+/// Payload of the `recall` success envelope.
+#[derive(Serialize)]
+struct RecallData {
+    hits: Vec<RecallHitData>,
+    missing: usize,
+}
+
+/// One hit: the summary's identity, its period and the text to read.
+#[derive(Serialize)]
+struct RecallHitData {
+    key: String,
+    title: String,
+    period_start: String,
+    period_end: String,
+    body: String,
+}
+
+impl From<archive::RecallHit> for RecallHitData {
+    fn from(hit: archive::RecallHit) -> Self {
+        Self {
+            key: hit.key,
+            title: hit.title,
+            period_start: hit.period_start,
+            period_end: hit.period_end,
+            body: hit.body,
+        }
+    }
 }
 
 /// Maps a clap failure onto the CLI contract: help stays plain text on stdout

@@ -26,6 +26,13 @@ const DIRS: [&str; 10] = [
 /// The two human-editable contract files and the content `init` gives them.
 const CONTRACT_FILES: [(&str, &str); 2] = [("wiki.toml", WIKI_TOML), ("SCHEMA.md", SCHEMA_MD)];
 
+/// The engine's `.gitignore`: derived state, one path or pattern per line.
+///
+/// `versions/` is deliberately absent. A snapshot is the history a rollback
+/// needs, so it is content and belongs in git; the ledger, the cache and the
+/// staging area are rebuilt by running the tool.
+const GITIGNORE: &str = "cache/\nstaging/\nsessions/\nstate.db\nstate.db-wal\nstate.db-shm\nlock\n";
+
 /// What one `init` run did, split by path so the caller can show both sides.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct InitOutcome {
@@ -80,6 +87,19 @@ pub fn run(root: &Path, force: bool) -> Result<InitOutcome> {
             source,
         })?;
         outcome.created.push(name.to_string());
+    }
+
+    // Not a contract file: it is written once and then belongs to the user, so
+    // `--force` does not rewrite it either.
+    let gitignore = root.join(".wiki").join(".gitignore");
+    if gitignore.exists() {
+        outcome.skipped.push(String::from(".wiki/.gitignore"));
+    } else {
+        std::fs::write(&gitignore, GITIGNORE).map_err(|source| InitError::Io {
+            path: gitignore.clone(),
+            source,
+        })?;
+        outcome.created.push(String::from(".wiki/.gitignore"));
     }
 
     Ok(outcome)
@@ -188,6 +208,13 @@ const SCHEMA_MD: &str = r#"# Page schema
     ![说明](../../source/<相对路径>)
 
 `raw/` 镜像 `source/` 的相对结构，asset 型 raw 用与自身深度相符的相对路径。
+
+## 归档页
+
+`wiki/archive/<id>.md` 放会话摘要，但不进 `index.md`：它记录的是记忆，不是知识目录的条目。
+归档页同样位于 `wiki/` 之下，引用 `source/` 的深度与普通页面一致，也写 `../../source/<相对路径>`。
+归档页的 frontmatter 另有两个字段：`origin`（`document` / `conversation`，说明摘要由文档还是会话蒸馏而来）
+与 `archived: true`（只在 `wiki/archive/` 下为真，等于声明「这是摘要，不是页面」，因而不受空页规则约束）。
 
 ## status 三态
 

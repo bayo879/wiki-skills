@@ -328,10 +328,8 @@ fn recall(
     full: bool,
 ) -> std::result::Result<llm_wiki::archive::RecallReport, llm_wiki::archive::ArchiveError> {
     let root = f.root().to_path_buf();
-    let cfg = f.cfg.clone();
     llm_wiki::archive::recall_at(
         &root,
-        &cfg,
         &mut f.store,
         &RecallRequest {
             query: String::from(query),

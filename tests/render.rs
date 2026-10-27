@@ -279,3 +279,23 @@ fn unknown_types_come_after_configured_ones_sorted_by_name() {
     let zzz = out.find("## zzz").unwrap();
     assert!(concept < aaa && aaa < zzz, "got: {out}");
 }
+
+// ------------------------------------------------------------------ archive
+
+#[test]
+fn index_leaves_the_archive_out() {
+    let d = tempdir().unwrap();
+    llm_wiki::init::run(d.path(), false).unwrap();
+    let cfg = Config::load(d.path()).unwrap();
+    write_page(d.path(), "concept", "a", "甲");
+    write_page(d.path(), "archive", "2026-05", "五月");
+
+    let count = render::write_index(d.path(), &cfg).unwrap();
+    assert_eq!(count, 1, "a summary is not a catalogue entry");
+    let index = std::fs::read_to_string(d.path().join("wiki/index.md")).unwrap();
+    assert!(index.contains("甲"), "{index}");
+    assert!(!index.contains("五月"), "{index}");
+    // The index is the only consumer that skips the archive; `lint` still reads
+    // the page, so `index_text` must agree with what was written.
+    assert_eq!(render::index_text(d.path(), &cfg).unwrap(), index);
+}

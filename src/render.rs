@@ -26,6 +26,7 @@ use std::path::{Component, Path, PathBuf};
 use chrono::NaiveDate;
 use walkdir::WalkDir;
 
+use crate::archive;
 use crate::config::Config;
 use crate::page;
 
@@ -271,6 +272,12 @@ pub fn index_text(root: &Path, cfg: &Config) -> Result<String> {
 fn index_pages(wiki_dir: &Path) -> Result<Vec<PageMeta>> {
     let mut pages = Vec::new();
     for path in page_files(wiki_dir)? {
+        // A summary is what the wiki remembers, not what it knows: `index.md`
+        // catalogues the pages a reader can be sent to, and a distillation of
+        // past sessions is read through `recall`.
+        if is_summary(wiki_dir, &path) {
+            continue;
+        }
         let (front, _body) = page::read(&path)?;
         pages.push(PageMeta {
             id: if front.id.is_empty() {
@@ -289,6 +296,14 @@ fn index_pages(wiki_dir: &Path) -> Result<Vec<PageMeta>> {
         });
     }
     Ok(pages)
+}
+
+/// Whether `path` lives under the wiki's archive directory.
+fn is_summary(wiki_dir: &Path, path: &Path) -> bool {
+    path.strip_prefix(wiki_dir)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .is_some_and(|first| first.as_os_str() == archive::DIR)
 }
 
 /// Every page file under `dir`, sorted by path.

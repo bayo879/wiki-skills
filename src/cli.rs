@@ -89,6 +89,57 @@ pub enum Command {
     },
     /// Keep the queue for later without changing any state.
     Defer,
+    /// Inspect, seal or clear the conversation summaries.
+    Archive {
+        #[command(subcommand)]
+        command: ArchiveCommand,
+    },
+    /// Search the sealed conversation summaries.
+    Recall {
+        /// Case-insensitive substring of the title, summary or body.
+        query: String,
+        /// Return each whole summary instead of its opening excerpt.
+        #[arg(long)]
+        full: bool,
+    },
+}
+
+/// The three verbs of the archive layer.
+#[derive(Debug, Subcommand)]
+pub enum ArchiveCommand {
+    /// Report the four numbers that say whether the layering keeps up.
+    Status,
+    /// Record a summary the agent already wrote, and re-hang the pages that
+    /// cite the sealed sources.
+    Seal {
+        /// Ledger keys of the sources being sealed; repeatable.
+        #[arg(long)]
+        sources: Vec<String>,
+        /// Summary id; defaults to the `YYYY-MM` of `--period-end`.
+        #[arg(long)]
+        id: Option<String>,
+        /// Summary title, for the human rendering only.
+        #[arg(long)]
+        title: Option<String>,
+        /// First day the summary covers; defaults to the first of the month.
+        #[arg(long)]
+        period_start: Option<chrono::NaiveDate>,
+        /// Last day the summary covers; defaults to today.
+        #[arg(long)]
+        period_end: Option<chrono::NaiveDate>,
+        /// Who sealed it: `human` or `agent`.
+        #[arg(long, default_value = "agent")]
+        by: String,
+    },
+    /// Clear the summaries that are over capacity and past their deadline.
+    Purge {
+        /// Report the candidates and delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// The human said yes; without it a purge only reports what it needs.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// The three verbs of an ingest round.

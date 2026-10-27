@@ -718,3 +718,134 @@ fn begin_without_a_source_is_an_error_the_cli_reports() {
     .unwrap_err();
     assert_eq!(err.code(), "E_NO_SOURCE");
 }
+
+// ------------------------------------------------------- archive exemptions
+
+/// A summary page: an ordinary page marked `archived: true`.
+fn archived_page(id: &str) -> String {
+    page_text(id, "concept", BODY).replace("status: stable", "status: stable\narchived: true")
+}
+
+/// `days` before today, so a fixture ages with the wall clock.
+fn days_ago(days: i64) -> String {
+    (Local::now().date_naive() - chrono::Duration::days(days)).to_string()
+}
+
+/// Records a sealed summary, sealed (or last read) `age` days ago.
+fn seal_archive(f: &mut Fixture, key: &str, age: i64, recalled: Option<i64>) {
+    f.db()
+        .upsert_archive(&llm_wiki::store::ArchiveRow {
+            key: String::from(key),
+            period_start: String::from("2026-01-01"),
+            period_end: String::from("2026-01-31"),
+            sources: vec![String::from("queries/a.md")],
+            sealed_at: days_ago(age),
+            sealed_by: String::from("agent"),
+            last_recalled_at: recalled.map(|days| days_ago(days)),
+            recall_count: i64::from(recalled.is_some()),
+        })
+        .unwrap();
+}
+
+#[test]
+fn l6_exempts_a_source_in_the_archive() {
+    let f = Fixture::new();
+    // A seal replaces the sealed sources with the summary, whose bytes are the
+    // distilled text rather than a raw file: it is not under `raw/`, and
+    // requiring one would make every sealed page fail the audit.
+    let text = page_text("a", "concept", BODY).replace(
+        "status: stable",
+        "status: stable\nsources: [wiki/archive/2026-01.md]",
+    );
+    f.put_page("concept", "a", &text);
+    assert!(only(&f.lint(), "L6").is_empty());
+}
+
+#[test]
+fn l6_still_reports_a_missing_source_beside_an_archive_one() {
+    let f = Fixture::new();
+    let text = page_text("a", "concept", BODY).replace(
+        "status: stable",
+        "status: stable\nsources: [wiki/archive/2026-01.md, raw/missing.md]",
+    );
+    f.put_page("concept", "a", &text);
+    let findings = f.lint();
+    let l6 = only(&findings, "L6");
+    assert_eq!(l6.len(), 1, "the exemption is per reference: {l6:?}");
+    assert!(l6[0].msg.contains("raw/missing.md"));
+}
+
+#[test]
+fn l8_exempts_an_archived_page() {
+    let f = Fixture::new();
+    // A summary may be short: it is a distillation, not a page with prose.
+    let text = archived_page("2026-01").replace(BODY, "短。");
+    f.put_page("archive", "2026-01", &text);
+    assert!(only(&f.lint(), "L8").is_empty(), "{:?}", f.lint());
+}
+
+#[test]
+fn l13_reports_an_idle_summary_nothing_cites() {
+    let mut f = Fixture::new();
+    f.put_page("archive", "2026-01", &archived_page("2026-01"));
+    seal_archive(&mut f, "wiki/archive/2026-01.md", 200, None);
+
+    let findings = f.lint();
+    let l13 = only(&findings, "L13");
+    assert_eq!(l13.len(), 1, "{findings:?}");
+    assert_eq!(l13[0].level, Level::Info);
+    assert_eq!(l13[0].page.as_deref(), Some("wiki/archive/2026-01.md"));
+    assert!(l13[0].msg.contains("200"), "{}", l13[0].msg);
+}
+
+#[test]
+fn l13_ignores_a_summary_a_page_still_cites() {
+    let mut f = Fixture::new();
+    f.put_page("archive", "2026-01", &archived_page("2026-01"));
+    let text = page_text("a", "concept", BODY).replace(
+        "status: stable",
+        "status: stable\nsources: [wiki/archive/2026-01.md]",
+    );
+    f.put_page("concept", "a", &text);
+    seal_archive(&mut f, "wiki/archive/2026-01.md", 200, None);
+    assert!(only(&f.lint(), "L13").is_empty());
+}
+
+#[test]
+fn l13_counts_a_wikilink_as_an_inbound_reference() {
+    let mut f = Fixture::new();
+    f.put_page("archive", "2026-01", &archived_page("2026-01"));
+    f.put_page(
+        "concept",
+        "a",
+        &page_text("a", "concept", &format!("{BODY} 详见 [[2026-01]]。")),
+    );
+    seal_archive(&mut f, "wiki/archive/2026-01.md", 200, None);
+    assert!(only(&f.lint(), "L13").is_empty(), "{:?}", f.lint());
+}
+
+#[test]
+fn l13_ignores_a_summary_recalled_recently() {
+    let mut f = Fixture::new();
+    f.put_page("archive", "2026-01", &archived_page("2026-01"));
+    // The deadline runs from the last read, not the seal: a recall resets it.
+    seal_archive(&mut f, "wiki/archive/2026-01.md", 400, Some(3));
+    assert!(only(&f.lint(), "L13").is_empty());
+}
+
+#[test]
+fn l13_ignores_a_summary_sealed_within_the_window() {
+    let mut f = Fixture::new();
+    f.put_page("archive", "2026-01", &archived_page("2026-01"));
+    seal_archive(&mut f, "wiki/archive/2026-01.md", 5, None);
+    assert!(only(&f.lint(), "L13").is_empty());
+}
+
+#[test]
+fn l13_ignores_an_archive_page_with_no_ledger_row() {
+    let f = Fixture::new();
+    // A hand-written page under `archive/` was never sealed, so nothing knows
+    // its period; reporting it would be a guess about age.
+    f.put_page("archive", "2026-01", &archived_page("2026-01"));
+    assert!(only(&f.lint(), "L13").is_empty());
+}

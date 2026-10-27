@@ -7,10 +7,10 @@
 //! a record disappears every page still citing it turns into a dangling
 //! `sources` entry and `lint` fails the whole repository.
 //!
-//! This module owns the *inspection* half of that: [`status`] reports the four
-//! numbers that tell a human whether the layering is keeping up. Sealing and
-//! purging mutate the tree and live in [`seal`] and [`purge`], which are still
-//! to be written.
+//! This module owns the whole archive layer: [`status`] reports the four
+//! numbers that tell a human whether the layering is keeping up, [`seal`]
+//! records a summary and re-hangs its citations, [`purge`] clears what is both
+//! over capacity and unread, and [`recall`] is the only reader of the summaries.
 //!
 //! `archive status` must never write: it is the command a scheduled job runs to
 //! decide whether to nudge a human, and a status command with side effects
@@ -339,9 +339,15 @@ fn normalise_keys(cfg: &Config, sources: &[String]) -> Vec<String> {
     }
     out
 }
+/// The archive directory's name inside the wiki tree.
+///
+/// `render` reads it to keep summaries out of the catalogue and `lint` reads it
+/// to exempt their references, so the name has a single spelling.
+pub const DIR: &str = "archive";
+
 /// The archive directory for `root`, relative to the wiki tree.
 pub fn dir(root: &Path, cfg: &Config) -> PathBuf {
-    root.join(&cfg.paths.wiki).join("archive")
+    root.join(&cfg.paths.wiki).join(DIR)
 }
 
 /// The session scratch directory for `root`.
@@ -413,7 +419,10 @@ fn is_purge_candidate(
 }
 
 /// The date part of an ISO timestamp or bare date.
-fn parse_date(text: &str) -> Option<NaiveDate> {
+///
+/// `lint`'s idle-summary rule ages a row the same way `purge` does, so the two
+/// agree on what "days since" means.
+pub(crate) fn parse_date(text: &str) -> Option<NaiveDate> {
     let head: String = text.chars().take(10).collect();
     NaiveDate::parse_from_str(&head, "%Y-%m-%d").ok()
 }
@@ -604,19 +613,16 @@ pub struct RecallReport {
 /// boundary rather than a convention: agents get the distilled text here and
 /// nothing walks `wiki/archive/` directly, so a `recall` is also the signal that
 /// keeps a summary out of the purge queue.
-pub fn recall(
-    root: &Path,
-    cfg: &Config,
-    store: &mut Store,
-    req: &RecallRequest,
-) -> Result<RecallReport> {
-    recall_at(root, cfg, store, req, Local::now().date_naive())
+///
+/// No configuration is taken: a summary is found by the ledger key and read from
+/// the repository root, so the search depends on nothing the config could change.
+pub fn recall(root: &Path, store: &mut Store, req: &RecallRequest) -> Result<RecallReport> {
+    recall_at(root, store, req, Local::now().date_naive())
 }
 
 /// [`recall`] with the hit timestamps written by the caller's clock.
 pub fn recall_at(
     root: &Path,
-    cfg: &Config,
     store: &mut Store,
     req: &RecallRequest,
     today: NaiveDate,
