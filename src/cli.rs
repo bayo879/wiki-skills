@@ -34,4 +34,19 @@ pub enum Command {
     },
     /// Compare `source/` with the ledger and report what changed.
     Scan,
+    /// Convert unconverted sources into the raw layer.
+    Convert {
+        /// Convert exactly this source key, converted before or not.
+        #[arg(long)]
+        key: Option<String>,
+        /// Convert at most this many pending sources.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Show what a source parses to, without writing anything.
+    Parse {
+        /// Source key, relative to `source/`.
+        #[arg(long)]
+        key: String,
+    },
 }

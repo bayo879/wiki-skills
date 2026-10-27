@@ -6,8 +6,10 @@
 
 pub mod cli;
 pub mod config;
+pub mod convert;
 pub mod hash;
 pub mod init;
+pub mod parse;
 pub mod paths;
 pub mod report;
 pub mod scan;
