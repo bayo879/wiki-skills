@@ -12,6 +12,7 @@ pub mod init;
 pub mod page;
 pub mod parse;
 pub mod paths;
+pub mod render;
 pub mod report;
 pub mod scan;
 pub mod store;
