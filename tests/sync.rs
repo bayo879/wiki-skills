@@ -102,8 +102,9 @@ fn second_lock_is_exit_4() {
     );
 
     // The holder records who it is, so a human can tell a live run from a crash.
-    let body: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(d.path().join(".wiki/lock")).unwrap()).unwrap();
+    // It is read through the handle: on Windows a second handle cannot read a
+    // locked file at all, and this test should not be the exception.
+    let body: serde_json::Value = serde_json::from_str(_h.body()).unwrap();
     for key in ["pid", "host", "started_at", "run_id"] {
         assert!(body.get(key).is_some(), "lock file must record {key}");
     }

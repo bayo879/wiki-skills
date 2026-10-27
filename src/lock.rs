@@ -15,6 +15,11 @@
 //!   body; if a *live-looking* file is older than the TTL it is treated the same
 //!   way (a hung process should not block the repository forever).
 //!
+//! A locked file is readable by others on unix but not on Windows, where byte
+//! range locks are mandatory. Anything that needs to inspect a live lock uses
+//! [`Lock::body`]; readers that must work on both platforms only look at the
+//! file's mtime ([`is_stale`]) or read it after the lock is gone.
+//!
 //! On drop the lock is released and the file removed, in that order: another
 //! process waiting on the same inode must never be told the lock is free while
 //! the file describing it still names this run.
@@ -49,6 +54,16 @@ impl Lock {
     /// Whether this acquisition replaced a stale lock file.
     pub fn reclaimed(&self) -> bool {
         self.reclaimed
+    }
+
+    /// The JSON body this run wrote into the lock file.
+    ///
+    /// On unix the body can also be read from disk while the lock is held; on
+    /// Windows the lock is mandatory, so a second handle cannot read the locked
+    /// region at all. Callers that need to inspect a *live* lock go through this
+    /// accessor instead of reopening the file.
+    pub fn body(&self) -> &str {
+        &self.body
     }
 }
 
