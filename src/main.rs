@@ -9,8 +9,11 @@ use clap::Parser;
 use serde::Serialize;
 
 use llm_wiki::cli::{Cli, Command};
+use llm_wiki::config::Config;
 use llm_wiki::init;
 use llm_wiki::report::{self, Exit};
+use llm_wiki::scan;
+use llm_wiki::store::Store;
 
 fn main() {
     // Tell the reporter the format before parsing, so that usage errors are
@@ -42,6 +45,7 @@ fn dispatch(cli: Cli) -> ! {
             },
         ),
         Command::Init { force } => run_init(force),
+        Command::Scan => run_scan(),
     }
 }
 
@@ -61,6 +65,39 @@ fn run_init(force: bool) -> ! {
     match init::run(&root, force) {
         Ok(outcome) => report::emit("init", outcome),
         Err(err) => report::fail("init", Exit::Usage, "E_IO", &err.to_string()),
+    }
+}
+
+/// `scan` reads `wiki.toml` and the ledger under the current directory, then
+/// reports the classified changes. A missing contract, database, or source tree
+/// is an environment error (exit 2), not a finding.
+fn run_scan() -> ! {
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(err) => report::fail(
+            "scan",
+            Exit::Usage,
+            "E_IO",
+            &format!("cannot determine the current directory: {err}"),
+        ),
+    };
+    let cfg = match Config::load(&root) {
+        Ok(cfg) => cfg,
+        Err(err) => report::fail("scan", Exit::Usage, err.code(), &err.to_string()),
+    };
+    // `Store::open` does not migrate, so every command entry point must do it
+    // explicitly before touching the schema.
+    let db = root.join(&cfg.paths.engine).join("state.db");
+    let mut store = match Store::open(&db) {
+        Ok(store) => store,
+        Err(err) => report::fail("scan", Exit::Usage, "E_DB", &err.to_string()),
+    };
+    if let Err(err) = store.migrate() {
+        report::fail("scan", Exit::Usage, "E_DB", &err.to_string());
+    }
+    match scan::scan_source(&root, &cfg, &store) {
+        Ok(outcome) => report::emit("scan", outcome),
+        Err(err) => report::fail("scan", Exit::Usage, "E_IO", &err.to_string()),
     }
 }
 

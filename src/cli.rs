@@ -32,4 +32,6 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Compare `source/` with the ledger and report what changed.
+    Scan,
 }
