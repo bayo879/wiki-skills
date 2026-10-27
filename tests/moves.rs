@@ -4,7 +4,7 @@
 //! `scan --apply-moves` (and runs inside `sync`), because a read-only command
 //! that silently rewrote pages would break the "scan twice, same answer" rule.
 //! These tests pin what a migration has to move: the ledger row, the raw file
-//! and its `source:` field, the `source_pages` mapping, and every page's
+//! and its `source:` field, and every page's
 //! `sources:` list — and that running it again changes nothing.
 
 use assert_cmd::Command;
@@ -71,11 +71,6 @@ fn apply_moves_renames_the_source_and_every_reference_to_it() {
         Status::Stable,
         &["raw/a.md"],
     );
-    let mut store = open(d.path());
-    store
-        .set_source_pages("raw/a.md", &[String::from("wiki/concept/alpha.md")])
-        .unwrap();
-    drop(store);
 
     fs::rename(d.path().join("source/a.md"), d.path().join("source/b.md")).unwrap();
 
@@ -111,15 +106,6 @@ fn apply_moves_renames_the_source_and_every_reference_to_it() {
     assert!(store.get_source("a.md").unwrap().is_none());
     let row = store.get_source("b.md").unwrap().expect("a ledger row");
     assert_eq!(row.raw_key.as_deref(), Some("raw/b.md"));
-    assert!(!store
-        .pages_for_source("raw/a.md")
-        .unwrap()
-        .iter()
-        .any(|page| page == "wiki/concept/alpha.md"));
-    assert_eq!(
-        store.pages_for_source("raw/b.md").unwrap(),
-        vec!["wiki/concept/alpha.md"]
-    );
     // The `raws` ledger speaks raw-relative keys (`scan_raw` and `convert` do),
     // so the rename has to move the row in that key space, not the repo one.
     assert!(store.get_raw("a.md").unwrap().is_none());

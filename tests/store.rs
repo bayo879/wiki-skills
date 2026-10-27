@@ -114,32 +114,6 @@ fn full_row_roundtrips_and_updates() {
     s.delete_source(&full.key).unwrap();
 }
 
-#[test]
-fn source_pages_roundtrip_and_replace() {
-    let d = tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("state.db")).unwrap();
-    s.migrate().unwrap();
-
-    assert!(s.pages_for_source("raw/a.md").unwrap().is_empty());
-
-    s.set_source_pages(
-        "raw/a.md",
-        &[String::from("page/b"), String::from("page/a")],
-    )
-    .unwrap();
-    let mut pages = s.pages_for_source("raw/a.md").unwrap();
-    pages.sort();
-    assert_eq!(pages, ["page/a", "page/b"]);
-
-    // Setting again replaces the set instead of appending to it.
-    s.set_source_pages("raw/a.md", &[String::from("page/c")])
-        .unwrap();
-    assert_eq!(s.pages_for_source("raw/a.md").unwrap(), ["page/c"]);
-
-    s.set_source_pages("raw/a.md", &[]).unwrap();
-    assert!(s.pages_for_source("raw/a.md").unwrap().is_empty());
-}
-
 /// A sealed-session record with every column filled.
 fn sealed(key: &str) -> ArchiveRow {
     ArchiveRow {

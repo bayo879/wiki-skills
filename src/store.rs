@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// DDL for version 1, applied once per database.
 const MIGRATION_1: &str = r#"
@@ -27,11 +27,6 @@ CREATE TABLE sources(
     mtime INTEGER NOT NULL,
     raw_key TEXT,
     converted_at TEXT
-);
-CREATE TABLE source_pages(
-    raw_key TEXT NOT NULL,
-    page_id TEXT NOT NULL,
-    PRIMARY KEY(raw_key, page_id)
 );
 CREATE TABLE versions(
     id INTEGER PRIMARY KEY,
@@ -106,6 +101,16 @@ CREATE TABLE archive(
     last_recalled_at TEXT,
     recall_count INTEGER NOT NULL DEFAULT 0
 );
+"#;
+
+/// DDL for version 5: the `source_pages` mapping is gone.
+///
+/// v1 created it, but nothing ever wrote a row: which pages cite a source is
+/// already recorded in each page's `sources:` field, and a second copy in SQLite
+/// is the kind of duplication that drifts. The table is dropped rather than left
+/// empty, so a reader of the schema is not invited to start filling it.
+const MIGRATION_5: &str = r#"
+DROP TABLE IF EXISTS source_pages;
 "#;
 
 /// Column order shared by the `sources` reader helpers.
@@ -403,6 +408,9 @@ impl Store {
         if version < 4 {
             self.apply_migration(MIGRATION_4, 4)?;
         }
+        if version < 5 {
+            self.apply_migration(MIGRATION_5, 5)?;
+        }
         Ok(())
     }
 
@@ -553,39 +561,6 @@ impl Store {
         Ok(())
     }
 
-    /// Page ids generated from the raw markdown `raw_key`, ordered by page id.
-    pub fn pages_for_source(&self, raw_key: &str) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT page_id FROM source_pages WHERE raw_key = ?1 ORDER BY page_id")?;
-        let rows = stmt.query_map([raw_key], |row| row.get(0))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
-    }
-
-    /// Replaces the page ids recorded for `raw_key`.
-    ///
-    /// Re-ingesting a raw source can produce a different page set, so this
-    /// writes the whole set instead of merging: pages that are gone from the new
-    /// set are removed from the mapping (the pages themselves are handled by the
-    /// ingest transaction, not here).
-    pub fn set_source_pages(&mut self, raw_key: &str, pages: &[String]) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM source_pages WHERE raw_key = ?1", [raw_key])?;
-        {
-            let mut insert =
-                tx.prepare("INSERT INTO source_pages(raw_key, page_id) VALUES (?1, ?2)")?;
-            for page in pages {
-                insert.execute(params![raw_key, page])?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Every `page_meta` record, ordered by page key.
     pub fn all_page_metas(&self) -> Result<Vec<PageMetaRow>> {
         let sql = format!("SELECT {PAGE_META_COLUMNS} FROM page_meta ORDER BY page_key");
@@ -685,16 +660,10 @@ impl Store {
         Ok(())
     }
 
-    /// Removes the raw row for `key` together with its page mapping.
-    ///
-    /// The mapping has to go with it: a page list keyed by a raw that no longer
-    /// exists is exactly the torn state `pages_for_source` is meant to answer.
-    /// Deleting an unknown key is a no-op.
+    /// Removes the raw row for `key`. Deleting an unknown key is a no-op.
     pub fn delete_raw(&mut self, key: &str) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM raws WHERE key = ?1", [key])?;
-        tx.execute("DELETE FROM source_pages WHERE raw_key = ?1", [key])?;
-        tx.commit()?;
+        self.conn
+            .execute("DELETE FROM raws WHERE key = ?1", [key])?;
         Ok(())
     }
 
@@ -851,11 +820,6 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO source_pages(raw_key, page_id) VALUES ('raw/a.md', 'page/a')",
-            [],
-        )
-        .unwrap();
     }
 
     fn raw_row(key: &str, hash: &str) -> RawRow {
@@ -885,12 +849,12 @@ mod tests {
         s.migrate().unwrap();
         assert_eq!(user_version(&s), SCHEMA_VERSION);
 
-        // The v1 tables and their rows survive: nothing is dropped or rebuilt.
+        // The v1 tables and their rows survive; only `source_pages` is dropped,
+        // because nothing ever wrote to it.
         let row = s.get_source("a.pdf").unwrap().unwrap();
         assert_eq!(row.hash, "blake3:aa");
         assert_eq!(row.raw_key.as_deref(), Some("raw/a.md"));
         assert_eq!(row.converted_at.as_deref(), Some("2026-10-27T10:00:00Z"));
-        assert_eq!(s.pages_for_source("raw/a.md").unwrap(), ["page/a"]);
 
         // The new table exists and behaves.
         s.upsert_raw(&raw_row("a.md", "blake3:ab")).unwrap();
@@ -942,7 +906,7 @@ mod tests {
         let mut s = Store::open(&p).unwrap();
         s.migrate().unwrap();
         assert_eq!(user_version(&s), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 4);
+        assert_eq!(SCHEMA_VERSION, 5);
 
         let first = page_meta("wiki/concept/a.md", "blake3:aa", "2026-10-27");
         s.upsert_page_meta(&first).unwrap();

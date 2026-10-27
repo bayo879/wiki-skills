@@ -394,16 +394,6 @@ fn a_missing_source_turns_its_stable_pages_stale_and_names_them_in_the_audit() {
     write_page(d.path(), "wiki/concept/alpha.md", "stable", &["raw/a.md"]);
     write_page(d.path(), "wiki/concept/beta.md", "stable", &["raw/a.md"]);
     write_page(d.path(), "wiki/concept/gamma.md", "draft", &["raw/a.md"]);
-    store
-        .set_source_pages(
-            "raw/a.md",
-            &[
-                String::from("wiki/concept/alpha.md"),
-                String::from("wiki/concept/beta.md"),
-                String::from("wiki/concept/gamma.md"),
-            ],
-        )
-        .unwrap();
     fs::remove_file(d.path().join("source/a.md")).unwrap();
 
     let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
@@ -451,9 +441,6 @@ fn on_missing_ignore_leaves_the_pages_alone() {
     let mut store = open(d.path());
     convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();
     write_page(d.path(), "wiki/concept/alpha.md", "stable", &["raw/a.md"]);
-    store
-        .set_source_pages("raw/a.md", &[String::from("wiki/concept/alpha.md")])
-        .unwrap();
     fs::remove_file(d.path().join("source/a.md")).unwrap();
 
     let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();

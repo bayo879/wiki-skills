@@ -7,7 +7,6 @@
 //!   source name),
 //! - the `raws` ledger row and the raw file itself, whose `source:` field points
 //!   back at the source,
-//! - the `source_pages` mapping,
 //! - every page's `sources:` list, rewritten in place with
 //!   [`page::replace_sources`] so the rest of the frontmatter is untouched.
 //!
@@ -219,15 +218,13 @@ fn migrate_one(
         }
     }
 
-    // The raw ledger follows the raw file, keeping the page mapping intact. Its
-    // keys are relative to `raw/` (`scan_raw` reports them that way, and
-    // `convert` records them that way), while `source_pages` and
-    // `sources.raw_key` carry the repository key.
+    // The raw ledger follows the raw file. Its keys are relative to `raw/`
+    // (`scan_raw` reports them that way, and `convert` records them that way),
+    // while `sources.raw_key` carries the repository key.
     if let (Some(old_raw), Some(new_raw)) = (raw_from.as_deref(), raw_to.as_deref()) {
         let rel_from = convert::raw_key_for(from);
         let rel_to = convert::raw_key_for(to);
         let previous = store.get_raw(&rel_from)?;
-        let pages = store.pages_for_source(old_raw)?;
         if old_raw != new_raw {
             store.delete_raw(&rel_from)?;
             if let Some(previous) = previous {
@@ -238,8 +235,6 @@ fn migrate_one(
                     converted_at: previous.converted_at,
                 })?;
             }
-            store.set_source_pages(new_raw, &pages)?;
-            store.set_source_pages(old_raw, &[])?;
         } else if let Some(previous) = previous {
             store.upsert_raw(&RawRow {
                 source_key: String::from(to),

@@ -366,7 +366,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
 
 /// The published pages that must go stale because a source they cite vanished.
 ///
-/// The page's own `sources:` list is the truth here, not the `source_pages`
+/// The page's own `sources:` list is the truth here, not the ledger's
 /// mapping: nothing in the engine writes that table after `init`, so a round
 /// that trusted it would mark nothing. A `draft` is left alone — marking it
 /// stale would claim a staleness its reader never saw — and a page already
