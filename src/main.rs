@@ -9,6 +9,7 @@ use clap::Parser;
 use serde::Serialize;
 
 use llm_wiki::cli::{Cli, Command};
+use llm_wiki::init;
 use llm_wiki::report::{self, Exit};
 
 fn main() {
@@ -40,6 +41,26 @@ fn dispatch(cli: Cli) -> ! {
                 version: env!("CARGO_PKG_VERSION"),
             },
         ),
+        Command::Init { force } => run_init(force),
+    }
+}
+
+/// `init` acts on the current directory, which is the repository root by
+/// convention. A failure to read it, or to write the contract, is an
+/// environment error (exit 2) rather than a finding.
+fn run_init(force: bool) -> ! {
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(err) => report::fail(
+            "init",
+            Exit::Usage,
+            "E_IO",
+            &format!("cannot determine the current directory: {err}"),
+        ),
+    };
+    match init::run(&root, force) {
+        Ok(outcome) => report::emit("init", outcome),
+        Err(err) => report::fail("init", Exit::Usage, "E_IO", &err.to_string()),
     }
 }
 

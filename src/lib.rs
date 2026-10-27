@@ -5,6 +5,8 @@
 //! wiring and dispatch.
 
 pub mod cli;
+pub mod config;
 pub mod hash;
+pub mod init;
 pub mod paths;
 pub mod report;

@@ -26,4 +26,10 @@ pub struct Cli {
 pub enum Command {
     /// Print the version of this binary.
     Version,
+    /// Write the contract files and create the engine directories.
+    Init {
+        /// Rewrite `wiki.toml` and `SCHEMA.md` even if they already exist.
+        #[arg(long)]
+        force: bool,
+    },
 }
