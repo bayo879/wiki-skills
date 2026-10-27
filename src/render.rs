@@ -28,7 +28,6 @@ use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::page;
-use crate::store::Store;
 
 /// First line of every `index.md`.
 const INDEX_TITLE: &str = "# 索引";
@@ -246,11 +245,9 @@ pub fn append_log(path: &Path, e: &LogEntry) -> Result<()> {
 /// reports are not catalogue entries. An empty or missing wiki directory still
 /// produces a valid, header-only index.
 ///
-/// `store` is part of the calling convention (the CLI has the ledger open when
-/// it renders); the catalogue is built from the pages, not from the ledger, so
-/// it is not read here.
-pub fn write_index(root: &Path, cfg: &Config, store: &Store) -> Result<usize> {
-    let _ = store;
+/// The catalogue is built from the pages on disk, not from the ledger, so no
+/// store handle is needed.
+pub fn write_index(root: &Path, cfg: &Config) -> Result<usize> {
     let wiki = root.join(&cfg.paths.wiki);
     let mut pages = Vec::new();
 

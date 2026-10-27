@@ -233,7 +233,7 @@ fn write_index_reads_pages_and_leaves_log_and_audit_alone() {
 
     let store = Store::open(&root.join(".wiki/state.db")).unwrap();
     let cfg = Config::default();
-    let written = render::write_index(root, &cfg, &store).unwrap();
+    let written = render::write_index(root, &cfg).unwrap();
     assert_eq!(written, 2, "audit/ 下的页面不算");
 
     let index = std::fs::read_to_string(root.join("wiki/index.md")).unwrap();
@@ -253,7 +253,7 @@ fn write_index_overwrites_a_stale_index() {
 
     let store = Store::open(&root.join(".wiki/state.db")).unwrap();
     let cfg = Config::default();
-    assert_eq!(render::write_index(root, &cfg, &store).unwrap(), 1);
+    assert_eq!(render::write_index(root, &cfg).unwrap(), 1);
     let index = std::fs::read_to_string(root.join("wiki/index.md")).unwrap();
     assert!(!index.contains("陈旧内容"));
     assert!(index.contains("甲"));
