@@ -286,28 +286,36 @@ lint 会抓到「写了但没账」的孤儿。
 
 分两层，这是第二个主张：**确定性检查给代码，语义判断给模型。**
 
+下表就是 `src/lint.rs` 落地的 13 条，编号与代码一致（2026-10-27 校正：此前本表是
+动工前写的另一套 12 条，与代码只有 L6/L12 同义，按号对会错位）。
+
 | 编号 | 检查 | 级别 |
 |---|---|---|
-| L1 | frontmatter 合法：必填字段齐全、类型正确、`id` == 文件名、`type` ∈ 配置枚举 | error |
-| L2 | `[[id]]` 断链 | error |
-| L3 | 孤儿页（除 index 外无入链） | warning |
-| L4 | index 漂移：磁盘页面集合 ≠ index.md 条目 | error |
-| L5 | log 格式非法、时间倒退 | warning |
-| L6 | `sources` 指向的文件不存在，或哈希与账本不符（→ `stale` 候选）；**归档层来源豁免**：指向 `wiki/archive/` 的引用不要求进 raw 账本（见 §5.11） | error |
-| L7 | 无 `sources` 的页面（无源声称） | warning |
-| L8 | 近似重复：标题归一化相同，或 summary 的 token Jaccard ≥ 0.7 | info |
-| L9 | 空页/占位（正文 < `min_page_chars` 或只剩模板）；`asset: true` 的 raw、`archived: true` 的归档页豁免 | warning |
-| L10 | 账本说已摄取，但无页面引用该源 | warning |
-| L11 | 页面 `updated` 早于新版的源 | warning |
-| L12 | 未被任何页面引用的 asset（图片等） | info |
-| L13 | 归档页零入链且超 `idle_days` 未被检索（→ 可提前清理的候选） | info |
+| L1 | 页面缺 `id`、`title` 或 `status` | error |
+| L2 | `[[wikilink]]` 指向不存在的页面（代码块内的 `[[` 不算） | error |
+| L3 | 同一个 id 出现在两个 type 目录下 | error |
+| L4 | `status` 不是 `draft`／`stable`／`stale` | error |
+| L5 | `updated` 缺失或不是 `YYYY-MM-DD` | warning |
+| L6 | 页面 `sources` 指向的文件不存在；**归档层来源豁免**：指向 `wiki/archive/` 的引用不要求进 raw 账本（见 §5.11） | error |
+| L7 | `raw/` 下有文件不在账本里（转换出来了但没记账） | warning |
+| L8 | 正文短于 `[audit].min_page_chars` 字符（按字符数，不按字节）；`asset: true` 与 `archived: true` 豁免 | warning |
+| L9 | 账本里该页的正文摘要变了，但 `updated` 没动（只对账本里有记录的页生效，新克隆没有记录所以静默） | warning |
+| L10 | 同一个 raw 被超过 3 个页面引用（源太粗或页该合并） | info |
+| L11 | `log.md` 的 `## ` 行不符合 `## [日期] 动作 | 标题` | warning |
+| L12 | 没有任何页面引用的 asset（图片等） | info |
+| L13 | 归档的会话摘要零入链，且超过 `idle_days` 没被 `recall`（可提前清理的候选） | info |
 
-**编号漂移（读代码前必看）**：已落地的 `src/lint.rs` 与 CLI 计划
-（[2026-10-27-llm-wiki-cli.md:1413](../plans/2026-10-27-llm-wiki-cli.md)）用的是另一套 12 条，
-与本表只有 L6、L12 语义相同 —— 它的 L8 才是空页，L9 是「字段变了但 `updated` 没变」。
-本表是目标态，代码是子集 + 偏移；**按检查内容对齐，不要按号对齐**。本表所有提到
-「空页规则」的地方指目标 L9 / 现 L8。编号统一单独立项，见
-[实现触点交底](../plans/2026-10-27-llm-wiki-memory-touchpoints.md) §0。
+**两条设计时列过、最终没做成检查的**，别在代码里找：
+
+- **索引漂移**：不给检查，因为在写路径上它不可能存活 —— `approve`、`checkpoint`、
+  `lint --fix` 都会用 `render::write_index` 把 `wiki/index.md` 整份重写。能看到旧索引的
+  只有「纯只读」的瞬间，不值得为它留一条永远不该出现的 finding。
+- **近似重复**（标题归一化相同 / summary 的 Jaccard ≥ 0.7）：归判断层。中文标题做模糊
+  匹配误报率太高，而且要不要合并两页是判断不是校验；`wiki-audit` 技能里按内容提示即可。
+
+判定边界两处容易搞错：**L9 只对账本里有记录的页生效**（`state.db` 不进 git，新克隆没有
+记录，若一律报「改过没打日期」会让干净检出直接失败）；**L8 按字符数**，所以短中文页
+仍然算短。
 
 判断层（skill）：跨页矛盾、被新源推翻的结论、反复出现却没建页的概念、跨源缺口、
 下一步该找什么源。CLI 只给料：`graph` 的孤立页（零入零出）、高扇入页（可能是枢纽）、`broken`（声称有链接但指向不存在的页）。

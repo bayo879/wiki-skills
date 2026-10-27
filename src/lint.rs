@@ -1,4 +1,4 @@
-//! `lint`: the twelve audit rules over `wiki/`, and the mechanical `--fix`.
+//! `lint`: the thirteen audit rules over `wiki/`, and the mechanical `--fix`.
 //!
 //! `lint` reads the wiki directory and the ledger and returns findings sorted by
 //! severity, rule and page, so the output is a stable value that can be
@@ -6,7 +6,7 @@
 //! malformed `updated`, an `updated` that did not move when the body changed,
 //! and a stale `index.md` — then re-runs `lint` and reports what is left.
 //!
-//! The rules are the contract from the brief (`docs/superpowers/specs/...`),
+//! The rules are the contract from the spec (`docs/superpowers/specs/...` §5.4),
 //! one test per rule in `tests/lint.rs`:
 //!
 //! - `L1` error: a page is missing `id`, `title` or `status`.
@@ -21,6 +21,7 @@
 //! - `L10` info: one raw file is cited by more than three pages.
 //! - `L11` warning: a `log.md` entry does not match `## [date] action | title`.
 //! - `L12` info: an asset raw file is cited by no page.
+//! - `L13` info: a sealed summary nothing cites and nobody recalled.
 //!
 //! Two of the rules are easy to get wrong, so they are called out here:
 //!
@@ -77,7 +78,7 @@ impl std::fmt::Display for Level {
 /// One lint finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Finding {
-    /// Rule identifier, `L1` through `L12`.
+    /// Rule identifier, `L1` through `L13`.
     pub rule: &'static str,
     /// Severity.
     pub level: Level,
