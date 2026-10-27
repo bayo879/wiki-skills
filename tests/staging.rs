@@ -144,7 +144,7 @@ fn ensure_keeps_unmerged_manifest_entries() {
         "ensure 不能丢掉上一轮没处理完的条目"
     );
     assert_eq!(
-        staging::pending_hashes(dir.path()).unwrap().get("a.md"),
+        staging::manifest_pending(dir.path()).unwrap().get("a.md"),
         Some(&String::from("blake3:new"))
     );
 }
@@ -259,7 +259,7 @@ fn pending_hashes_lists_only_sources_that_moved_since_baseline() {
         .insert(String::from("vanished.md"), entry(Some("h3"), None, &[]));
     staging::Manifest::save(dir.path(), &manifest).unwrap();
 
-    let pending = staging::pending_hashes(dir.path()).unwrap();
+    let pending = staging::manifest_pending(dir.path()).unwrap();
     let expected: BTreeMap<String, String> = [("changed.md", "new"), ("new.md", "h2")]
         .iter()
         .map(|(key, hash)| (String::from(*key), String::from(*hash)))
@@ -366,6 +366,12 @@ fn pending_json_from_ingest_begin_takes_precedence() {
     assert_eq!(
         staging::pending_hashes(dir.path()).unwrap(),
         BTreeMap::from([(String::from("round.md"), String::from("blake3:abc"))])
+    );
+
+    assert_eq!(
+        staging::pending_hashes(&dir.path().join("nowhere")).unwrap(),
+        BTreeMap::new(),
+        "没有在途轮次时是空表，不是错误"
     );
 
     fs::write(dir.path().join(".wiki/staging/pending.json"), "{oops").unwrap();

@@ -413,21 +413,29 @@ pub fn write_page(root: &Path, cfg: &Config, id: &str, content: &str) -> Result<
 /// with a current hash different from its baseline has moved since the last
 /// merge. Sources with no current hash are not built at all, so they are not
 /// pending.
+/// Reads the current round's pending sources from `pending.json`.
+///
+/// Missing file means no round is open, which is an empty map rather than an
+/// error: `abort`/`commit` on a clean tree are no-ops, not failures.
 pub fn pending_hashes(root: &Path) -> Result<BTreeMap<String, String>> {
     let path = dir(root).join(PENDING);
     match fs::read(&path) {
-        Ok(bytes) => {
-            let pending: BTreeMap<String, String> =
-                serde_json::from_slice(&bytes).map_err(|source| StagingError::Corrupt {
-                    path,
-                    message: source.to_string(),
-                })?;
-            return Ok(pending);
-        }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => return Err(StagingError::Io { path, source }),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| StagingError::Corrupt {
+            path,
+            message: source.to_string(),
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(source) => Err(StagingError::Io { path, source }),
     }
+}
 
+/// Derives which sources still differ from the approved baseline, per manifest.
+///
+/// This answers a different question than [`pending_hashes`]: "what has drifted
+/// since the last approval", not "what did this round open". Keeping them apart
+/// stops an abandoned round from being reported as drift, and stops drift from
+/// being silently committed as if a round had opened it.
+pub fn manifest_pending(root: &Path) -> Result<BTreeMap<String, String>> {
     let manifest = Manifest::load(root)?;
     let mut pending = BTreeMap::new();
     for (key, entry) in manifest.sources {
