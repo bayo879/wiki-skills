@@ -487,7 +487,7 @@ pub fn replace_sources(p: &Path, remove: &[String], add: &[String]) -> Result<(u
 /// `raw/big.md#p=12-40` and `raw/big.md` are the same underlying file: the
 /// fragment only selects a slice of it, and a seal replacing the whole source
 /// does not care which slice a page quoted.
-fn same_reference(a: &str, b: &str) -> bool {
+pub(crate) fn same_reference(a: &str, b: &str) -> bool {
     fn base(s: &str) -> &str {
         s.split('#').next().unwrap_or(s).trim()
     }

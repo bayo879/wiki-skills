@@ -91,7 +91,12 @@ fn orphan_pages_have_neither_in_nor_out_links() {
 fn a_link_may_name_the_bare_id_or_the_wiki_relative_path() {
     let d = tempdir().unwrap();
     let root = d.path();
-    write_page(root, "concept", "a", "[[concept/b]] [[b]] [[wiki/concept/b.md]]");
+    write_page(
+        root,
+        "concept",
+        "a",
+        "[[concept/b]] [[b]] [[wiki/concept/b.md]]",
+    );
     write_page(root, "concept", "b", "");
 
     let g = graph::build(root, &Config::default()).unwrap();

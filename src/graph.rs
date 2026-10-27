@@ -178,7 +178,11 @@ fn read_pages(root: &Path, cfg: &Config) -> Result<Vec<(String, String, String, 
             if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
                 continue;
             }
-            if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+            if !entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+            {
                 continue;
             }
             let (front, body) = page::read(&path)?;

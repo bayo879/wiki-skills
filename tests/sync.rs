@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 use chrono::Local;
 use llm_wiki::config::Config;
 use llm_wiki::store::Store;
-use llm_wiki::{hash, init, lock, sync};
+use llm_wiki::{convert, hash, init, lock, page, sync};
 use tempfile::{tempdir, TempDir};
 
 /// Opens (and migrates) the ledger under `root`.
@@ -360,4 +360,114 @@ fn a_second_round_over_unchanged_sources_converts_nothing() {
         "an unchanged tree has no changes: {:?}",
         second.changes
     );
+}
+
+/// Writes one page under `wiki/` with the frontmatter the tests care about.
+fn write_page(root: &Path, key: &str, status: &str, sources: &[&str]) {
+    let mut text = String::from("---\n");
+    text.push_str(&format!("status: {status}\n"));
+    text.push_str("updated: 2026-10-27\n");
+    text.push_str("sources:\n");
+    for source in sources {
+        text.push_str(&format!("  - {source}\n"));
+    }
+    text.push_str("---\n\nbody\n");
+    let path = root.join(key);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+}
+
+/// The audit file a round ran today appends to.
+fn audit_text(root: &Path) -> String {
+    let path = root
+        .join("wiki/audit")
+        .join(format!("{}-sync.md", Local::now().date_naive()));
+    fs::read_to_string(&path).unwrap_or_default()
+}
+
+#[test]
+fn a_missing_source_turns_its_stable_pages_stale_and_names_them_in_the_audit() {
+    let (d, cfg) = repo(0);
+    write(d.path(), "a.md", "# A\n\nalpha body\n");
+    let mut store = open(d.path());
+    convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();
+    write_page(d.path(), "wiki/concept/alpha.md", "stable", &["raw/a.md"]);
+    write_page(d.path(), "wiki/concept/beta.md", "stable", &["raw/a.md"]);
+    write_page(d.path(), "wiki/concept/gamma.md", "draft", &["raw/a.md"]);
+    store
+        .set_source_pages(
+            "raw/a.md",
+            &[
+                String::from("wiki/concept/alpha.md"),
+                String::from("wiki/concept/beta.md"),
+                String::from("wiki/concept/gamma.md"),
+            ],
+        )
+        .unwrap();
+    fs::remove_file(d.path().join("source/a.md")).unwrap();
+
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(
+        report.stale_pages,
+        vec!["wiki/concept/alpha.md", "wiki/concept/beta.md"],
+        "only published pages are demoted; the draft stays a draft"
+    );
+    for key in ["wiki/concept/alpha.md", "wiki/concept/beta.md"] {
+        let (front, _) = page::read(&d.path().join(key)).unwrap();
+        assert_eq!(front.status, page::Status::Stale, "{key}");
+    }
+    let (draft, _) = page::read(&d.path().join("wiki/concept/gamma.md")).unwrap();
+    assert_eq!(draft.status, page::Status::Draft);
+
+    let meta = store
+        .get_page_meta("wiki/concept/alpha.md")
+        .unwrap()
+        .expect("a page_meta record for the demoted page");
+    assert_eq!(
+        meta.hash,
+        hash::hash_file(&d.path().join("wiki/concept/alpha.md"), true).unwrap(),
+        "the status write does not leave lint L9 drift behind"
+    );
+
+    let audit = audit_text(d.path());
+    assert!(
+        audit.contains("## 源消失导致转 stale 的页面"),
+        "the audit names the section: {audit}"
+    );
+    assert!(audit.contains("wiki/concept/alpha.md"), "{audit}");
+    assert!(audit.contains("wiki/concept/beta.md"), "{audit}");
+    assert!(!audit.contains("wiki/concept/gamma.md"), "{audit}");
+
+    // A second round finds the pages already stale and rewrites nothing.
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert!(report.stale_pages.is_empty(), "{:?}", report.stale_pages);
+}
+
+#[test]
+fn on_missing_ignore_leaves_the_pages_alone() {
+    let (d, mut cfg) = repo(0);
+    cfg.sync.on_missing = String::from("ignore");
+    write(d.path(), "a.md", "# A\n\nalpha body\n");
+    let mut store = open(d.path());
+    convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();
+    write_page(d.path(), "wiki/concept/alpha.md", "stable", &["raw/a.md"]);
+    store
+        .set_source_pages("raw/a.md", &[String::from("wiki/concept/alpha.md")])
+        .unwrap();
+    fs::remove_file(d.path().join("source/a.md")).unwrap();
+
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert!(report.stale_pages.is_empty());
+    let (front, _) = page::read(&d.path().join("wiki/concept/alpha.md")).unwrap();
+    assert_eq!(front.status, page::Status::Stable);
+}
+
+#[test]
+fn an_unknown_on_missing_value_fails_config_validation() {
+    let (d, _cfg) = repo(0);
+    let path = d.path().join("wiki.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, text.replace("\"mark_stale\"", "\"explode\"")).unwrap();
+    let err = Config::load(d.path()).expect_err("an unknown on_missing is a config error");
+    assert_eq!(err.code(), "E_BAD_CONFIG");
 }

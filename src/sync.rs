@@ -29,9 +29,10 @@ use chrono::Local;
 use serde::Serialize;
 
 use crate::config::Config;
-use crate::scan::{self, ChangeKind};
-use crate::store::Store;
-use crate::{convert, hash, ingest, lock, paths, render};
+use crate::page;
+use crate::scan::{self, ChangeKind, Layer};
+use crate::store::{PageMetaRow, Store};
+use crate::{convert, hash, ingest, lock, moves, paths, render, staging};
 
 /// `sync_state` key that closes the auto-ingest gate until a human clears it.
 pub const AUTO_INGEST_DISABLED: &str = "auto_ingest_disabled";
@@ -57,6 +58,8 @@ pub struct SyncReport {
     pub run_id: String,
     /// The classified changes the round started from.
     pub changes: Vec<scan::Change>,
+    /// Pages turned stale this round because the source they cited disappeared.
+    pub stale_pages: Vec<String>,
     /// Sources that produced a fresh raw file.
     pub converted: usize,
     /// Sources handed to an ingest round.
@@ -87,6 +90,15 @@ pub enum SyncError {
     /// `wiki/index.md` could not be rendered.
     #[error(transparent)]
     Render(#[from] crate::render::RenderError),
+    /// A page could not be read or rewritten.
+    #[error(transparent)]
+    Page(#[from] crate::page::PageError),
+    /// A rename could not be migrated.
+    #[error(transparent)]
+    Move(#[from] crate::moves::MoveError),
+    /// A path could not be turned into a repository key.
+    #[error(transparent)]
+    Path(#[from] crate::paths::PathError),
     /// A derived file could not be written.
     #[error("cannot write {}: {source}", path.display())]
     Io {
@@ -103,8 +115,12 @@ impl SyncError {
     pub fn code(&self) -> &'static str {
         match self {
             SyncError::Lock(err) => err.code(),
-            SyncError::Scan(_) | SyncError::Hash(_) | SyncError::Render(_) => "E_IO",
+            SyncError::Scan(_) | SyncError::Hash(_) | SyncError::Render(_) | SyncError::Page(_) => {
+                "E_IO"
+            }
             SyncError::Store(_) => "E_DB",
+            SyncError::Move(err) => err.code(),
+            SyncError::Path(_) => "E_IO",
             SyncError::Io { .. } => "E_IO",
         }
     }
@@ -180,6 +196,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         return Ok(SyncReport {
             run_id,
             changes,
+            stale_pages: Vec::new(),
             converted: 0,
             ingested: Vec::new(),
             queued,
@@ -188,8 +205,35 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         });
     }
 
-    let mut converted = 0;
+    // 4a. A rename is a move, not a delete plus an add: migrate it before
+    //     anything else so the rest of the round already works on the new name.
+    //     A collision is left untouched for a human; it is a finding (exit 1),
+    //     never a reason to overwrite a file.
     let mut failures = 0;
+    let moved = moves::apply(root, cfg, store, &changes)?;
+    for applied in &moved.applied {
+        warnings.push(format!(
+            "moved: {} -> {} ({} page(s) rewritten)",
+            applied.from,
+            applied.to,
+            applied.pages.len()
+        ));
+    }
+    for collision in &moved.collisions {
+        failures += 1;
+        warnings.push(format!(
+            "moved: {} -> {} skipped: {} ({})",
+            collision.from, collision.to, collision.message, collision.code
+        ));
+    }
+
+    // 4b. A source that disappeared leaves conclusions without a source behind
+    //     them. `on_missing = "mark_stale"` marks the published pages that cited
+    //     it stale; drafts are left alone, because marking one stale would claim
+    //     a staleness its reader never saw.
+    let stale_pages = stale_pages_for_missing(root, cfg, store, &changes)?;
+
+    let mut converted = 0;
     for change in pending.iter().take(budget) {
         let key = change.key.as_str();
         match convert::convert_one(root, cfg, store, key) {
@@ -305,6 +349,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     let report = SyncReport {
         run_id,
         changes,
+        stale_pages,
         converted,
         ingested,
         queued,
@@ -317,6 +362,76 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     write_audit(root, cfg, &report)?;
 
     Ok(report)
+}
+
+/// The published pages that must go stale because a source they cite vanished.
+///
+/// The page's own `sources:` list is the truth here, not the `source_pages`
+/// mapping: nothing in the engine writes that table after `init`, so a round
+/// that trusted it would mark nothing. A `draft` is left alone — marking it
+/// stale would claim a staleness its reader never saw — and a page already
+/// `stale` is not touched again, so a long-gone source rewrites nothing after
+/// the first round. The rewritten page refreshes its `page_meta` digest with the
+/// old `updated` date: only the status line moved, so the page is not re-dated
+/// and lint L9 cannot read this as undated drift.
+fn stale_pages_for_missing(
+    root: &Path,
+    cfg: &Config,
+    store: &mut Store,
+    changes: &[scan::Change],
+) -> Result<Vec<String>> {
+    if cfg.sync.on_missing != "mark_stale" {
+        return Ok(Vec::new());
+    }
+    let mut vanished: Vec<String> = Vec::new();
+    for change in changes {
+        if change.kind != ChangeKind::Missing || change.layer != Layer::Source {
+            continue;
+        }
+        // A source that never converted left no raw file, so no page can cite it.
+        let Some(row) = store.get_source(&change.key)? else {
+            continue;
+        };
+        if row.raw_key.is_none() {
+            continue;
+        }
+        vanished.push(convert::raw_key_for(&change.key));
+    }
+    if vanished.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stale = Vec::new();
+    for path in moves::page_files(root, cfg) {
+        let (front, _) = match page::read(&path) {
+            Ok(read) => read,
+            // A file without frontmatter is not a page; lint owns that finding.
+            Err(page::PageError::BadFrontmatter { .. }) => continue,
+            Err(err) => return Err(SyncError::Page(err)),
+        };
+        if front.status != page::Status::Stable {
+            continue;
+        }
+        let cited = staging::source_keys(&front.sources, &cfg.paths.raw);
+        if !cited.iter().any(|key| vanished.contains(key)) {
+            continue;
+        }
+        page::set_status(&path, page::Status::Stale)?;
+        let key = paths::identity_key(root, &path)?;
+        let updated = match store.get_page_meta(&key)? {
+            Some(meta) => meta.updated,
+            None => front.updated.to_string(),
+        };
+        store.upsert_page_meta(&PageMetaRow {
+            page_key: key.clone(),
+            hash: hash::hash_file(&path, true)?,
+            updated,
+        })?;
+        stale.push(key);
+    }
+    stale.sort();
+    stale.dedup();
+    Ok(stale)
 }
 
 /// Seconds since the file was last modified, when it exists and the platform
@@ -374,6 +489,14 @@ fn render_audit(report: &SyncReport) -> String {
     }
     for change in &report.changes {
         out.push_str(&format!("- {:?} {}\n", change.kind, change.key));
+    }
+
+    out.push_str("\n## 源消失导致转 stale 的页面\n");
+    if report.stale_pages.is_empty() {
+        out.push_str("- (none)\n");
+    }
+    for page in &report.stale_pages {
+        out.push_str(&format!("- {page}\n"));
     }
 
     out.push_str("\n## ingested\n");

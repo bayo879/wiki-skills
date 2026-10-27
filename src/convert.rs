@@ -179,7 +179,7 @@ pub fn convert_one(
 }
 
 /// The raw file name for `key`: the same relative path with a `.md` extension.
-fn raw_key_for(key: &str) -> String {
+pub(crate) fn raw_key_for(key: &str) -> String {
     paths::to_slash(&Path::new(key).with_extension("md"))
 }
 
@@ -320,7 +320,7 @@ fn render_raw(
 /// as structure — `#` starts a comment and `:` separates a mapping — and to
 /// escape the two characters that are special inside a double-quoted scalar.
 /// A plain value such as `source/说明.md` or `builtin-text` stays readable.
-fn yaml_scalar(value: &str) -> String {
+pub(crate) fn yaml_scalar(value: &str) -> String {
     let needs_quotes = value.is_empty()
         || value.trim() != value
         || value

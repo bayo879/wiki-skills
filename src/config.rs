@@ -85,22 +85,38 @@ impl Config {
             }
             Err(source) => return Err(ConfigError::Io { path, source }),
         };
-        toml::from_str(&text).map_err(|err| ConfigError::Bad {
+        let cfg: Config = toml::from_str(&text).map_err(|err| ConfigError::Bad {
             message: format!("{CONFIG_FILE} is invalid: {err}"),
-        })
+        })?;
+        // An unknown `sync.on_missing` is a contract error, not a value to keep
+        // around: silently falling back would hide a typo behind "do nothing".
+        cfg.validate_on_missing()?;
+        Ok(cfg)
     }
 
     /// Checks the parts of the contract that deserialization cannot.
     ///
     /// Covers the page-type enum, the parse backend choice, the numeric
-    /// invariants between the three size settings, and the ban on storing a
-    /// token instead of an environment variable name.
+    /// invariants between the three size settings, the `sync.on_missing` policy,
+    /// and the ban on storing a token instead of an environment variable name.
     pub fn validate(&self) -> Result<()> {
         self.validate_types()?;
         self.validate_primary()?;
         self.validate_sizes()?;
         self.validate_external()?;
+        self.validate_on_missing()?;
         Ok(())
+    }
+
+    fn validate_on_missing(&self) -> Result<()> {
+        match self.sync.on_missing.as_str() {
+            "mark_stale" | "ignore" => Ok(()),
+            other => Err(ConfigError::Bad {
+                message: format!(
+                    "sync.on_missing must be \"mark_stale\" or \"ignore\", not {other:?}"
+                ),
+            }),
+        }
     }
 
     fn validate_types(&self) -> Result<()> {

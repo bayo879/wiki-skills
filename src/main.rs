@@ -20,6 +20,7 @@ use llm_wiki::hash;
 use llm_wiki::ingest;
 use llm_wiki::init;
 use llm_wiki::lint;
+use llm_wiki::moves;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
 use llm_wiki::query::{self, Scope as QueryScope};
@@ -63,7 +64,7 @@ fn dispatch(cli: Cli) -> ! {
         ),
         Command::Init { force } => run_init(force),
         Command::Doctor => run_doctor(),
-        Command::Scan => run_scan(),
+        Command::Scan { apply_moves } => run_scan(apply_moves),
         Command::Convert { key, limit } => run_convert(key, limit),
         Command::Parse { key, chunk, range } => run_parse(key, chunk, range),
         Command::Ingest { command } => run_ingest(command),
@@ -235,28 +236,111 @@ fn human_sync(report: &sync::SyncReport) -> String {
     out.trim_end().to_string()
 }
 
-/// `scan` compares `source/` with the ledger and reports the classified changes.
-fn run_scan() -> ! {
+/// `scan` compares both layers with the ledger and reports the classified
+/// changes.
+///
+/// The source layer says what `convert` should pick up; the raw layer says what
+/// was edited by hand after conversion. Reporting them together is what makes a
+/// second `scan` meaningful — a clean source layer does not mean the raw layer
+/// is clean.
+fn run_scan(apply_moves: bool) -> ! {
     let root = wiki_root("scan");
     let cfg = load_config("scan", &root);
-    let store = open_store("scan", &root, &cfg);
-    match scan::scan_source(&root, &cfg, &store) {
-        Ok(outcome) => report::emit("scan", outcome),
+    let mut store = open_store("scan", &root, &cfg);
+    let outcome = match scan::scan_all(&root, &cfg, &store) {
+        Ok(outcome) => outcome,
         Err(err) => report::fail("scan", Exit::Usage, "E_IO", &err.to_string()),
+    };
+    let changes = outcome.changes;
+    let ignored_count = outcome.ignored_count;
+
+    if !apply_moves {
+        report::emit(
+            "scan",
+            ScanData {
+                changes,
+                ignored_count,
+                moved: None,
+            },
+        );
     }
+
+    // `--apply-moves` is the only part of `scan` that writes: the plain scan
+    // stays read-only. A collision is a finding, not an environment error, so
+    // the round reports `ok: true` and exits 1.
+    let moved = match moves::apply(&root, &cfg, &mut store, &changes) {
+        Ok(moved) => moved,
+        Err(err) => report::fail("scan", Exit::Error, err.code(), &err.to_string()),
+    };
+    let exit = if moved.is_clean() {
+        Exit::Ok
+    } else {
+        Exit::Error
+    };
+    report::emit_with(
+        "scan",
+        ScanData {
+            changes,
+            ignored_count,
+            moved: Some(moved),
+        },
+        exit,
+        human_scan,
+    )
+}
+
+/// Human rendering of an `--apply-moves` scan: the changes, then what the
+/// migration did with them.
+fn human_scan(data: &ScanData) -> String {
+    let mut out = format!("changes: {}\n", data.changes.len());
+    for change in &data.changes {
+        out.push_str(&format!("- {:?} {}\n", change.kind, change.key));
+    }
+    if let Some(moved) = &data.moved {
+        out.push_str(&format!("moved: {}\n", moved.applied.len()));
+        for applied in &moved.applied {
+            out.push_str(&format!(
+                "- {} -> {} ({} page(s))\n",
+                applied.from,
+                applied.to,
+                applied.pages.len()
+            ));
+        }
+        for collision in &moved.collisions {
+            out.push_str(&format!(
+                "- skipped {} -> {}: {} ({})\n",
+                collision.from, collision.to, collision.message, collision.code
+            ));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// The `scan` payload. `moved` is only present when `--apply-moves` ran.
+#[derive(Serialize)]
+struct ScanData {
+    changes: Vec<scan::Change>,
+    ignored_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved: Option<moves::MoveReport>,
 }
 
 /// `convert` turns pending sources into the raw layer.
 ///
 /// With `--key` the named source is converted whether or not the ledger has seen
 /// it; without it, a scan decides what is pending — sources classified as new or
-/// changed — and the first `--limit` of them, in key order, are converted. A
-/// failed conversion is a finding (exit 1), not an environment error, so that one
-/// bad source does not look like a broken invocation.
+/// changed — and the first `--limit` of them, in key order, are converted.
+///
+/// A batch keeps going after a bad source: the failure is recorded under
+/// `data.failures` and the round still reports `ok: true` with exit 1, so one
+/// unparseable PDF cannot stop the other nineteen sources from being converted.
+/// `--key` is not a batch — there is nothing to continue with — so it keeps the
+/// immediate failure path (`ok: false`, exit 1).
 fn run_convert(key: Option<String>, limit: usize) -> ! {
     let root = wiki_root("convert");
     let cfg = load_config("convert", &root);
     let mut store = open_store("convert", &root, &cfg);
+    let named = key.is_some();
 
     let keys = match conversion_targets(&root, &cfg, &store, key.as_deref(), limit) {
         Ok(keys) => keys,
@@ -264,13 +348,48 @@ fn run_convert(key: Option<String>, limit: usize) -> ! {
     };
 
     let mut converted = Vec::with_capacity(keys.len());
+    let mut failures = Vec::new();
     for key in keys {
         match convert::convert_one(&root, &cfg, &mut store, &key) {
             Ok(outcome) => converted.push(outcome),
-            Err(err) => report::fail("convert", Exit::Error, err.code(), &err.to_string()),
+            Err(err) => {
+                if named {
+                    report::fail("convert", Exit::Error, err.code(), &err.to_string());
+                }
+                failures.push(ConvertFailure {
+                    key,
+                    code: String::from(err.code()),
+                    message: err.to_string(),
+                });
+            }
         }
     }
-    report::emit("convert", ConvertData { converted });
+    let exit = if failures.is_empty() {
+        Exit::Ok
+    } else {
+        Exit::Error
+    };
+    report::emit_with(
+        "convert",
+        ConvertData {
+            converted,
+            failures,
+        },
+        exit,
+        human_convert,
+    )
+}
+
+/// Human rendering of a batch: what converted, then which sources did not.
+fn human_convert(data: &ConvertData) -> String {
+    let mut out = format!("converted: {}\n", data.converted.len());
+    for failure in &data.failures {
+        out.push_str(&format!(
+            "failed: {} ({}): {}\n",
+            failure.key, failure.code, failure.message
+        ));
+    }
+    out.trim_end().to_string()
 }
 
 /// The source keys `convert` should hand to [`convert::convert_one`].
@@ -969,10 +1088,22 @@ struct InstructData {
     text: String,
 }
 
-/// Payload of the `convert` success envelope.
+/// Payload of the `convert` envelope: what worked and what did not.
+///
+/// A batch reports both lists even when one is empty, so a caller can tell "the
+/// batch ran and nothing failed" from "the batch never ran".
 #[derive(Serialize)]
 struct ConvertData {
     converted: Vec<convert::ConvertOutcome>,
+    failures: Vec<ConvertFailure>,
+}
+
+/// One source a batch could not convert.
+#[derive(Serialize)]
+struct ConvertFailure {
+    key: String,
+    code: String,
+    message: String,
 }
 
 /// Payload of the `parse` success envelope, tagged by delivery mode.

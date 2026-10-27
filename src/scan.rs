@@ -68,17 +68,32 @@ pub enum ChangeKind {
     Oversize,
 }
 
+/// Which layer a change was found in.
+///
+/// Both layers share one key space in the merged report, so a caller that only
+/// cares about one half filters on this rather than guessing from the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layer {
+    /// A file under `source/`, classified against the `sources` ledger.
+    Source,
+    /// A file under `raw/`, classified against the `raws` ledger.
+    Raw,
+}
+
 /// One classified key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Change {
     /// What happened to `key`.
     pub kind: ChangeKind,
-    /// Path identity key relative to `source/`, `/`-separated and NFC.
+    /// Path identity key relative to `source/` or `raw/`, `/`-separated, NFC.
     pub key: String,
     /// Content digest, or `None` for `Missing` and `Oversize`.
     pub hash: Option<String>,
     /// For `Moved`, the ledger key the content came from.
     pub moved_from: Option<String>,
+    /// The layer `key` was found in.
+    pub layer: Layer,
 }
 
 /// Everything one scan found.
@@ -155,6 +170,24 @@ pub fn scan_raw(root: &Path, cfg: &Config, store: &Store) -> Result<ScanReport> 
     })
 }
 
+/// Scans both layers and merges their reports.
+///
+/// `changes` is the union of the two layers, ordered by key and then by layer so
+/// the same report comes out every time; `ignored_count` is the sum, which only
+/// the source layer can raise. Like its two halves this is read-only, so `scan`
+/// may run it as often as it likes.
+pub fn scan_all(root: &Path, cfg: &Config, store: &Store) -> Result<ScanReport> {
+    let source = scan_source(root, cfg, store)?;
+    let raw = scan_raw(root, cfg, store)?;
+    let mut changes = source.changes;
+    changes.extend(raw.changes);
+    changes.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| a.layer.cmp(&b.layer)));
+    Ok(ScanReport {
+        changes,
+        ignored_count: source.ignored_count + raw.ignored_count,
+    })
+}
+
 /// One raw file found under `raw/`, with the digest of its full content.
 struct RawFile {
     /// Path identity key relative to `raw/`.
@@ -214,6 +247,7 @@ fn classify_raw(disk: &[RawFile], ledger: &[RawRow]) -> Vec<Change> {
             None => new_candidates.push(file),
             Some(row) if row.hash == file.hash => {}
             Some(_) => changes.push(change(
+                Layer::Raw,
                 ChangeKind::Changed,
                 &file.key,
                 Some(file.hash.clone()),
@@ -234,13 +268,25 @@ fn classify_raw(disk: &[RawFile], ledger: &[RawRow]) -> Vec<Change> {
             Some(canonical_key) if *canonical_key == file.key.as_str() => ChangeKind::New,
             _ => ChangeKind::Duplicate,
         };
-        changes.push(change(kind, &file.key, Some(file.hash.clone()), None));
+        changes.push(change(
+            Layer::Raw,
+            kind,
+            &file.key,
+            Some(file.hash.clone()),
+            None,
+        ));
     }
 
     let present: BTreeSet<&str> = disk.iter().map(|file| file.key.as_str()).collect();
     for row in ledger {
         if !present.contains(row.key.as_str()) {
-            changes.push(change(ChangeKind::Missing, &row.key, None, None));
+            changes.push(change(
+                Layer::Raw,
+                ChangeKind::Missing,
+                &row.key,
+                None,
+                None,
+            ));
         }
     }
 
@@ -340,12 +386,19 @@ fn classify(disk: &[DiskFile], present: &BTreeSet<String>, ledger: &[SourceRow])
     for file in disk {
         match &file.digest {
             DiskDigest::Oversize => {
-                changes.push(change(ChangeKind::Oversize, &file.key, None, None));
+                changes.push(change(
+                    Layer::Source,
+                    ChangeKind::Oversize,
+                    &file.key,
+                    None,
+                    None,
+                ));
             }
             DiskDigest::Digest(digest) => match by_key.get(file.key.as_str()) {
                 None => new_candidates.push(file),
                 Some(row) if row.hash.as_str() == digest => {}
                 Some(_) => changes.push(change(
+                    Layer::Source,
                     ChangeKind::Changed,
                     &file.key,
                     Some(digest.clone()),
@@ -372,6 +425,7 @@ fn classify(disk: &[DiskFile], present: &BTreeSet<String>, ledger: &[SourceRow])
         match canonical.get(digest.as_str()) {
             Some(canonical_key) if *canonical_key == file.key.as_str() => survivors.push(file),
             _ => changes.push(change(
+                Layer::Source,
                 ChangeKind::Duplicate,
                 &file.key,
                 Some(digest.clone()),
@@ -397,6 +451,7 @@ fn classify(disk: &[DiskFile], present: &BTreeSet<String>, ledger: &[SourceRow])
                 let row = unclaimed.remove(position);
                 claimed.insert(row.key.as_str());
                 changes.push(change(
+                    Layer::Source,
                     ChangeKind::Moved,
                     &file.key,
                     Some(digest.clone()),
@@ -404,6 +459,7 @@ fn classify(disk: &[DiskFile], present: &BTreeSet<String>, ledger: &[SourceRow])
                 ));
             }
             None => changes.push(change(
+                Layer::Source,
                 ChangeKind::New,
                 &file.key,
                 Some(digest.clone()),
@@ -415,7 +471,13 @@ fn classify(disk: &[DiskFile], present: &BTreeSet<String>, ledger: &[SourceRow])
         if present.contains(&row.key) || claimed.contains(row.key.as_str()) {
             continue;
         }
-        changes.push(change(ChangeKind::Missing, &row.key, None, None));
+        changes.push(change(
+            Layer::Source,
+            ChangeKind::Missing,
+            &row.key,
+            None,
+            None,
+        ));
     }
 
     // One key can only carry one change, so the sort is total.
@@ -424,11 +486,18 @@ fn classify(disk: &[DiskFile], present: &BTreeSet<String>, ledger: &[SourceRow])
 }
 
 /// Convenience constructor keeping the field order visible.
-fn change(kind: ChangeKind, key: &str, hash: Option<String>, moved_from: Option<String>) -> Change {
+fn change(
+    layer: Layer,
+    kind: ChangeKind,
+    key: &str,
+    hash: Option<String>,
+    moved_from: Option<String>,
+) -> Change {
     Change {
         kind,
         key: String::from(key),
         hash,
         moved_from,
+        layer,
     }
 }

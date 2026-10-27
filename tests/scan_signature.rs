@@ -200,3 +200,108 @@ fn cli_scan_emits_json_changes() {
     assert!(v["data"]["changes"][0]["hash"].is_string());
     assert!(v["data"]["changes"][0]["moved_from"].is_null());
 }
+
+/// Runs `llm-wiki --json <args>` in `dir` and returns the parsed envelope.
+fn cli(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
+    let out = Command::cargo_bin("llm-wiki")
+        .unwrap()
+        .arg("--json")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// Converts one source through the CLI, so both ledger layers have a row.
+fn convert_one(dir: &std::path::Path, key: &str) {
+    let v = cli(dir, &["convert", "--key", key]);
+    assert_eq!(v["ok"], true, "{v}");
+}
+
+#[test]
+fn cli_scan_reports_a_hand_edited_raw_file_under_the_raw_layer() {
+    let d = tempdir().unwrap();
+    init::run(d.path(), false).unwrap();
+    fs::write(d.path().join("source/a.md"), "# A\n\nalpha body\n").unwrap();
+    convert_one(d.path(), "a.md");
+
+    // Right after `convert` both layers are in sync.
+    let clean = cli(d.path(), &["scan"]);
+    assert_eq!(
+        clean["data"]["changes"].as_array().unwrap().len(),
+        0,
+        "a fresh conversion must leave nothing pending: {clean}"
+    );
+
+    // A hand edit to the raw layer is invisible to the source layer, so only
+    // the raw half of the scan can report it.
+    let raw = d.path().join("raw/a.md");
+    let mut text = fs::read_to_string(&raw).unwrap();
+    text.push_str("\nhand edit\n");
+    fs::write(&raw, text).unwrap();
+
+    let edited = cli(d.path(), &["scan"]);
+    let changes = edited["data"]["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "only the raw layer changed: {edited}");
+    assert_eq!(changes[0]["kind"], "changed");
+    assert_eq!(changes[0]["key"], "a.md");
+    assert_eq!(changes[0]["layer"], "raw", "{edited}");
+    assert!(changes[0]["hash"].is_string());
+}
+
+#[test]
+fn cli_scan_merges_both_layers_and_labels_each_change() {
+    let d = tempdir().unwrap();
+    init::run(d.path(), false).unwrap();
+    fs::write(d.path().join("source/a.md"), "# A\n\nalpha body\n").unwrap();
+    convert_one(d.path(), "a.md");
+
+    // One pending source in the source layer and one edited raw file in the raw
+    // layer: the merged list must carry both, each with its own layer.
+    fs::write(d.path().join("source/b.md"), "# B\n\nbeta body\n").unwrap();
+    let raw = d.path().join("raw/a.md");
+    let mut text = fs::read_to_string(&raw).unwrap();
+    text.push_str("\nhand edit\n");
+    fs::write(&raw, text).unwrap();
+
+    let merged = cli(d.path(), &["scan"]);
+    let changes = merged["data"]["changes"].as_array().unwrap();
+    let pairs: Vec<(&str, &str, &str)> = changes
+        .iter()
+        .map(|c| {
+            (
+                c["key"].as_str().unwrap(),
+                c["kind"].as_str().unwrap(),
+                c["layer"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![("a.md", "changed", "raw"), ("b.md", "new", "source")],
+        "{merged}"
+    );
+}
+
+#[test]
+fn cli_scan_is_idempotent_across_both_layers() {
+    let d = tempdir().unwrap();
+    init::run(d.path(), false).unwrap();
+    fs::write(d.path().join("source/a.md"), "# A\n\nalpha body\n").unwrap();
+    convert_one(d.path(), "a.md");
+    fs::write(d.path().join("source/b.md"), "# B\n\nbeta body\n").unwrap();
+    let raw = d.path().join("raw/a.md");
+    let mut text = fs::read_to_string(&raw).unwrap();
+    text.push_str("\nhand edit\n");
+    fs::write(&raw, text).unwrap();
+
+    let first = cli(d.path(), &["scan"]);
+    let second = cli(d.path(), &["scan"]);
+    assert_eq!(first, second, "scan must be read-only and idempotent");
+
+    // Both findings are still there on a repeat run.
+    assert_eq!(first["data"]["changes"].as_array().unwrap().len(), 2);
+    assert_eq!(first["data"]["ignored_count"], 0);
+}

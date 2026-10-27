@@ -16,6 +16,7 @@ pub mod ingest;
 pub mod init;
 pub mod lint;
 pub mod lock;
+pub mod moves;
 pub mod page;
 pub mod parse;
 pub mod paths;

@@ -37,7 +37,16 @@ pub enum Command {
         force: bool,
     },
     /// Compare `source/` with the ledger and report what changed.
-    Scan,
+    ///
+    /// Both layers are scanned: `source/` says what `convert` should pick up,
+    /// and the raw layer says what was edited by hand after conversion. Each
+    /// change names its layer.
+    Scan {
+        /// Migrate the renames this scan reports: move the ledger rows and
+        /// rewrite every page that cites the old name. Nothing else changes.
+        #[arg(long)]
+        apply_moves: bool,
+    },
     /// Convert unconverted sources into the raw layer.
     Convert {
         /// Convert exactly this source key, converted before or not.
@@ -64,7 +73,7 @@ pub enum Command {
         #[command(subcommand)]
         command: IngestCommand,
     },
-    /// Audit the wiki against the twelve lint rules.
+    /// Audit the wiki against the lint rules.
     Lint {
         /// Fail on warnings as well as errors.
         #[arg(long)]

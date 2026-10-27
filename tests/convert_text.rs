@@ -707,3 +707,64 @@ fn cli_parse_of_a_missing_source_is_a_runtime_error() {
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "E_IO");
 }
+
+/// Runs `llm-wiki --json <args>` in `dir` and returns (exit code, envelope).
+fn run_cli(dir: &Path, args: &[&str]) -> (i32, serde_json::Value) {
+    let out = Command::cargo_bin("llm-wiki")
+        .unwrap()
+        .arg("--json")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let code = out.status.code().expect("llm-wiki exits normally");
+    (code, json_of(&out))
+}
+
+#[test]
+fn batch_convert_keeps_going_after_a_bad_source() {
+    let d = tempdir().unwrap();
+    init::run(d.path(), false).unwrap();
+    fs::write(d.path().join("source/a.md"), "# A\n\nhealthy\n").unwrap();
+    // A `.pdf` that is not a PDF: its parser claims the extension and then
+    // fails, which is the "one bad source" a batch must survive.
+    fs::write(d.path().join("source/z.pdf"), b"definitely not a pdf").unwrap();
+
+    let (code, v) = run_cli(d.path(), &["convert"]);
+    assert_eq!(code, 1, "a failed source is a finding: {v}");
+    assert_eq!(v["ok"], true, "the round itself ran: {v}");
+    let converted = v["data"]["converted"].as_array().unwrap();
+    assert_eq!(converted.len(), 1, "the good source still converted: {v}");
+    assert_eq!(converted[0]["raw_path"], "raw/a.md");
+    assert!(d.path().join("raw/a.md").is_file());
+    let failures = v["data"]["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "{v}");
+    assert_eq!(failures[0]["key"], "z.pdf");
+    assert_eq!(failures[0]["code"], "E_BAD_SOURCE");
+    assert!(failures[0]["message"].is_string());
+}
+
+#[test]
+fn batch_convert_without_failures_exits_zero_with_an_empty_failure_list() {
+    let d = tempdir().unwrap();
+    init::run(d.path(), false).unwrap();
+    fs::write(d.path().join("source/a.md"), "# A\n").unwrap();
+
+    let (code, v) = run_cli(d.path(), &["convert"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["converted"].as_array().unwrap().len(), 1);
+    assert_eq!(v["data"]["failures"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn single_key_convert_keeps_the_immediate_failure_path() {
+    let d = tempdir().unwrap();
+    init::run(d.path(), false).unwrap();
+    fs::write(d.path().join("source/z.pdf"), b"definitely not a pdf").unwrap();
+
+    let (code, v) = run_cli(d.path(), &["convert", "--key", "z.pdf"]);
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["ok"], false, "one named source is not a batch: {v}");
+    assert_eq!(v["error"]["code"], "E_BAD_SOURCE");
+}
