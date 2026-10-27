@@ -12,7 +12,7 @@ use serde_json::json;
 
 use llm_wiki::archive;
 use llm_wiki::chunk;
-use llm_wiki::cli::{ArchiveCommand, Cli, Command, IngestCommand};
+use llm_wiki::cli::{ArchiveCommand, Cli, Command, IngestCommand, ScopeArg};
 use llm_wiki::config::Config;
 use llm_wiki::convert;
 use llm_wiki::hash;
@@ -21,6 +21,7 @@ use llm_wiki::init;
 use llm_wiki::lint;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
+use llm_wiki::query::{self, Scope as QueryScope};
 use llm_wiki::report::{self, Exit};
 use llm_wiki::scan::{self, ChangeKind};
 use llm_wiki::store::Store;
@@ -72,6 +73,13 @@ fn dispatch(cli: Cli) -> ! {
         Command::Defer => run_defer(),
         Command::Archive { command } => run_archive(command),
         Command::Recall { query, full } => run_recall(query, full),
+        Command::Query {
+            text,
+            limit,
+            expand,
+            scope,
+            reindex,
+        } => run_query(text, limit, expand, scope, reindex),
         Command::Sync {
             limit,
             dry_run,
@@ -630,6 +638,144 @@ fn run_recall(query: String, full: bool) -> ! {
     }
 }
 
+/// `query` is the only command that decides when to pay for an index update:
+/// `--reindex` rebuilds, a plain search catches up incrementally, and with no
+/// text only `--reindex` has something to do (report the page count).
+fn run_query(
+    text: Option<String>,
+    limit: usize,
+    expand: usize,
+    scope: ScopeArg,
+    reindex: bool,
+) -> ! {
+    let cmd = "query";
+    let root = wiki_root(cmd);
+    let cfg = load_config(cmd, &root);
+    let mut store = open_store(cmd, &root, &cfg);
+    let text = text.unwrap_or_default();
+    let empty = text.trim().is_empty();
+
+    if reindex {
+        match query::reindex(&root, &cfg, &mut store) {
+            Ok(indexed) if empty => report::emit(cmd, QueryReindexData { indexed }),
+            Ok(_) => {}
+            Err(err) => fail_query(cmd, &err),
+        }
+    } else if empty {
+        // Empty text without a rebuild is the caller's mistake, and it is
+        // caught before any write: `query` must not silently rebuild.
+        report::fail(
+            cmd,
+            Exit::Usage,
+            "E_EMPTY_QUERY",
+            "no query text; pass a word to search for, or --reindex",
+        )
+    } else if let Err(err) = query::refresh(&root, &cfg, &mut store) {
+        fail_query(cmd, &err)
+    }
+
+    let search = query::SearchQuery {
+        text,
+        limit,
+        expand,
+        scope: match scope {
+            ScopeArg::All => QueryScope::All,
+            ScopeArg::Wiki => QueryScope::Wiki,
+            ScopeArg::Archive => QueryScope::Archive,
+        },
+    };
+    match query::search(&root, &cfg, &store, &search) {
+        Ok(hits) => {
+            let data = QueryHitsData {
+                count: hits.len(),
+                hits,
+            };
+            report::emit_with(cmd, data, Exit::Ok, human_query)
+        }
+        Err(err) => fail_query(cmd, &err),
+    }
+}
+
+/// A query that cannot run is the caller's mistake: empty text, a broken
+/// ledger, a page path that cannot be named. No hits is not a failure — it is
+/// an empty result with exit 0.
+fn fail_query(cmd: &str, err: &query::QueryError) -> ! {
+    report::fail(cmd, Exit::Usage, err.code(), &err.to_string())
+}
+
+/// One block per hit: the heading, the snippet, then the three next-step clues
+/// on one arrow line. Expanded neighbours hang off it, one line each.
+fn human_query(data: &QueryHitsData) -> String {
+    if data.hits.is_empty() {
+        return String::from("no hits");
+    }
+    let mut blocks = Vec::new();
+    for (index, hit) in data.hits.iter().enumerate() {
+        let excerpt = if hit.snippet.is_empty() {
+            hit.summary.as_str()
+        } else {
+            hit.snippet.as_str()
+        };
+        // A body excerpt may span lines; a block line must not.
+        let excerpt = excerpt
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let links = if hit.links.is_empty() {
+            String::from("-")
+        } else {
+            hit.links
+                .iter()
+                .map(|link| link.title.clone())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let sources = if hit.sources.is_empty() {
+            String::from("-")
+        } else {
+            hit.sources
+                .iter()
+                .map(|source| {
+                    format!(
+                        "{} ({})",
+                        source.raw,
+                        if source.raw_available {
+                            "ok"
+                        } else {
+                            "missing"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let mut block = format!(
+            "{}. {} [{}] {}\n   {}\n   → links: {} | sources: {} | backlinks {}",
+            index + 1,
+            hit.title,
+            hit.status,
+            hit.page,
+            excerpt,
+            links,
+            sources,
+            hit.backlinks
+        );
+        if let Some(recall) = &hit.recall {
+            block.push_str(&format!(" | recall: {recall}"));
+        }
+        for expanded in &hit.expanded {
+            block.push_str(&format!(
+                "\n   ↳ {} ({}): {}",
+                expanded.title, expanded.page, expanded.summary
+            ));
+        }
+        blocks.push(block);
+    }
+    blocks.join("\n\n")
+}
+
 /// A purge that needs a human is a third outcome (exit 3), a recall that matched
 /// nothing is a finding (exit 1), and every other refusal — an unledgered key, an
 /// already sealed one, a missing summary, a bad query, a broken ledger — is the
@@ -893,6 +1039,19 @@ impl From<archive::RecallHit> for RecallHitData {
             body: hit.body,
         }
     }
+}
+
+/// Payload of the `query` success envelope.
+#[derive(Serialize)]
+struct QueryHitsData {
+    count: usize,
+    hits: Vec<query::Hit>,
+}
+
+/// Payload of `query --reindex` with no text: what a rebuild indexed.
+#[derive(Serialize)]
+struct QueryReindexData {
+    indexed: usize,
 }
 
 /// Maps a clap failure onto the CLI contract: help stays plain text on stdout

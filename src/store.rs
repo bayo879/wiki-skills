@@ -145,6 +145,33 @@ impl PageMetaRow {
     }
 }
 
+/// One row returned by [`Store::fts_search`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct FtsHit {
+    /// Repository-relative path of the matching page.
+    pub page_id: String,
+    /// The title as it was indexed.
+    pub title: String,
+    /// Body excerpt chosen by FTS5, still in index (segmented) form.
+    pub snippet: String,
+    /// `-bm25`, so a larger number is a better match.
+    pub score: f64,
+}
+
+/// Which pages [`Store::fts_search`] may return.
+///
+/// The patterns are SQL `LIKE` patterns against the page path; the caller owns
+/// the escaping, because only the caller knows what a path prefix looks like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FtsScope<'a> {
+    /// Every indexed page.
+    All,
+    /// Only pages whose path matches the pattern.
+    Like(&'a str),
+    /// Only pages whose path does not match the pattern.
+    NotLike(&'a str),
+}
+
 /// One row of the `sources` ledger: a file that exists under `source/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRow {
@@ -689,6 +716,108 @@ impl Store {
         )?;
         Ok(count > 0)
     }
+
+    /// Replaces the whole full-text index with `rows` in one transaction.
+    ///
+    /// Each row is `(page_id, title, body)`. The delete and the inserts commit
+    /// together, so a failure leaves the previous index intact instead of a
+    /// half-emptied one.
+    pub fn fts_replace_all(&mut self, rows: &[(String, String, String)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM fts", [])?;
+        Self::fts_insert(&tx, rows)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Applies a delta to the full-text index in one transaction.
+    ///
+    /// Deletes happen by `page_id`; the upserts follow. A transaction here is
+    /// what keeps a crashed run from leaving a page twice-indexed or missing.
+    pub fn fts_apply(
+        &mut self,
+        delete: &[String],
+        upsert: &[(String, String, String)],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for page_id in delete {
+            tx.execute("DELETE FROM fts WHERE page_id = ?1", params![page_id])?;
+        }
+        Self::fts_insert(&tx, upsert)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every page id currently in the full-text index, sorted.
+    pub fn fts_page_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT page_id FROM fts ORDER BY page_id")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    /// Runs one FTS5 `MATCH` expression, best match first.
+    ///
+    /// `expression` must already be a valid FTS5 expression: this layer does not
+    /// fix syntax, it only filters by scope and limits the result.
+    pub fn fts_search(
+        &self,
+        expression: &str,
+        limit: usize,
+        scope: FtsScope<'_>,
+    ) -> Result<Vec<FtsHit>> {
+        let mut sql = String::from(
+            "SELECT page_id, title, snippet(fts, 2, '', '', '…', 32), bm25(fts) \
+             FROM fts WHERE fts MATCH ?1",
+        );
+        match scope {
+            FtsScope::All => {}
+            FtsScope::Like(_) => sql.push_str(" AND page_id LIKE ?3"),
+            FtsScope::NotLike(_) => sql.push_str(" AND page_id NOT LIKE ?3"),
+        }
+        sql.push_str(" ORDER BY bm25(fts), page_id LIMIT ?2");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = match scope {
+            FtsScope::All => stmt
+                .query_map(params![expression, limit as i64], fts_hit_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            FtsScope::Like(pattern) | FtsScope::NotLike(pattern) => stmt
+                .query_map(params![expression, limit as i64, pattern], fts_hit_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        };
+        Ok(rows)
+    }
+
+    /// Drops one page from the `page_meta` ledger.
+    pub fn delete_page_meta(&mut self, page_key: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM page_meta WHERE page_key = ?1",
+            params![page_key],
+        )?;
+        Ok(())
+    }
+
+    /// Inserts `(page_id, title, body)` rows into `fts`.
+    fn fts_insert(conn: &Connection, rows: &[(String, String, String)]) -> Result<()> {
+        let mut stmt = conn.prepare("INSERT INTO fts(page_id, title, body) VALUES (?1, ?2, ?3)")?;
+        for (page_id, title, body) in rows {
+            stmt.execute(params![page_id, title, body])?;
+        }
+        Ok(())
+    }
+}
+
+/// Reads one [`Store::fts_search`] row in select order.
+fn fts_hit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FtsHit> {
+    let bm25: f64 = row.get(3)?;
+    Ok(FtsHit {
+        page_id: row.get(0)?,
+        title: row.get(1)?,
+        snippet: row.get(2)?,
+        score: -bm25,
+    })
 }
 
 #[cfg(test)]

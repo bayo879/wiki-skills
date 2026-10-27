@@ -17,6 +17,7 @@ pub mod lock;
 pub mod page;
 pub mod parse;
 pub mod paths;
+pub mod query;
 pub mod render;
 pub mod report;
 pub mod scan;

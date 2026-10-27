@@ -2,7 +2,7 @@
 //!
 //! Later tasks add their subcommands to [`Command`]; nothing here does work.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Top-level invocation: `llm-wiki [--json] <command>`.
 #[derive(Debug, Parser)]
@@ -108,6 +108,23 @@ pub enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Search the wiki with the full-text index.
+    Query {
+        /// Words to search for; omit only together with `--reindex`.
+        text: Option<String>,
+        /// Return at most this many hits.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Inline the summary of each linked neighbour; one hop, five maximum.
+        #[arg(long, default_value_t = 0)]
+        expand: usize,
+        /// Search live pages, archived summaries, or both.
+        #[arg(long, value_enum, default_value = "all")]
+        scope: ScopeArg,
+        /// Rebuild the whole index from `wiki/` before searching.
+        #[arg(long)]
+        reindex: bool,
+    },
     /// Run one unattended round: scan, convert, gate and audit.
     Sync {
         /// Convert at most this many sources; defaults to `sync.max_per_run`.
@@ -120,6 +137,17 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+}
+
+/// The half of the index `query` may return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ScopeArg {
+    /// Live pages and archived summaries.
+    All,
+    /// Live pages only.
+    Wiki,
+    /// Archived summaries only.
+    Archive,
 }
 
 /// The three verbs of the archive layer.
