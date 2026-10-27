@@ -19,3 +19,4 @@ pub mod report;
 pub mod scan;
 pub mod staging;
 pub mod store;
+pub mod version;

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use serde::Serialize;
+use serde_json::json;
 
 use llm_wiki::cli::{Cli, Command, IngestCommand};
 use llm_wiki::config::Config;
@@ -20,6 +21,7 @@ use llm_wiki::paths;
 use llm_wiki::report::{self, Exit};
 use llm_wiki::scan::{self, ChangeKind};
 use llm_wiki::store::Store;
+use llm_wiki::version::{self, ApproveOutcome};
 
 /// Characters of parsed markdown echoed by `parse`.
 const HEAD_CHARS: usize = 200;
@@ -59,6 +61,11 @@ fn dispatch(cli: Cli) -> ! {
         Command::Parse { key } => run_parse(key),
         Command::Ingest { command } => run_ingest(command),
         Command::Lint { strict, fix } => run_lint(strict, fix),
+        Command::Checkpoint { label } => run_checkpoint(label),
+        Command::Approve { confirm } => run_approve(confirm),
+        Command::Reject { reason } => run_reject(reason),
+        Command::Instruct { text } => run_instruct(text),
+        Command::Defer => run_defer(),
     }
 }
 
@@ -263,6 +270,83 @@ fn fail_ingest(cmd: &str, err: &ingest::IngestError) -> ! {
     report::fail(cmd, exit, err.code(), &err.to_string())
 }
 
+/// `checkpoint` snapshots the approved wiki as a new version.
+fn run_checkpoint(label: String) -> ! {
+    let root = wiki_root("checkpoint");
+    let cfg = load_config("checkpoint", &root);
+    let mut store = open_store("checkpoint", &root, &cfg);
+    match version::checkpoint(&root, &cfg, &mut store, &label) {
+        Ok(version) => report::emit("checkpoint", CheckpointData { version }),
+        Err(err) => fail_version("checkpoint", &err),
+    }
+}
+
+/// `approve` publishes the staged candidates, but only when a human confirmed.
+///
+/// Without `--confirm`, a ready merge is reported as `NEEDS_CONFIRMATION` with
+/// exit 3: exiting 0 would read as "published" and exiting 1 as "failed", while
+/// the human decision is a third outcome with its own code.
+fn run_approve(confirm: bool) -> ! {
+    let root = wiki_root("approve");
+    let cfg = load_config("approve", &root);
+    let mut store = open_store("approve", &root, &cfg);
+    match version::approve(&root, &cfg, &mut store, confirm) {
+        Ok(ApproveOutcome::Applied { version }) => report::emit("approve", ApproveData { version }),
+        Ok(ApproveOutcome::NeedsConfirmation { reason, detail }) => report::fail_detail(
+            "approve",
+            Exit::NeedsConfirm,
+            "NEEDS_CONFIRMATION",
+            &format!("{reason}: {detail}"),
+            Some(json!({ "reason": reason, "detail": detail })),
+        ),
+        Err(err) => fail_version("approve", &err),
+    }
+}
+
+/// `reject` discards the candidates and keeps the reason in the log.
+fn run_reject(reason: String) -> ! {
+    let root = wiki_root("reject");
+    let cfg = load_config("reject", &root);
+    let mut store = open_store("reject", &root, &cfg);
+    match version::reject(&root, &cfg, &mut store, &reason) {
+        Ok(()) => report::emit("reject", RejectData { reason }),
+        Err(err) => fail_version("reject", &err),
+    }
+}
+
+/// `instruct` writes guidance for the next agent session.
+fn run_instruct(text: String) -> ! {
+    let root = wiki_root("instruct");
+    let cfg = load_config("instruct", &root);
+    let mut store = open_store("instruct", &root, &cfg);
+    match version::instruct(&root, &cfg, &mut store, &text) {
+        Ok(()) => report::emit("instruct", InstructData { text }),
+        Err(err) => fail_version("instruct", &err),
+    }
+}
+
+/// `defer` keeps the queue for later and changes nothing else.
+fn run_defer() -> ! {
+    let root = wiki_root("defer");
+    let cfg = load_config("defer", &root);
+    let mut store = open_store("defer", &root, &cfg);
+    match version::defer(&root, &cfg, &mut store) {
+        Ok(()) => report::emit("defer", json!({})),
+        Err(err) => fail_version("defer", &err),
+    }
+}
+
+/// A drift or a stale source is a finding (exit 1); everything else — a missing
+/// candidate set, a bad reason, an unwritable path — is the caller's or the
+/// environment's mistake (exit 2).
+fn fail_version(cmd: &str, err: &version::VersionError) -> ! {
+    let exit = match err {
+        version::VersionError::Drift { .. } | version::VersionError::Stale { .. } => Exit::Error,
+        _ => Exit::Usage,
+    };
+    report::fail(cmd, exit, err.code(), &err.to_string())
+}
+
 /// `lint` audits the wiki; with `--fix` it repairs the mechanical defects
 /// first, then reports what is left.
 ///
@@ -331,6 +415,30 @@ struct LintData {
 #[derive(Serialize)]
 struct VersionData {
     version: &'static str,
+}
+
+/// Payload of the `checkpoint` success envelope.
+#[derive(Serialize)]
+struct CheckpointData {
+    version: String,
+}
+
+/// Payload of the `approve` success envelope.
+#[derive(Serialize)]
+struct ApproveData {
+    version: String,
+}
+
+/// Payload of the `reject` success envelope.
+#[derive(Serialize)]
+struct RejectData {
+    reason: String,
+}
+
+/// Payload of the `instruct` success envelope.
+#[derive(Serialize)]
+struct InstructData {
+    text: String,
 }
 
 /// Payload of the `convert` success envelope.

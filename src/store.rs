@@ -455,6 +455,23 @@ impl Store {
         Ok(())
     }
 
+    /// Appends one row to the `versions` ledger and returns its row id.
+    pub fn record_version(&mut self, created_at: &str, note: &str, kind: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO versions(created_at, note, kind) VALUES (?1, ?2, ?3)",
+            params![created_at, note, kind],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Number of rows in the `versions` ledger.
+    pub fn version_count(&self) -> Result<i64> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM versions", [], |row| row.get(0))?;
+        Ok(count)
+    }
+
     /// Whether the linked SQLite was built with the FTS5 extension.
     ///
     /// The full-text index in the schema is useless without it, and the bundled

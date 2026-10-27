@@ -22,7 +22,6 @@ pub enum Exit {
     /// Bad usage or bad environment.
     Usage = 2,
     /// The command stopped and needs a human decision.
-    #[allow(dead_code)] // Constructed once the decision-gated commands land.
     NeedsConfirm = 3,
     /// Another process holds the repository lock.
     #[allow(dead_code)] // Constructed once the write commands take the lock.
@@ -67,6 +66,8 @@ struct Failure<'a> {
 struct ErrorBody<'a> {
     code: &'a str,
     message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<Value>,
 }
 
 /// Reports a successful command and exits 0.
@@ -115,17 +116,33 @@ pub fn emit_with<T: Serialize>(
 /// Reports a failed command and exits with `exit`. Human-readable diagnostics
 /// go to stderr, where they cannot be mistaken for the machine-readable stdout.
 pub fn fail(cmd: &str, exit: Exit, code: &str, msg: &str) -> ! {
+    fail_detail(cmd, exit, code, msg, None)
+}
+
+/// Like [`fail`], with a structured `detail` object in the JSON envelope.
+///
+/// The detail carries the data a caller needs to act on a refusal (which page
+/// drifted, which source went stale). The field is omitted when absent, so
+/// commands without one keep the envelope they always had.
+pub fn fail_detail(cmd: &str, exit: Exit, code: &str, msg: &str, detail: Option<Value>) -> ! {
     if json_mode() {
         let envelope = Failure {
             ok: false,
             cmd,
-            error: ErrorBody { code, message: msg },
+            error: ErrorBody {
+                code,
+                message: msg,
+                detail,
+            },
         };
         let line =
             serde_json::to_string(&envelope).unwrap_or_else(|_| String::from(INTERNAL_FAILURE));
         write_line(&line);
     } else {
         let _ = writeln!(std::io::stderr(), "error [{code}]: {msg}");
+        if let Some(detail) = &detail {
+            let _ = writeln!(std::io::stderr(), "detail: {detail}");
+        }
     }
     std::process::exit(exit.code())
 }

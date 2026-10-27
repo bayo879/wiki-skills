@@ -63,6 +63,32 @@ pub enum Command {
         #[arg(long)]
         fix: bool,
     },
+    /// Snapshot the approved wiki as a new version.
+    Checkpoint {
+        /// Why the snapshot is taken; recorded in the version record.
+        #[arg(long)]
+        label: String,
+    },
+    /// Publish the staging candidates, or report that a human must confirm.
+    Approve {
+        /// Merge without asking; without it, a ready merge is only reported.
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Discard the staging candidates and record why.
+    Reject {
+        /// Why the candidates were rejected.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Leave free-text guidance for the next agent session.
+    Instruct {
+        /// The instruction, written verbatim to `.wiki/next-instruction.md`.
+        #[arg(long)]
+        text: String,
+    },
+    /// Keep the queue for later without changing any state.
+    Defer,
 }
 
 /// The three verbs of an ingest round.
