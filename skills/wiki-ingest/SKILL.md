@@ -151,6 +151,8 @@ llm-wiki ingest abort
 2. 要改哪些页，改哪一段、为什么；
 3. `orphan_pages` 怎么处理：补来源，还是弃页。
 
+汇报里把整条序列一次说全，别等人问「然后呢」：`begin` → 写候选页到 `.wiki/staging/` → `commit` → 人跑 `approve --confirm` 并入 `wiki/`。前两步你做，最后一步是人做。
+
 讲完等确认。人没点头就不 commit。
 
 ## 8. 收尾
