@@ -14,6 +14,7 @@ pub mod graph;
 pub mod hash;
 pub mod ingest;
 pub mod init;
+pub mod ledger;
 pub mod lint;
 pub mod lock;
 pub mod moves;

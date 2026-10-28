@@ -22,6 +22,7 @@ use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::hash::{self, HashError};
+use crate::ledger::Ledger;
 use crate::page;
 use crate::render;
 use crate::store::{self, ArchiveRow, PageMetaRow, Store};
@@ -541,14 +542,13 @@ pub fn purge_at(
                 remove_file(root.join(&cfg.paths.source).join(key))?;
                 if let Some(raw_key) = &source.raw_key {
                     remove_file(root.join(&cfg.paths.raw).join(raw_key))?;
-                    store.delete_raw(raw_key)?;
                 }
-                store.delete_source(key)?;
+                Ledger::new(store).forget_source(key, source.raw_key.as_deref())?;
                 report.sources += 1;
             }
         }
         remove_file(root.join(&row.key))?;
-        store.delete_archive(&row.key)?;
+        Ledger::new(store).forget_archive(&row.key)?;
         report.deleted += 1;
     }
     if report.deleted > 0 {

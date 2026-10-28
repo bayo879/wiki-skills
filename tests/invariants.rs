@@ -144,7 +144,7 @@ fn only_store_writes_sql() {
 /// Fooled by: writing the rows with raw SQL instead of these methods, which the
 /// test above catches first.
 #[test]
-fn only_three_modules_write_the_ledger() {
+fn only_ledger_writes_the_ledger() {
     const WRITERS: [&str; 5] = [
         "upsert_source(",
         "upsert_raw(",
@@ -163,14 +163,11 @@ fn only_three_modules_write_the_ledger() {
         }
     }
     let found: BTreeSet<String> = callers;
-    let expected: BTreeSet<String> = ["archive.rs", "convert.rs", "moves.rs"]
-        .iter()
-        .map(|name| String::from(*name))
-        .collect();
+    let expected: BTreeSet<String> = BTreeSet::from([String::from("ledger.rs")]);
     assert_eq!(
         found, expected,
-        "the ledger has a new writer; either route it through one of the three or update the \
-         invariant in docs/readme/architecture.md"
+        "a module writes the ledger directly; state the intent on `ledger::Ledger` instead, or \
+         update the invariant in docs/readme/architecture.md"
     );
 }
 

@@ -59,6 +59,7 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
 | `src/version.rs` | 版本快照与保留策略 |
 | `src/lock.rs` | 仓库锁（TTL 600s） |
 | `src/store.rs` | SQLite 账本、schema 迁移、FTS5 |
+| `src/ledger.rs` | 账本唯一的写入口：登记转换、跟随改名、遗忘删除 |
 | `src/sync.rs` | 无人值守一轮 |
 | `src/query.rs` | FTS5 索引与检索 |
 | `src/archive.rs` | 摘要封存、清理与召回 |
@@ -70,7 +71,7 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
 ## 不变量
 
 - 账本只由 CLI 写；`source/` 是唯一输入，`raw/` 与 `wiki/` 都是派生产物，但都进 git。（检查：tests/invariants.rs::only_store_writes_sql）
-- 账本表只有 `src/store.rs` 能写；`sources` 与 `raws` 的业务写入口只有三处：`convert` 登记、`moves` 改键、`archive purge` 删行。想加第四处，先确认它不是前三种变更的另一种写法。（检查：tests/invariants.rs::only_three_modules_write_the_ledger）
+- 账本表只有 `src/store.rs` 能执行 SQL，业务写入只有 `src/ledger.rs` 一个入口：`convert` 登记、`moves` 改键、`archive purge` 删行都表达成 `ledger::Ledger` 的一次调用，顺序与失败语义写在 `ledger.rs` 的注释里。想加第四个意图，加 `Ledger` 的方法，不要绕回 `store`。（检查：tests/invariants.rs::only_ledger_writes_the_ledger）
 - 先文件后账本：`convert` 先原子写 `raw/`，再登记两张表，两步之间没有跨表事务。中断留下的缺口由 `scan`（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露，所以「账本与磁盘暂时不一致」是被允许并会被检出的状态，不是靠事务禁止的状态。（未机器化：没有崩溃注入测试，无法证明两次写入的先后）
 - 对账只有一个答案：`scan::classify`（`source/`）与 `scan::classify_raw`（`raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan` 输出的 `layer` 字段、`lint` `L7`、`ingest begin` 的 `orphan_pages` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这三处必须同答。（检查：tests/reconcile.rs::an_unledgered_raw_is_reported_the_same_way_by_all_three）
 - 页面 `sources` 里的 raw 键必须在 `raws` 账本内；违反由 `ingest begin` 的 `orphan_pages` 报告，只报不修。（检查：tests/ingest.rs::begin_reports_orphan_pages）
@@ -86,7 +87,7 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
 
 | 文件 | 抓什么 |
 | --- | --- |
-| `tests/invariants.rs` | 代码结构：SQL 只在 `store.rs`、账本只有三个写入口、对账只有 `scan`、不变量标注指向真实测试、迁移步数等于 `SCHEMA_VERSION`、`L1`–`L13` 三方一致 |
+| `tests/invariants.rs` | 代码结构：SQL 只在 `store.rs`、账本写入只在 `ledger.rs`、对账只有 `scan`、不变量标注指向真实测试、迁移步数等于 `SCHEMA_VERSION`、`L1`–`L13` 三方一致 |
 | `tests/docs_contract.rs` | 文档与 CLI 一致：JSON 形状快照、flag 真存在、表格与枚举等于代码、被点名对象的字段在对应技能里有枚举行、文档里的 `snake_case` 名字与 `E_*` 码闭世界 |
 | `tests/snapshots/cli-keys.json` | 各命令 `--json` 的键路径。改输出必须改快照；置 `LLM_WIKI_UPDATE_SNAPSHOTS=1` 重跑 `tests/docs_contract.rs` 会重写它，之后人工过一遍 |
 | `tests/docs_tokens.allow` | 白名单：文档里合理出现、但不是本仓词汇的名字，每条写理由 |

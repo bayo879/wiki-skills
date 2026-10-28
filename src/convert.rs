@@ -27,6 +27,7 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::hash;
+use crate::ledger::Ledger;
 use crate::parse::{self, Extracted, Source, Warning};
 use crate::paths;
 use crate::store::{RawRow, SourceRow, Store, StoreError};
@@ -163,9 +164,15 @@ pub fn convert_one(
     let raw_hash = hash::hash_bytes(document.as_bytes());
     write_atomic(&raw_path, document.as_bytes())?;
 
-    record_conversion(store, cfg, key, &source_path, &raw_key, &converted_at)?;
+    let source_row = converted_source_row(store, cfg, key, &source_path, &raw_key, &converted_at)?;
     // The `raws` key space is relative to `raw/`, like `scan_raw` reports it.
-    record_raw(store, key, &raw_rel, &raw_hash, &converted_at)?;
+    let raw_row = RawRow {
+        key: raw_rel,
+        hash: raw_hash,
+        source_key: String::from(key),
+        converted_at: converted_at.clone(),
+    };
+    Ledger::new(store).record_conversion(&source_row, &raw_row)?;
 
     Ok(ConvertOutcome {
         raw_path: raw_key,
@@ -401,44 +408,21 @@ fn unquote(value: &str) -> String {
     out
 }
 
-/// Writes the `raws` row for the file this conversion just put on disk.
-///
-/// `hash` digests the written bytes, frontmatter included, because that is what
-/// [`crate::scan::scan_raw`] recomputes; hashing the body alone would leave every
-/// conversion looking like pending work on the next scan. `source_key` is the
-/// plain source key, in the same key space as the `sources` ledger; the raw key is
-/// relative to `raw/`, which is the key space `scan_raw` walks and reports.
-fn record_raw(
-    store: &mut Store,
-    source_key: &str,
-    raw_key: &str,
-    hash: &str,
-    converted_at: &str,
-) -> Result<()> {
-    store.upsert_raw(&RawRow {
-        key: String::from(raw_key),
-        hash: String::from(hash),
-        source_key: String::from(source_key),
-        converted_at: String::from(converted_at),
-    })?;
-    Ok(())
-}
-
-/// Writes `raw_key` and `converted_at` into the ledger, keeping every other
+/// The `sources` row a conversion should leave behind, keeping every other
 /// column as recorded.
 ///
 /// A key the ledger has never seen gets a row derived from the file on disk, so
 /// `convert --key` works before the first scan. The digest is chosen exactly the
 /// way `scan` chooses it (full up to `parse.chunk_threshold`, sampled above), so
 /// the next scan sees an unchanged source instead of a spurious `changed`.
-fn record_conversion(
+fn converted_source_row(
     store: &mut Store,
     cfg: &Config,
     key: &str,
     source_path: &Path,
     raw_key: &str,
     converted_at: &str,
-) -> Result<()> {
+) -> Result<SourceRow> {
     let mut row = match store.get_source(key)? {
         Some(row) => row,
         None => {
@@ -460,8 +444,7 @@ fn record_conversion(
     };
     row.raw_key = Some(String::from(raw_key));
     row.converted_at = Some(String::from(converted_at));
-    store.upsert_source(&row)?;
-    Ok(())
+    Ok(row)
 }
 
 #[cfg(test)]

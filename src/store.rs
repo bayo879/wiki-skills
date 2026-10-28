@@ -460,6 +460,9 @@ impl Store {
     }
 
     /// Inserts `row`, or replaces the existing row with the same key.
+    ///
+    /// Production code states its intent on [`crate::ledger::Ledger`] rather
+    /// than calling this directly; tests seed rows here.
     pub fn upsert_source(&mut self, row: &SourceRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO sources(key, hash, size, mtime, raw_key, converted_at) \
@@ -549,6 +552,9 @@ impl Store {
     }
 
     /// Inserts `row`, or replaces the existing row with the same key.
+    ///
+    /// Production code states its intent on [`crate::ledger::Ledger`] rather
+    /// than calling this directly; tests seed rows here.
     pub fn upsert_raw(&mut self, row: &RawRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO raws(key, hash, source_key, converted_at) \

@@ -23,6 +23,7 @@ use walkdir::WalkDir;
 use crate::config::Config;
 use crate::convert;
 use crate::hash::{self, HashError};
+use crate::ledger::{Ledger, RawRelocation};
 use crate::page::{self, PageError};
 use crate::paths;
 use crate::scan::{Change, ChangeKind, Layer};
@@ -221,28 +222,33 @@ fn migrate_one(
     // The raw ledger follows the raw file. Its keys are relative to `raw/`
     // (`scan_raw` reports them that way, and `convert` records them that way),
     // while `sources.raw_key` carries the repository key.
-    if let (Some(old_raw), Some(new_raw)) = (raw_from.as_deref(), raw_to.as_deref()) {
-        let rel_from = convert::raw_key_for(from);
-        let rel_to = convert::raw_key_for(to);
-        let previous = store.get_raw(&rel_from)?;
-        if old_raw != new_raw {
-            store.delete_raw(&rel_from)?;
-            if let Some(previous) = previous {
-                store.upsert_raw(&RawRow {
-                    key: rel_to,
-                    hash: raw_digest.unwrap_or(previous.hash),
-                    source_key: String::from(to),
-                    converted_at: previous.converted_at,
-                })?;
+    let relocation = match (raw_from.as_deref(), raw_to.as_deref()) {
+        (Some(old_raw), Some(new_raw)) => {
+            let rel_from = convert::raw_key_for(from);
+            let previous = store.get_raw(&rel_from)?;
+            if old_raw != new_raw {
+                RawRelocation::Moved {
+                    from: rel_from,
+                    row: previous.map(|previous| RawRow {
+                        key: convert::raw_key_for(to),
+                        hash: raw_digest.unwrap_or(previous.hash),
+                        source_key: String::from(to),
+                        converted_at: previous.converted_at,
+                    }),
+                }
+            } else {
+                match previous {
+                    Some(previous) => RawRelocation::InPlace(RawRow {
+                        source_key: String::from(to),
+                        hash: raw_digest.unwrap_or(previous.hash),
+                        ..previous
+                    }),
+                    None => RawRelocation::Absent,
+                }
             }
-        } else if let Some(previous) = previous {
-            store.upsert_raw(&RawRow {
-                source_key: String::from(to),
-                hash: raw_digest.unwrap_or(previous.hash),
-                ..previous
-            })?;
         }
-    }
+        _ => RawRelocation::Absent,
+    };
 
     // The source ledger row moves last among the ledgers, so a failure above
     // leaves the old key in place and the next round simply retries.
@@ -251,8 +257,7 @@ fn migrate_one(
     if let Some(new_raw) = &raw_to {
         new_row.raw_key = Some(new_raw.clone());
     }
-    store.delete_source(from)?;
-    store.upsert_source(&new_row)?;
+    Ledger::new(store).relocate_source(from, &new_row, relocation)?;
 
     let pages = match (raw_from.as_deref(), raw_to.as_deref()) {
         (Some(old_raw), Some(new_raw)) if old_raw != new_raw => {
