@@ -1,11 +1,12 @@
 //! The one place the ledger is written.
 //!
 //! [`Store`] can write the `sources` and `raws` tables, but only this module
-//! does. Three callers have a reason to change the ledger — `convert` registers
+//! does. Four callers have a reason to change the ledger — `convert` registers
 //! what it wrote, `moves` follows a rename, `archive purge` forgets what it
-//! deleted — and each of them states its intent here instead of touching the
-//! tables itself. `tests/invariants.rs::only_ledger_writes_the_ledger` holds
-//! production code to that.
+//! deleted, `reject` accepts the bytes a human just reviewed — and each of them
+//! states its intent here instead of touching the tables itself.
+//! `tests/invariants.rs::only_ledger_writes_the_ledger` holds production code
+//! to that.
 
 use crate::store::{RawRow, Result, SourceRow, Store};
 
@@ -70,6 +71,17 @@ impl<'a> Ledger<'a> {
             self.store.delete_raw(raw_key)?;
         }
         self.store.delete_source(key)
+    }
+
+    /// Accept the bytes on disk as the state a human has reviewed.
+    ///
+    /// A rejected round is a judgement on the *sources*, not only on the pages:
+    /// the change was looked at and refused as wiki material, which still
+    /// settles what the ledger knows about that file. Only the file facts move;
+    /// `raw_key` and `converted_at` stay, because the raw on disk is still the
+    /// one this source last produced.
+    pub fn mark_reviewed(&mut self, row: &SourceRow) -> Result<()> {
+        self.store.upsert_source(row)
     }
 
     /// Forget a sealed archive summary.

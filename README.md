@@ -21,7 +21,7 @@
 1. **扫描**：`scan` 对比仓库根与账本 `state.db`，得出新增 / 修改 / 删除 / 改名。
 2. **解析**：`convert` 把源交给解析后端，写 `.wiki/raw/<key>.md`，frontmatter 记录来源、`source_hash`、`parser` 与 `pin`。
 3. **成页**：agent 读 `.wiki/raw/`，把候选页写进 `.wiki/staging/<type>/<id>.md`；`ingest begin / commit / abort` 管住一轮的读写。
-4. **发布**：`approve --confirm` 把候选合并进 `.wiki/pages/` 并重建 `index.md`、追加 `log.md`；`reject` 记录原因后丢弃。
+4. **发布**：`approve --confirm` 把候选合并进 `.wiki/pages/` 并重建 `index.md`、追加 `log.md`；`reject` 记录原因后丢弃候选，并把这一轮的源按当前字节记为已复核。
 5. **校验**：`lint` 跑十三条规则，`--fix` 修掉不需要判断的机械缺陷。
 6. **留痕**：`checkpoint` 记一份 manifest（`pages/` 与 `raw/` 每条的 blake3），字节按摘要存进 `.wiki/objects/`；`sync` 把「扫描 → 转换 → 稳定门槛 → 审计」串成无人值守的一轮。`history` / `diff` 读同一份 manifest，`rollback <vNNN>` 整版还原并把自己记成新版本；`.wiki/ignore` 挡住反复制造变动的源，页面超预算时 `approve` 会以 `page_budget` 停下。
 7. **检索与续命**：`query` 用 FTS5 检索全库；`archive seal` 把会话摘要封存，`recall` 检索摘要，`archive purge` 按容量与时限清理。
@@ -191,7 +191,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `ignore add <PATTERN>...` / `ignore remove <PATTERN>...` | 增删忽略规则（`.gitignore` 语法，`#` 注释、`!` 取反、`/` 锚定、`**` 跨目录） |
 | `ignore check <PATH>` | 报 `ignored`、命中的 `rule` 与归一化后的 `path` |
 | `approve [--confirm]` | 发布候选；不带 `--confirm` 只报告（exit 3） |
-| `reject --reason <REASON>` | 丢弃候选并记录原因 |
+| `reject --reason <REASON>` | 丢弃候选、记录原因，并把本轮的源按当前字节记为已复核（下一轮不再报同一变动） |
 | `instruct --text <TEXT>` | 给下一次 agent 会话留话（写入 `.wiki/next-instruction.md`） |
 | `defer` | 保留队列，不改变任何状态 |
 | `archive status` | 报告归档数、活跃会话、可清理数、仍被引用数 |

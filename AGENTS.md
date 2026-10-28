@@ -72,9 +72,9 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 不要在调用点自己拼通配，也不要把它和 `[scan].ignore`（只按目录名粗过滤）混用——两者语义不同，混了就会出现「列表里明明写了却还被扫到」。
 显式 `convert --key` 绕开忽略是故意的：先看一眼再决定要不要永久挡住。
 
-### 2.11 两道刹车，都只走「问」的那条路
+### 2.11 三道刹车，都只走「问」的那条路
 
-`approve` 不带 `--confirm` 时依次过两道，命中就停在 `.wiki/staging/` 不动：
+`approve` 不带 `--confirm` 时依次过三道，命中就停在 `.wiki/staging/` 不动：
 
 1. **近义页**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选页的 `sources` 是某张已发布页 `sources` 的子集（没引入新证据）。只比 frontmatter，不读正文、不调模型——语义级「近义」在这里是做不到的，别试图加。
 2. **切片预算**（`reason: page_slice_budget`）：一个切片养出的页数超过 `[ingest].max_pages_per_slice`（默认 5）。切片是 `#p=<n>` 指的那一块，没带片段算整份文件一块；按块而不是按文件计数，是因为「一个源」这一个源可能是一页笔记，也可能是两百页手册——按文件数计，要么卡死大文档，要么放过小文件被拆成十页。`#p=1-999999` 这种宽到离谱的区间按整份文件算，别让人用大区间刷页数；小于 `parse.chunk_threshold` 的文件，页面上写什么 `#p=` 都并到整份文件那一个切片——否则给一页速记编个 `#p=7` 就能凭空多出一个切片。
@@ -86,6 +86,14 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 `.wiki/` 是单机事实源。不要加 `sync --push/--pull`、不要读远端、不要假设网络、不要为多机场景改账本：这里只保证「目录内没有绝对路径」（键一律来自 `paths::identity_key`，是仓库相对路径），所以整个目录可以被任意文件级工具搬走。
 搬的三条纪律写在 [README 的服务特殊说明](README.md)：停机搬、排除 `lock` 与 `cache/`、单写者。要合并多台机器的账本是新设计，不是小改。
+
+### 2.13 否决也是对源的表决
+
+`reject` 只丢页面是不够的：人看过这批变动、说了「不要」，变动的字节就已经被承认为已知状态。所以 `reject` 走 `Ledger::mark_reviewed`，把这一轮每个源的账本摘要换成磁盘上的当前摘要，并把它们在 manifest 里的 `baseline_hash` 推到 `current_hash`。
+不这么做，同一个文件会一轮轮以 `changed` 回来，直到有人把它加进忽略列表——而拒绝和忽略是两件事。
+摘要必须按 `scan` 的选法算（小文件全量、大文件采样，见 `accept_reviewed_sources`），否则下一次 `scan` 立刻报假 `changed`；`tests/version.rs::reject_accepts_the_source_bytes_so_it_is_not_reported_again` 钉住。超大读不了的文件跳过，让它继续报 `oversize`。
+
+这道表决依赖 `ingest commit` 把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `reject`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`reject` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
 
 ## 3. 提交前自查
 

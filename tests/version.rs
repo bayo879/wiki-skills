@@ -456,12 +456,12 @@ fn reject_restores_staging_to_the_wiki_mirror() {
     let manifest = Manifest::load(root).unwrap();
     assert_eq!(
         manifest.sources["a.md"].baseline_hash.as_deref(),
-        Some("blake3:old")
+        Some("blake3:new"),
+        "the state the round recorded becomes the baseline"
     );
     assert_eq!(
         manifest.sources["a.md"].current_hash.as_deref(),
-        Some("blake3:old"),
-        "reject rolls the current hash back to the baseline"
+        Some("blake3:new")
     );
     assert!(staging::manifest_pending(root).unwrap().is_empty());
     assert!(!staging::dir(root).join("pending.json").exists());
@@ -470,6 +470,35 @@ fn reject_restores_staging_to_the_wiki_mirror() {
     assert!(
         log.contains("内容不对"),
         "the reason survives in log.md: {log}"
+    );
+}
+
+#[test]
+fn reject_accepts_the_source_bytes_so_it_is_not_reported_again() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    write_file(root, "notes/a.md", "一\n");
+    llm_wiki::scan::scan_source(root, &cfg, &store).unwrap();
+    llm_wiki::convert::convert_one(root, &cfg, &mut store, "notes/a.md").unwrap();
+
+    // The round opens on the converted bytes, then the file moves again before
+    // anyone decides. The wiki was never rebuilt for the new bytes.
+    stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
+    let mut pending = BTreeMap::new();
+    pending.insert(String::from("notes/a.md"), String::from("blake3:round"));
+    staging::write_pending(root, &pending).unwrap();
+    write_file(root, "notes/a.md", "二\n");
+
+    let before = llm_wiki::scan::scan_source(root, &cfg, &store).unwrap();
+    assert_eq!(before.changes.len(), 1, "the edit is reported as changed");
+
+    version::reject(root, &cfg, &mut store, "不要这版").unwrap();
+
+    let after = llm_wiki::scan::scan_source(root, &cfg, &store).unwrap();
+    assert!(
+        after.changes.is_empty(),
+        "the reviewed bytes are the accepted state: {:?}",
+        after.changes
     );
 }
 

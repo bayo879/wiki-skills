@@ -365,13 +365,23 @@ pub fn commit(
     render::write_index_in(&staging_dir, &cfg.schema.types)?;
 
     let stamp = today.format("%Y-%m-%d").to_string();
+    // `current_hash` is the raw the agent read this round: `check_sources` and
+    // `reject` compare it with the file on disk, so it must be the raw's digest,
+    // not the source's. Leaving it unset would make both gates inert.
+    let raw_dir = root.join(&cfg.paths.raw);
     let mut manifest = staging::Manifest::load(root)?;
     for key in pending.keys() {
-        manifest
-            .sources
-            .entry(key.clone())
-            .or_default()
-            .last_processed_at = Some(stamp.clone());
+        let entry = manifest.sources.entry(key.clone()).or_default();
+        entry.last_processed_at = Some(stamp.clone());
+        // A raw that vanished between `begin` and `commit` leaves the gate for
+        // that key unset rather than failing the round: `lint` L7 already
+        // reports it, and `check_sources` has nothing to compare against.
+        match hash::hash_file(&paths::join_key(&raw_dir, key), true) {
+            Ok(digest) => entry.current_hash = Some(digest),
+            Err(hash::HashError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
     }
     staging::Manifest::save(root, &manifest)?;
     staging::clear_pending(root)?;

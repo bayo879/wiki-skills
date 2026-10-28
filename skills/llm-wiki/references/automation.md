@@ -33,7 +33,7 @@ llm-wiki sync --limit 5 --dry-run --json       # 只看这一轮会做什么
 看到 `page_budget` 不要自己决定，把数字和清单给用户：
 
 1. 批准（`llm-wiki approve --confirm`）——人显式越过预算。
-2. 不批准并说明原因（`llm-wiki reject --reason "..."`）——候选丢弃，基线不动。
+2. 不批准并说明原因（`llm-wiki reject --reason "..."`）——候选丢弃，但这一轮的源按当前字节记为已复核，下一轮不再报同一变动。
 3. 补充要求（`llm-wiki instruct --text "..."`）——让下一轮少建几页。
 4. 先放着（`llm-wiki defer`）。
 

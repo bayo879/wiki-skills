@@ -12,8 +12,8 @@
 //! restored pages, so a version cannot disagree with what `query` returns.
 //!
 //! The decision gate has four outcomes. `approve` publishes the staged
-//! candidates and advances the baseline, `reject` throws them away and records
-//! why, `instruct` leaves free text for the next agent session, and `defer`
+//! candidates and advances the baseline, `reject` throws them away, records
+//! why, and settles the round's sources at the bytes on disk, `instruct` leaves free text for the next agent session, and `defer`
 //! keeps the queue for later. A merge is only allowed while every candidate
 //! still matches what `ingest commit` wrote and every pending source still
 //! matches the hash the round recorded: a hand edit or a changed source makes
@@ -33,10 +33,11 @@ use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::hash;
+use crate::ledger::Ledger;
 use crate::paths;
 use crate::render::{self, LogEntry};
 use crate::staging::{self, Manifest};
-use crate::store::Store;
+use crate::store::{SourceRow, Store};
 
 /// Marker file that makes a directory in `.wiki/versions` ours to prune.
 ///
@@ -552,9 +553,16 @@ pub fn approve(
 ///
 /// The staged tree is restored to a mirror of `wiki/`: a page the wiki does not
 /// have is deleted, a page whose bytes differ is overwritten with the approved
-/// bytes, and a page missing from staging is copied back. The baseline does not
-/// move, so the next round reopens the same work.
-pub fn reject(root: &Path, cfg: &Config, _store: &mut Store, reason: &str) -> Result<()> {
+/// bytes, and a page missing from staging is copied back.
+///
+/// The round's sources stay settled even though its pages do not: the human
+/// looked at what changed and refused it as wiki material, which is still a
+/// judgement on the source. Their ledger rows take the bytes now on disk, so
+/// `scan` stops reporting the same edit as `changed` every round, and the
+/// staging baseline for them moves to the recorded state so `approve` does not
+/// call them stale. Sources outside the round are left alone — their drift was
+/// never reviewed.
+pub fn reject(root: &Path, cfg: &Config, store: &mut Store, reason: &str) -> Result<()> {
     if reason.is_empty() {
         return Err(VersionError::NoReason);
     }
@@ -571,9 +579,14 @@ pub fn reject(root: &Path, cfg: &Config, _store: &mut Store, reason: &str) -> Re
     }
     staging::ensure(root, cfg)?;
 
+    let keys = round_sources(root)?;
+    accept_reviewed_sources(root, cfg, store, &keys)?;
+
     let mut manifest = Manifest::load(root)?;
-    for entry in manifest.sources.values_mut() {
-        entry.current_hash = entry.baseline_hash.clone();
+    for key in &keys {
+        if let Some(entry) = manifest.sources.get_mut(key) {
+            entry.baseline_hash = entry.current_hash.clone();
+        }
     }
     Manifest::save(root, &manifest)?;
     staging::clear_pending(root)?;
@@ -587,6 +600,92 @@ pub fn reject(root: &Path, cfg: &Config, _store: &mut Store, reason: &str) -> Re
         },
     )?;
     Ok(())
+}
+
+/// Takes the bytes now on disk as the accepted state of every source in a
+/// rejected round.
+///
+/// `pending` is keyed the way `pending.json` is — relative to `.wiki/raw/` —
+/// while ledger rows are keyed by the source path, so the mapping goes through
+/// each row's `raw_key`. Sources that cannot be digested right now (oversize,
+/// unreadable) are skipped: there is no state to accept, and `scan` keeps
+/// reporting them, which is the honest answer.
+fn accept_reviewed_sources(
+    root: &Path,
+    cfg: &Config,
+    store: &mut Store,
+    keys: &BTreeSet<String>,
+) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let mut reviewed: Vec<SourceRow> = Vec::new();
+    for row in store.all_sources()? {
+        let Some(raw_key) = row.raw_key.as_deref() else {
+            continue;
+        };
+        if !keys.contains(&raw_relative(cfg, raw_key)) {
+            continue;
+        }
+        let path = paths::join_key(&root.join(&cfg.paths.source), &row.key);
+        let Some(digest) = reviewed_digest(cfg, &path)? else {
+            continue;
+        };
+        reviewed.push(SourceRow {
+            key: row.key,
+            hash: digest.0,
+            size: digest.1,
+            mtime: digest.2,
+            raw_key: row.raw_key,
+            converted_at: row.converted_at,
+        });
+    }
+    let mut ledger = Ledger::new(store);
+    for row in &reviewed {
+        ledger.mark_reviewed(row)?;
+    }
+    Ok(())
+}
+
+/// The sources this round is still waiting on a decision for.
+///
+/// Two records name them: `pending.json` while the round is open, and
+/// `manifest.json`'s `current_hash` after `ingest commit` (which is why it has
+/// to be written there). A reject can arrive in either state, so both count.
+fn round_sources(root: &Path) -> Result<BTreeSet<String>> {
+    let mut keys: BTreeSet<String> = staging::pending_hashes(root)?.into_keys().collect();
+    keys.extend(staging::manifest_pending(root)?.into_keys());
+    Ok(keys)
+}
+
+/// `raw_key` with the configured raw directory stripped, matching the keys
+/// `ingest` writes to `pending.json`.
+fn raw_relative(cfg: &Config, raw_key: &str) -> String {
+    let prefix = cfg.paths.raw.trim_matches('/');
+    let raw_key = raw_key.trim_start_matches("./");
+    match raw_key.strip_prefix(prefix) {
+        Some(rest) => String::from(rest.trim_start_matches('/')),
+        None => String::from(raw_key),
+    }
+}
+
+/// Digest, size and mtime of the source at `path`, chosen the way `scan`
+/// chooses them (full up to `parse.chunk_threshold`, sampled above) so the next
+/// scan sees an unchanged source instead of a spurious `changed`.
+///
+/// `None` for a source too large to read: `scan` reports it as `oversize` and
+/// keeps doing so, which is the state there is nothing to accept.
+fn reviewed_digest(cfg: &Config, path: &Path) -> Result<Option<(String, i64, i64)>> {
+    let fingerprint = hash::fingerprint(path)?;
+    if fingerprint.size > cfg.parse.max_source_bytes {
+        return Ok(None);
+    }
+    let digest = if fingerprint.size <= cfg.parse.chunk_threshold {
+        hash::hash_file(path, true)?
+    } else {
+        fingerprint.sample.clone()
+    };
+    Ok(Some((digest, fingerprint.size as i64, fingerprint.mtime)))
 }
 
 /// Leaves a free-text instruction for the next agent session.
