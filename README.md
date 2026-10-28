@@ -229,6 +229,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 - 版本在 `.wiki/versions/vNNN/`：`manifest.json` 记路径与摘要，`.version.json` 记 `kind` / `label` / `pages`，字节按摘要存在 `.wiki/objects/`（同一内容只存一份）。只保留最近 `[versions].keep` 份（默认 5）；`log.md` 记录每次 `approve` / `checkpoint` / `seal` / `rollback`。索引不进版本，回退后自动重建。
 - 页面预算：`[ingest].max_new_pages_per_run`（默认 20）限制 `approve` 一轮新增的页数，超出时返回 `reason: page_budget` 并把候选留在 `.wiki/staging/`；`approve --confirm` 是人显式越过预算。
 - 忽略列表 `.wiki/ignore` 用 `.gitignore` 语法，`scan` / `convert` 跳过、`archive purge` 不清；显式 `convert --key` 仍可读单个文件。`.wiki/` 不随 git 共享，所以忽略列表也是每台机器一份。
+- `.wiki/` 是这台机器的事实源，**不随仓库共享，CLI 也不提供同步**。要带到别的机器，用任意文件级手段（`rsync`、`unison`、私有 git 仓、网盘）整目录搬，遵守三条：搬时不能有 llm-wiki 在跑（SQLite 账本必须一致）；排除 `.wiki/lock` 与 `.wiki/cache/`；同一时刻只有一个写者——账本无法合并，两边各写再拼会得到互相矛盾的 `source_hash`。目录内只存仓库相对路径（键由 `paths::identity_key` 产出），换机器不用改配置。
 - 仓库锁 `.wiki/lock` 的 TTL 是 600 秒；崩溃残留会被下一次运行回收，只有真正被别的进程持有时才以 exit 4 退出。
 - 索引是派生状态：`query` 前会增量刷新，刚 `approve` 的页也能立刻搜到；怀疑索引不一致时用 `query --reindex` 全量重建。
 - `sync` 的 `--dry-run` 保证不写盘（`settle_seconds` 与 `stable_streak` 门槛在演练里同样生效），`--force` 才跳过早写门槛。

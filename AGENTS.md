@@ -77,6 +77,11 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 `approve` 不带 `--confirm` 时先算本轮新增页数（已存在的页算覆盖），超过 `[ingest].max_new_pages_per_run` 就返回 `reason: page_budget`，候选留在暂存区。
 它只防「一次建出几百页」，不替人做内容判断；`--confirm` 是显式越权，所以不要为了压测或图省事把预算调到很大再一路 confirm。
 
+### 2.12 同步在 CLI 之外
+
+`.wiki/` 是单机事实源。不要加 `sync --push/--pull`、不要读远端、不要假设网络、不要为多机场景改账本：这里只保证「目录内没有绝对路径」（键一律来自 `paths::identity_key`，是仓库相对路径），所以整个目录可以被任意文件级工具搬走。
+搬的三条纪律写在 [README 的服务特殊说明](README.md)：停机搬、排除 `lock` 与 `cache/`、单写者。要合并多台机器的账本是新设计，不是小改。
+
 ## 3. 提交前自查
 
 ```bash
