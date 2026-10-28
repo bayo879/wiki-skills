@@ -20,7 +20,7 @@
 
 1. **扫描**：`scan` 对比仓库根与账本 `state.db`，得出新增 / 修改 / 删除 / 改名。
 2. **解析**：`convert` 把源交给解析后端，写 `.wiki/raw/<key>.md`，frontmatter 记录来源、`source_hash`、`parser` 与 `pin`。
-3. **成页**：agent 读 `.wiki/raw/`，把候选页写进 `.wiki/staging/<type>/<id>.md`；`ingest begin / commit / abort` 管住一轮的读写。
+3. **成页**：agent 读 `.wiki/raw/`，把候选页写进 `.wiki/staging/<type>/<id>.md`；`ingest begin / submit / abort` 管住一轮的读写——`submit` 只是交稿，发布永远是 `approve`。
 4. **发布**：`approve --confirm` 把候选合并进 `.wiki/pages/` 并重建 `index.md`、追加 `log.md`；`reject` 记录原因后丢弃候选，并把这一轮的源按当前字节记为已复核。
 5. **校验**：`lint` 跑十三条规则，`--fix` 修掉不需要判断的机械缺陷。
 6. **留痕**：`checkpoint` 记一份 manifest（`pages/` 与 `raw/` 每条的 blake3），字节按摘要存进 `.wiki/objects/`；`sync` 把「扫描 → 转换 → 稳定门槛 → 审计」串成无人值守的一轮。`history` / `diff` 读同一份 manifest，`rollback <vNNN>` 整版还原并把自己记成新版本；`.wiki/ignore` 挡住反复制造变动的源，页面超预算时 `approve` 会以 `page_budget` 停下。
@@ -118,7 +118,7 @@ git tag v0.1.1 && git push origin v0.1.1
 |---|---|
 | `skills/llm-wiki/SKILL.md` | 入口：边界、路由、最小序列、决策门、退出码、把 `--json` 翻成人话 |
 | `references/scan.md` | `scan` / `convert`，七种变更的判读 |
-| `references/ingest.md` | `ingest begin/commit/abort`，唯一要 agent 写正文的环节 |
+| `references/ingest.md` | `ingest begin/submit/abort`，唯一要 agent 写正文的环节 |
 | `references/parse.md` | 单文件解析诊断、后端选择、外部服务配置 |
 | `references/audit.md` | `lint` 与判断层分析（矛盾、过时、孤儿、重复） |
 | `references/sync.md` | 定时同步、读变更报告、失败退避 |
@@ -147,7 +147,7 @@ llm-wiki parse --key docs/a.pdf            # 只看解析结果，不写任何�
 
 llm-wiki ingest begin --sources notes/a.md --pages concept/alpha
 # ……agent 把候选页写进 .wiki/staging/concept/alpha.md……
-llm-wiki ingest commit --pages concept/alpha
+llm-wiki ingest submit --pages concept/alpha
 llm-wiki lint --fix                        # 先修机械缺陷，再报告剩下的
 llm-wiki approve --confirm                 # 合并候选进 .wiki/pages/
 llm-wiki checkpoint --label "after alpha"
@@ -180,7 +180,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `convert [--key <KEY>] [--limit <N>]` | 转换待处理源（默认 10）；单个失败不中断 |
 | `parse --key <KEY> [--chunk <N>] [--range <A-B>] [--force-large]` | 只显示解析结果，不写文件；大文件按需分块；`--force-large` 越过尺寸上限只为看一眼 |
 | `ingest begin [--sources <K>]... [--pages <P>]... [--dry-run]` | 开一轮，报告受影响的页面 |
-| `ingest commit [--pages <P>]...` | 关闭本轮，刷新候选页与暂存清单 |
+| `ingest submit [--pages <P>]...` | 交稿：刷新候选页与暂存清单，**不发布**（发布是 `approve`） |
 | `ingest abort` | 丢弃本轮，保留已写候选页 |
 | `lint [--strict] [--fix]` | 十三条规则；`--strict` 让警告也失败 |
 | `checkpoint --label <LABEL>` | 记 manifest 与内容对象，成为新版本（只保留最近 `[versions].keep` 份） |

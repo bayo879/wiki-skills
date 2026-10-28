@@ -600,14 +600,14 @@ fn parse_chunk_range(spec: &str) -> std::result::Result<(usize, usize), String> 
     Ok((from, to))
 }
 
-/// `ingest` drives one round: `begin` opens it, `commit`/`abort` close it.
+/// `ingest` drives one round: `begin` opens it, `submit`/`abort` close it.
 ///
-/// A round never publishes: `commit` refreshes the candidates under staging and
+/// A round never publishes: `submit` refreshes the candidates under staging and
 /// regenerates the staging index, and approval is what moves pages into `wiki/`.
 fn run_ingest(command: IngestCommand) -> ! {
     let cmd = match &command {
         IngestCommand::Begin { .. } => "ingest.begin",
-        IngestCommand::Commit { .. } => "ingest.commit",
+        IngestCommand::Submit { .. } => "ingest.submit",
         IngestCommand::Abort => "ingest.abort",
     };
     let root = wiki_root(cmd);
@@ -630,7 +630,7 @@ fn run_ingest(command: IngestCommand) -> ! {
                 Err(err) => fail_ingest(cmd, &err),
             }
         }
-        IngestCommand::Commit { pages } => match ingest::commit(&root, &cfg, &mut store, &pages) {
+        IngestCommand::Submit { pages } => match ingest::submit(&root, &cfg, &mut store, &pages) {
             Ok(outcome) => report::emit(cmd, outcome),
             Err(err) => fail_ingest(cmd, &err),
         },

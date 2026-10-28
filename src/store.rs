@@ -708,8 +708,8 @@ impl Store {
 
     /// Replaces the whole full-text index with `rows` in one transaction.
     ///
-    /// Each row is `(page_id, title, body)`. The delete and the inserts commit
-    /// together, so a failure leaves the previous index intact instead of a
+    /// Each row is `(page_id, title, body)`. The delete and the inserts land in
+    /// one transaction, so a failure leaves the previous index intact instead of a
     /// half-emptied one.
     pub fn fts_replace_all(&mut self, rows: &[(String, String, String)]) -> Result<()> {
         let tx = self.conn.transaction()?;

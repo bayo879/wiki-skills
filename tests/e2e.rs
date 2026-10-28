@@ -240,17 +240,17 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
         format!("{PAGE_FRONT}\n\n{}\n", page_body()),
     );
 
-    // ------------------------------------------------- ingest commit
-    let commit = ok_call(root, &["ingest", "commit", "--pages", "concept/alpha"]);
+    // ------------------------------------------------- ingest submit
+    let submit = ok_call(root, &["ingest", "submit", "--pages", "concept/alpha"]);
     assert_eq!(
-        commit["pages_written"],
+        submit["pages_written"],
         serde_json::json!(["concept/alpha"])
     );
-    assert_eq!(commit["index_updated"], Value::Bool(true));
+    assert_eq!(submit["index_updated"], Value::Bool(true));
     assert!(root.join(".wiki/staging/concept/alpha.md").is_file());
     assert!(
         !root.join(".wiki/pages/concept/alpha.md").exists(),
-        "commit only finishes staging; publishing is a human decision"
+        "submit only finishes staging; publishing is a human decision"
     );
 
     // ------------------------------------------------------------- lint

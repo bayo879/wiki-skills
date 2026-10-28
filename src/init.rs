@@ -229,7 +229,7 @@ const SCHEMA_MD: &str = r#"# Page schema
 
 ## status 三态
 
-- `draft`：草稿。已写但未经人工确认，`ingest commit` 之前的状态，不当作结论引用。
+- `draft`：草稿。已写但未经人工确认，`ingest submit` 之前的状态，不当作结论引用。
 - `stable`：已批准。当前可信版本，`checkpoint` 会把它登记进 `.wiki/versions/`。
 - `stale`：已过期。源发生变更、源缺失或结论被新源推翻，等待重新审阅；
   保留页面和源引用，不自动改写结论，也不自动删除。

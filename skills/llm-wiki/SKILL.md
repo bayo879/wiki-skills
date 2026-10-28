@@ -46,7 +46,7 @@ llm-wiki scan --json                    # 仓库根有什么新/变/删
 llm-wiki convert --limit 20 --json      # 源 → .wiki/raw/
 llm-wiki ingest begin --sources a.md --json   # 开一轮，看 affected
 #   写候选页到 .wiki/staging/<type>/<id>.md
-llm-wiki ingest commit --json           # 盖清单，等批
+llm-wiki ingest submit --json           # 盖清单，等批
 llm-wiki approve --confirm              # 人拍板后才进 .wiki/pages/
 llm-wiki query --text "..." --json      # 检索
 ```
@@ -102,7 +102,7 @@ llm-wiki query --text "..." --json      # 检索
 | 文件 | 什么时候读 |
 |---|---|
 | `references/scan.md` | 要看差分、跑 `convert`、解释七种 `kind`、判断是不是摄取队列 |
-| `references/ingest.md` | 要开一轮摄取、写页面正文、理解 `begin/commit/abort` 与 frontmatter 归属 |
+| `references/ingest.md` | 要开一轮摄取、写页面正文、理解 `begin/submit/abort` 与 frontmatter 归属 |
 | `references/parse.md` | 解析结果不对、要换后端、要看警告与外部服务 |
 | `references/audit.md` | 跑 `lint`、做判断层分析（矛盾/过时/孤儿/重复）、出体检报告 |
 | `references/sync.md` | 无人值守一轮、定时任务、退避与锁 |

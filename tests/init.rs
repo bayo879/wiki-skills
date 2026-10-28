@@ -364,7 +364,7 @@ fn init_does_not_overwrite_a_hand_edited_engine_gitignore() {
     let d = tempdir().unwrap();
     run(d.path(), &["init"]);
     let path = d.path().join(".wiki/.gitignore");
-    // `versions/` must stay committed: it is content, not a cache.
+    // a hand-edited ignore list must survive a re-run of `init`.
     std::fs::write(&path, "versions/\n").unwrap();
 
     let out = run(d.path(), &["init"]);

@@ -1,4 +1,4 @@
-//! Ingest rounds: `begin` opens one, the agent writes candidates, `commit` or
+//! Ingest rounds: `begin` opens one, the agent writes candidates, `submit` or
 //! `abort` closes it.
 //!
 //! The CLI never writes page prose. A round is a bookkeeping envelope around
@@ -8,7 +8,7 @@
 //! 2. [`begin`] records which sources the round reads and reports the pages
 //!    those sources affect, so the agent knows what to open;
 //! 3. the agent rewrites the candidates' prose;
-//! 4. [`commit`] refreshes `updated`, merges the round's `raw/<key>` references
+//! 4. [`submit`] refreshes `updated`, merges the round's `raw/<key>` references
 //!    into `sources`, regenerates the staging index, clears the round and
 //!    stamps the manifest; [`abort`] drops the round and keeps the candidates.
 //!
@@ -68,9 +68,9 @@ pub struct BeginReport {
     pub pending_hash: String,
 }
 
-/// What `commit` published.
+/// What `submit` published.
 #[derive(Debug, Clone, Serialize)]
-pub struct CommitReport {
+pub struct SubmitReport {
     /// The pages it refreshed, as type-qualified ids.
     pub pages_written: Vec<String>,
     /// Whether the staging index was regenerated.
@@ -98,10 +98,10 @@ pub enum IngestError {
         /// The key as the caller wrote it.
         key: String,
     },
-    /// `commit` was called without a page.
-    #[error("ingest commit needs at least one `--pages` id")]
+    /// `submit` was called without a page.
+    #[error("ingest submit needs at least one `--pages` id")]
     NoPages,
-    /// `commit` found no open round.
+    /// `submit` found no open round.
     #[error("no open ingest round; run `ingest begin` first")]
     NoPending,
     /// A named page has no candidate under staging.
@@ -195,7 +195,7 @@ impl WikiPage {
 ///
 /// `affected` is the union of two answers: every page under `wiki/` whose
 /// `sources` cite one of the round's sources, and every page the caller named
-/// explicitly. The scan is a suggestion — `commit` only ever touches the pages
+/// explicitly. The scan is a suggestion — `submit` only ever touches the pages
 /// it is given — but it is what lets an agent find the pages it does not know
 /// about. A named page without a file is counted in `new_pages` and reported
 /// with an empty path: the type directory it will live in is not known yet.
@@ -300,15 +300,15 @@ pub fn begin(
 /// order is kept, and a source already present (with or without a fragment) is
 /// not duplicated. The staging index is rebuilt before the round closes, and
 /// `pending.json` is deleted last: a failure anywhere above leaves the round
-/// open and the whole commit retryable.
+/// open and the whole submit retryable.
 ///
 /// `wiki/` is never touched. Approval publishes, and that is a separate step.
-pub fn commit(
+pub fn submit(
     root: &Path,
     cfg: &Config,
     store: &mut Store,
     pages: &[String],
-) -> Result<CommitReport> {
+) -> Result<SubmitReport> {
     if pages.is_empty() {
         return Err(IngestError::NoPages);
     }
@@ -373,7 +373,7 @@ pub fn commit(
     for key in pending.keys() {
         let entry = manifest.sources.entry(key.clone()).or_default();
         entry.last_processed_at = Some(stamp.clone());
-        // A raw that vanished between `begin` and `commit` leaves the gate for
+        // A raw that vanished between `begin` and `submit` leaves the gate for
         // that key unset rather than failing the round: `lint` L7 already
         // reports it, and `check_sources` has nothing to compare against.
         match hash::hash_file(&paths::join_key(&raw_dir, key), true) {
@@ -386,7 +386,7 @@ pub fn commit(
     staging::Manifest::save(root, &manifest)?;
     staging::clear_pending(root)?;
 
-    Ok(CommitReport {
+    Ok(SubmitReport {
         pages_written: written,
         index_updated: true,
         warnings: Vec::new(),

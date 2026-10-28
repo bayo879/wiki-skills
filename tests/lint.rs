@@ -678,7 +678,7 @@ fn cli_fix_repairs_l5_then_exits_zero() {
 // --------------------------------------------------- ingest writes page_meta
 
 #[test]
-fn commit_records_page_meta_for_written_candidates() {
+fn submit_records_page_meta_for_written_candidates() {
     let mut f = Fixture::new();
     let text = page_text("a", "concept", BODY);
     staging::write_page(f.root(), &f.cfg, "concept/a", &text).unwrap();
@@ -692,14 +692,14 @@ fn commit_records_page_meta_for_written_candidates() {
 
     let root = f.root().to_path_buf();
     let cfg = f.cfg.clone();
-    ingest::commit(&root, &cfg, &mut f.store, &[String::from("concept/a")]).unwrap();
+    ingest::submit(&root, &cfg, &mut f.store, &[String::from("concept/a")]).unwrap();
 
     let staged = f.root().join(".wiki/staging/concept/a.md");
     let row = f
         .store
         .get_page_meta(".wiki/pages/concept/a.md")
         .unwrap()
-        .expect("commit records the candidate it wrote");
+        .expect("submit records the candidate it wrote");
     assert_eq!(
         row.hash,
         hash::hash_file(&staged, true).unwrap(),

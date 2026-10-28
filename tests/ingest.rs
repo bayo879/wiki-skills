@@ -1,8 +1,8 @@
 //! `ingest` drives one round: `begin` names the sources, the agent writes the
-//! candidates, `commit` or `abort` closes the round.
+//! candidates, `submit` or `abort` closes the round.
 //!
 //! The suite pins the contract the CLI depends on: `begin` never writes into
-//! `wiki/`, `commit` only ever writes staging (refreshing `updated` to the local
+//! `wiki/`, `submit` only ever writes staging (refreshing `updated` to the local
 //! date and merging the round's `raw/<key>` references into `sources`), and
 //! `abort` drops the round but keeps the candidates nobody has reviewed yet.
 //!
@@ -155,16 +155,16 @@ fn pending(root: &Path) -> PathBuf {
     root.join(".wiki/staging/pending.json")
 }
 
-/// The local date `commit` stamps into `updated`.
+/// The local date `submit` stamps into `updated`.
 fn today() -> chrono::NaiveDate {
     Local::now().date_naive()
 }
 
 #[test]
-fn commit_without_pages_is_a_usage_error() {
+fn submit_without_pages_is_a_usage_error() {
     let (d, cfg) = setup();
     let mut store = open(d.path());
-    let err = ingest::commit(d.path(), &cfg, &mut store, &[]).unwrap_err();
+    let err = ingest::submit(d.path(), &cfg, &mut store, &[]).unwrap_err();
     assert_eq!(err.code(), "E_NO_PAGES", "{err}");
 }
 
@@ -349,7 +349,7 @@ fn dry_run_writes_no_pending() {
 }
 
 #[test]
-fn commit_without_a_round_is_an_error() {
+fn submit_without_a_round_is_an_error() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
@@ -362,23 +362,23 @@ fn commit_without_a_round_is_an_error() {
     )
     .unwrap();
 
-    let err = ingest::commit(root, &cfg, &mut store, &args(&["retry"])).unwrap_err();
+    let err = ingest::submit(root, &cfg, &mut store, &args(&["retry"])).unwrap_err();
     assert_eq!(err.code(), "E_NO_PENDING", "{err}");
 }
 
 #[test]
-fn commit_rejects_a_page_that_is_not_staged() {
+fn submit_rejects_a_page_that_is_not_staged() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
     begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
 
-    let err = ingest::commit(root, &cfg, &mut store, &args(&["ghost"])).unwrap_err();
+    let err = ingest::submit(root, &cfg, &mut store, &args(&["ghost"])).unwrap_err();
     assert_eq!(err.code(), "E_NO_STAGED_PAGE", "{err}");
 }
 
 #[test]
-fn commit_refreshes_the_staged_page_and_the_staging_index() {
+fn submit_refreshes_the_staged_page_and_the_staging_index() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
@@ -400,7 +400,7 @@ fn commit_refreshes_the_staged_page_and_the_staging_index() {
     )
     .unwrap();
 
-    let report = ingest::commit(
+    let report = ingest::submit(
         root,
         &cfg,
         &mut store,
@@ -444,11 +444,11 @@ fn commit_refreshes_the_staged_page_and_the_staging_index() {
             "staging index lost {title}:\n{index}"
         );
     }
-    assert!(!pending(root).exists(), "commit left the round open");
+    assert!(!pending(root).exists(), "submit left the round open");
 }
 
 #[test]
-fn commit_leaves_wiki_untouched() {
+fn submit_leaves_wiki_untouched() {
     let (d, cfg) = setup();
     let root = d.path();
     write_file(
@@ -467,9 +467,9 @@ fn commit_leaves_wiki_untouched() {
         &page_block("retry", "重试", &[".wiki/raw/a.md"]),
     )
     .unwrap();
-    ingest::commit(root, &cfg, &mut store, &args(&["retry"])).unwrap();
+    ingest::submit(root, &cfg, &mut store, &args(&["retry"])).unwrap();
 
-    assert_eq!(wiki_snapshot(root), before, "commit wrote into wiki/");
+    assert_eq!(wiki_snapshot(root), before, "submit wrote into wiki/");
 }
 
 #[test]
@@ -494,7 +494,7 @@ fn abort_keeps_the_staged_candidates() {
 }
 
 #[test]
-fn commit_does_not_duplicate_an_existing_source() {
+fn submit_does_not_duplicate_an_existing_source() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
@@ -507,7 +507,7 @@ fn commit_does_not_duplicate_an_existing_source() {
     )
     .unwrap();
 
-    ingest::commit(root, &cfg, &mut store, &args(&["retry"])).unwrap();
+    ingest::submit(root, &cfg, &mut store, &args(&["retry"])).unwrap();
 
     let front = page::read(&root.join(".wiki/staging/concept/retry.md"))
         .unwrap()
@@ -539,6 +539,6 @@ fn a_round_reports_no_warnings() {
     begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
     staging::write_page(root, &cfg, "concept/one", &page_bare("one", "一")).unwrap();
 
-    let report = ingest::commit(root, &cfg, &mut store, &args(&["concept/one"])).unwrap();
+    let report = ingest::submit(root, &cfg, &mut store, &args(&["concept/one"])).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
 }

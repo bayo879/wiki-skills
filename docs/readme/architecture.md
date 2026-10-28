@@ -32,7 +32,7 @@
 
 1. **scan** 对比仓库根与账本表 `sources`，得出新增 / 修改 / 删除 / 改名。
 2. **convert** 把源交给解析后端（`src/parse/`），写 `.wiki/raw/<key>.md`，再登记 `sources` 行（记 `raw_key`）与 `raws` 行（记 `source_key`）。反查由这两列互指完成，v5 迁移已删除独立的 `source_pages` 表。
-3. **ingest** 一轮读写：`begin` 把涉及的源与预判页面写进 `pending` 表，`commit` 把候选页与暂存清单对齐，`abort` 丢弃本轮但保留已写候选页。
+3. **ingest** 一轮读写：`begin` 把涉及的源与预判页面写进 `pending` 表，`submit` 把候选页与暂存清单对齐，`abort` 丢弃本轮但保留已写候选页。
 4. **staging → pages**：候选页放在 `.wiki/staging/<type>/<id>.md`；`approve` 只在 `--confirm` 下合并进 `.wiki/pages/` 并写 `log.md`、重建 `index.md`，`reject` 记录原因后清空暂存；它同时把这一轮的源按磁盘上的当前字节记进账本，这是「人看过并否决」的落点——变动的字节被承认为已知状态，否则同一文件会一轮轮报 `changed`。
 5. **lint** 跑十三条规则（`L1`–`L13`），`--fix` 只修不需要判断的机械缺陷，`--strict` 把警告也算失败。
 6. **checkpoint** 记一份 manifest（`pages/` 与 `raw/` 每条路径的 blake3 摘要）到 `.wiki/versions/vNNN/manifest.json`，字节按摘要存进 `.wiki/objects/`，同一内容只存一份；只保留最近 `[versions].keep` 份。`rollback vNNN` 按 manifest 把两棵树还原、重建索引，并把自己记成新版本；`history` / `diff` 读同一份 manifest。

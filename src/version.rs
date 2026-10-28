@@ -15,7 +15,7 @@
 //! candidates and advances the baseline, `reject` throws them away, records
 //! why, and settles the round's sources at the bytes on disk, `instruct` leaves free text for the next agent session, and `defer`
 //! keeps the queue for later. A merge is only allowed while every candidate
-//! still matches what `ingest commit` wrote and every pending source still
+//! still matches what `ingest submit` wrote and every pending source still
 //! matches the hash the round recorded: a hand edit or a changed source makes
 //! the merge unsafe, so it is refused instead of silently published.
 //!
@@ -455,7 +455,7 @@ pub fn approve(
                 return Ok(ApproveOutcome::NeedsConfirmation {
                     reason: String::from("page_overlap"),
                     detail: format!(
-                        "{why}；确认后可用 approve --confirm 合并，或改 id/title 后重新 ingest commit"
+                        "{why}；确认后可用 approve --confirm 合并，或改 id/title 后重新 ingest submit"
                     ),
                 });
             }
@@ -650,7 +650,7 @@ fn accept_reviewed_sources(
 /// The sources this round is still waiting on a decision for.
 ///
 /// Two records name them: `pending.json` while the round is open, and
-/// `manifest.json`'s `current_hash` after `ingest commit` (which is why it has
+/// `manifest.json`'s `current_hash` after `ingest submit` (which is why it has
 /// to be written there). A reject can arrive in either state, so both count.
 fn round_sources(root: &Path) -> Result<BTreeSet<String>> {
     let mut keys: BTreeSet<String> = staging::pending_hashes(root)?.into_keys().collect();

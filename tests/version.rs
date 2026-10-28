@@ -44,7 +44,7 @@ fn page_text(id: &str, title: &str) -> String {
     )
 }
 
-/// Stages one page and records the ledger row `ingest commit` would leave.
+/// Stages one page and records the ledger row `ingest submit` would leave.
 ///
 /// `rel` is relative to the wiki root, e.g. `concept/alpha.md`.
 fn stage(root: &Path, cfg: &Config, store: &mut Store, rel: &str, title: &str) -> String {
@@ -54,7 +54,7 @@ fn stage(root: &Path, cfg: &Config, store: &mut Store, rel: &str, title: &str) -
     text
 }
 
-/// Stages exactly `text` and records the ledger row `ingest commit` would leave.
+/// Stages exactly `text` and records the ledger row `ingest submit` would leave.
 fn stage_text(root: &Path, cfg: &Config, store: &mut Store, rel: &str, text: &str) {
     staging::write_page(root, cfg, rel.trim_end_matches(".md"), text).unwrap();
     let staged = staging::dir(root).join(rel);

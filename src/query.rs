@@ -219,7 +219,7 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
         .collect();
     let current: BTreeSet<String> = pages.iter().map(|(key, _)| key.clone()).collect();
     // A `page_meta` row alone does not prove a page is searchable: publishing
-    // through `approve`, `ingest commit` or `archive` records the digest
+    // through `approve`, `ingest submit` or `archive` records the digest
     // without touching the FTS table. The digest only counts when the index
     // also holds the page, or such a page would stay invisible until
     // `query --reindex`.
@@ -671,9 +671,9 @@ fn fence_marker(trimmed: &str) -> Option<&'static str> {
 /// Splits the frontmatter `sources` entries into raw path and chunk, and stats
 /// each raw file.
 ///
-/// A missing raw is a fact, not an error: `raw/` is committed but the files a
-/// clone might not have are unrelated to the query, and the hit is still worth
-/// returning with `raw_available: false`.
+/// A missing raw is a fact, not an error: `.wiki/` is not shared between
+/// machines, so a raw another checkout has may be absent here, and the hit is
+/// still worth returning with `raw_available: false`.
 fn source_refs(root: &Path, sources: &[String]) -> Vec<SourceRef> {
     sources
         .iter()

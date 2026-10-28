@@ -93,7 +93,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 不这么做，同一个文件会一轮轮以 `changed` 回来，直到有人把它加进忽略列表——而拒绝和忽略是两件事。
 摘要必须按 `scan` 的选法算（小文件全量、大文件采样，见 `accept_reviewed_sources`），否则下一次 `scan` 立刻报假 `changed`；`tests/version.rs::reject_accepts_the_source_bytes_so_it_is_not_reported_again` 钉住。超大读不了的文件跳过，让它继续报 `oversize`。
 
-这道表决依赖 `ingest commit` 把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `reject`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`reject` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
+这道表决依赖 `ingest submit` 把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `reject`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`reject` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
 
 ## 3. 提交前自查
 

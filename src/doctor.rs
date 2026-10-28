@@ -350,7 +350,7 @@ fn check_engine_ignore(root: &Path, cfg: &Config) -> Check {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Check::warn(
             NAME,
             format!(
-                "{} is missing; the page tree and the ledger would be committed",
+                "{} is missing; new pages and ledger rows would have nowhere to land",
                 display.display()
             ),
         ),

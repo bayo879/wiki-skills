@@ -1,10 +1,10 @@
 # 摄取与成页（ingest）
 
-> 何时读：当需要把已转换的 raw 源并进 wiki 时使用。它驱动 ingest 的 begin、commit、abort，并亲手撰写候选页正文，把源里的结论落成一页一事、可追溯来源的知识页。它只写 .wiki/staging/ 下的候选页，进 wiki 要人确认。典型场合是新源入库、旧源更新后结论可能被改写、多源讲同一件事需要合并成页。它不扫描、不转换、不调试解析、不跑 lint。动笔前先汇报要建哪些页、改哪些页和各页要点，等人点头后才提交。
+> 何时读：当需要把已转换的 raw 源并进 wiki 时使用。它驱动 ingest 的 begin、submit、abort，并亲手撰写候选页正文，把源里的结论落成一页一事、可追溯来源的知识页。它只写 .wiki/staging/ 下的候选页，进 wiki 要人确认。典型场合是新源入库、旧源更新后结论可能被改写、多源讲同一件事需要合并成页。它不扫描、不转换、不调试解析、不跑 lint。动笔前先汇报要建哪些页、改哪些页和各页要点，等人点头后才提交。
 
 命令是 `llm-wiki`；不在 PATH 上时，用仓库根的 `.wiki/llm-wiki`。
 
-把**已经转成 `.wiki/raw/*.md` 的源**写成 wiki 页。本 skill 只做两件别人不做的事：驱动 `ingest begin/commit/abort`，以及**亲手写页面正文**。
+把**已经转成 `.wiki/raw/*.md` 的源**写成 wiki 页。本 skill 只做两件别人不做的事：驱动 `ingest begin/submit/abort`，以及**亲手写页面正文**。
 
 边界：源没进来回 `references/scan.md`，页读不对回 `references/parse.md`，发布前的审计回 `references/audit.md`。
 
@@ -79,7 +79,7 @@ updated: 1970-01-01
 ---
 ```
 
-`updated:` **必须自己写一行**，占位日期即可：`commit` 只改值、不补行，缺了报 `no 'updated:' field`。
+`updated:` **必须自己写一行**，占位日期即可：`submit` 只改值、不补行，缺了报 `no 'updated:' field`。
 
 正文好坏对照：
 
@@ -100,24 +100,24 @@ updated: 1970-01-01
 | `title` | agent | 进 `index.md` |
 | `type` | agent | 取 `.wiki/wiki.toml` 的 `[schema].types`；文件放在同名子目录下 |
 | `summary` | agent | 一句话，进 `index.md`；写不出一句话说明这页还没想清楚 |
-| `sources` | agent 起笔，`commit` 追加 | 仓库相对路径 `.wiki/raw/order-timeout.md`；大文件带片段 `.wiki/raw/big.md#p=12-40` |
+| `sources` | agent 起笔，`submit` 追加 | 仓库相对路径 `.wiki/raw/order-timeout.md`；大文件带片段 `.wiki/raw/big.md#p=12-40` |
 | `status` | agent | 新页 `draft`；人审过才改 `stable` |
-| `updated` | CLI（`commit`） | 只做行级替换，保留注释、键序和引号风格 |
+| `updated` | CLI（`submit`） | 只做行级替换，保留注释、键序和引号风格 |
 
 `sources` 一律仓库相对路径。漏了 `sources` 等于「无源声称」。
 
-## 4. 收口：commit
+## 4. 交稿：submit
 
 ```bash
-llm-wiki ingest commit --pages concept/order-retry --json
+llm-wiki ingest submit --pages concept/order-retry --json
 ```
 
-`--pages` 是这一轮真正发布进 staging 的候选页；不传直接报错，不是「全提交」。裸 id 命中多个类型时会报歧义，改写成 `type/id`。
+`--pages` 是这一轮真正发布进 staging 的候选页；不传直接报错，不是「全交稿」。裸 id 命中多个类型时会报歧义，改写成 `type/id`。
 
-`commit` 依次做：刷 `updated`、把本轮 `.wiki/raw/<key>` 补进 `sources`、记录页哈希、重建 `.wiki/staging/index.md`、盖 manifest、删 `pending.json`。
+`submit` 依次做：刷 `updated`、把本轮 `.wiki/raw/<key>` 补进 `sources`、记录页哈希、重建 `.wiki/staging/index.md`、盖 manifest、删 `pending.json`。
 
-- 它**不写 `.wiki/pages/`**，也**不写 `.wiki/pages/index.md` 与 `.wiki/pages/log.md`**：前者由 `approve` 重建，后者由 `approve`/`reject` 追加。commit 之后不要自己再改这两个文件。
-- **`commit` 之后不要再改候选正文**。`approve` 会拿记录的哈希比对，改了就报 drift，只能 abort 重来。
+- 它**不写 `.wiki/pages/`**，也**不写 `.wiki/pages/index.md` 与 `.wiki/pages/log.md`**：前者由 `approve` 重建，后者由 `approve`/`reject` 追加。submit 之后不要自己再改这两个文件。
+- **`submit` 之后不要再改候选正文**。`approve` 会拿记录的哈希比对，改了就报 drift，只能 abort 重来。
 - 中途失败可以整轮重试；`pending.json` 还在，轮次就没关。
 
 ## 5. 放弃：abort
@@ -137,7 +137,7 @@ llm-wiki ingest abort
 - **一页只讲一件事，一页只服务一个读者问题。** 两个问题写成两页，再互相 `[[链接]]`。
 - **三个以上源讲同一件事才建页。** 单源短内容通常并进已有页；先 `llm-wiki query "<词>"` 找归属。
 - 新页一律 `status: draft`。人看过、认可了，才改成 `stable`；不要自己给自己升。
-- **源变了、结论没变**：只补 `sources`（`updated` 由 `commit` 刷），正文不动。
+- **源变了、结论没变**：只补 `sources`（`updated` 由 `submit` 刷），正文不动。
 - **结论变了**：改写正文，并留一句「以前认为…；现在…」。不许静默覆盖，读者需要知道判断被推翻过。
 
 ## 7. 先汇报，再落笔
@@ -148,9 +148,9 @@ llm-wiki ingest abort
 2. 要改哪些页，改哪一段、为什么；
 3. `orphan_pages` 怎么处理：补来源，还是弃页。
 
-汇报里把整条序列一次说全，别等人问「然后呢」：`begin` → 写候选页到 `.wiki/staging/` → `commit` → 人跑 `approve --confirm` 并入 `.wiki/pages/`。前两步你做，最后一步是人做。
+汇报里把整条序列一次说全，别等人问「然后呢」：`begin` → 写候选页到 `.wiki/staging/` → `submit` → 人跑 `approve --confirm` 并入 `.wiki/pages/`。前两步你做，最后一步是人做。
 
-讲完等确认。人没点头就不 commit。
+讲完等确认。人没点头就不 submit。
 
 ## 8. 收尾
 

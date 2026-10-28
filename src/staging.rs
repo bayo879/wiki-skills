@@ -465,7 +465,7 @@ pub fn write_page(root: &Path, cfg: &Config, id: &str, content: &str) -> Result<
 /// Reads the current round's pending sources from `pending.json`.
 ///
 /// Missing file means no round is open, which is an empty map rather than an
-/// error: `abort`/`commit` on a clean tree are no-ops, not failures.
+/// error: `abort`/`submit` on a clean tree are no-ops, not failures.
 pub fn pending_hashes(root: &Path) -> Result<BTreeMap<String, String>> {
     let path = dir(root).join(PENDING);
     match fs::read(&path) {
@@ -501,7 +501,7 @@ pub fn write_pending(root: &Path, hashes: &BTreeMap<String, String>) -> Result<(
 /// Closes the current round, if any.
 ///
 /// A missing file is success: closing a round that is already closed is not an
-/// error, so a retried `commit` fails on its own terms rather than here.
+/// error, so a retried `submit` fails on its own terms rather than here.
 pub fn clear_pending(root: &Path) -> Result<()> {
     let path = dir(root).join(PENDING);
     match fs::remove_file(&path) {
@@ -516,7 +516,7 @@ pub fn clear_pending(root: &Path) -> Result<()> {
 /// This answers a different question than [`pending_hashes`]: "what has drifted
 /// since the last approval", not "what did this round open". Keeping them apart
 /// stops an abandoned round from being reported as drift, and stops drift from
-/// being silently committed as if a round had opened it.
+/// being silently treated as reviewed as if a round had opened it.
 pub fn manifest_pending(root: &Path) -> Result<BTreeMap<String, String>> {
     let manifest = Manifest::load(root)?;
     let mut pending = BTreeMap::new();

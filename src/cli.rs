@@ -264,8 +264,8 @@ pub enum IngestCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Close the open round: refresh the candidates and the staging index.
-    Commit {
+    /// Submit the open round: refresh the candidates and the staging index.
+    Submit {
         /// Candidate page ids to publish into staging, in the order given.
         #[arg(long)]
         pages: Vec<String>,
