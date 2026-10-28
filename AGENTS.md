@@ -72,10 +72,14 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 不要在调用点自己拼通配，也不要把它和 `[scan].ignore`（只按目录名粗过滤）混用——两者语义不同，混了就会出现「列表里明明写了却还被扫到」。
 显式 `convert --key` 绕开忽略是故意的：先看一眼再决定要不要永久挡住。
 
-### 2.11 页面预算是刹车，不是审批
+### 2.11 两道刹车，都只走「问」的那条路
 
-`approve` 不带 `--confirm` 时先算本轮新增页数（已存在的页算覆盖），超过 `[ingest].max_new_pages_per_run` 就返回 `reason: page_budget`，候选留在暂存区。
-它只防「一次建出几百页」，不替人做内容判断；`--confirm` 是显式越权，所以不要为了压测或图省事把预算调到很大再一路 confirm。
+`approve` 不带 `--confirm` 时依次过两道，命中就停在 `.wiki/staging/` 不动：
+
+1. **近义页**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选页的 `sources` 是某张已发布页 `sources` 的子集（没引入新证据）。只比 frontmatter，不读正文、不调模型——语义级「近义」在这里是做不到的，别试图加。
+2. **页面预算**（`reason: page_budget`）：本轮新增页数超过 `[ingest].max_new_pages_per_run`（默认 20）；已存在的页算覆盖，不占预算。
+
+`--confirm` 是显式越权，两道都不拦它；所以别为了省事把预算调大再一路 confirm。另有一条容易踩的：这两道都写在 `if !confirm` 里，曾经写在它外面，结果 `--confirm` 也被拦，人没法越权（tests/version.rs 的 `approve_confirm_overrules_*` 钉住）。
 
 ### 2.12 同步在 CLI 之外
 

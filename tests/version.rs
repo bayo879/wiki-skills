@@ -50,7 +50,13 @@ fn page_text(id: &str, title: &str) -> String {
 fn stage(root: &Path, cfg: &Config, store: &mut Store, rel: &str, title: &str) -> String {
     let id = rel.rsplit('/').next().unwrap().trim_end_matches(".md");
     let text = page_text(id, title);
-    staging::write_page(root, cfg, rel.trim_end_matches(".md"), &text).unwrap();
+    stage_text(root, cfg, store, rel, &text);
+    text
+}
+
+/// Stages exactly `text` and records the ledger row `ingest commit` would leave.
+fn stage_text(root: &Path, cfg: &Config, store: &mut Store, rel: &str, text: &str) {
+    staging::write_page(root, cfg, rel.trim_end_matches(".md"), text).unwrap();
     let staged = staging::dir(root).join(rel);
     let key = format!("{}/{}", cfg.paths.wiki.trim_matches('/'), rel);
     store
@@ -60,7 +66,22 @@ fn stage(root: &Path, cfg: &Config, store: &mut Store, rel: &str, title: &str) -
             updated: String::from("2026-01-01"),
         })
         .unwrap();
-    text
+}
+
+/// A page that cites raws, for the overlap rule.
+fn sourced_page(id: &str, title: &str, sources: &[&str]) -> String {
+    let list: String = sources
+        .iter()
+        .map(|source| format!("  - {source}\n"))
+        .collect();
+    format!(
+        "---\nid: {id}\ntitle: {title}\ntype: concept\nsources:\n{list}status: draft\nupdated: 2026-01-01\n---\n正文\n"
+    )
+}
+
+/// Writes a page straight into `.wiki/pages/`, bypassing staging.
+fn publish(root: &Path, rel: &str, text: &str) {
+    write_file(root, &format!(".wiki/pages/{rel}"), text);
 }
 
 /// Replaces the manifest row for one raw-relative source key.
@@ -697,4 +718,106 @@ fn approve_asks_when_a_round_would_add_too_many_pages() {
         }
         other => panic!("expected merge_staging, got {other:?}"),
     }
+}
+
+#[test]
+fn approve_asks_when_a_candidate_repeats_a_published_title() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    publish(
+        root,
+        "concept/alpha.md",
+        &page_text("alpha", "Retry Policy"),
+    );
+    // Same title modulo punctuation and case: the same page under a new id.
+    stage_text(
+        root,
+        &cfg,
+        &mut store,
+        "concept/retry-policy.md",
+        &page_text("retry-policy", "retry_policy"),
+    );
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::NeedsConfirmation { reason, detail } => {
+            assert_eq!(reason, "page_overlap");
+            assert!(detail.contains("concept/alpha.md"), "{detail}");
+        }
+        other => panic!("expected page_overlap, got {other:?}"),
+    }
+    assert!(staging::dir(root).join("concept/retry-policy.md").is_file());
+}
+
+#[test]
+fn approve_asks_when_a_candidate_adds_no_new_source() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    publish(
+        root,
+        "concept/alpha.md",
+        &sourced_page("alpha", "Alpha", &[".wiki/raw/a.md"]),
+    );
+    // The wiki already says what this raw says; a second page adds nothing.
+    stage_text(
+        root,
+        &cfg,
+        &mut store,
+        "concept/beta.md",
+        &sourced_page("beta", "The same fact", &[".wiki/raw/a.md"]),
+    );
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::NeedsConfirmation { reason, detail } => {
+            assert_eq!(reason, "page_overlap");
+            assert!(detail.contains("没有新证据"), "{detail}");
+        }
+        other => panic!("expected page_overlap, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_candidate_citing_a_new_source_is_not_an_overlap() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    publish(
+        root,
+        "concept/alpha.md",
+        &sourced_page("alpha", "Alpha", &[".wiki/raw/a.md"]),
+    );
+    stage_text(
+        root,
+        &cfg,
+        &mut store,
+        "concept/beta.md",
+        &sourced_page("beta", "Beta", &[".wiki/raw/a.md", ".wiki/raw/b.md"]),
+    );
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::NeedsConfirmation { reason, .. } => assert_eq!(reason, "merge_staging"),
+        other => panic!("expected merge_staging, got {other:?}"),
+    }
+}
+
+#[test]
+fn approve_confirm_overrules_the_overlap_gate() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    publish(
+        root,
+        "concept/alpha.md",
+        &page_text("alpha", "Retry Policy"),
+    );
+    stage_text(
+        root,
+        &cfg,
+        &mut store,
+        "concept/retry-policy.md",
+        &page_text("retry-policy", "Retry Policy"),
+    );
+
+    match version::approve(root, &cfg, &mut store, true).unwrap() {
+        ApproveOutcome::Applied { .. } => {}
+        other => panic!("expected the merge to go through, got {other:?}"),
+    }
+    assert!(root.join(".wiki/pages/concept/retry-policy.md").is_file());
 }

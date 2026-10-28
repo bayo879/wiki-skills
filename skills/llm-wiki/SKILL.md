@@ -55,7 +55,7 @@ llm-wiki query --text "..." --json      # 检索
 
 ## 需要人拍板的地方
 
-退出码 3、暂存区有待批候选、`reason: page_budget`、或 `archive purge` 不带 `--yes` 时，**照抄这四个选项，不要自己发挥**：
+退出码 3、暂存区有待批候选、`reason: page_budget` 或 `page_overlap`、或 `archive purge` 不带 `--yes` 时，**照抄这四个选项，不要自己发挥**：
 
 1. 批准（`llm-wiki approve --confirm`）
 2. 不批准并说明原因（`llm-wiki reject --reason "..."`）

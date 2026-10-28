@@ -23,6 +23,7 @@
 //! location is part of the repository layout that `init` creates, matching how
 //! [`crate::staging`] locates its directory.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -216,6 +217,98 @@ struct Candidate {
     wiki: PathBuf,
 }
 
+/// A published page, reduced to the facts the overlap rule compares.
+///
+/// Overlap is deliberately mechanical: it never reads the prose. A candidate
+/// whose title says the same thing as a page already in the wiki, or which
+/// cites only sources the wiki already cites, is almost certainly the same page
+/// written twice under two ids — the failure mode a page budget cannot see,
+/// because writing it was cheap.
+struct Published {
+    /// Path relative to the wiki root, `/`-separated (`concept/alpha.md`).
+    rel: String,
+    /// Case-, space- and punctuation-insensitive title.
+    title: String,
+    /// Raw keys the page cites, raw-relative.
+    sources: BTreeSet<String>,
+}
+
+/// Case-, space- and punctuation-insensitive title key.
+///
+/// `Retry Policy`, `retry-policy` and `retry_policy` all collapse to
+/// `retrypolicy`, so a rename that only changes punctuation still collides.
+fn title_key(title: &str) -> String {
+    title
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The raw keys a page cites, as raw-relative keys.
+fn cited_sources(cfg: &Config, sources: &[String]) -> BTreeSet<String> {
+    staging::source_keys(sources, &cfg.paths.raw)
+        .into_iter()
+        .collect()
+}
+
+/// The pages already in the wiki that the overlap rule compares against.
+///
+/// Bookkeeping files and the two summary trees are skipped: an audit report or
+/// an archived conversation is not a page competing for the same subject.
+fn published(root: &Path, cfg: &Config) -> Vec<Published> {
+    let dir = root.join(&cfg.paths.wiki);
+    let mut out = Vec::new();
+    for path in render::page_files(&dir).unwrap_or_default() {
+        let Ok(rel) = path.strip_prefix(&dir) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if rel == "index.md"
+            || rel == "log.md"
+            || rel.starts_with("audit/")
+            || rel.starts_with("archive/")
+        {
+            continue;
+        }
+        let Ok(raw) = fs::read(&path) else {
+            continue;
+        };
+        // A page that does not parse is `lint`'s problem, not a reason to
+        // refuse a merge.
+        let Ok((front, _body)) = crate::page::parse(&raw) else {
+            continue;
+        };
+        out.push(Published {
+            rel,
+            title: title_key(&front.title),
+            sources: cited_sources(cfg, &front.sources),
+        });
+    }
+    out
+}
+
+/// Why `candidate` looks like a page the wiki already holds, if it does.
+fn overlap_reason(
+    candidate: &str,
+    title: &str,
+    sources: &BTreeSet<String>,
+    pages: &[Published],
+) -> Option<String> {
+    for page in pages {
+        if !title.is_empty() && title == page.title {
+            return Some(format!("`{candidate}` 与已发布的 `{}` 标题相同", page.rel));
+        }
+        if !sources.is_empty() && sources.is_subset(&page.sources) {
+            return Some(format!(
+                "`{candidate}` 只引用了 `{}` 已经引用过的源，没有新证据",
+                page.rel
+            ));
+        }
+    }
+    None
+}
+
 /// Snapshots the approved wiki as a new version.
 ///
 /// The name is `vNNN`, one past the highest numbered directory already in
@@ -260,9 +353,30 @@ pub fn approve(
     }
     check_sources(root, cfg)?;
     if !confirm {
+        // The two content brakes only run on the asking path: `--confirm` is
+        // the human overruling them, not another question.
+        let existing = published(root, cfg);
+        for candidate in &candidates {
+            let Ok(raw) = fs::read(&candidate.staging) else {
+                continue;
+            };
+            let Ok((front, _body)) = crate::page::parse(&raw) else {
+                continue;
+            };
+            let title = title_key(&front.title);
+            let sources = cited_sources(cfg, &front.sources);
+            if let Some(why) = overlap_reason(&candidate.rel, &title, &sources, &existing) {
+                return Ok(ApproveOutcome::NeedsConfirmation {
+                    reason: String::from("page_overlap"),
+                    detail: format!(
+                        "{why}；确认后可用 approve --confirm 合并，或改 id/title 后重新 ingest commit"
+                    ),
+                });
+            }
+        }
+
         // A page the wiki already holds is an overwrite, not growth, so only
-        // new paths count against the budget. `--confirm` is the human
-        // overruling the cap, so the budget only applies to the asking path.
+        // new paths count against the budget.
         let new_pages = candidates
             .iter()
             .filter(|candidate| !candidate.wiki.is_file())

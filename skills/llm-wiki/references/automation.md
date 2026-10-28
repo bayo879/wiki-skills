@@ -39,6 +39,13 @@ llm-wiki sync --limit 5 --dry-run --json       # 只看这一轮会做什么
 
 真觉得预算太小就改 `.wiki/wiki.toml` 的 `[ingest].max_new_pages_per_run`，不要靠反复 `--confirm` 绕过。
 
+预算之前还有一道更细的闸：**近义页**（`reason: page_overlap`）。候选页出现下面任一情况就停在暂存区：
+
+- 标题归一化后与已发布页相同（`Retry Policy`、`retry-policy`、`retry_policy` 算同一个）；
+- 候选页 `sources` 全是某张已发布页已经引用过的源——同样的证据写第二遍，没有新事实。
+
+`detail` 会点名和哪张已发布页撞了。处置和 `page_budget` 一样四选一；要做就改 id/title、或补一个真正的新源，然后重新 `ingest commit`。它只比 frontmatter，不读正文，所以语义上「像」但标题与来源都不同的页不会被拦。
+
 ## 回退一版
 
 版本是内容寻址的：`checkpoint` / `approve` / `rollback` 各打一个点，只存变化的字节。回退还原**页面和 raw**，索引随之重建。
