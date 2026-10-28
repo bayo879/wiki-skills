@@ -12,7 +12,7 @@ use llm_wiki::graph;
 use tempfile::tempdir;
 
 fn write_page(root: &Path, typ: &str, id: &str, body: &str) {
-    let path = root.join("wiki").join(typ).join(format!("{id}.md"));
+    let path = root.join(".wiki/pages").join(typ).join(format!("{id}.md"));
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
@@ -35,11 +35,11 @@ fn counts_in_and_out_degrees() {
     let g = graph::build(root, &Config::default()).unwrap();
 
     let by_page = |key: &str| g.nodes.iter().find(|n| n.page == key).cloned().unwrap();
-    let a = by_page("wiki/concept/a.md");
+    let a = by_page(".wiki/pages/concept/a.md");
     assert_eq!((a.in_degree, a.out_degree), (1, 2), "{:?}", a);
-    let b = by_page("wiki/concept/b.md");
+    let b = by_page(".wiki/pages/concept/b.md");
     assert_eq!((b.in_degree, b.out_degree), (1, 0), "{:?}", b);
-    let c = by_page("wiki/entity/c.md");
+    let c = by_page(".wiki/pages/entity/c.md");
     assert_eq!((c.in_degree, c.out_degree), (1, 1), "{:?}", c);
 }
 
@@ -57,19 +57,19 @@ fn edges_are_sorted_and_deduplicated() {
         g.edges,
         vec![
             graph::Edge {
-                from: String::from("wiki/concept/a.md"),
-                to: String::from("wiki/concept/b.md")
+                from: String::from(".wiki/pages/concept/a.md"),
+                to: String::from(".wiki/pages/concept/b.md")
             },
             graph::Edge {
-                from: String::from("wiki/concept/a.md"),
-                to: String::from("wiki/concept/c.md")
+                from: String::from(".wiki/pages/concept/a.md"),
+                to: String::from(".wiki/pages/concept/c.md")
             },
         ]
     );
     let a = g
         .nodes
         .iter()
-        .find(|n| n.page == "wiki/concept/a.md")
+        .find(|n| n.page == ".wiki/pages/concept/a.md")
         .unwrap();
     assert_eq!(a.out_degree, 3, "degrees count mentions, edges are unique");
 }
@@ -84,18 +84,21 @@ fn orphan_pages_have_neither_in_nor_out_links() {
 
     let g = graph::build(root, &Config::default()).unwrap();
 
-    assert_eq!(g.orphans, vec![String::from("wiki/concept/lonely.md")]);
+    assert_eq!(
+        g.orphans,
+        vec![String::from(".wiki/pages/concept/lonely.md")]
+    );
 }
 
 #[test]
-fn a_link_may_name_the_bare_id_or_the_wiki_relative_path() {
+fn a_link_may_name_the_bare_id_or_the_engine_relative_path() {
     let d = tempdir().unwrap();
     let root = d.path();
     write_page(
         root,
         "concept",
         "a",
-        "[[concept/b]] [[b]] [[wiki/concept/b.md]]",
+        "[[concept/b]] [[b]] [[.wiki/pages/concept/b.md]]",
     );
     write_page(root, "concept", "b", "");
 
@@ -157,10 +160,10 @@ fn nodes_are_ordered_by_in_degree_then_path() {
     assert_eq!(
         order,
         vec![
-            "wiki/concept/hub.md",
-            "wiki/concept/a.md",
-            "wiki/concept/b.md",
-            "wiki/concept/quiet.md",
+            ".wiki/pages/concept/hub.md",
+            ".wiki/pages/concept/a.md",
+            ".wiki/pages/concept/b.md",
+            ".wiki/pages/concept/quiet.md",
         ]
     );
 }

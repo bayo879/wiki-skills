@@ -20,7 +20,7 @@ const CHECKS: [&str; 11] = [
     "db",
     "fts5",
     "engine_ignore",
-    "versions_tracked",
+    "legacy_layout",
     "lock",
     "staging",
     "token",
@@ -88,7 +88,7 @@ fn check_detail(json: &Value, name: &str) -> String {
 
 /// Edits one line of `wiki.toml`, keeping the rest byte-identical.
 fn edit_toml_line(dir: &Path, prefix: &str, replacement: &str) {
-    let path = dir.join("wiki.toml");
+    let path = dir.join(".wiki/wiki.toml");
     let text = fs::read_to_string(&path).expect("wiki.toml exists");
     let mut out = String::new();
     let mut replaced = false;
@@ -145,7 +145,7 @@ fn a_healthy_repository_exits_zero_and_names_every_check() {
 #[test]
 fn a_missing_wiki_toml_fails_the_config_check() {
     let dir = repo();
-    fs::remove_file(dir.path().join("wiki.toml")).expect("removable");
+    fs::remove_file(dir.path().join(".wiki/wiki.toml")).expect("removable");
     let (code, json) = doctor(dir.path());
     assert_eq!(code, 1, "a FAIL is exit 1");
     assert_eq!(level(&json, "config"), "fail");
@@ -153,7 +153,7 @@ fn a_missing_wiki_toml_fails_the_config_check() {
     // command ran, the same way `lint` reports findings).
     let detail = check_detail(&json, "config");
     assert!(
-        detail.contains("wiki.toml"),
+        detail.contains(".wiki/wiki.toml"),
         "the finding names the file: {detail}"
     );
 }
@@ -161,7 +161,7 @@ fn a_missing_wiki_toml_fails_the_config_check() {
 #[test]
 fn a_missing_config_section_is_only_a_warning() {
     let dir = repo();
-    let path = dir.path().join("wiki.toml");
+    let path = dir.path().join(".wiki/wiki.toml");
     let text = fs::read_to_string(&path).expect("readable");
     let cut = text.find("[memory]").expect("[memory] is in the contract");
     fs::write(&path, &text[..cut]).expect("writable");
@@ -173,7 +173,7 @@ fn a_missing_config_section_is_only_a_warning() {
 #[test]
 fn a_missing_schema_fails_the_schema_check() {
     let dir = repo();
-    fs::remove_file(dir.path().join("SCHEMA.md")).expect("removable");
+    fs::remove_file(dir.path().join(".wiki/SCHEMA.md")).expect("removable");
     let (code, json) = doctor(dir.path());
     assert_eq!(code, 1);
     assert_eq!(level(&json, "schema"), "fail");
@@ -182,7 +182,7 @@ fn a_missing_schema_fails_the_schema_check() {
 #[test]
 fn a_missing_wiki_directory_fails_the_paths_check() {
     let dir = repo();
-    fs::remove_dir_all(dir.path().join("wiki")).expect("removable");
+    fs::remove_dir_all(dir.path().join(".wiki/pages")).expect("removable");
     let (code, json) = doctor(dir.path());
     assert_eq!(code, 1);
     assert_eq!(level(&json, "paths"), "fail");
@@ -212,24 +212,26 @@ fn fts5_is_reported_ok_by_this_build() {
 }
 
 #[test]
-fn a_versions_rule_in_the_engine_gitignore_is_a_warning() {
+fn an_engine_gitignore_without_a_wildcard_is_a_warning() {
     let dir = repo();
-    let path = dir.path().join(".wiki/.gitignore");
-    let mut text = fs::read_to_string(&path).expect("readable");
-    text.push_str("versions/\n");
-    fs::write(&path, text).expect("writable");
+    fs::write(dir.path().join(".wiki/.gitignore"), "cache/\nstaging/\n").expect("writable");
     let (code, json) = doctor(dir.path());
     assert_eq!(code, 0);
     assert_eq!(level(&json, "engine_ignore"), "warn");
 }
 
 #[test]
-fn a_root_gitignore_that_hides_versions_is_a_warning() {
+fn a_root_contract_from_the_old_layout_is_a_warning() {
     let dir = repo();
-    fs::write(dir.path().join(".gitignore"), ".wiki/versions/\n").expect("writable");
+    fs::write(dir.path().join("wiki.toml"), "[paths]\n").expect("writable");
     let (code, json) = doctor(dir.path());
     assert_eq!(code, 0);
-    assert_eq!(level(&json, "versions_tracked"), "warn");
+    assert_eq!(level(&json, "legacy_layout"), "warn");
+    let detail = check_detail(&json, "legacy_layout");
+    assert!(
+        detail.contains("wiki.toml"),
+        "the finding names it: {detail}"
+    );
 }
 
 #[test]
@@ -273,7 +275,7 @@ fn staged_candidates_without_a_ledger_are_a_warning() {
 #[test]
 fn a_literal_token_is_a_failure() {
     let dir = repo();
-    let path = dir.path().join("wiki.toml");
+    let path = dir.path().join(".wiki/wiki.toml");
     let text = fs::read_to_string(&path).expect("readable");
     fs::write(&path, format!("token = \"abc123\"\n{text}")).expect("writable");
     let (code, json) = doctor(dir.path());
@@ -308,7 +310,7 @@ fn external_primary_without_a_section_is_a_failure() {
 fn an_unreachable_external_service_is_only_a_warning() {
     let dir = repo();
     edit_toml_line(dir.path(), "primary", "primary = \"external\"");
-    let path = dir.path().join("wiki.toml");
+    let path = dir.path().join(".wiki/wiki.toml");
     let text = fs::read_to_string(&path).expect("readable");
     fs::write(
         &path,
@@ -328,7 +330,7 @@ fn an_unreachable_external_service_is_only_a_warning() {
 #[test]
 fn the_human_table_marks_each_level() {
     let dir = repo();
-    fs::remove_file(dir.path().join("wiki.toml")).expect("removable");
+    fs::remove_file(dir.path().join(".wiki/wiki.toml")).expect("removable");
     let output = run(dir.path(), &["doctor"]);
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&output.stdout);

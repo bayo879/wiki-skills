@@ -80,11 +80,11 @@ fn full_row_roundtrips_and_updates() {
     s.migrate().unwrap();
 
     let full = SourceRow {
-        key: String::from("source/report.pdf"),
+        key: String::from("report.pdf"),
         hash: String::from("blake3:bb"),
         size: 2048,
         mtime: 1_700_000_000,
-        raw_key: Some(String::from("raw/report.md")),
+        raw_key: Some(String::from(".wiki/raw/report.md")),
         converted_at: Some(String::from("2026-10-27T11:30:00+08:00")),
     };
     s.upsert_source(&full).unwrap();
@@ -106,7 +106,7 @@ fn full_row_roundtrips_and_updates() {
         .into_iter()
         .map(|entry| entry.key)
         .collect();
-    assert_eq!(keys, ["b.pdf", "source/report.pdf"]);
+    assert_eq!(keys, ["b.pdf", "report.pdf"]);
 
     s.delete_source(&full.key).unwrap();
     assert!(s.get_source(&full.key).unwrap().is_none());
@@ -135,9 +135,9 @@ fn archive_rows_roundtrip() {
     s.migrate().unwrap();
 
     assert!(s.all_archives().unwrap().is_empty());
-    assert!(s.get_archive("wiki/archive/a.md").unwrap().is_none());
+    assert!(s.get_archive(".wiki/pages/archive/a.md").unwrap().is_none());
 
-    let first = sealed("wiki/archive/a.md");
+    let first = sealed(".wiki/pages/archive/a.md");
     s.upsert_archive(&first).unwrap();
     assert_eq!(s.get_archive(&first.key).unwrap().unwrap(), first);
 
@@ -156,15 +156,20 @@ fn archive_rows_are_ordered_by_key() {
     let mut s = Store::open(&d.path().join("state.db")).unwrap();
     s.migrate().unwrap();
 
-    s.upsert_archive(&sealed("wiki/archive/c.md")).unwrap();
-    s.upsert_archive(&sealed("wiki/archive/a.md")).unwrap();
+    s.upsert_archive(&sealed(".wiki/pages/archive/c.md"))
+        .unwrap();
+    s.upsert_archive(&sealed(".wiki/pages/archive/a.md"))
+        .unwrap();
     let keys: Vec<String> = s
         .all_archives()
         .unwrap()
         .into_iter()
         .map(|entry| entry.key)
         .collect();
-    assert_eq!(keys, ["wiki/archive/a.md", "wiki/archive/c.md"]);
+    assert_eq!(
+        keys,
+        [".wiki/pages/archive/a.md", ".wiki/pages/archive/c.md"]
+    );
 }
 
 #[test]
@@ -172,26 +177,30 @@ fn touch_recall_records_the_hit() {
     let d = tempdir().unwrap();
     let mut s = Store::open(&d.path().join("state.db")).unwrap();
     s.migrate().unwrap();
-    s.upsert_archive(&sealed("wiki/archive/a.md")).unwrap();
+    s.upsert_archive(&sealed(".wiki/pages/archive/a.md"))
+        .unwrap();
 
     // The first hit stamps the time and starts the count at one.
-    s.touch_archive_recall("wiki/archive/a.md", "2026-10-27")
+    s.touch_archive_recall(".wiki/pages/archive/a.md", "2026-10-27")
         .unwrap();
-    let touched = s.get_archive("wiki/archive/a.md").unwrap().unwrap();
+    let touched = s.get_archive(".wiki/pages/archive/a.md").unwrap().unwrap();
     assert_eq!(touched.last_recalled_at.as_deref(), Some("2026-10-27"));
     assert_eq!(touched.recall_count, 1);
 
     // A later hit moves the time forward and accumulates the count.
-    s.touch_archive_recall("wiki/archive/a.md", "2026-11-02")
+    s.touch_archive_recall(".wiki/pages/archive/a.md", "2026-11-02")
         .unwrap();
-    let touched = s.get_archive("wiki/archive/a.md").unwrap().unwrap();
+    let touched = s.get_archive(".wiki/pages/archive/a.md").unwrap().unwrap();
     assert_eq!(touched.last_recalled_at.as_deref(), Some("2026-11-02"));
     assert_eq!(touched.recall_count, 2);
 
     // Touching an unknown archive is a no-op, not an error.
-    s.touch_archive_recall("wiki/archive/nope.md", "2026-11-02")
+    s.touch_archive_recall(".wiki/pages/archive/nope.md", "2026-11-02")
         .unwrap();
-    assert!(s.get_archive("wiki/archive/nope.md").unwrap().is_none());
+    assert!(s
+        .get_archive(".wiki/pages/archive/nope.md")
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -199,12 +208,14 @@ fn delete_archive_removes_only_that_row() {
     let d = tempdir().unwrap();
     let mut s = Store::open(&d.path().join("state.db")).unwrap();
     s.migrate().unwrap();
-    s.upsert_archive(&sealed("wiki/archive/a.md")).unwrap();
-    s.upsert_archive(&sealed("wiki/archive/b.md")).unwrap();
+    s.upsert_archive(&sealed(".wiki/pages/archive/a.md"))
+        .unwrap();
+    s.upsert_archive(&sealed(".wiki/pages/archive/b.md"))
+        .unwrap();
 
-    s.delete_archive("wiki/archive/a.md").unwrap();
-    assert!(s.get_archive("wiki/archive/a.md").unwrap().is_none());
-    assert!(s.get_archive("wiki/archive/b.md").unwrap().is_some());
+    s.delete_archive(".wiki/pages/archive/a.md").unwrap();
+    assert!(s.get_archive(".wiki/pages/archive/a.md").unwrap().is_none());
+    assert!(s.get_archive(".wiki/pages/archive/b.md").unwrap().is_some());
     // Deleting a key that is already gone is a no-op, not an error.
-    s.delete_archive("wiki/archive/a.md").unwrap();
+    s.delete_archive(".wiki/pages/archive/a.md").unwrap();
 }

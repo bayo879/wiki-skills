@@ -40,7 +40,7 @@ impl Fixture {
 
     /// Converts `source/a.md`, so `ingest begin` has a key it accepts.
     fn convert_source(&mut self) {
-        fs::write(self.root().join("source/a.md"), "重试上限是 3 次。\n").unwrap();
+        fs::write(self.root().join("a.md"), "重试上限是 3 次。\n").unwrap();
         let root = self.root().to_path_buf();
         let cfg = self.cfg.clone();
         convert::convert_one(&root, &cfg, &mut self.store, "a.md").unwrap();
@@ -55,7 +55,7 @@ impl Fixture {
 
     /// Registers `raw/<key>` the way `convert` does: digest of the bytes on disk.
     fn ledger(&mut self, key: &str) {
-        let digest = hash::hash_file(&self.root().join("raw").join(key), true).unwrap();
+        let digest = hash::hash_file(&self.root().join(".wiki/raw").join(key), true).unwrap();
         self.store
             .upsert_raw(&RawRow {
                 key: String::from(key),
@@ -68,10 +68,13 @@ impl Fixture {
 
     /// Writes a page citing `raw/<key>`.
     fn put_page(&self, id: &str, key: &str) {
-        let path = self.root().join("wiki/concept").join(format!("{id}.md"));
+        let path = self
+            .root()
+            .join(".wiki/pages/concept")
+            .join(format!("{id}.md"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let text = format!(
-            "---\nid: {id}\ntitle: {id}\ntype: concept\nsummary: 摘要\nsources:\n  - raw/{key}\n\
+            "---\nid: {id}\ntitle: {id}\ntype: concept\nsummary: 摘要\nsources:\n  - .wiki/raw/{key}\n\
              status: stable\nupdated: 2026-10-20\n---\n\n\
              这一页的正文足够长，写清楚前因后果，测试才会认为它达标。\n"
         );

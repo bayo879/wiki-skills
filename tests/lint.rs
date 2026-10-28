@@ -48,7 +48,11 @@ impl Fixture {
 
     /// Writes a page at `wiki/<typ>/<id>.md` and returns its path.
     fn put_page(&self, typ: &str, id: &str, text: &str) -> PathBuf {
-        let path = self.root().join("wiki").join(typ).join(format!("{id}.md"));
+        let path = self
+            .root()
+            .join(".wiki/pages")
+            .join(typ)
+            .join(format!("{id}.md"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, text).unwrap();
         path
@@ -56,7 +60,7 @@ impl Fixture {
 
     /// Writes a raw file at `raw/<key>` and returns its path.
     fn put_raw(&self, key: &str, body: &str) -> PathBuf {
-        let path = self.root().join("raw").join(key);
+        let path = self.root().join(".wiki/raw").join(key);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, body).unwrap();
         path
@@ -115,7 +119,7 @@ fn l1_reports_each_missing_required_field() {
     assert!(l1.iter().any(|f| f.msg.contains("status")));
     assert_eq!(
         l1[0].page.as_deref(),
-        Some("wiki/concept/a.md"),
+        Some(".wiki/pages/concept/a.md"),
         "every finding names its page"
     );
 }
@@ -157,8 +161,8 @@ fn l3_reports_a_duplicate_id_in_two_type_directories() {
     assert_eq!(l3.len(), 2, "one finding per page");
     assert!(l3.iter().all(|f| f.level == Level::Error));
     let pages: Vec<&str> = l3.iter().filter_map(|f| f.page.as_deref()).collect();
-    assert!(pages.contains(&"wiki/concept/retry.md"));
-    assert!(pages.contains(&"wiki/entity/retry.md"));
+    assert!(pages.contains(&".wiki/pages/concept/retry.md"));
+    assert!(pages.contains(&".wiki/pages/entity/retry.md"));
 }
 
 // ------------------------------------------------------------------ L4, L5
@@ -201,7 +205,10 @@ fn l5_reports_an_updated_that_is_not_a_date() {
 
     let findings = f.lint();
     assert_eq!(rules(&findings), vec!["L5"], "{findings:?}");
-    assert_eq!(findings[0].page.as_deref(), Some("wiki/concept/a.md"));
+    assert_eq!(
+        findings[0].page.as_deref(),
+        Some(".wiki/pages/concept/a.md")
+    );
 }
 
 // ------------------------------------------------------------------ L6, L7
@@ -221,17 +228,19 @@ fn l6_reports_sources_that_do_not_exist() {
 
     let text = page_text("a", "concept", BODY).replace(
         "status: stable",
-        "status: stable\nsources: [raw/missing.md]",
+        "status: stable\nsources: [.wiki/raw/missing.md]",
     );
     f.put_page("concept", "a", &text);
-    let text = page_text("b", "concept", BODY)
-        .replace("status: stable", "status: stable\nsources: [raw/here.md]");
+    let text = page_text("b", "concept", BODY).replace(
+        "status: stable",
+        "status: stable\nsources: [.wiki/raw/here.md]",
+    );
     f.put_page("concept", "b", &text);
 
     let findings = f.lint();
     let l6 = only(&findings, "L6");
     assert_eq!(l6.len(), 1, "{l6:?}");
-    assert!(l6[0].msg.contains("raw/missing.md"));
+    assert!(l6[0].msg.contains(".wiki/raw/missing.md"));
     assert_eq!(l6[0].level, Level::Error);
 }
 
@@ -263,7 +272,7 @@ fn l8_counts_characters_not_bytes() {
     let l8 = only(&findings, "L8");
     assert_eq!(l8.len(), 1, "{findings:?}");
     assert_eq!(l8[0].level, Level::Warning);
-    assert_eq!(l8[0].page.as_deref(), Some("wiki/concept/short.md"));
+    assert_eq!(l8[0].page.as_deref(), Some(".wiki/pages/concept/short.md"));
 }
 
 #[test]
@@ -289,7 +298,7 @@ fn l9_reports_a_body_edit_that_left_updated_behind() {
     let text = fs::read_to_string(&path).unwrap();
     f.db()
         .upsert_page_meta(&PageMetaRow {
-            page_key: String::from("wiki/concept/a.md"),
+            page_key: String::from(".wiki/pages/concept/a.md"),
             hash: hash::hash_bytes(text.as_bytes()),
             updated: String::from("2026-10-20"),
         })
@@ -303,7 +312,7 @@ fn l9_reports_a_body_edit_that_left_updated_behind() {
     let l9 = only(&findings, "L9");
     assert_eq!(l9.len(), 1, "an edited body with an old date is L9");
     assert_eq!(l9[0].level, Level::Warning);
-    assert_eq!(l9[0].page.as_deref(), Some("wiki/concept/a.md"));
+    assert_eq!(l9[0].page.as_deref(), Some(".wiki/pages/concept/a.md"));
 }
 
 #[test]
@@ -314,7 +323,7 @@ fn l9_exempts_asset_pages() {
     let path = f.put_page("asset", "a", &text);
     f.db()
         .upsert_page_meta(&PageMetaRow {
-            page_key: String::from("wiki/asset/a.md"),
+            page_key: String::from(".wiki/pages/asset/a.md"),
             hash: String::from("blake3:now-stale"),
             updated: String::from("2026-10-20"),
         })
@@ -362,13 +371,13 @@ fn l10_does_not_fire_at_three_pages() {
 fn l11_reports_a_log_line_that_is_not_a_log_entry() {
     let f = Fixture::new();
     let log = "## [2026-10-27] ingest | ok\n\n- detail\n\n## 2026-10-27 manual\n";
-    fs::write(f.root().join("wiki/log.md"), log).unwrap();
+    fs::write(f.root().join(".wiki/pages/log.md"), log).unwrap();
 
     let findings = f.lint();
     let l11 = only(&findings, "L11");
     assert_eq!(l11.len(), 1, "{findings:?}");
     assert_eq!(l11[0].level, Level::Warning);
-    assert_eq!(l11[0].page.as_deref(), Some("wiki/log.md"));
+    assert_eq!(l11[0].page.as_deref(), Some(".wiki/pages/log.md"));
     assert!(
         l11[0].msg.contains("line 5"),
         "the line number locates it: {}",
@@ -480,7 +489,7 @@ fn fix_repairs_l5_and_lint_is_clean_afterwards() {
         let (front, _body) = page::read(&path).unwrap();
         assert_eq!(front.updated, today);
     }
-    assert!(f.root().join("wiki/index.md").is_file());
+    assert!(f.root().join(".wiki/pages/index.md").is_file());
     assert!(only(&f.lint(), "L5").is_empty());
 }
 
@@ -491,7 +500,7 @@ fn fix_refreshes_page_meta_after_a_body_edit() {
     let text = fs::read_to_string(&path).unwrap();
     f.db()
         .upsert_page_meta(&PageMetaRow {
-            page_key: String::from("wiki/concept/a.md"),
+            page_key: String::from(".wiki/pages/concept/a.md"),
             hash: hash::hash_bytes(text.as_bytes()),
             updated: String::from("2026-10-20"),
         })
@@ -514,7 +523,7 @@ fn fix_refreshes_page_meta_after_a_body_edit() {
 fn fix_rewrites_a_stale_index_without_touching_pages() {
     let mut f = Fixture::new();
     f.put_page("concept", "a", &page_text("a", "concept", BODY));
-    let index = f.root().join("wiki/index.md");
+    let index = f.root().join(".wiki/pages/index.md");
     assert!(!index.exists());
 
     let report = f.fix();
@@ -544,7 +553,7 @@ fn fix_leaves_judgement_calls_alone() {
 fn cli_fixture(min_chars: usize) -> TempDir {
     let dir = tempdir().unwrap();
     init::run(dir.path(), false).unwrap();
-    let toml = dir.path().join("wiki.toml");
+    let toml = dir.path().join(".wiki/wiki.toml");
     let body = fs::read_to_string(&toml).unwrap().replace(
         "min_page_chars = 200",
         &format!("min_page_chars = {min_chars}"),
@@ -563,9 +572,9 @@ fn cli(dir: &Path) -> Command {
 fn cli_lint_json_reports_findings_and_exit_codes() {
     let dir = cli_fixture(12);
     let root = dir.path();
-    fs::create_dir_all(root.join("wiki/concept")).unwrap();
+    fs::create_dir_all(root.join(".wiki/pages/concept")).unwrap();
     fs::write(
-        root.join("wiki/concept/a.md"),
+        root.join(".wiki/pages/concept/a.md"),
         page_text("a", "concept", "订单超时后重试三次"),
     )
     .unwrap();
@@ -583,7 +592,7 @@ fn cli_lint_json_reports_findings_and_exit_codes() {
     assert_eq!(out.status.code(), Some(1), "--strict turns warnings into 1");
 
     let broken = page_text("b", "concept", BODY).replace("status: stable", "status: broken");
-    fs::write(root.join("wiki/concept/b.md"), broken).unwrap();
+    fs::write(root.join(".wiki/pages/concept/b.md"), broken).unwrap();
     let out = cli(root).args(["--json", "lint"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "an error always fails");
 }
@@ -592,9 +601,9 @@ fn cli_lint_json_reports_findings_and_exit_codes() {
 fn cli_lint_info_does_not_fail_even_strict() {
     let dir = cli_fixture(12);
     let root = dir.path();
-    fs::create_dir_all(root.join("wiki/concept")).unwrap();
+    fs::create_dir_all(root.join(".wiki/pages/concept")).unwrap();
     fs::write(
-        root.join("wiki/concept/a.md"),
+        root.join(".wiki/pages/concept/a.md"),
         page_text("a", "concept", BODY),
     )
     .unwrap();
@@ -624,9 +633,9 @@ fn cli_lint_info_does_not_fail_even_strict() {
 fn cli_lint_human_output_names_the_rule_and_page() {
     let dir = cli_fixture(12);
     let root = dir.path();
-    fs::create_dir_all(root.join("wiki/concept")).unwrap();
+    fs::create_dir_all(root.join(".wiki/pages/concept")).unwrap();
     fs::write(
-        root.join("wiki/concept/a.md"),
+        root.join(".wiki/pages/concept/a.md"),
         page_text("a", "concept", "短"),
     )
     .unwrap();
@@ -634,17 +643,17 @@ fn cli_lint_human_output_names_the_rule_and_page() {
     let out = cli(root).args(["lint", "--strict"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("L8 wiki/concept/a.md"), "{text}");
+    assert!(text.contains("L8 .wiki/pages/concept/a.md"), "{text}");
 }
 
 #[test]
 fn cli_fix_repairs_l5_then_exits_zero() {
     let dir = cli_fixture(12);
     let root = dir.path();
-    fs::create_dir_all(root.join("wiki/concept")).unwrap();
+    fs::create_dir_all(root.join(".wiki/pages/concept")).unwrap();
     let text =
         page_text("a", "concept", BODY).replace("updated: 2026-10-20", "updated: 2026/10/20");
-    fs::write(root.join("wiki/concept/a.md"), text).unwrap();
+    fs::write(root.join(".wiki/pages/concept/a.md"), text).unwrap();
 
     let out = cli(root)
         .args(["--json", "lint", "--fix"])
@@ -660,7 +669,7 @@ fn cli_fix_repairs_l5_then_exits_zero() {
     assert_eq!(v["cmd"], "lint");
     assert_eq!(v["data"]["fixed"], 2, "the page and the index");
 
-    let (front, _body) = page::read(&root.join("wiki/concept/a.md")).unwrap();
+    let (front, _body) = page::read(&root.join(".wiki/pages/concept/a.md")).unwrap();
     assert_eq!(front.updated, Local::now().date_naive());
     let out = cli(root).args(["--json", "lint"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -688,7 +697,7 @@ fn commit_records_page_meta_for_written_candidates() {
     let staged = f.root().join(".wiki/staging/concept/a.md");
     let row = f
         .store
-        .get_page_meta("wiki/concept/a.md")
+        .get_page_meta(".wiki/pages/concept/a.md")
         .unwrap()
         .expect("commit records the candidate it wrote");
     assert_eq!(
@@ -755,7 +764,7 @@ fn l6_exempts_a_source_in_the_archive() {
     // requiring one would make every sealed page fail the audit.
     let text = page_text("a", "concept", BODY).replace(
         "status: stable",
-        "status: stable\nsources: [wiki/archive/2026-01.md]",
+        "status: stable\nsources: [.wiki/pages/archive/2026-01.md]",
     );
     f.put_page("concept", "a", &text);
     assert!(only(&f.lint(), "L6").is_empty());
@@ -766,13 +775,13 @@ fn l6_still_reports_a_missing_source_beside_an_archive_one() {
     let f = Fixture::new();
     let text = page_text("a", "concept", BODY).replace(
         "status: stable",
-        "status: stable\nsources: [wiki/archive/2026-01.md, raw/missing.md]",
+        "status: stable\nsources: [.wiki/pages/archive/2026-01.md, .wiki/raw/missing.md]",
     );
     f.put_page("concept", "a", &text);
     let findings = f.lint();
     let l6 = only(&findings, "L6");
     assert_eq!(l6.len(), 1, "the exemption is per reference: {l6:?}");
-    assert!(l6[0].msg.contains("raw/missing.md"));
+    assert!(l6[0].msg.contains(".wiki/raw/missing.md"));
 }
 
 #[test]
@@ -788,13 +797,16 @@ fn l8_exempts_an_archived_page() {
 fn l13_reports_an_idle_summary_nothing_cites() {
     let mut f = Fixture::new();
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
-    seal_archive(&mut f, "wiki/archive/2026-01.md", 200, None);
+    seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 200, None);
 
     let findings = f.lint();
     let l13 = only(&findings, "L13");
     assert_eq!(l13.len(), 1, "{findings:?}");
     assert_eq!(l13[0].level, Level::Info);
-    assert_eq!(l13[0].page.as_deref(), Some("wiki/archive/2026-01.md"));
+    assert_eq!(
+        l13[0].page.as_deref(),
+        Some(".wiki/pages/archive/2026-01.md")
+    );
     assert!(l13[0].msg.contains("200"), "{}", l13[0].msg);
 }
 
@@ -804,10 +816,10 @@ fn l13_ignores_a_summary_a_page_still_cites() {
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
     let text = page_text("a", "concept", BODY).replace(
         "status: stable",
-        "status: stable\nsources: [wiki/archive/2026-01.md]",
+        "status: stable\nsources: [.wiki/pages/archive/2026-01.md]",
     );
     f.put_page("concept", "a", &text);
-    seal_archive(&mut f, "wiki/archive/2026-01.md", 200, None);
+    seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 200, None);
     assert!(only(&f.lint(), "L13").is_empty());
 }
 
@@ -820,7 +832,7 @@ fn l13_counts_a_wikilink_as_an_inbound_reference() {
         "a",
         &page_text("a", "concept", &format!("{BODY} 详见 [[2026-01]]。")),
     );
-    seal_archive(&mut f, "wiki/archive/2026-01.md", 200, None);
+    seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 200, None);
     assert!(only(&f.lint(), "L13").is_empty(), "{:?}", f.lint());
 }
 
@@ -829,7 +841,7 @@ fn l13_ignores_a_summary_recalled_recently() {
     let mut f = Fixture::new();
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
     // The deadline runs from the last read, not the seal: a recall resets it.
-    seal_archive(&mut f, "wiki/archive/2026-01.md", 400, Some(3));
+    seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 400, Some(3));
     assert!(only(&f.lint(), "L13").is_empty());
 }
 
@@ -837,7 +849,7 @@ fn l13_ignores_a_summary_recalled_recently() {
 fn l13_ignores_a_summary_sealed_within_the_window() {
     let mut f = Fixture::new();
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
-    seal_archive(&mut f, "wiki/archive/2026-01.md", 5, None);
+    seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 5, None);
     assert!(only(&f.lint(), "L13").is_empty());
 }
 

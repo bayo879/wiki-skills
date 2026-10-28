@@ -320,7 +320,7 @@ fn image_stays_builtin_even_in_external_mode() {
     let (extracted, id) = parse::parse_with(&cfg, &Source::inline("a.png", b"\x89PNG")).unwrap();
     assert_eq!(id, "builtin-asset");
     assert!(extracted.asset);
-    assert_eq!(extracted.markdown, "![](../source/a.png)");
+    assert_eq!(extracted.markdown, "![](../../a.png)");
 }
 
 #[test]

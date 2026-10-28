@@ -8,11 +8,11 @@
 |---|---|---|
 | `builtin-text` | `md` `markdown` `txt` | 原样读入，去 BOM，坏 UTF-8 用替换字符并告警 |
 | `builtin-html` | `html` `htm` | 抽取正文文本 |
-| `builtin-asset` | `png` `jpg` `jpeg` `gif` `webp` `svg` | 不读内容，产出 `![](../source/<key>)` 链接 |
+| `builtin-asset` | `png` `jpg` `jpeg` `gif` `webp` `svg` | 不读内容，产出 `![](../../<key>)` 链接（按 key 深度加 `../`） |
 | `builtin-pdf` | `pdf` | 抽取文本层；抽不到文本层时降级成资源链接并置 `no_text_layer` |
 | `external-http` | `md` `markdown` `txt` `html` `htm` `pdf` | 把源文件 POST 给外部服务，取回 markdown |
 
-后端 id 会写进 `raw/` 的 frontmatter 与 `--json` 输出，便于按解析器版本筛出需要重转的源。扩展名大小写不敏感。
+后端 id 会写进 `.wiki/raw/` 的 frontmatter 与 `--json` 输出，便于按解析器版本筛出需要重转的源。扩展名大小写不敏感。
 
 ## 三种 `primary` 模式
 
@@ -60,7 +60,7 @@ Content-Type: multipart/form-data; boundary=...
 
 响应：JSON，按 `response.text` 的点分路径取值；对象键与数组下标（十进制数字）都可走，例如 `data`、`data.markdown`、`result.items.0.text`。取到的必须是字符串，否则 `E_EXTERNAL`。
 
-`wiki.toml` 示例（`init` 模板里以注释形式给出）：
+`.wiki/wiki.toml` 示例（`init` 模板里以注释形式给出）：
 
 ```toml
 [parse.external]

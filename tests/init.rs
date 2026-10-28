@@ -17,7 +17,8 @@ fn run(dir: &Path, args: &[&str]) -> std::process::Output {
 /// Writes a `wiki.toml` fixture and loads it.
 fn load_with(body: &str) -> llm_wiki::config::Config {
     let d = tempdir().unwrap();
-    std::fs::write(d.path().join("wiki.toml"), body).unwrap();
+    std::fs::create_dir_all(d.path().join(".wiki")).unwrap();
+    std::fs::write(d.path().join(".wiki/wiki.toml"), body).unwrap();
     llm_wiki::config::Config::load(d.path()).unwrap()
 }
 
@@ -27,12 +28,11 @@ fn init_creates_contracts_and_engine_dirs() {
     let out = run(d.path(), &["init"]);
     assert_eq!(out.status.code(), Some(0));
     for p in [
-        "wiki.toml",
-        "SCHEMA.md",
-        "source",
-        "raw",
-        "wiki",
-        "wiki/audit",
+        ".wiki/wiki.toml",
+        ".wiki/SCHEMA.md",
+        ".wiki/raw",
+        ".wiki/pages",
+        ".wiki/pages/audit",
         ".wiki/cache",
         ".wiki/staging",
         ".wiki/versions",
@@ -45,11 +45,15 @@ fn init_creates_contracts_and_engine_dirs() {
 fn init_is_idempotent_and_does_not_overwrite() {
     let d = tempdir().unwrap();
     run(d.path(), &["init"]);
-    std::fs::write(d.path().join("wiki.toml"), "[paths]\nsource=\"S\"\n").unwrap();
+    std::fs::write(
+        d.path().join(".wiki/wiki.toml"),
+        "[schema]\ntypes = [\"only\"]\n",
+    )
+    .unwrap();
     let out = run(d.path(), &["init"]);
     assert_eq!(out.status.code(), Some(0));
-    let body = std::fs::read_to_string(d.path().join("wiki.toml")).unwrap();
-    assert!(body.contains("source=\"S\""));
+    let body = std::fs::read_to_string(d.path().join(".wiki/wiki.toml")).unwrap();
+    assert!(body.contains("types = [\"only\"]"));
 }
 
 #[test]
@@ -59,14 +63,14 @@ fn init_reports_created_then_skipped() {
     let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
     assert_eq!(first["cmd"], "init");
     let created = first["data"]["created"].as_array().unwrap();
-    assert!(created.iter().any(|v| v == "wiki.toml"));
+    assert!(created.iter().any(|v| v == ".wiki/wiki.toml"));
     assert!(created.iter().any(|v| v == ".wiki/staging"));
 
     let second = run(d.path(), &["init"]);
     let second: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
     let skipped = second["data"]["skipped"].as_array().unwrap();
-    assert!(skipped.iter().any(|v| v == "wiki.toml"));
-    assert!(skipped.iter().any(|v| v == "source"));
+    assert!(skipped.iter().any(|v| v == ".wiki/wiki.toml"));
+    assert!(skipped.iter().any(|v| v == ".wiki/pages"));
     assert!(second["data"]["created"].as_array().unwrap().is_empty());
 }
 
@@ -74,27 +78,31 @@ fn init_reports_created_then_skipped() {
 fn init_force_rewrites_contracts_only() {
     let d = tempdir().unwrap();
     run(d.path(), &["init"]);
-    std::fs::write(d.path().join("wiki.toml"), "[paths]\nsource=\"S\"\n").unwrap();
-    std::fs::write(d.path().join("SCHEMA.md"), "hand written\n").unwrap();
-    std::fs::create_dir_all(d.path().join("wiki/my-type")).unwrap();
-    std::fs::write(d.path().join("source/keep.md"), "keep me\n").unwrap();
+    std::fs::write(
+        d.path().join(".wiki/wiki.toml"),
+        "[schema]\ntypes = [\"only\"]\n",
+    )
+    .unwrap();
+    std::fs::write(d.path().join(".wiki/SCHEMA.md"), "hand written\n").unwrap();
+    std::fs::create_dir_all(d.path().join(".wiki/pages/my-type")).unwrap();
+    std::fs::write(d.path().join("keep.md"), "keep me\n").unwrap();
 
     let out = run(d.path(), &["init", "--force"]);
     assert_eq!(out.status.code(), Some(0));
 
-    let body = std::fs::read_to_string(d.path().join("wiki.toml")).unwrap();
+    let body = std::fs::read_to_string(d.path().join(".wiki/wiki.toml")).unwrap();
     assert!(
-        !body.contains("source=\"S\""),
+        !body.contains("types = [\"only\"]"),
         "force must rewrite wiki.toml"
     );
     assert!(
         body.contains("max_source_bytes"),
         "template must be restored"
     );
-    let schema = std::fs::read_to_string(d.path().join("SCHEMA.md")).unwrap();
+    let schema = std::fs::read_to_string(d.path().join(".wiki/SCHEMA.md")).unwrap();
     assert_ne!(schema, "hand written\n", "force must rewrite SCHEMA.md");
-    assert!(d.path().join("source/keep.md").exists());
-    assert!(d.path().join("wiki/my-type").is_dir());
+    assert!(d.path().join("keep.md").exists());
+    assert!(d.path().join(".wiki/pages/my-type").is_dir());
 }
 
 #[test]
@@ -104,7 +112,9 @@ fn init_template_loads_and_validates() {
     let cfg = llm_wiki::config::Config::load(d.path()).unwrap();
     cfg.validate().unwrap();
 
-    assert_eq!(cfg.paths.source, "source");
+    assert_eq!(cfg.paths.source, "");
+    assert_eq!(cfg.paths.raw, ".wiki/raw");
+    assert_eq!(cfg.paths.wiki, ".wiki/pages");
     assert_eq!(cfg.paths.engine, ".wiki");
     assert!(cfg.formats.allow.iter().any(|f| f == "pdf"));
     assert!(cfg.schema.types.iter().any(|t| t == "concept"));
@@ -135,7 +145,7 @@ fn init_template_loads_and_validates() {
 fn init_template_documents_min_chars() {
     let d = tempdir().unwrap();
     run(d.path(), &["init"]);
-    let body = std::fs::read_to_string(d.path().join("wiki.toml")).unwrap();
+    let body = std::fs::read_to_string(d.path().join(".wiki/wiki.toml")).unwrap();
     assert!(
         body.contains("min_chars"),
         "the template must document the fallback threshold"
@@ -160,12 +170,24 @@ fn config_load_reports_missing_file() {
 
 #[test]
 fn partial_config_uses_documented_defaults() {
-    let cfg = load_with("[paths]\nsource = \"S\"\n");
-    assert_eq!(cfg.paths.source, "S");
-    assert_eq!(cfg.paths.raw, "raw");
+    let cfg = load_with("[schema]\ntypes = [\"concept\"]\n");
+    assert_eq!(cfg.paths.source, "");
+    assert_eq!(cfg.paths.raw, ".wiki/raw");
+    assert_eq!(cfg.paths.wiki, ".wiki/pages");
     assert_eq!(cfg.parse.max_source_bytes, 100 * 1024 * 1024);
     assert_eq!(cfg.versions.keep, 5);
     cfg.validate().unwrap();
+}
+
+#[test]
+fn a_hand_edited_paths_section_cannot_move_the_engine() {
+    let cfg = load_with(
+        "[paths]\nsource = \"elsewhere\"\nraw = \"outside/raw\"\nwiki = \"outside/pages\"\nengine = \"visible\"\n",
+    );
+    assert_eq!(cfg.paths.source, "");
+    assert_eq!(cfg.paths.raw, ".wiki/raw");
+    assert_eq!(cfg.paths.wiki, ".wiki/pages");
+    assert_eq!(cfg.paths.engine, ".wiki");
 }
 
 #[test]
@@ -208,8 +230,9 @@ fn bad_size_strings_are_rejected_as_bad_config() {
     }
 
     let d = tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join(".wiki")).unwrap();
     std::fs::write(
-        d.path().join("wiki.toml"),
+        d.path().join(".wiki/wiki.toml"),
         "[parse]\nmax_source_bytes = \"lots\"\n",
     )
     .unwrap();
@@ -230,8 +253,9 @@ fn validate_rejects_empty_and_duplicate_types() {
 #[test]
 fn validate_rejects_unknown_primary() {
     let d = tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join(".wiki")).unwrap();
     std::fs::write(
-        d.path().join("wiki.toml"),
+        d.path().join(".wiki/wiki.toml"),
         "[parse]\nprimary = \"network\"\n",
     )
     .unwrap();
@@ -299,7 +323,7 @@ fn init_creates_archive_and_session_dirs() {
     assert_eq!(out.status.code(), Some(0));
     // The archive holds sealed summaries (in git); the session directory is the
     // scratch space the layering fills and clears, so both must exist up front.
-    for p in ["wiki/archive", ".wiki/sessions"] {
+    for p in [".wiki/pages/archive", ".wiki/sessions"] {
         assert!(d.path().join(p).is_dir(), "missing {p}");
     }
 }
@@ -330,8 +354,8 @@ fn init_writes_the_engine_gitignore() {
     assert_eq!(out.status.code(), Some(0));
     let body = std::fs::read_to_string(d.path().join(".wiki/.gitignore")).unwrap();
     assert_eq!(
-        body, "cache/\nstaging/\nsessions/\nstate.db\nstate.db-wal\nstate.db-shm\nlock\nllm-wiki\nllm-wiki.exe\n",
-        "the engine ignores what it can rebuild, and only that"
+        body, "*\n",
+        "the whole engine is derived state and stays out of git"
     );
 }
 

@@ -385,10 +385,11 @@ struct Walked {
     ignored_count: usize,
 }
 
-/// Walks `source/` and digests the allowed files.
+/// Walks the source tree (the repository root) and digests the allowed files.
 ///
-/// A missing `source/` directory is treated as an empty one: every ledger key is
-/// then missing, which is what a deleted tree means.
+/// Dot-paths are skipped by [`paths::is_ignored`], so `.wiki/` and `.git/` never
+/// appear, and `[scan].ignore` skips noisy build directories. A missing root is
+/// impossible in practice; an unreadable one is treated as empty.
 fn walk_source(source_root: &Path, cfg: &Config) -> Result<Walked> {
     let mut disk = Vec::new();
     let mut present = BTreeSet::new();
@@ -398,7 +399,7 @@ fn walk_source(source_root: &Path, cfg: &Config) -> Result<Walked> {
         let walker = WalkDir::new(source_root)
             .follow_links(false)
             .into_iter()
-            .filter_entry(|entry| !is_ignored_path(source_root, entry));
+            .filter_entry(|entry| !is_ignored_source(source_root, entry, cfg));
         for entry in walker {
             let entry = entry?;
             if !entry.file_type().is_file() {
@@ -438,6 +439,23 @@ fn is_ignored_path(root: &Path, entry: &walkdir::DirEntry) -> bool {
         Ok(rel) => paths::is_ignored(&paths::to_slash(rel)),
         Err(_) => false,
     }
+}
+
+/// As [`is_ignored_path`], plus the `[scan].ignore` directory names.
+///
+/// Only directories are matched by name: a *file* called `build` is a normal
+/// source, it is the build tree next to it that is noise.
+fn is_ignored_source(root: &Path, entry: &walkdir::DirEntry, cfg: &Config) -> bool {
+    if is_ignored_path(root, entry) {
+        return true;
+    }
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+    let Some(name) = entry.file_name().to_str() else {
+        return false;
+    };
+    cfg.scan.ignore.iter().any(|ignored| ignored == name)
 }
 
 /// Whether the file extension is whitelisted, ignoring ASCII case.

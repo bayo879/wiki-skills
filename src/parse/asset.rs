@@ -73,10 +73,10 @@ impl Parser for AssetParser {
 
 /// The markdown image link for a source key, relative to the raw file.
 ///
-/// `source_key` is the identity key without the `source/` prefix. The relative
-/// prefix repeats `../` once per path component, because the raw file at
-/// `raw/<key minus ext>.md` sits exactly that many levels below the repository
-/// root and `source/<key>` sits the same number below it.
+/// `source_key` is the identity key of a file at the repository root. The raw
+/// file sits at `.wiki/raw/<key minus ext>.md`, one level deeper than the key,
+/// so the link steps up `depth + 1` times to reach the root and then walks the
+/// key.
 ///
 /// Public because the scanned-PDF path in a later task needs the same link (a
 /// PDF with no text layer degrades to a link), and both must agree byte for
@@ -86,7 +86,7 @@ pub fn link_for(source_key: &str) -> String {
         .split('/')
         .filter(|component| !component.is_empty())
         .count();
-    let target = format!("{}source/{source_key}", "../".repeat(depth));
+    let target = format!("{}{source_key}", "../".repeat(depth + 1));
     if paths::needs_angle(&target) {
         format!("![](<{target}>)")
     } else {

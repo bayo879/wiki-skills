@@ -1,40 +1,44 @@
 //! Repository bootstrap: write the two contract files and create the engine
 //! directories.
 //!
+//! Every path `init` touches is under `.wiki/`. The repository outside it is
+//! read-only to the tool: it holds the user's own files, which are scanned as
+//! sources but never created, rewritten or deleted.
+//!
 //! `init` only ever creates what is missing. It does not load or validate an
-//! existing `wiki.toml` (that belongs to `doctor` and `lint`), so a repository
-//! with a deliberately broken config can still be repaired by `--force`.
+//! existing config (that belongs to `doctor` and `lint`), so a repository with a
+//! deliberately broken config can still be repaired by `--force`.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 /// Directories that must exist after `init`, parents before children.
-const DIRS: [&str; 10] = [
-    "source",
-    "raw",
-    "wiki",
-    "wiki/archive",
-    "wiki/audit",
+const DIRS: [&str; 9] = [
     ".wiki",
     ".wiki/cache",
+    ".wiki/pages",
+    ".wiki/pages/archive",
+    ".wiki/pages/audit",
+    ".wiki/raw",
     ".wiki/sessions",
     ".wiki/staging",
     ".wiki/versions",
 ];
 
-/// The two human-editable contract files and the content `init` gives them.
-const CONTRACT_FILES: [(&str, &str); 2] = [("wiki.toml", WIKI_TOML), ("SCHEMA.md", SCHEMA_MD)];
+/// The two contract files and the content `init` gives them.
+const CONTRACT_FILES: [(&str, &str); 2] = [
+    (".wiki/wiki.toml", WIKI_TOML),
+    (".wiki/SCHEMA.md", SCHEMA_MD),
+];
 
-/// The engine's `.gitignore`: derived state, one path or pattern per line.
+/// The engine's `.gitignore`.
 ///
-/// `versions/` is deliberately absent. A snapshot is the history a rollback
-/// needs, so it is content and belongs in git; the ledger, the cache and the
-/// staging area are rebuilt by running the tool.
-// `llm-wiki` here is the optional local copy of the CLI: the tool itself is a
-// single file a user may drop into the engine directory instead of putting it on
-// PATH, and it must never be committed into the repository it operates on.
-const GITIGNORE: &str = "cache/\nstaging/\nsessions/\nstate.db\nstate.db-wal\nstate.db-shm\nlock\nllm-wiki\nllm-wiki.exe\n";
+/// A single `*` keeps the whole engine out of version control: the ledger, the
+/// page tree, the versions and the staging area are all derived state, rebuilt
+/// by running the tool. The repository's own `.gitignore` is never edited — it
+/// is outside the engine, and therefore a source file.
+const GITIGNORE: &str = "*\n";
 
 /// What one `init` run did, split by path so the caller can show both sides.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -110,16 +114,15 @@ pub fn run(root: &Path, force: bool) -> Result<InitOutcome> {
 
 /// Default `wiki.toml`: every section spelled out, every default made visible.
 const WIKI_TOML: &str = r#"# llm-wiki contract. The single source of configuration.
-# Kept in git: humans and agents both read it.
+# Lives in .wiki/ and stays local: the whole engine is derived state.
 
-[paths]
-source = "source"
-raw    = "raw"
-wiki   = "wiki"
-engine = ".wiki"
+[scan]
+# Directory names skipped anywhere under the repository root. Everything else
+# that is not hidden is a source: the repository itself is the source tree.
+ignore = ["node_modules", "target", "dist", "build", "vendor", ".git"]
 
 [formats]
-# Whitelist for source/. Images are only linked, never parsed.
+# Whitelist for sources. Images are only linked, never parsed.
 allow = ["md", "txt", "html", "pdf", "png", "jpg", "jpeg", "gif", "webp", "svg"]
 
 [schema]
@@ -177,12 +180,14 @@ purge_days       = 180
 /// Default `SCHEMA.md`: the conventions the CLI enforces, for humans and agents.
 const SCHEMA_MD: &str = r#"# Page schema
 
-这是本 wiki 的页面约定，人与其 agent 共读，随仓库进 git。
+这是本 wiki 的页面约定，人与其 agent 共读，随 `.wiki/` 留在本机。
 机器可读的一半在 `wiki.toml`；本文件解释 CLI 会强制检查的规则。
+
+仓库里除 `.wiki/` 和隐藏目录之外的所有文件都是源文件：CLI 只读，从不修改。
 
 ## 机制字段
 
-每个页面位于 `wiki/<type>/<id>.md`，开头是这段 frontmatter：
+每个页面位于 `.wiki/pages/<type>/<id>.md`，开头是这段 frontmatter：
 
 | 字段 | 必填 | 含义 |
 |---|---|---|
@@ -191,7 +196,7 @@ const SCHEMA_MD: &str = r#"# Page schema
 | `type` | 是 | 取自 `wiki.toml` 的 `[schema].types` |
 | `summary` | 是 | 一句话摘要，进 `index.md` |
 | `tags` | 否 | 自由标签列表 |
-| `sources` | 是 | 本页依据的 `raw/*.md` 路径；没有它就是「无源声称」 |
+| `sources` | 是 | 本页依据的 `.wiki/raw/*.md` 路径；没有它就是「无源声称」 |
 | `status` | 是 | `draft` / `stable` / `stale` |
 | `updated` | 是 | ISO 日期，只由 CLI 行级替换写入，禁止手写 |
 
@@ -206,19 +211,19 @@ const SCHEMA_MD: &str = r#"# Page schema
 
 ## 图片路径
 
-图片放在 `source/`，只登记链接、不做识别（不 OCR）。
-页面在 `wiki/<type>/<id>.md`，比仓库根深两层，因此引用 `source/` 下的图片统一写：
+图片是普通源文件，留在仓库里原本的位置，只登记链接、不做识别（不 OCR）。
+页面在 `.wiki/pages/<type>/<id>.md`，比仓库根深三层，因此引用仓库根下的图片统一写：
 
-    ![说明](../../source/<相对路径>)
+    ![说明](../../../<相对仓库根的路径>)
 
-`raw/` 镜像 `source/` 的相对结构，asset 型 raw 用与自身深度相符的相对路径。
+`.wiki/raw/` 镜像源文件在仓库里的相对结构，asset 型 raw 用与自身深度相符的相对路径。
 
 ## 归档页
 
-`wiki/archive/<id>.md` 放会话摘要，但不进 `index.md`：它记录的是记忆，不是知识目录的条目。
-归档页同样位于 `wiki/` 之下，引用 `source/` 的深度与普通页面一致，也写 `../../source/<相对路径>`。
+`.wiki/pages/archive/<id>.md` 放会话摘要，但不进 `index.md`：它记录的是记忆，不是知识目录的条目。
+归档页与普通页面同在 `.wiki/pages/` 下，引用源图片的深度相同，也写 `../../../<相对仓库根的路径>`。
 归档页的 frontmatter 另有两个字段：`origin`（`document` / `conversation`，说明摘要由文档还是会话蒸馏而来）
-与 `archived: true`（只在 `wiki/archive/` 下为真，等于声明「这是摘要，不是页面」，因而不受空页规则约束）。
+与 `archived: true`（只在 `.wiki/pages/archive/` 下为真，等于声明「这是摘要，不是页面」，因而不受空页规则约束）。
 
 ## status 三态
 

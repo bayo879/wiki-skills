@@ -367,8 +367,8 @@ fn every_lint_rule_agrees_with_the_skill_table() {
         "src/lint.rs must declare L1..L13 once each, in order"
     );
 
-    let skill = fs::read_to_string("skills/wiki-audit/SKILL.md")
-        .expect("skills/wiki-audit/SKILL.md is missing");
+    let skill = fs::read_to_string("skills/llm-wiki/references/audit.md")
+        .expect("skills/llm-wiki/references/audit.md is missing");
     let mut rows: Vec<(String, String)> = Vec::new();
     let mut in_table = false;
     for line in skill.lines() {

@@ -82,7 +82,7 @@ fn ledger(root: &Path, key: &str) {
 
 /// Writes the summary the agent is expected to hand to `seal`.
 fn put_summary(root: &Path, id: &str) {
-    let path = root.join("wiki/archive").join(format!("{id}.md"));
+    let path = root.join(".wiki/pages/archive").join(format!("{id}.md"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
@@ -97,7 +97,7 @@ fn put_summary(root: &Path, id: &str) {
 /// Writes a page that cites `sources`.
 fn put_page(root: &Path, sources: &[&str]) {
     let list: String = sources.iter().map(|s| format!("  - {s}\n")).collect();
-    let path = root.join("wiki/concept/sync.md");
+    let path = root.join(".wiki/pages/concept/sync.md");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
@@ -209,7 +209,7 @@ fn archive_seal_without_a_summary_exits_2() {
         v["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("wiki/archive/2026-05.md"),
+            .contains(".wiki/pages/archive/2026-05.md"),
         "the message names the missing summary: {}",
         v["error"]["message"]
     );
@@ -221,7 +221,10 @@ fn archive_seal_rehangs_the_citing_page_and_records_the_period() {
     let repo = d.path();
     ledger(repo, "queries/2026-05.md");
     ledger(repo, "docs/a.md");
-    put_page(repo, &["raw/queries/2026-05.md", "raw/docs/a.md"]);
+    put_page(
+        repo,
+        &[".wiki/raw/queries/2026-05.md", ".wiki/raw/docs/a.md"],
+    );
     put_summary(repo, "2026-05");
 
     let out = run_text(
@@ -240,13 +243,13 @@ fn archive_seal_rehangs_the_citing_page_and_records_the_period() {
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap().trim(),
-        "sealed wiki/archive/2026-05.md (1 pages re-hung)"
+        "sealed .wiki/pages/archive/2026-05.md (1 pages re-hung)"
     );
 
     // The sealed source is replaced by the summary; the source nobody sealed
     // stays where it was.
-    let page = std::fs::read_to_string(repo.join("wiki/concept/sync.md")).unwrap();
-    assert!(page.contains("wiki/archive/2026-05.md"), "{page}");
+    let page = std::fs::read_to_string(repo.join(".wiki/pages/concept/sync.md")).unwrap();
+    assert!(page.contains(".wiki/pages/archive/2026-05.md"), "{page}");
     assert!(!page.contains("queries/2026-05.md"), "{page}");
     assert!(page.contains("docs/a.md"), "{page}");
 
@@ -260,7 +263,7 @@ fn archive_seal_reports_the_summary_in_json() {
     let d = repo();
     let repo = d.path();
     ledger(repo, "queries/2026-05.md");
-    put_page(repo, &["raw/queries/2026-05.md"]);
+    put_page(repo, &[".wiki/raw/queries/2026-05.md"]);
     put_summary(repo, "2026-05");
 
     let out = run_json(
@@ -280,14 +283,14 @@ fn archive_seal_reports_the_summary_in_json() {
     let v = stdout_json(&out);
     assert_eq!(v["cmd"], "archive");
     assert_eq!(v["data"]["action"], "seal");
-    assert_eq!(v["data"]["key"], "wiki/archive/2026-05.md");
+    assert_eq!(v["data"]["key"], ".wiki/pages/archive/2026-05.md");
     assert_eq!(
         v["data"]["sources"],
         serde_json::json!(["queries/2026-05.md"])
     );
     assert_eq!(
         v["data"]["pages"],
-        serde_json::json!(["wiki/concept/sync.md"])
+        serde_json::json!([".wiki/pages/concept/sync.md"])
     );
     assert_eq!(v["data"]["updated_pages"], 1);
 }
@@ -310,7 +313,7 @@ fn recall_returns_the_summary_it_sealed() {
     let d = repo();
     let repo = d.path();
     ledger(repo, "queries/2026-05.md");
-    put_page(repo, &["raw/queries/2026-05.md"]);
+    put_page(repo, &[".wiki/raw/queries/2026-05.md"]);
     put_summary(repo, "2026-05");
     let seal = run_json(
         repo,
@@ -336,7 +339,10 @@ fn recall_returns_the_summary_it_sealed() {
         heading.starts_with("2026 年 5 月 [2026-05-01..2026-05-31] "),
         "heading: {heading:?}"
     );
-    assert!(heading.ends_with("wiki/archive/2026-05.md"), "{heading:?}");
+    assert!(
+        heading.ends_with(".wiki/pages/archive/2026-05.md"),
+        "{heading:?}"
+    );
     assert_eq!(lines.next(), Some("    五月做完了转换器。"));
 }
 
@@ -345,7 +351,7 @@ fn recall_reports_the_hits_in_json() {
     let d = repo();
     let repo = d.path();
     ledger(repo, "queries/2026-05.md");
-    put_page(repo, &["raw/queries/2026-05.md"]);
+    put_page(repo, &[".wiki/raw/queries/2026-05.md"]);
     put_summary(repo, "2026-05");
     let seal = run_json(
         repo,
@@ -368,7 +374,7 @@ fn recall_reports_the_hits_in_json() {
     assert_eq!(v["cmd"], "recall");
     let hits = v["data"]["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0]["key"], "wiki/archive/2026-05.md");
+    assert_eq!(hits[0]["key"], ".wiki/pages/archive/2026-05.md");
     assert_eq!(hits[0]["title"], "2026 年 5 月");
     assert_eq!(hits[0]["period_start"], "2026-05-01");
     assert_eq!(hits[0]["period_end"], "2026-05-31");

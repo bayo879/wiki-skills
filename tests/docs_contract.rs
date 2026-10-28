@@ -70,26 +70,22 @@ fn fixture() -> tempfile::TempDir {
     run_json(root, &["init"]);
 
     fs::write(
-        root.join("source").join("a.md"),
+        root.join("a.md"),
         "# A\n\nThe retry limit is three attempts.\n",
     )
     .unwrap();
-    fs::write(
-        root.join("source").join("b.md"),
-        "# B\n\nThe timeout is five seconds.\n",
-    )
-    .unwrap();
+    fs::write(root.join("b.md"), "# B\n\nThe timeout is five seconds.\n").unwrap();
     dir
 }
 
 /// Writes one well-formed page so the wiki is not empty.
 fn write_page(root: &Path, name: &str, body: &str) {
-    let dir = root.join("wiki").join("concept");
+    let dir = root.join(".wiki/pages").join("concept");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join(name),
         format!(
-            "---\nid: {}\ntitle: {name}\ntype: concept\nsummary: about retries\nsources:\n  - raw/a.md\nstatus: stable\nupdated: 2026-10-27\n---\n\n{body}\n",
+            "---\nid: {}\ntitle: {name}\ntype: concept\nsummary: about retries\nsources:\n  - .wiki/raw/a.md\nstatus: stable\nupdated: 2026-10-27\n---\n\n{body}\n",
             name.trim_end_matches(".md")
         ),
     )
@@ -491,11 +487,19 @@ fn every_marked_field_table_lists_the_keys_the_command_prints() {
 /// them. A field can be added to a command without the doc noticing; this is
 /// the direction the snapshot alone cannot catch.
 const COVERED: &[(&str, &str, &str)] = &[
-    ("skills/wiki-scan/SKILL.md", "scan", "changes[]"),
-    ("skills/wiki-scan/SKILL.md", "convert", "converted[]"),
-    ("skills/wiki-audit/SKILL.md", "lint", "findings[]"),
-    ("skills/wiki-audit/SKILL.md", "doctor", "checks[]"),
-    ("skills/wiki-ingest/SKILL.md", "ingest-begin", "affected[]"),
+    ("skills/llm-wiki/references/scan.md", "scan", "changes[]"),
+    (
+        "skills/llm-wiki/references/scan.md",
+        "convert",
+        "converted[]",
+    ),
+    ("skills/llm-wiki/references/audit.md", "lint", "findings[]"),
+    ("skills/llm-wiki/references/audit.md", "doctor", "checks[]"),
+    (
+        "skills/llm-wiki/references/ingest.md",
+        "ingest-begin",
+        "affected[]",
+    ),
 ];
 
 #[test]
@@ -612,7 +616,8 @@ fn vocabulary() -> BTreeSet<String> {
     // `wiki.toml` keys, from the file `init` writes.
     let dir = tempfile::tempdir().expect("temp dir");
     run_json(dir.path(), &["init"]);
-    let toml = fs::read_to_string(dir.path().join("wiki.toml")).expect("init wrote no wiki.toml");
+    let toml =
+        fs::read_to_string(dir.path().join(".wiki/wiki.toml")).expect("init wrote no wiki.toml");
     for line in toml.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('#') || trimmed.is_empty() {
@@ -630,7 +635,8 @@ fn vocabulary() -> BTreeSet<String> {
     }
 
     // Fields `SCHEMA.md` declares, which the page frontmatter tables restate.
-    let schema = fs::read_to_string(dir.path().join("SCHEMA.md")).expect("init wrote no SCHEMA.md");
+    let schema =
+        fs::read_to_string(dir.path().join(".wiki/SCHEMA.md")).expect("init wrote no SCHEMA.md");
     for token in snake_tokens(&schema) {
         names.insert(token);
     }

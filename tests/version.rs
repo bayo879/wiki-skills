@@ -155,11 +155,11 @@ fn checkpoint_copies_current_wiki_and_prunes_old() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
     let text = page_text("alpha", "Alpha");
-    write_file(root, "wiki/concept/alpha.md", &text);
-    write_file(root, "wiki/index.md", "# 索引\n");
+    write_file(root, ".wiki/pages/concept/alpha.md", &text);
+    write_file(root, ".wiki/pages/index.md", "# 索引\n");
     write_file(
         root,
-        "wiki/log.md",
+        ".wiki/pages/log.md",
         "# 日志\n\n## [2026-01-01] init | test\n",
     );
 
@@ -188,7 +188,7 @@ fn checkpoint_copies_current_wiki_and_prunes_old() {
     );
     assert!(
         snapshot.join("audit").is_dir(),
-        "wiki/audit is part of the snapshot"
+        ".wiki/pages/audit is part of the snapshot"
     );
     assert_eq!(
         fs::read_to_string(snapshot.join("log.md")).unwrap(),
@@ -198,7 +198,7 @@ fn checkpoint_copies_current_wiki_and_prunes_old() {
     // Editing the snapshot must not reach the approved wiki.
     fs::write(snapshot.join("concept/alpha.md"), "改了\n").unwrap();
     assert_eq!(
-        fs::read_to_string(root.join("wiki/concept/alpha.md")).unwrap(),
+        fs::read_to_string(root.join(".wiki/pages/concept/alpha.md")).unwrap(),
         text
     );
 }
@@ -236,8 +236,12 @@ fn checkpoint_prunes_but_keeps_foreign_directories() {
 fn checkpoint_record_names_label_and_page_count() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
-    write_file(root, "wiki/concept/alpha.md", &page_text("alpha", "Alpha"));
-    write_file(root, "wiki/audit/2026-01-01.md", "# 审计\n");
+    write_file(
+        root,
+        ".wiki/pages/concept/alpha.md",
+        &page_text("alpha", "Alpha"),
+    );
+    write_file(root, ".wiki/pages/audit/2026-01-01.md", "# 审计\n");
 
     let name = version::checkpoint(root, &cfg, &mut store, "before-merge").unwrap();
     let raw = fs::read_to_string(
@@ -265,8 +269,8 @@ fn checkpoint_record_names_label_and_page_count() {
 fn approve_without_confirm_asks_a_human() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
-    write_file(root, "raw/a.md", "one\n");
-    let current = hash::hash_file(&root.join("raw/a.md"), true).unwrap();
+    write_file(root, ".wiki/raw/a.md", "one\n");
+    let current = hash::hash_file(&root.join(".wiki/raw/a.md"), true).unwrap();
     set_source(root, "a.md", None, Some(&current));
     stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
 
@@ -279,7 +283,7 @@ fn approve_without_confirm_asks_a_human() {
         other => panic!("expected NeedsConfirmation, got {other:?}"),
     }
     assert!(
-        !root.join("wiki/concept/alpha.md").exists(),
+        !root.join(".wiki/pages/concept/alpha.md").exists(),
         "nothing may reach wiki without confirm"
     );
 }
@@ -288,8 +292,8 @@ fn approve_without_confirm_asks_a_human() {
 fn approve_with_confirm_merges_into_wiki() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
-    write_file(root, "raw/a.md", "one\n");
-    let current = hash::hash_file(&root.join("raw/a.md"), true).unwrap();
+    write_file(root, ".wiki/raw/a.md", "one\n");
+    let current = hash::hash_file(&root.join(".wiki/raw/a.md"), true).unwrap();
     set_source(root, "a.md", None, Some(&current));
     let text = stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
 
@@ -300,14 +304,14 @@ fn approve_with_confirm_merges_into_wiki() {
     }
 
     assert_eq!(
-        fs::read_to_string(root.join("wiki/concept/alpha.md")).unwrap(),
+        fs::read_to_string(root.join(".wiki/pages/concept/alpha.md")).unwrap(),
         text
     );
     assert!(
         !staging::dir(root).join("concept/alpha.md").exists(),
         "the candidate moved out of staging"
     );
-    assert!(fs::read_to_string(root.join("wiki/index.md"))
+    assert!(fs::read_to_string(root.join(".wiki/pages/index.md"))
         .unwrap()
         .contains("Alpha"));
     let log = log_of(root, &cfg);
@@ -354,7 +358,7 @@ fn approve_refuses_a_hand_edited_candidate() {
         err.to_string().contains("concept/alpha.md"),
         "detail names the page: {err}"
     );
-    assert!(!root.join("wiki/concept/alpha.md").exists());
+    assert!(!root.join(".wiki/pages/concept/alpha.md").exists());
     assert!(version_dirs(root).is_empty());
 }
 
@@ -362,12 +366,12 @@ fn approve_refuses_a_hand_edited_candidate() {
 fn approve_refuses_a_stale_source() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
-    write_file(root, "raw/a.md", "one\n");
-    let old = hash::hash_file(&root.join("raw/a.md"), true).unwrap();
+    write_file(root, ".wiki/raw/a.md", "one\n");
+    let old = hash::hash_file(&root.join(".wiki/raw/a.md"), true).unwrap();
     stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
     set_source(root, "a.md", None, Some(&old));
     // The source changed after the round: merging would publish stale synthesis.
-    write_file(root, "raw/a.md", "two\n");
+    write_file(root, ".wiki/raw/a.md", "two\n");
 
     let err = version::approve(root, &cfg, &mut store, false).unwrap_err();
     assert_eq!(err.code(), "E_STAGING_STALE");
@@ -375,18 +379,18 @@ fn approve_refuses_a_stale_source() {
         err.to_string().contains("a.md"),
         "detail names the source: {err}"
     );
-    assert!(!root.join("wiki/concept/alpha.md").exists());
+    assert!(!root.join(".wiki/pages/concept/alpha.md").exists());
 }
 
 #[test]
 fn approve_refuses_a_vanished_source() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
-    write_file(root, "raw/a.md", "one\n");
-    let old = hash::hash_file(&root.join("raw/a.md"), true).unwrap();
+    write_file(root, ".wiki/raw/a.md", "one\n");
+    let old = hash::hash_file(&root.join(".wiki/raw/a.md"), true).unwrap();
     stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
     set_source(root, "a.md", None, Some(&old));
-    fs::remove_file(root.join("raw/a.md")).unwrap();
+    fs::remove_file(root.join(".wiki/raw/a.md")).unwrap();
 
     let err = version::approve(root, &cfg, &mut store, true).unwrap_err();
     assert_eq!(err.code(), "E_STAGING_STALE");
@@ -397,7 +401,7 @@ fn reject_restores_staging_to_the_wiki_mirror() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
     let text = page_text("alpha", "Alpha");
-    write_file(root, "wiki/concept/alpha.md", &text);
+    write_file(root, ".wiki/pages/concept/alpha.md", &text);
     staging::ensure(root, &cfg).unwrap();
     let staged = staging::dir(root).join("concept/alpha.md");
     fs::write(&staged, page_text("alpha", "Alpha").replace("正文", "手改")).unwrap();
@@ -414,12 +418,12 @@ fn reject_restores_staging_to_the_wiki_mirror() {
         "a candidate absent from wiki is deleted"
     );
     assert!(
-        !root.join("wiki/concept/beta.md").exists(),
+        !root.join(".wiki/pages/concept/beta.md").exists(),
         "reject never publishes"
     );
     assert_eq!(
         fs::read(&staged).unwrap(),
-        fs::read(root.join("wiki/concept/alpha.md")).unwrap()
+        fs::read(root.join(".wiki/pages/concept/alpha.md")).unwrap()
     );
     let manifest = Manifest::load(root).unwrap();
     assert_eq!(
@@ -450,7 +454,7 @@ fn reject_requires_a_reason() {
     let err = version::reject(root, &cfg, &mut store, "").unwrap_err();
     assert_eq!(err.code(), "E_NO_REASON");
     assert!(
-        !root.join("wiki/log.md").exists(),
+        !root.join(".wiki/pages/log.md").exists(),
         "a refused reject writes nothing"
     );
     assert!(staging::dir(root).join("concept/alpha.md").exists());

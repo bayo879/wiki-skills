@@ -36,21 +36,15 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::config::{self, Config, Primary};
+use crate::config::{self, Config, Primary, CONFIG_FILE, SCHEMA_FILE};
 use crate::lock;
 use crate::staging;
 use crate::store::{self, Store, StoreError};
 
-/// The contract file at the repository root.
-pub const CONFIG_FILE: &str = "wiki.toml";
-
-/// The schema description `init` writes next to the contract.
-pub const SCHEMA_FILE: &str = "SCHEMA.md";
-
 /// The sections a complete contract carries. A missing one is not fatal — the
 /// loader defaults it — but it usually means the file was hand-trimmed.
 const SECTIONS: [&str; 9] = [
-    "paths", "formats", "schema", "parse", "ingest", "audit", "versions", "sync", "memory",
+    "scan", "formats", "schema", "parse", "ingest", "audit", "versions", "sync", "memory",
 ];
 
 /// The ledger file inside the engine directory.
@@ -158,7 +152,7 @@ pub fn run(root: &Path, cfg: Option<&Config>) -> Vec<Check> {
         check_db(root, effective),
         check_fts5(),
         check_engine_ignore(root, effective),
-        check_versions_tracked(root),
+        check_legacy(root),
         check_lock(root, effective),
         check_staging(root),
         check_token(text.as_deref()),
@@ -224,29 +218,44 @@ fn check_schema(root: &Path) -> Check {
     }
 }
 
-/// `paths`: the four directories the commands write into exist.
+/// `paths`: the engine's directories exist and nothing is configured to live
+/// outside them.
+///
+/// The layout is fixed, so this cannot drift: the check exists to report a
+/// half-deleted engine, not to police a `[paths]` section.
 fn check_paths(root: &Path, cfg: &Config) -> Check {
     const NAME: &str = "paths";
     let wanted = [
-        ("source", &cfg.paths.source),
         ("raw", &cfg.paths.raw),
-        ("wiki", &cfg.paths.wiki),
+        ("pages", &cfg.paths.wiki),
         ("engine", &cfg.paths.engine),
     ];
+    let outside: Vec<&str> = wanted
+        .iter()
+        .map(|(_, path)| path.as_str())
+        .filter(|path| !path.starts_with(config::ENGINE_DIR))
+        .collect();
+    if !outside.is_empty() {
+        return Check::fail(
+            NAME,
+            format!(
+                "{} would be written outside {}",
+                outside.join(", "),
+                config::ENGINE_DIR
+            ),
+        );
+    }
     let missing: Vec<String> = wanted
         .iter()
         .filter(|(_, path)| !root.join(path).is_dir())
         .map(|(name, path)| format!("{name} ({path})"))
         .collect();
     if missing.is_empty() {
-        Check::ok(NAME, "source/, raw/, wiki/ and the engine directory exist")
+        Check::ok(NAME, ".wiki/raw, .wiki/pages and .wiki exist")
     } else {
         Check::fail(
             NAME,
-            format!(
-                "{} missing; run `llm-wiki init` or fix [paths]",
-                missing.join(", ")
-            ),
+            format!("{} missing; run `llm-wiki init`", missing.join(", ")),
         )
     }
 }
@@ -328,7 +337,11 @@ fn fts5_check(available: store::Result<bool>) -> Check {
     }
 }
 
-/// `engine_ignore`: `.wiki/.gitignore` hides the engine's runtime files.
+/// `engine_ignore`: `.wiki/.gitignore` hides the whole engine from git.
+///
+/// Derived state is local by design: the page tree can be rebuilt from the
+/// sources, so keeping it out of version control is what makes the repositories
+/// that scanners see contain only the user's own files.
 fn check_engine_ignore(root: &Path, cfg: &Config) -> Check {
     const NAME: &str = "engine_ignore";
     let path = root.join(&cfg.paths.engine).join(".gitignore");
@@ -337,25 +350,26 @@ fn check_engine_ignore(root: &Path, cfg: &Config) -> Check {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Check::warn(
             NAME,
             format!(
-                "{} is missing; cache/, staging/ and state.db would be committed",
+                "{} is missing; the page tree and the ledger would be committed",
                 display.display()
             ),
         ),
         Err(err) => Check::warn(NAME, format!("cannot read {}: {err}", display.display())),
         Ok(text) => {
-            if is_ignored_by(&text, "versions") {
+            // Rules in `.wiki/.gitignore` are relative to `.wiki` itself, so a
+            // leading `*` hides every page and the ledger alike.
+            let hides_all =
+                is_ignored_by(&text, "pages/index.md") && is_ignored_by(&text, "state.db");
+            if hides_all {
+                Check::ok(
+                    NAME,
+                    format!("{} keeps the whole engine out of git", display.display()),
+                )
+            } else {
                 Check::warn(
                     NAME,
                     format!(
-                        "{} ignores versions/; checkpoint history would stay out of git",
-                        display.display()
-                    ),
-                )
-            } else {
-                Check::ok(
-                    NAME,
-                    format!(
-                        "{} hides the runtime files and keeps versions/ tracked",
+                        "{} does not ignore the page tree and the ledger; add a `*` line",
                         display.display()
                     ),
                 )
@@ -364,28 +378,32 @@ fn check_engine_ignore(root: &Path, cfg: &Config) -> Check {
     }
 }
 
-/// `versions_tracked`: the checkpoint snapshots are not ignored by git.
-fn check_versions_tracked(root: &Path) -> Check {
-    const NAME: &str = "versions_tracked";
-    let path = root.join(".gitignore");
-    match fs::read_to_string(&path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Check::ok(NAME, "no root .gitignore, so .wiki/versions/ is tracked")
-        }
-        Err(err) => Check::warn(NAME, format!("cannot read .gitignore: {err}")),
-        Ok(text) => {
-            if is_ignored_by(&text, ".wiki/versions") {
-                Check::warn(
-                    NAME,
-                    ".gitignore ignores .wiki/versions/; checkpoint history would not be committed",
-                )
-            } else {
-                Check::ok(
-                    NAME,
-                    ".wiki/versions/ is not ignored by the root .gitignore",
-                )
-            }
-        }
+/// `legacy_layout`: the pre-`.wiki` layout is still lying around.
+///
+/// The upgrade is destructive by decision: old wikis are rebuilt, not migrated.
+/// The tool cannot delete the old files (they are outside the engine, and the
+/// engine boundary is what makes it safe to run at all), so it points at them
+/// and leaves the removal to the user.
+fn check_legacy(root: &Path) -> Check {
+    const NAME: &str = "legacy_layout";
+    let mut found: Vec<&str> = Vec::new();
+    if root.join("wiki.toml").is_file() {
+        found.push("wiki.toml");
+    }
+    if root.join("source").is_dir() {
+        found.push("source/");
+    }
+    if found.is_empty() {
+        Check::ok(NAME, "no pre-.wiki layout files at the repository root")
+    } else {
+        Check::warn(
+            NAME,
+            format!(
+                "{} at the root are from the old layout; this build reads {} — delete them and run `llm-wiki init` to rebuild",
+                found.join(", "),
+                CONFIG_FILE
+            ),
+        )
     }
 }
 

@@ -43,7 +43,7 @@ fn repo() -> TempDir {
 }
 
 fn write_page(root: &Path, typ: &str, id: &str, body: &str) {
-    let path = root.join("wiki").join(typ).join(format!("{id}.md"));
+    let path = root.join(".wiki/pages").join(typ).join(format!("{id}.md"));
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
@@ -70,13 +70,13 @@ fn graph_reports_nodes_edges_and_orphans() {
     assert_eq!(data["edges"].as_array().unwrap().len(), 1);
     assert_eq!(
         data["orphans"],
-        serde_json::json!(["wiki/concept/lonely.md"])
+        serde_json::json!([".wiki/pages/concept/lonely.md"])
     );
     let hub = data["nodes"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|node| node["page"] == "wiki/concept/hub.md")
+        .find(|node| node["page"] == ".wiki/pages/concept/hub.md")
         .unwrap();
     assert_eq!(hub["in_degree"], 1);
 }
@@ -97,15 +97,11 @@ fn parse_refuses_an_oversize_source_without_force_large() {
     let root = dir.path();
     // Shrink the ceiling so a normal note counts as oversize: the guard is the
     // same code path whatever the number is.
-    let toml = fs::read_to_string(root.join("wiki.toml")).unwrap();
+    let toml = fs::read_to_string(root.join(".wiki/wiki.toml")).unwrap();
     let toml = toml.replace("max_source_bytes = \"100MB\"", "max_source_bytes = 16");
-    fs::write(root.join("wiki.toml"), toml).unwrap();
-    fs::create_dir_all(root.join("source")).unwrap();
-    fs::write(
-        root.join("source/note.md"),
-        "这是一份超过十六字节的笔记正文。\n",
-    )
-    .unwrap();
+    fs::write(root.join(".wiki/wiki.toml"), toml).unwrap();
+    fs::create_dir_all(root.join(".")).unwrap();
+    fs::write(root.join("note.md"), "这是一份超过十六字节的笔记正文。\n").unwrap();
 
     let refused = run_json(root, &["parse", "--key", "note.md"]);
     assert_eq!(refused.status.code(), Some(2), "oversize is a usage error");
@@ -125,20 +121,16 @@ fn parse_refuses_an_oversize_source_without_force_large() {
 fn force_large_still_writes_nothing() {
     let dir = repo();
     let root = dir.path();
-    let toml = fs::read_to_string(root.join("wiki.toml")).unwrap();
+    let toml = fs::read_to_string(root.join(".wiki/wiki.toml")).unwrap();
     let toml = toml.replace("max_source_bytes = \"100MB\"", "max_source_bytes = 16");
-    fs::write(root.join("wiki.toml"), toml).unwrap();
-    fs::create_dir_all(root.join("source")).unwrap();
-    fs::write(
-        root.join("source/note.md"),
-        "这是一份超过十六字节的笔记正文。\n",
-    )
-    .unwrap();
+    fs::write(root.join(".wiki/wiki.toml"), toml).unwrap();
+    fs::create_dir_all(root.join(".")).unwrap();
+    fs::write(root.join("note.md"), "这是一份超过十六字节的笔记正文。\n").unwrap();
 
     let out = run_json(root, &["parse", "--key", "note.md", "--force-large"]);
     assert!(out.status.success());
     assert!(
-        !root.join("raw/note.md").exists(),
+        !root.join(".wiki/raw/note.md").exists(),
         "parse never writes the raw layer"
     );
 }

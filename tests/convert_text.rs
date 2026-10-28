@@ -118,18 +118,18 @@ fn md_source_becomes_raw_with_traceability_frontmatter() {
     let cfg = Config::load(d.path()).unwrap();
     let mut s = Store::open(&d.path().join(".wiki/state.db")).unwrap();
     s.migrate().unwrap();
-    fs::create_dir_all(d.path().join("source/子目录")).unwrap();
+    fs::create_dir_all(d.path().join("子目录")).unwrap();
     fs::write(
-        d.path().join("source/子目录/说明.md"),
+        d.path().join("子目录/说明.md"),
         "---\ntitle: 忽略\n---\n# 正文\n\n内容\n",
     )
     .unwrap();
 
     let out = convert::convert_one(d.path(), &cfg, &mut s, "子目录/说明.md").unwrap();
-    assert_eq!(out.raw_path, "raw/子目录/说明.md");
+    assert_eq!(out.raw_path, ".wiki/raw/子目录/说明.md");
     assert_eq!(out.backend, "builtin-text");
-    let raw = fs::read_to_string(d.path().join("raw/子目录/说明.md")).unwrap();
-    assert!(raw.contains("source: source/子目录/说明.md"));
+    let raw = fs::read_to_string(d.path().join(".wiki/raw/子目录/说明.md")).unwrap();
+    assert!(raw.contains("source: 子目录/说明.md"));
     assert!(raw.contains("parser: builtin-text"));
     assert!(raw.contains("pin: false"));
     assert!(
@@ -143,10 +143,10 @@ fn md_source_becomes_raw_with_traceability_frontmatter() {
 #[test]
 fn crlf_is_normalised_to_lf() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.txt"), "a\r\nb\r\n").unwrap();
+    fs::write(d.path().join("a.txt"), "a\r\nb\r\n").unwrap();
 
     convert::convert_one(d.path(), &cfg, &mut s, "a.txt").unwrap();
-    let raw = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
+    let raw = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
     assert_eq!(body_of(&raw), "a\nb\n");
 }
 
@@ -154,13 +154,13 @@ fn crlf_is_normalised_to_lf() {
 fn a_crlf_file_with_frontmatter_still_loses_its_frontmatter() {
     let (d, mut s, cfg) = setup();
     fs::write(
-        d.path().join("source/a.md"),
+        d.path().join("a.md"),
         "---\r\ntitle: 标题\r\n---\r\n正文\r\n",
     )
     .unwrap();
 
     convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
-    let raw = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
+    let raw = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
     assert_eq!(body_of(&raw), "正文\n");
     assert!(!raw.contains("title: 标题"));
 }
@@ -168,11 +168,11 @@ fn a_crlf_file_with_frontmatter_still_loses_its_frontmatter() {
 #[test]
 fn plain_text_without_frontmatter_passes_through() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/b.md"), "普通文本\n第二行\n").unwrap();
+    fs::write(d.path().join("b.md"), "普通文本\n第二行\n").unwrap();
 
     let out = convert::convert_one(d.path(), &cfg, &mut s, "b.md").unwrap();
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    let raw = fs::read_to_string(d.path().join("raw/b.md")).unwrap();
+    let raw = fs::read_to_string(d.path().join(".wiki/raw/b.md")).unwrap();
     assert_eq!(body_of(&raw), "普通文本\n第二行\n");
 }
 
@@ -180,7 +180,7 @@ fn plain_text_without_frontmatter_passes_through() {
 fn source_that_is_all_frontmatter_warns_empty() {
     let (d, mut s, cfg) = setup();
     fs::write(
-        d.path().join("source/empty.md"),
+        d.path().join("empty.md"),
         "---\ntitle: 只有 frontmatter\n---\n",
     )
     .unwrap();
@@ -197,10 +197,10 @@ fn source_that_is_all_frontmatter_warns_empty() {
 #[test]
 fn raw_frontmatter_key_order_is_fixed() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# 正文\n").unwrap();
+    fs::write(d.path().join("a.md"), "# 正文\n").unwrap();
 
     convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
-    let raw = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
+    let raw = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
     let keys: Vec<&str> = raw
         .lines()
         .skip(1)
@@ -219,38 +219,35 @@ fn raw_frontmatter_key_order_is_fixed() {
 #[test]
 fn raw_key_collision_is_refused() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# from md\n").unwrap();
-    fs::write(d.path().join("source/a.txt"), "# from txt\n").unwrap();
+    fs::write(d.path().join("a.md"), "# from md\n").unwrap();
+    fs::write(d.path().join("a.txt"), "# from txt\n").unwrap();
 
     convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
-    let before = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
+    let before = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
 
     let err = convert::convert_one(d.path(), &cfg, &mut s, "a.txt").unwrap_err();
     assert_eq!(err.code(), "E_RAW_COLLISION");
-    assert!(err.to_string().contains("raw/a.md"), "{err}");
+    assert!(err.to_string().contains(".wiki/raw/a.md"), "{err}");
 
     // The first conversion's output must be untouched.
-    let after = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
+    let after = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
     assert_eq!(after, before);
-    assert_eq!(
-        frontmatter_value(&after, "source").as_deref(),
-        Some("source/a.md")
-    );
+    assert_eq!(frontmatter_value(&after, "source").as_deref(), Some("a.md"));
     assert_eq!(body_of(&after), "# from md\n");
 }
 
 #[test]
 fn a_foreign_raw_file_without_an_owner_is_never_overwritten() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# 正文\n").unwrap();
+    fs::write(d.path().join("a.md"), "# 正文\n").unwrap();
     // A hand-made raw file: nothing proves it came from `source/a.md`, so as far
     // as conversion can tell it belongs to someone else.
-    fs::write(d.path().join("raw/a.md"), "# 手工文件\n").unwrap();
+    fs::write(d.path().join(".wiki/raw/a.md"), "# 手工文件\n").unwrap();
 
     let err = convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap_err();
     assert_eq!(err.code(), "E_RAW_COLLISION");
     assert_eq!(
-        fs::read_to_string(d.path().join("raw/a.md")).unwrap(),
+        fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap(),
         "# 手工文件\n"
     );
 }
@@ -258,10 +255,10 @@ fn a_foreign_raw_file_without_an_owner_is_never_overwritten() {
 #[test]
 fn reconverting_a_changed_source_overwrites_its_own_raw() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# 第一版\n").unwrap();
+    fs::write(d.path().join("a.md"), "# 第一版\n").unwrap();
     let first = convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
 
-    fs::write(d.path().join("source/a.md"), "# 第二版\n").unwrap();
+    fs::write(d.path().join("a.md"), "# 第二版\n").unwrap();
     let second = convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
 
     assert_eq!(first.raw_path, second.raw_path);
@@ -270,7 +267,7 @@ fn reconverting_a_changed_source_overwrites_its_own_raw() {
         !second.skipped,
         "an unpinned raw of the same source is replaced"
     );
-    let raw = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
+    let raw = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
     assert_eq!(body_of(&raw), "# 第二版\n");
     assert_eq!(frontmatter_value(&raw, "pin").as_deref(), Some("false"));
 }
@@ -278,19 +275,19 @@ fn reconverting_a_changed_source_overwrites_its_own_raw() {
 #[test]
 fn a_pinned_raw_file_is_left_alone() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# 生成版\n").unwrap();
+    fs::write(d.path().join("a.md"), "# 生成版\n").unwrap();
     convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
     let converted_at = s.get_source("a.md").unwrap().unwrap().converted_at;
 
     // A human pins the raw file and edits its body; a later conversion must not
     // undo that edit, because the pinned body is now the source of truth.
-    let pinned = fs::read_to_string(d.path().join("raw/a.md"))
+    let pinned = fs::read_to_string(d.path().join(".wiki/raw/a.md"))
         .unwrap()
         .replace("pin: false", "pin: true")
         .replace("# 生成版", "# 手改版");
-    fs::write(d.path().join("raw/a.md"), &pinned).unwrap();
+    fs::write(d.path().join(".wiki/raw/a.md"), &pinned).unwrap();
 
-    fs::write(d.path().join("source/a.md"), "# 又改版\n").unwrap();
+    fs::write(d.path().join("a.md"), "# 又改版\n").unwrap();
     let out = convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
 
     assert!(out.skipped, "a pinned raw must not be rewritten");
@@ -298,31 +295,31 @@ fn a_pinned_raw_file_is_left_alone() {
     assert_eq!(out.chars, 0);
     assert_eq!(out.backend, "builtin-text");
     assert_eq!(
-        fs::read_to_string(d.path().join("raw/a.md")).unwrap(),
+        fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap(),
         pinned,
         "the pinned file must be byte-for-byte untouched"
     );
     let row = s.get_source("a.md").unwrap().unwrap();
     assert_eq!(row.converted_at, converted_at, "a skip must not re-stamp");
-    assert_eq!(row.raw_key.as_deref(), Some("raw/a.md"));
+    assert_eq!(row.raw_key.as_deref(), Some(".wiki/raw/a.md"));
 }
 
 #[test]
 fn a_pinned_raw_of_another_source_is_still_a_collision() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# md\n").unwrap();
-    fs::write(d.path().join("source/a.txt"), "# txt\n").unwrap();
+    fs::write(d.path().join("a.md"), "# md\n").unwrap();
+    fs::write(d.path().join("a.txt"), "# txt\n").unwrap();
     convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
-    let pinned = fs::read_to_string(d.path().join("raw/a.md"))
+    let pinned = fs::read_to_string(d.path().join(".wiki/raw/a.md"))
         .unwrap()
         .replace("pin: false", "pin: true");
-    fs::write(d.path().join("raw/a.md"), &pinned).unwrap();
+    fs::write(d.path().join(".wiki/raw/a.md"), &pinned).unwrap();
 
     // Pin protects the body, not the owner: another source still cannot take it.
     let err = convert::convert_one(d.path(), &cfg, &mut s, "a.txt").unwrap_err();
     assert_eq!(err.code(), "E_RAW_COLLISION");
     assert_eq!(
-        fs::read_to_string(d.path().join("raw/a.md")).unwrap(),
+        fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap(),
         pinned
     );
 }
@@ -330,12 +327,12 @@ fn a_pinned_raw_of_another_source_is_still_a_collision() {
 #[test]
 fn converting_twice_is_idempotent_apart_from_converted_at() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# 正文\n").unwrap();
+    fs::write(d.path().join("a.md"), "# 正文\n").unwrap();
 
     convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
-    let first = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
+    let first = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
     convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
-    let second = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
+    let second = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
 
     assert_eq!(without_converted_at(&first), without_converted_at(&second));
     let stamp = frontmatter_value(&second, "converted_at").unwrap();
@@ -345,17 +342,17 @@ fn converting_twice_is_idempotent_apart_from_converted_at() {
     );
     assert_eq!(
         s.get_source("a.md").unwrap().unwrap().raw_key.as_deref(),
-        Some("raw/a.md")
+        Some(".wiki/raw/a.md")
     );
 }
 
 #[test]
 fn source_name_with_hash_is_quoted_and_round_trips() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/说明#1.md"), "# 标题\n").unwrap();
+    fs::write(d.path().join("说明#1.md"), "# 标题\n").unwrap();
 
     convert::convert_one(d.path(), &cfg, &mut s, "说明#1.md").unwrap();
-    let raw = fs::read_to_string(d.path().join("raw/说明#1.md")).unwrap();
+    let raw = fs::read_to_string(d.path().join(".wiki/raw/说明#1.md")).unwrap();
     let line = raw
         .lines()
         .find(|line| line.starts_with("source:"))
@@ -366,7 +363,7 @@ fn source_name_with_hash_is_quoted_and_round_trips() {
     );
     assert_eq!(
         frontmatter_value(&raw, "source").as_deref(),
-        Some("source/说明#1.md")
+        Some("说明#1.md")
     );
 
     // A second conversion must recognise its own quoted output and not report a
@@ -379,14 +376,11 @@ fn source_name_with_hash_is_quoted_and_round_trips() {
 fn source_name_with_colon_space_and_quote_is_escaped() {
     let name = "a b\"c:d.md";
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source").join(name), "# 正文\n").unwrap();
+    fs::write(d.path().join(name), "# 正文\n").unwrap();
 
     convert::convert_one(d.path(), &cfg, &mut s, name).unwrap();
-    let raw = fs::read_to_string(d.path().join("raw").join(name)).unwrap();
-    assert_eq!(
-        frontmatter_value(&raw, "source").as_deref(),
-        Some(format!("source/{name}").as_str())
-    );
+    let raw = fs::read_to_string(d.path().join(".wiki/raw").join(name)).unwrap();
+    assert_eq!(frontmatter_value(&raw, "source").as_deref(), Some(name));
     // The escaped value must survive another pass.
     convert::convert_one(d.path(), &cfg, &mut s, name).unwrap();
 }
@@ -394,7 +388,7 @@ fn source_name_with_colon_space_and_quote_is_escaped() {
 #[test]
 fn conversion_records_raw_key_without_touching_other_ledger_fields() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "alpha").unwrap();
+    fs::write(d.path().join("a.md"), "alpha").unwrap();
     let row = ledger_row(
         "a.md",
         "blake3:0000000000000000000000000000000000000000000000000000000000000000",
@@ -411,14 +405,14 @@ fn conversion_records_raw_key_without_touching_other_ledger_fields() {
     );
     assert_eq!(got.size, row.size);
     assert_eq!(got.mtime, row.mtime);
-    assert_eq!(got.raw_key.as_deref(), Some("raw/a.md"));
+    assert_eq!(got.raw_key.as_deref(), Some(".wiki/raw/a.md"));
     assert!(got.converted_at.is_some());
 }
 
 #[test]
 fn converting_an_unscanned_source_keeps_the_next_scan_quiet() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/fresh.md"), "# 新\n").unwrap();
+    fs::write(d.path().join("fresh.md"), "# 新\n").unwrap();
 
     // `convert --key` synthesises the ledger row; the digest it guesses must
     // match what `scan` computes, or the source looks new again right after.
@@ -437,7 +431,7 @@ fn invalid_utf8_is_replaced_with_a_warning() {
     let mut bytes = b"# ok\n".to_vec();
     bytes.push(0xff);
     bytes.push(b'\n');
-    fs::write(d.path().join("source/bad.md"), &bytes).unwrap();
+    fs::write(d.path().join("bad.md"), &bytes).unwrap();
 
     let out = convert::convert_one(d.path(), &cfg, &mut s, "bad.md").unwrap();
     assert!(
@@ -447,7 +441,7 @@ fn invalid_utf8_is_replaced_with_a_warning() {
         "expected a `bad_utf8` warning, got {:?}",
         out.warnings
     );
-    let raw = fs::read_to_string(d.path().join("raw/bad.md")).unwrap();
+    let raw = fs::read_to_string(d.path().join(".wiki/raw/bad.md")).unwrap();
     assert!(body_of(&raw).contains('\u{fffd}'));
 }
 
@@ -489,14 +483,14 @@ fn registry_binds_the_html_and_asset_backends() {
         parse::parse_with(&cfg, &parse::Source::inline("a.png", b"\x89PNG")).unwrap();
     assert_eq!(id, "builtin-asset");
     assert!(extracted.asset);
-    assert_eq!(extracted.markdown, "![](../source/a.png)");
+    assert_eq!(extracted.markdown, "![](../../a.png)");
 }
 
 #[test]
 fn cli_parse_does_not_write_raw_or_ledger() {
     let (d, mut s, _cfg) = setup();
     let body = "x".repeat(250);
-    fs::write(d.path().join("source/a.md"), &body).unwrap();
+    fs::write(d.path().join("a.md"), &body).unwrap();
     s.upsert_source(&ledger_row("a.md", "blake3:placeholder", 250))
         .unwrap();
 
@@ -520,7 +514,10 @@ fn cli_parse_does_not_write_raw_or_ledger() {
 
     // Nothing may be written: no raw file, no ledger change.
     assert!(
-        fs::read_dir(d.path().join("raw")).unwrap().next().is_none(),
+        fs::read_dir(d.path().join(".wiki/raw"))
+            .unwrap()
+            .next()
+            .is_none(),
         "parse must not create raw files"
     );
     assert_eq!(
@@ -534,7 +531,7 @@ fn cli_parse_does_not_write_raw_or_ledger() {
 fn cli_parse_truncates_the_head_to_200_chars() {
     let (d, _s, _cfg) = setup();
     let body = "y".repeat(250);
-    fs::write(d.path().join("source/long.md"), &body).unwrap();
+    fs::write(d.path().join("long.md"), &body).unwrap();
 
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
@@ -552,7 +549,7 @@ fn cli_parse_truncates_the_head_to_200_chars() {
 fn cli_convert_emits_converted_array_and_respects_limit() {
     let (d, _s, _cfg) = setup();
     for key in ["a.md", "b.md", "c.md"] {
-        fs::write(d.path().join("source").join(key), format!("# {key}\n")).unwrap();
+        fs::write(d.path().join(".").join(key), format!("# {key}\n")).unwrap();
     }
 
     let first = Command::cargo_bin("llm-wiki")
@@ -567,15 +564,15 @@ fn cli_convert_emits_converted_array_and_respects_limit() {
     assert_eq!(value["cmd"], "convert");
     let converted = value["data"]["converted"].as_array().unwrap();
     assert_eq!(converted.len(), 1);
-    assert_eq!(converted[0]["raw_path"], "raw/a.md");
+    assert_eq!(converted[0]["raw_path"], ".wiki/raw/a.md");
     assert_eq!(converted[0]["backend"], "builtin-text");
     assert!(converted[0]["chars"].is_number());
     assert!(converted[0]["duration_ms"].is_number());
     assert!(converted[0]["warnings"].is_array());
     assert_eq!(converted[0]["skipped"], false);
     assert!(converted[0]["skip_reason"].is_null());
-    assert!(Path::new(&d.path().join("raw/a.md")).is_file());
-    assert!(!Path::new(&d.path().join("raw/b.md")).exists());
+    assert!(Path::new(&d.path().join(".wiki/raw/a.md")).is_file());
+    assert!(!Path::new(&d.path().join(".wiki/raw/b.md")).exists());
 
     // Each run takes the next source in key order, and a converted source stops
     // being pending, so the limit moves the frontier forward instead of redoing
@@ -590,8 +587,8 @@ fn cli_convert_emits_converted_array_and_respects_limit() {
     let value = json_of(&second);
     let converted = value["data"]["converted"].as_array().unwrap();
     assert_eq!(converted.len(), 1);
-    assert_eq!(converted[0]["raw_path"], "raw/b.md");
-    assert!(!Path::new(&d.path().join("raw/c.md")).exists());
+    assert_eq!(converted[0]["raw_path"], ".wiki/raw/b.md");
+    assert!(!Path::new(&d.path().join(".wiki/raw/c.md")).exists());
 
     let third = Command::cargo_bin("llm-wiki")
         .unwrap()
@@ -603,15 +600,15 @@ fn cli_convert_emits_converted_array_and_respects_limit() {
     let value = json_of(&third);
     let converted = value["data"]["converted"].as_array().unwrap();
     assert_eq!(converted.len(), 1);
-    assert_eq!(converted[0]["raw_path"], "raw/c.md");
-    assert!(Path::new(&d.path().join("raw/c.md")).is_file());
+    assert_eq!(converted[0]["raw_path"], ".wiki/raw/c.md");
+    assert!(Path::new(&d.path().join(".wiki/raw/c.md")).is_file());
 }
 
 #[test]
 fn convert_without_a_key_discovers_new_sources_by_scanning() {
     let (d, _s, _cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# A\n").unwrap();
-    fs::write(d.path().join("source/b.md"), "# B\n").unwrap();
+    fs::write(d.path().join("a.md"), "# A\n").unwrap();
+    fs::write(d.path().join("b.md"), "# B\n").unwrap();
 
     // No ledger rows exist: the pending set has to come from the filesystem, or
     // the first `convert` of a repository would find nothing to do.
@@ -625,10 +622,10 @@ fn convert_without_a_key_discovers_new_sources_by_scanning() {
     let value = json_of(&out);
     let converted = value["data"]["converted"].as_array().unwrap();
     assert_eq!(converted.len(), 2, "{value}");
-    assert_eq!(converted[0]["raw_path"], "raw/a.md");
-    assert_eq!(converted[1]["raw_path"], "raw/b.md");
-    assert!(Path::new(&d.path().join("raw/a.md")).is_file());
-    assert!(Path::new(&d.path().join("raw/b.md")).is_file());
+    assert_eq!(converted[0]["raw_path"], ".wiki/raw/a.md");
+    assert_eq!(converted[1]["raw_path"], ".wiki/raw/b.md");
+    assert!(Path::new(&d.path().join(".wiki/raw/a.md")).is_file());
+    assert!(Path::new(&d.path().join(".wiki/raw/b.md")).is_file());
 
     let scan = Command::cargo_bin("llm-wiki")
         .unwrap()
@@ -648,7 +645,7 @@ fn convert_without_a_key_discovers_new_sources_by_scanning() {
 #[test]
 fn cli_convert_by_key_sees_a_source_it_never_scanned() {
     let (d, _s, _cfg) = setup();
-    fs::write(d.path().join("source/lone.md"), "# 孤独\n").unwrap();
+    fs::write(d.path().join("lone.md"), "# 孤独\n").unwrap();
 
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
@@ -659,7 +656,7 @@ fn cli_convert_by_key_sees_a_source_it_never_scanned() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let value = json_of(&out);
     assert_eq!(
-        value["data"]["converted"][0]["raw_path"], "raw/lone.md",
+        value["data"]["converted"][0]["raw_path"], ".wiki/raw/lone.md",
         "a source missing from the ledger must still convert"
     );
 }
@@ -667,8 +664,8 @@ fn cli_convert_by_key_sees_a_source_it_never_scanned() {
 #[test]
 fn cli_convert_reports_a_raw_collision() {
     let (d, _s, _cfg) = setup();
-    fs::write(d.path().join("source/a.md"), "# md\n").unwrap();
-    fs::write(d.path().join("source/a.txt"), "# txt\n").unwrap();
+    fs::write(d.path().join("a.md"), "# md\n").unwrap();
+    fs::write(d.path().join("a.txt"), "# txt\n").unwrap();
 
     let ok = Command::cargo_bin("llm-wiki")
         .unwrap()
@@ -725,18 +722,18 @@ fn run_cli(dir: &Path, args: &[&str]) -> (i32, serde_json::Value) {
 fn batch_convert_keeps_going_after_a_bad_source() {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
-    fs::write(d.path().join("source/a.md"), "# A\n\nhealthy\n").unwrap();
+    fs::write(d.path().join("a.md"), "# A\n\nhealthy\n").unwrap();
     // A `.pdf` that is not a PDF: its parser claims the extension and then
     // fails, which is the "one bad source" a batch must survive.
-    fs::write(d.path().join("source/z.pdf"), b"definitely not a pdf").unwrap();
+    fs::write(d.path().join("z.pdf"), b"definitely not a pdf").unwrap();
 
     let (code, v) = run_cli(d.path(), &["convert"]);
     assert_eq!(code, 1, "a failed source is a finding: {v}");
     assert_eq!(v["ok"], true, "the round itself ran: {v}");
     let converted = v["data"]["converted"].as_array().unwrap();
     assert_eq!(converted.len(), 1, "the good source still converted: {v}");
-    assert_eq!(converted[0]["raw_path"], "raw/a.md");
-    assert!(d.path().join("raw/a.md").is_file());
+    assert_eq!(converted[0]["raw_path"], ".wiki/raw/a.md");
+    assert!(d.path().join(".wiki/raw/a.md").is_file());
     let failures = v["data"]["failures"].as_array().unwrap();
     assert_eq!(failures.len(), 1, "{v}");
     assert_eq!(failures[0]["key"], "z.pdf");
@@ -748,7 +745,7 @@ fn batch_convert_keeps_going_after_a_bad_source() {
 fn batch_convert_without_failures_exits_zero_with_an_empty_failure_list() {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
-    fs::write(d.path().join("source/a.md"), "# A\n").unwrap();
+    fs::write(d.path().join("a.md"), "# A\n").unwrap();
 
     let (code, v) = run_cli(d.path(), &["convert"]);
     assert_eq!(code, 0, "{v}");
@@ -761,7 +758,7 @@ fn batch_convert_without_failures_exits_zero_with_an_empty_failure_list() {
 fn single_key_convert_keeps_the_immediate_failure_path() {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
-    fs::write(d.path().join("source/z.pdf"), b"definitely not a pdf").unwrap();
+    fs::write(d.path().join("z.pdf"), b"definitely not a pdf").unwrap();
 
     let (code, v) = run_cli(d.path(), &["convert", "--key", "z.pdf"]);
     assert_eq!(code, 1, "{v}");

@@ -9,17 +9,20 @@
 //!
 //! So the layout is split by who owns it:
 //!
-//! - **Authored and load-bearing**: `wiki.toml` and `wiki/`. They live in git,
-//!   every command reads one or both, and their absence means the repository was
-//!   never initialised. Every command refuses with [`CODE`] and the hint in
-//!   [`HINT`]; nothing is guessed or repaired. (`SCHEMA.md` is the third file
-//!   `init` writes, but no code reads it, so it is `doctor`'s business rather
-//!   than a hard stop.)
-//! - **Provisioned**: `source/`, `raw/`, `wiki/audit/`, `wiki/archive/` and
-//!   everything under the engine directory. These are inputs, outputs and
-//!   derived state; `init` creates them, but a fresh clone has no engine
-//!   directory at all because it is ignored. Refusing there would make
-//!   "clone and run" impossible, so [`provision`] creates them on demand.
+//! - **Authored and load-bearing**: `.wiki/wiki.toml` and `.wiki/pages/`. The
+//!   contract is the decision the user made, and the page tree is the product;
+//!   their absence means the repository was never initialised. Every command
+//!   refuses with [`CODE`] and the hint in [`HINT`]; nothing is guessed or
+//!   repaired. (`.wiki/SCHEMA.md` is the third file `init` writes, but no code
+//!   reads it, so it is `doctor`'s business rather than a hard stop.)
+//! - **Provisioned**: `.wiki/raw/`, `.wiki/audit/`, `.wiki/archive/` and the
+//!   rest of the engine. These are inputs, outputs and derived state; `init`
+//!   creates them, but a fresh clone has no engine directory at all because it
+//!   is ignored. Refusing there would make "clone and run" impossible, so
+//!   [`provision`] creates them on demand.
+//!
+//! Nothing outside `.wiki/` is ever created: the repository itself is the source
+//! tree, and the tool treats it as read-only.
 //!
 //! The distinction is the point: a missing contract is a decision the user has
 //! not made yet, and the tool must not make it for them.
@@ -33,22 +36,21 @@ pub const CODE: &str = "E_NOT_INITIALISED";
 pub const HINT: &str = "run `llm-wiki init` in the repository root, then retry";
 
 /// The contract every command loads; `init` is the only thing that writes it.
-const REQUIRED_FILES: [&str; 1] = ["wiki.toml"];
+const REQUIRED_FILES: [&str; 1] = [".wiki/wiki.toml"];
 
-/// Directories that hold the product and are in git.
-const REQUIRED_DIRS: [&str; 1] = ["wiki"];
+/// The directory that holds the product.
+const REQUIRED_DIRS: [&str; 1] = [".wiki/pages"];
 
 /// Directories that are inputs, outputs or derived state.
 ///
 /// Parents come before children so a single `create_dir_all` per entry works
 /// even on a fresh checkout.
-const PROVISIONED: [&str; 9] = [
-    "source",
-    "raw",
-    "wiki/archive",
-    "wiki/audit",
+const PROVISIONED: [&str; 8] = [
     ".wiki",
     ".wiki/cache",
+    ".wiki/pages/archive",
+    ".wiki/pages/audit",
+    ".wiki/raw",
     ".wiki/sessions",
     ".wiki/staging",
     ".wiki/versions",

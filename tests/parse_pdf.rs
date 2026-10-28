@@ -41,8 +41,8 @@ fn scanned_pdf_degrades_to_asset_link() {
     assert!(out.asset);
     assert!(out.no_text_layer);
     assert!(
-        out.markdown.contains("](../source/scan.pdf)"),
-        "key 只有一层，前缀是一个 ../: {:?}",
+        out.markdown.contains("](../../scan.pdf)"),
+        "key 只有一层，raw 在 .wiki/raw/，前缀是两个 ../: {:?}",
         out.markdown
     );
 }

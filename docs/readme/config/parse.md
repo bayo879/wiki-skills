@@ -1,6 +1,6 @@
 # parse 配置
 
-`wiki.toml` 只有仓库根目录一份，`llm-wiki init` 生成。本节只覆盖 `[parse]` 与 `[parse.external]`；解析行为见 [解析后端与 auto 回退](../parse/external.md)。
+`.wiki/wiki.toml` 只有一份，`llm-wiki init` 生成。本节只覆盖 `[parse]` 与 `[parse.external]`；解析行为见 [解析后端与 auto 回退](../parse/external.md)。
 
 ## `[parse]`
 
@@ -9,7 +9,7 @@
 | `primary` | `"auto"` \| `"builtin"` \| `"external"` | `"auto"` | 后端选择模式 |
 | `chunk_threshold` | 尺寸 | `2MB` | 计算源指纹时的分界：不超过它全量哈希，超过它采样哈希（见 `src/convert.rs:432`） |
 | `max_source_bytes` | 尺寸 | `100MB` | 超过它的源不进入转换流水线（`scan` 报 `oversize`）；只有 `parse --force-large` 能强行抽一份看，但不会进账本 |
-| `chunk_target` | 尺寸 | `64KB` | 单个文本块的目标大小；`parse --chunk N` 按它切分，分块视图只落 `.wiki/cache/`，`raw/` 仍是一份完整 markdown（决策 43） |
+| `chunk_target` | 尺寸 | `64KB` | 单个文本块的目标大小；`parse --chunk N` 按它切分，分块视图只落 `.wiki/cache/`，`.wiki/raw/` 仍是一份完整 markdown（决策 43） |
 | `min_chars` | 整数 | `200` | 内置结果字符数低于它时，`auto` 才可能回退外部 |
 | `[parse.external]` | 表 | 无 | 可选的外部解析服务；不写就是没有 |
 
@@ -72,6 +72,6 @@ timeout_s = 120
 
 | 码 | 触发 |
 |---|---|
-| `E_NO_CONFIG` | `wiki.toml` 读不出来（缺失会在更早的入口检查里变成 `E_NOT_INITIALISED`） |
+| `E_NO_CONFIG` | `.wiki/wiki.toml` 读不出来（缺失会在更早的入口检查里变成 `E_NOT_INITIALISED`） |
 | `E_BAD_CONFIG` | 非法 TOML、类型/单位错误、数值不变量不满足 |
 | `E_TOKEN_IN_CONFIG` | `auth_env` 里写的是 token 字面量 |

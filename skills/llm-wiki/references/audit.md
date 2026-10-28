@@ -1,9 +1,6 @@
----
-name: wiki-audit
-description: 当用户要求给知识库做体检、问「有没有说法不一致的地方」，或在 checkpoint、sync 之后、交接前需要确认页面可信时使用。先跑 llm-wiki lint --json 收机械层结论，再读页面正文与 sources 原文做判断层分析，覆盖跨页矛盾、被新源推翻的过时结论、孤儿页与重复页。只摆证据、给建议动作，不自动改页面；机械修复交 lint --fix，正文改动交 wiki-ingest，源变更跟进交 wiki-scan。
----
+# 体检与审计（lint / doctor / graph）
 
-# wiki-audit
+> 何时读：当用户要求给知识库做体检、问「有没有说法不一致的地方」，或在 checkpoint、sync 之后、交接前需要确认页面可信时使用。先跑 llm-wiki lint --json 收机械层结论，再读页面正文与 sources 原文做判断层分析，覆盖跨页矛盾、被新源推翻的过时结论、孤儿页与重复页。只摆证据、给建议动作，不自动改页面；机械修复交 lint --fix，正文改动交 references/ingest.md，源变更跟进交 references/scan.md。
 
 命令是 `llm-wiki`；不在 PATH 上时，用仓库根的 `.wiki/llm-wiki`。
 
@@ -16,7 +13,7 @@ description: 当用户要求给知识库做体检、问「有没有说法不一�
 ## 职责边界
 
 - 拥有：`lint` 的调用，以及判断层分析——机械问题之外，只有读过正文才能发现的事
-- 不碰：机械修复（交 `llm-wiki lint --fix`）、摄取与写页（交 `wiki-ingest`）
+- 不碰：机械修复（交 `llm-wiki lint --fix`）、摄取与写页（交 `references/ingest.md`）
 
 ## 两个层次
 
@@ -29,7 +26,7 @@ description: 当用户要求给知识库做体检、问「有没有说法不一�
 
 ## 机械层
 
-先确认仓库就绪：`llm-wiki doctor --json` 的 `checks[]` 每条是 `{name, level, detail}`——`level` 有 `fail` 就先看同名 `detail` 再处理，缺 `wiki.toml` 跑 `llm-wiki init`。`doctor` 退出 1 只表示有检查项失败，不代表 wiki 坏了。
+先确认仓库就绪：`llm-wiki doctor --json` 的 `checks[]` 每条是 `{name, level, detail}`——`level` 有 `fail` 就先看同名 `detail` 再处理，缺 `.wiki/wiki.toml` 跑 `llm-wiki init`。`doctor` 退出 1 只表示有检查项失败，不代表 wiki 坏了。
 
 ```bash
 llm-wiki lint --json            # 默认：有 error 才 exit 1
@@ -39,7 +36,7 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 
 - `exit 0`：没有 error（`--strict` 下没有 warning）
 - `exit 1`：有 error；`--strict` 时有 warning
-- `exit 2`：跑不起来——缺 `wiki.toml`、账本坏了。这是环境问题，别当 finding 汇报
+- `exit 2`：跑不起来——缺 `.wiki/wiki.toml`、账本坏了。这是环境问题，别当 finding 汇报
 
 `--json` 的形状是 `data.findings[]`，每条 `{rule, level, page, msg}`，已按严重度排序。`page` 为仓库相对路径，跨页问题可能是 `null`。
 
@@ -58,8 +55,8 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 | 重复 id | error | 一个 id 出现在两个类型目录 | 复制一页到新目录当草稿，草稿也查重 |
 | status 非法 | error | 只认 `draft`/`stable`/`stale` | 团队自定义 `review`、大写 `Draft` |
 | updated 格式 | warning | 必须是 `YYYY-MM-DD` | 写成时间戳 `2026-10-27T10:00:00Z` |
-| 缺源 | error | `sources` 指的文件不存在 | 写了 `source/` 原文路径而不是 `raw/` 产物；归档引用豁免 |
-| 未入账 raw | warning | `raw/` 里有账本不认识的文件 | 新 clone 后 `state.db` 为空，整层都报。补账本：raw 的 frontmatter 有 `source:` 且没有 `pin: true` 时，`llm-wiki convert --key <源key>` 会认领它并登记（批量 `convert` 只挑 source 层待转换项，已入账源不会重转）。认领不了的文件（无 `source:`、或 `pin: true`）只能删——`raw/` 是派生产物，内容本该进 `source/`。两种情况都不要手改账本或 `.wiki/state.db` |
+| 缺源 | error | `sources` 指的文件不存在 | `sources` 写了仓库根路径而不是 `.wiki/raw/` 产物；归档引用豁免 |
+| 未入账 raw | warning | `.wiki/raw/` 里有账本不认识的文件 | 新 clone 后 `state.db` 为空，整层都报。补账本：raw 的 frontmatter 有 `source:` 且没有 `pin: true` 时，`llm-wiki convert --key <源key>` 会认领它并登记（批量 `convert` 只挑 source 层待转换项，已入账源不会重转）。认领不了的文件（无 `source:`、或 `pin: true`）只能删——`.wiki/raw/` 是派生产物，内容本该留在仓库根。两种情况都不要手改账本或 `.wiki/state.db` |
 | 空页 | warning | 正文短于 `[audit].min_page_chars`（默认 200 字符） | 导航页、目录页本来就短；归档页豁免 |
 | 改了没跟日期 | warning | 文件哈希变了而 `updated` 没动 | 只改了 `tags`/`summary`，正文其实没变 |
 | 共享 raw 过多 | info | 一份 raw 被超过 3 页引用 | 规范页被多页引用是合理的 |
@@ -79,7 +76,7 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 ### 矛盾
 
 1. 用 `llm-wiki query <关键词>` 或 grep 找讲同一件事的页
-2. 结论互斥时，打开各自 `sources` 指向的 `raw/` 原文
+2. 结论互斥时，打开各自 `sources` 指向的 `.wiki/raw/` 原文
 3. 比三件事：原文日期（`converted_at`）、来源类型（`origin: conversation` 的页可信度低于文档页）、是否一手
 4. 把证据摆出来让人决定，建议动作写「改哪页、改成什么」，不执行
 
@@ -88,7 +85,7 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 1. `llm-wiki scan --json`，找 `kind` 为 `changed` / `missing` 的项。只当证据，不做变更解释
 2. 反查谁引用它：grep 页面的 `sources`，比对时去掉 `#p=..` 片段
 3. 页面 `updated` 早于 raw 的 `converted_at` → 结论可能已被新源推翻
-4. 建议动作：交 `wiki-ingest` 重写该页；来不及就先报告，由人决定是否标 `stale`
+4. 建议动作：交 `references/ingest.md` 重写该页；来不及就先报告，由人决定是否标 `stale`
 
 ### 孤儿
 
@@ -100,7 +97,7 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 
 - 信号：标题归一化后相同、`summary` 高度相似、两页 `sources` 大面积重叠
 - 判合并还是分：同一个概念给同一读者 → 合并；同一事实不同用途（教程 vs 参考）→ 分并加互链
-- 动作一律交 `wiki-ingest`
+- 动作一律交 `references/ingest.md`
 
 ## 出报告
 
@@ -108,11 +105,11 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 
 ```
 问题：concept/retry 与 guide/retry-policy 对最大重试次数给出互斥结论
-证据：wiki/concept/retry.md:12 说 3 次；wiki/guide/retry-policy.md:8 说 5 次；两页分别引 raw/api.md 与 raw/handbook.md
-建议：以较新的 raw/handbook.md 为准，改 guide/retry-policy.md；需人工确认
+证据：.wiki/pages/concept/retry.md:12 说 3 次；.wiki/pages/guide/retry-policy.md:8 说 5 次；两页分别引 .wiki/raw/api.md 与 .wiki/raw/handbook.md
+建议：以较新的 .wiki/raw/handbook.md 为准，改 guide/retry-policy.md；需人工确认
 ```
 
-- 完整清单落 `wiki/audit/YYYY-MM-DD-<主题>.md`；`audit/` 不进索引、不参与 lint，写完提醒用户提交
+- 完整清单落 `.wiki/pages/audit/YYYY-MM-DD-<主题>.md`；`audit/` 不进索引、不参与 lint，写完提醒用户提交
 - `info` 默认不进会话汇报，除非它指向真实风险
 - 没有 finding 就直说 clean，不凑数
 
@@ -120,9 +117,9 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 
 | 需要 | 交给 |
 |---|---|
-| 改页、补源、合并 | `wiki-ingest` |
-| 源变了要跟进（`convert`、变更解释） | `wiki-scan` |
-| 定时体检、无人值守 | `wiki-sync` |
+| 改页、补源、合并 | `references/ingest.md` |
+| 源变了要跟进（`convert`、变更解释） | `references/scan.md` |
+| 定时体检、无人值守 | `references/sync.md` |
 
 ## 别做
 

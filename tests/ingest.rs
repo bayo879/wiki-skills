@@ -34,7 +34,7 @@ fn setup() -> (TempDir, Config) {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
     let cfg = Config::load(d.path()).unwrap();
-    fs::write(d.path().join("raw/a.md"), "订单超时后重试三次。\n").unwrap();
+    fs::write(d.path().join(".wiki/raw/a.md"), "订单超时后重试三次。\n").unwrap();
 
     let mut store = open(d.path());
     store
@@ -43,7 +43,7 @@ fn setup() -> (TempDir, Config) {
             hash: String::from("blake3:source"),
             size: 27,
             mtime: 1,
-            raw_key: Some(String::from("raw/a.md")),
+            raw_key: Some(String::from(".wiki/raw/a.md")),
             converted_at: Some(String::from("2026-10-27T00:00:00Z")),
         })
         .unwrap();
@@ -122,7 +122,7 @@ fn args(items: &[&str]) -> Vec<String> {
 
 /// Every file under `wiki/`, keyed by repository-relative path.
 fn wiki_snapshot(root: &Path) -> BTreeMap<String, String> {
-    let wiki = root.join("wiki");
+    let wiki = root.join(".wiki/pages");
     let mut out = BTreeMap::new();
     if !wiki.is_dir() {
         return out;
@@ -174,8 +174,8 @@ fn begin_reports_affected_pages_from_full_scan() {
     let root = d.path();
     write_file(
         root,
-        "wiki/concept/retry.md",
-        &page_block("retry", "重试", &["raw/a.md"]),
+        ".wiki/pages/concept/retry.md",
+        &page_block("retry", "重试", &[".wiki/raw/a.md"]),
     );
 
     let mut store = open(root);
@@ -184,7 +184,7 @@ fn begin_reports_affected_pages_from_full_scan() {
         &cfg,
         &mut store,
         &ingest::BeginInput {
-            sources: vec![String::from("raw/a.md")],
+            sources: vec![String::from(".wiki/raw/a.md")],
             pages: Vec::new(),
             dry_run: false,
         },
@@ -202,7 +202,7 @@ fn abort_clears_pending_and_leaves_wiki_untouched() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
-    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
 
     let report = ingest::abort(root, &cfg, &mut store).unwrap();
     assert_eq!(report.cleared, 1);
@@ -212,7 +212,7 @@ fn abort_clears_pending_and_leaves_wiki_untouched() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".md"))
         .collect();
-    assert!(names.is_empty(), "wiki/ gained pages: {names:?}");
+    assert!(names.is_empty(), ".wiki/pages/ gained pages: {names:?}");
     assert!(!pending(root).exists());
 }
 
@@ -222,13 +222,13 @@ fn begin_leaves_wiki_untouched_and_writes_pending() {
     let root = d.path();
     write_file(
         root,
-        "wiki/concept/retry.md",
-        &page_block("retry", "重试", &["raw/a.md"]),
+        ".wiki/pages/concept/retry.md",
+        &page_block("retry", "重试", &[".wiki/raw/a.md"]),
     );
     let before = wiki_snapshot(root);
 
     let mut store = open(root);
-    let report = begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    let report = begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
 
     assert_eq!(report.source_keys, args(&["a.md"]));
     assert_eq!(wiki_snapshot(root), before, "begin wrote into wiki/");
@@ -249,18 +249,18 @@ fn begin_finds_every_page_that_cites_the_source() {
     let root = d.path();
     write_file(
         root,
-        "wiki/concept/retry.md",
-        &page_block("retry", "重试", &["raw/a.md"]),
+        ".wiki/pages/concept/retry.md",
+        &page_block("retry", "重试", &[".wiki/raw/a.md"]),
     );
     // A fragment locates a passage; the page still cites the same raw file.
     write_file(
         root,
-        "wiki/entity/order.md",
-        &page_inline("order", "订单", &["raw/a.md#p=3"]),
+        ".wiki/pages/entity/order.md",
+        &page_inline("order", "订单", &[".wiki/raw/a.md#p=3"]),
     );
 
     let mut store = open(root);
-    let report = begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    let report = begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
 
     assert_eq!(affected_ids(&report), args(&["order", "retry"]));
     let order = report
@@ -268,21 +268,25 @@ fn begin_finds_every_page_that_cites_the_source() {
         .iter()
         .find(|page| page.id == "order")
         .unwrap();
-    assert_eq!(order.path, "wiki/entity/order.md");
+    assert_eq!(order.path, ".wiki/pages/entity/order.md");
 }
 
 #[test]
 fn begin_includes_explicit_pages() {
     let (d, cfg) = setup();
     let root = d.path();
-    write_file(root, "wiki/concept/retry.md", &page_bare("retry", "重试"));
+    write_file(
+        root,
+        ".wiki/pages/concept/retry.md",
+        &page_bare("retry", "重试"),
+    );
 
     let mut store = open(root);
     let report = begin(
         root,
         &cfg,
         &mut store,
-        &["raw/a.md"],
+        &[".wiki/raw/a.md"],
         &["retry", "concept/cache"],
     );
 
@@ -295,7 +299,7 @@ fn begin_includes_explicit_pages() {
         .iter()
         .find(|page| page.id == "retry")
         .unwrap();
-    assert_eq!(retry.path, "wiki/concept/retry.md");
+    assert_eq!(retry.path, ".wiki/pages/concept/retry.md");
     let cache = report
         .affected
         .iter()
@@ -332,7 +336,7 @@ fn dry_run_writes_no_pending() {
         &cfg,
         &mut store,
         &ingest::BeginInput {
-            sources: vec![String::from("raw/a.md")],
+            sources: vec![String::from(".wiki/raw/a.md")],
             pages: Vec::new(),
             dry_run: true,
         },
@@ -354,7 +358,7 @@ fn commit_without_a_round_is_an_error() {
         root,
         &cfg,
         "concept/retry",
-        &page_block("retry", "重试", &["raw/a.md"]),
+        &page_block("retry", "重试", &[".wiki/raw/a.md"]),
     )
     .unwrap();
 
@@ -367,7 +371,7 @@ fn commit_rejects_a_page_that_is_not_staged() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
-    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
 
     let err = ingest::commit(root, &cfg, &mut store, &args(&["ghost"])).unwrap_err();
     assert_eq!(err.code(), "E_NO_STAGED_PAGE", "{err}");
@@ -378,14 +382,14 @@ fn commit_refreshes_the_staged_page_and_the_staging_index() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
-    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
 
     staging::write_page(root, &cfg, "concept/retry", &page_bare("retry", "重试")).unwrap();
     staging::write_page(
         root,
         &cfg,
         "concept/cache",
-        &page_inline("cache", "缓存", &["raw/other.md"]),
+        &page_inline("cache", "缓存", &[".wiki/raw/other.md"]),
     )
     .unwrap();
     staging::write_page(
@@ -415,13 +419,13 @@ fn commit_refreshes_the_staged_page_and_the_staging_index() {
     assert_eq!(retry.updated, today());
     assert_eq!(
         retry.sources,
-        args(&["raw/a.md"]),
+        args(&[".wiki/raw/a.md"]),
         "absent field is created"
     );
     let cache = page::read(&staging_dir.join("concept/cache.md")).unwrap().0;
     assert_eq!(
         cache.sources,
-        args(&["raw/other.md", "raw/a.md"]),
+        args(&[".wiki/raw/other.md", ".wiki/raw/a.md"]),
         "appended in order"
     );
     let timeout = page::read(&staging_dir.join("concept/timeout.md"))
@@ -429,7 +433,7 @@ fn commit_refreshes_the_staged_page_and_the_staging_index() {
         .0;
     assert_eq!(
         timeout.sources,
-        args(&["raw/a.md"]),
+        args(&[".wiki/raw/a.md"]),
         "empty block gets an item"
     );
 
@@ -449,18 +453,18 @@ fn commit_leaves_wiki_untouched() {
     let root = d.path();
     write_file(
         root,
-        "wiki/concept/retry.md",
-        &page_block("retry", "重试", &["raw/a.md"]),
+        ".wiki/pages/concept/retry.md",
+        &page_block("retry", "重试", &[".wiki/raw/a.md"]),
     );
     let before = wiki_snapshot(root);
 
     let mut store = open(root);
-    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
     staging::write_page(
         root,
         &cfg,
         "concept/retry",
-        &page_block("retry", "重试", &["raw/a.md"]),
+        &page_block("retry", "重试", &[".wiki/raw/a.md"]),
     )
     .unwrap();
     ingest::commit(root, &cfg, &mut store, &args(&["retry"])).unwrap();
@@ -473,7 +477,7 @@ fn abort_keeps_the_staged_candidates() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
-    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
     staging::write_page(
         root,
         &cfg,
@@ -494,12 +498,12 @@ fn commit_does_not_duplicate_an_existing_source() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
-    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
     staging::write_page(
         root,
         &cfg,
         "concept/retry",
-        &page_block("retry", "重试", &["raw/a.md"]),
+        &page_block("retry", "重试", &[".wiki/raw/a.md"]),
     )
     .unwrap();
 
@@ -508,7 +512,7 @@ fn commit_does_not_duplicate_an_existing_source() {
     let front = page::read(&root.join(".wiki/staging/concept/retry.md"))
         .unwrap()
         .0;
-    assert_eq!(front.sources, args(&["raw/a.md"]));
+    assert_eq!(front.sources, args(&[".wiki/raw/a.md"]));
 }
 
 #[test]
@@ -517,12 +521,12 @@ fn begin_reports_orphan_pages() {
     let root = d.path();
     write_file(
         root,
-        "wiki/concept/stale.md",
-        &page_block("stale", "过期", &["raw/gone.md"]),
+        ".wiki/pages/concept/stale.md",
+        &page_block("stale", "过期", &[".wiki/raw/gone.md"]),
     );
 
     let mut store = open(root);
-    let report = begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    let report = begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
 
     assert_eq!(report.orphan_pages, args(&["stale"]));
 }
@@ -532,7 +536,7 @@ fn commit_warns_when_a_round_writes_more_pages_than_the_cap() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
-    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
 
     staging::write_page(root, &cfg, "concept/one", &page_bare("one", "一")).unwrap();
     staging::write_page(root, &cfg, "concept/two", &page_bare("two", "二")).unwrap();
@@ -566,7 +570,7 @@ fn a_round_within_the_cap_has_no_warning() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
-    begin(root, &cfg, &mut store, &["raw/a.md"], &[]);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
     staging::write_page(root, &cfg, "concept/one", &page_bare("one", "一")).unwrap();
 
     let mut capped = cfg.clone();

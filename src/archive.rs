@@ -474,7 +474,7 @@ pub struct PurgeRequest {
 pub struct PurgeReport {
     /// Summary keys that were (or, for a dry run, would be) cleared.
     pub candidates: Vec<String>,
-    /// Live source records whose bytes were removed.
+    /// Live source records whose derived raw was removed.
     pub sources: usize,
     /// Summaries actually cleared.
     pub deleted: usize,
@@ -492,10 +492,12 @@ pub struct PurgeReport {
 /// - both the capacity and the deadline condition must hold, so a small wiki
 ///   never loses history merely because it is old.
 ///
-/// Purging removes the summary page, the source bytes it distilled, the derived
-/// raw, and every ledger row for them, then records a version entry. The pages
-/// stay: the seal already re-hung them onto the summary, and with the summary
-/// gone they keep a `sources` entry that the next `lint` will flag as stale —
+/// Purging removes the summary page, the derived raw it distilled, and every
+/// ledger row for them, then records a version entry. The source files stay:
+/// they are the user's, outside the engine, and clearing a summary must never
+/// delete one. The pages stay too: the seal already re-hung them onto the
+/// summary, and with the summary gone they keep a `sources` entry that the next
+/// `lint` will flag as stale —
 /// which is the honest outcome, since a page citing a summary that was cleared
 /// has lost its provenance.
 pub fn purge(
@@ -539,7 +541,9 @@ pub fn purge_at(
     for row in &candidates {
         for key in &row.sources {
             if let Some(source) = store.get_source(key)? {
-                remove_file(root.join(&cfg.paths.source).join(key))?;
+                // Sources are the user's own files, outside the engine: a purge
+                // drops this tool's derived copy and its ledger row, never the
+                // original.
                 if let Some(raw_key) = &source.raw_key {
                     remove_file(root.join(&cfg.paths.raw).join(raw_key))?;
                 }

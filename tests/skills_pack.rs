@@ -90,7 +90,11 @@ fn real_subcommands() -> BTreeSet<String> {
 #[test]
 fn every_skill_has_valid_frontmatter() {
     let all = skills();
-    assert_eq!(all.len(), 6, "the package ships exactly six skills");
+    assert_eq!(
+        all.len(),
+        1,
+        "the package ships one skill; the rest live in references/"
+    );
     for (dir, text) in all {
         let (fm, body) = parse_frontmatter(&text);
         assert_eq!(

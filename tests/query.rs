@@ -76,7 +76,12 @@ impl Fixture {
     }
 
     fn path(&self, dir: &str, rel: &str) -> PathBuf {
-        self.root().join(dir).join(rel)
+        let base = match dir {
+            "wiki" => ".wiki/pages",
+            "raw" => ".wiki/raw",
+            other => other,
+        };
+        self.root().join(base).join(rel)
     }
 
     fn reindex(&mut self) -> usize {
@@ -173,7 +178,7 @@ fn chinese_words_hit_through_single_char_indexing() {
     assert_eq!(fx.reindex(), 1);
 
     let hit = fx.only("订单");
-    assert_eq!(hit.page, "wiki/concept/order.md");
+    assert_eq!(hit.page, ".wiki/pages/concept/order.md");
     assert_eq!(hit.title, "订单超时");
     assert_eq!(hit.summary, "未支付超时");
 }
@@ -210,8 +215,8 @@ fn ascii_words_and_numbers_hit() {
     );
     fx.reindex();
 
-    assert_eq!(fx.only("timeout").page, "wiki/concept/timeout.md");
-    assert_eq!(fx.only("30").page, "wiki/concept/timeout.md");
+    assert_eq!(fx.only("timeout").page, ".wiki/pages/concept/timeout.md");
+    assert_eq!(fx.only("30").page, ".wiki/pages/concept/timeout.md");
 }
 
 #[test]
@@ -256,7 +261,7 @@ fn hits_are_ranked_by_score_and_carry_status() {
 
     let hits = fx.hits("订单");
     assert_eq!(hits.len(), 2);
-    assert_eq!(hits[0].page, "wiki/concept/a.md");
+    assert_eq!(hits[0].page, ".wiki/pages/concept/a.md");
     assert!(
         hits[0].score > hits[1].score,
         "the page repeating the term must rank first: {:?}",
@@ -298,11 +303,11 @@ fn scope_separates_the_wiki_from_the_archive() {
 
     let wiki = fx.search("同步", 10, 0, Scope::Wiki);
     assert_eq!(wiki.len(), 1);
-    assert_eq!(wiki[0].page, "wiki/concept/live.md");
+    assert_eq!(wiki[0].page, ".wiki/pages/concept/live.md");
 
     let archive = fx.search("同步", 10, 0, Scope::Archive);
     assert_eq!(archive.len(), 1);
-    assert_eq!(archive[0].page, "wiki/archive/2026-01/old.md");
+    assert_eq!(archive[0].page, ".wiki/pages/archive/2026-01/old.md");
 
     assert_eq!(fx.search("同步", 10, 0, Scope::All).len(), 2);
 }
@@ -322,7 +327,7 @@ fn links_resolve_to_page_paths_and_titles() {
     assert_eq!(
         hit.links,
         vec![LinkRef {
-            to: String::from("wiki/concept/b.md"),
+            to: String::from(".wiki/pages/concept/b.md"),
             title: String::from("乙页"),
         }]
     );
@@ -343,18 +348,18 @@ fn sources_split_the_chunk_and_check_the_raw_file() {
     fx.page_with(
         "concept/sourced.md",
         "id: sourced\ntitle: 有源页\ntype: concept\nsummary: 源\n\
-         status: stable\nupdated: 2026-10-27\nsources:\n  - raw/a.md#p=12-40",
+         status: stable\nupdated: 2026-10-27\nsources:\n  - .wiki/raw/a.md#p=12-40",
         "订单系统设计。",
     );
-    fx.raw("a.md", "source/a.pdf");
+    fx.raw("a.md", "a.pdf");
     fx.reindex();
 
     let hit = fx.only("订单");
     assert_eq!(
         hit.sources,
         vec![SourceRef {
-            raw: String::from("raw/a.md"),
-            source: Some(String::from("source/a.pdf")),
+            raw: String::from(".wiki/raw/a.md"),
+            source: Some(String::from("a.pdf")),
             chunk: Some(String::from("p=12-40")),
             raw_available: true,
         }]
@@ -363,20 +368,20 @@ fn sources_split_the_chunk_and_check_the_raw_file() {
 
 #[test]
 fn a_missing_raw_is_reported_not_fatal() {
-    // `raw/` is in git and `source/` is not, so a clone has the raw and misses
-    // the source; the opposite also happens mid-conversion. Neither is an error.
+    // The raw can be purged while the page keeps citing it, so a missing file
+    // is a fact worth reporting, never an error.
     let mut fx = Fixture::new();
     fx.page_with(
         "concept/sourced.md",
         "id: sourced\ntitle: 有源页\ntype: concept\nsummary: 源\n\
-         status: stable\nupdated: 2026-10-27\nsources:\n  - raw/missing.md#p=1-2",
+         status: stable\nupdated: 2026-10-27\nsources:\n  - .wiki/raw/missing.md#p=1-2",
         "订单系统设计。",
     );
     fx.reindex();
 
     let hit = fx.only("订单");
     assert_eq!(hit.sources.len(), 1);
-    assert_eq!(hit.sources[0].raw, "raw/missing.md");
+    assert_eq!(hit.sources[0].raw, ".wiki/raw/missing.md");
     assert_eq!(hit.sources[0].chunk.as_deref(), Some("p=1-2"));
     assert!(!hit.sources[0].raw_available);
     assert_eq!(hit.sources[0].source, None);
@@ -434,7 +439,7 @@ fn expand_inlines_exactly_one_hop() {
     assert_eq!(
         expanded,
         &vec![ExpandedRef {
-            page: String::from("wiki/concept/b.md"),
+            page: String::from(".wiki/pages/concept/b.md"),
             title: String::from("乙页"),
             summary: String::from("乙摘要"),
         }],
@@ -458,7 +463,7 @@ fn reindex_is_what_makes_a_new_page_searchable() {
     assert!(fx.hits("检索").is_empty());
 
     assert_eq!(fx.reindex(), 2);
-    assert_eq!(fx.only("检索").page, "wiki/concept/new.md");
+    assert_eq!(fx.only("检索").page, ".wiki/pages/concept/new.md");
 }
 
 #[test]
@@ -533,7 +538,7 @@ fn a_plain_query_catches_up_on_the_pages_written_since_the_last_run() {
     let v = stdout_json(&out);
     assert_eq!(v["ok"], true);
     assert_eq!(v["data"]["count"], 1);
-    assert_eq!(v["data"]["hits"][0]["page"], "wiki/concept/order.md");
+    assert_eq!(v["data"]["hits"][0]["page"], ".wiki/pages/concept/order.md");
     assert_eq!(v["data"]["hits"][0]["title"], "订单超时");
 }
 
@@ -543,10 +548,10 @@ fn the_human_readable_form_has_one_block_per_hit() {
     fx.page_with(
         "concept/order.md",
         "id: order\ntitle: 订单超时\ntype: concept\nsummary: 未支付超时\n\
-         status: stable\nupdated: 2026-10-27\nsources:\n  - raw/a.md",
+         status: stable\nupdated: 2026-10-27\nsources:\n  - .wiki/raw/a.md",
         "订单超过三十分钟未支付时关闭。",
     );
-    fx.raw("a.md", "source/a.pdf");
+    fx.raw("a.md", "a.pdf");
 
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
@@ -557,7 +562,7 @@ fn the_human_readable_form_has_one_block_per_hit() {
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("1. 订单超时 [stable] wiki/concept/order.md"),
+        text.contains("1. 订单超时 [stable] .wiki/pages/concept/order.md"),
         "stdout: {text}"
     );
     assert!(
@@ -565,6 +570,9 @@ fn the_human_readable_form_has_one_block_per_hit() {
         "stdout: {text}"
     );
     assert!(text.contains("→ links:"), "stdout: {text}");
-    assert!(text.contains("sources: raw/a.md (ok)"), "stdout: {text}");
+    assert!(
+        text.contains("sources: .wiki/raw/a.md (ok)"),
+        "stdout: {text}"
+    );
     assert!(text.contains("backlinks 0"), "stdout: {text}");
 }

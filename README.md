@@ -1,27 +1,29 @@
 # llm-wiki
 
-维护一份 Karpathy 式 LLM wiki 的命令行工具：源文件进 `source/`，解析成 `raw/` 里的 markdown，由人和 agent 一起写成 `wiki/` 页面，再用 lint、版本快照与 ingest 轮次保证它不腐烂。
+维护一份 Karpathy 式 LLM wiki 的命令行工具：仓库里的任意文件都是源，解析成 `.wiki/raw/` 里的 markdown，由人和 agent 一起写成 `.wiki/pages/` 页面，再用 lint、版本快照与 ingest 轮次保证它不腐烂。工具只往 `.wiki/` 里写，源文件永远只读。
 
 ## 服务说明
 
-五个目录层，全部在仓库里，没有服务端：
+没有服务端，只有一个隐藏目录 `.wiki/`。引擎之外的一切都是只读的源：
 
 | 层 | 位置 | 说明 |
 |---|---|---|
-| 契约 | `wiki.toml`、`SCHEMA.md` | 配置与页面类型枚举，人和 agent 都读 |
-| 源 | `source/` | 唯一输入，工具只读 |
-| 中间层 | `raw/` | 解析产物，可重建；frontmatter 记录来源、哈希、解析后端 |
-| 知识层 | `wiki/` | 页面、`index.md`、`log.md`、`audit/`、`archive/` |
-| 引擎 | `.wiki/` | SQLite 账本、暂存区、版本快照、会话、锁 |
+| 源 | 仓库根（`.wiki/` 之外） | 唯一输入，任意格式，工具只读；`[scan].ignore` 可排除目录 |
+| 契约 | `.wiki/wiki.toml`、`.wiki/SCHEMA.md` | 配置与页面类型枚举，人和 agent 都读 |
+| 中间层 | `.wiki/raw/` | 解析产物，可重建；frontmatter 记录来源、哈希、解析后端 |
+| 知识层 | `.wiki/pages/` | 页面、`index.md`、`log.md`、`audit/`、`archive/` |
+| 引擎状态 | `.wiki/` 其余 | SQLite 账本、暂存区、版本快照、会话、锁 |
+
+写入边界是结构性的：契约、页面、账本全在 `.wiki/` 里，手写 `[paths]` 也移不出去。
 
 一条源文件的完整生命周期：
 
-1. **扫描**：`scan` 对比 `source/` 与账本 `state.db`，得出新增 / 修改 / 删除 / 改名。
-2. **解析**：`convert` 把源交给解析后端，写 `raw/<key>.md`，frontmatter 记录来源、`source_hash`、`parser` 与 `pin`。
-3. **成页**：agent 读 `raw/`，把候选页写进 `.wiki/staging/<type>/<id>.md`；`ingest begin / commit / abort` 管住一轮的读写。
-4. **发布**：`approve --confirm` 把候选合并进 `wiki/` 并重建 `index.md`、追加 `log.md`；`reject` 记录原因后丢弃。
+1. **扫描**：`scan` 对比仓库根与账本 `state.db`，得出新增 / 修改 / 删除 / 改名。
+2. **解析**：`convert` 把源交给解析后端，写 `.wiki/raw/<key>.md`，frontmatter 记录来源、`source_hash`、`parser` 与 `pin`。
+3. **成页**：agent 读 `.wiki/raw/`，把候选页写进 `.wiki/staging/<type>/<id>.md`；`ingest begin / commit / abort` 管住一轮的读写。
+4. **发布**：`approve --confirm` 把候选合并进 `.wiki/pages/` 并重建 `index.md`、追加 `log.md`；`reject` 记录原因后丢弃。
 5. **校验**：`lint` 跑十三条规则，`--fix` 修掉不需要判断的机械缺陷。
-6. **留痕**：`checkpoint` 给 `wiki/` 拍版本快照；`sync` 把「扫描 → 转换 → 稳定门槛 → 审计」串成无人值守的一轮。
+6. **留痕**：`checkpoint` 给 `.wiki/pages/` 拍版本快照；`sync` 把「扫描 → 转换 → 稳定门槛 → 审计」串成无人值守的一轮。
 7. **检索与续命**：`query` 用 FTS5 检索全库；`archive seal` 把会话摘要封存，`recall` 检索摘要，`archive purge` 按容量与时限清理。
 
 解析层是可替换的后端集合：文本、HTML、图片、PDF 各有一个内置后端，另有一个可选的 `external-http` 后端把扫描件之类「内置读不出字」的文档交给外部 HTTP 服务。分层、数据流、模块表与不变量见 [架构与模块](docs/readme/architecture.md)，后端选择与回退规则见 [解析后端与 auto 回退](docs/readme/parse/external.md)。
@@ -50,17 +52,19 @@ CARGO_HOME=$PWD/.cargo-home CARGO_NET_OFFLINE=true cargo clippy --all-targets --
 在任意仓库根目录初始化并自检：
 
 ```bash
-llm-wiki init              # 写 wiki.toml、SCHEMA.md，建 source/ raw/ wiki/ .wiki/
-llm-wiki init --force      # 覆盖重写这两份契约文件（不动 source/ 与 wiki/ 页面）
+llm-wiki init              # 写 .wiki/wiki.toml、.wiki/SCHEMA.md，建 .wiki/ 下的目录
+llm-wiki init --force      # 覆盖重写这两份契约文件（不动源文件与页面）
 llm-wiki doctor            # 十一项健康检查，有 Fail 则退出码 1
 llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"checks":[...]}}
 ```
 
-`init` 生成的 `.wiki/.gitignore` 只忽略可重建的状态（`cache/`、`staging/`、`sessions/`、`state.db*`、`lock`）与本地 CLI 副本（`llm-wiki`）；`wiki/`、`raw/`、`source/` 与 `.wiki/versions/` 都进 git。CI 在 Ubuntu / macOS / Windows 三平台跑 `build`、`test`、`test --release`、`fmt --check`、`clippy -D warnings`，不安装 poppler/pandoc（PDF 测试用模板现造）。
+`init` 生成的 `.wiki/.gitignore` 只有一行 `*`：**整个引擎都不进 git**，包括契约、页面、账本与版本快照；仓库里进 git 的只有源文件。工具绝不修改仓库根的 `.gitignore`。CI 在 Ubuntu / macOS / Windows 三平台跑 `build`、`test`、`test --release`、`fmt --check`、`clippy -D warnings`，不安装 poppler/pandoc（PDF 测试用模板现造）。
 
 ### Agent skills 安装
 
-6 个 skill 是给 Claude Code 用的薄指令层，所有簿记与判定逻辑都在 `llm-wiki` 里。
+1 个 skill 是给 Claude Code 用的薄指令层，所有簿记与判定逻辑都在 `llm-wiki` 里。
+`skills/llm-wiki/SKILL.md` 是入口与路由，`skills/llm-wiki/references/` 下是六份按需阅读的手册
+（扫描、摄取、解析、审计、同步、排障）：agent 只在需要时读对应那份，不把全部细节塞进上下文。
 skill 只有 markdown，复制即可；CLI 是另一个可执行文件，按下面的方式放到能调用的地方。
 
 ```bash
@@ -110,31 +114,32 @@ git tag v0.1.1 && git push origin v0.1.1
 
 没有 tag 时也可以去 Actions 页面手动跑 `Release`（`workflow_dispatch`）。
 
-| skill | 管什么 |
+| 文件 | 管什么 |
 |---|---|
-| `llm-wiki` | 总纲：判断该调谁、把 `--json` 翻成人话、决策门四选项 |
-| `wiki-scan` | `scan` / `convert`，解释七种变更 |
-| `wiki-parse` | 单文件解析诊断、后端选择、外部服务配置 |
-| `wiki-ingest` | `ingest begin/commit/abort`，唯一要 agent 写正文的环节 |
-| `wiki-audit` | `lint` 与判断层分析（矛盾、过时、孤儿、重复） |
-| `wiki-sync` | 定时同步、读变更报告、失败退避 |
+| `skills/llm-wiki/SKILL.md` | 入口：边界、路由、最小序列、决策门、退出码、把 `--json` 翻成人话 |
+| `references/scan.md` | `scan` / `convert`，七种变更的判读 |
+| `references/ingest.md` | `ingest begin/commit/abort`，唯一要 agent 写正文的环节 |
+| `references/parse.md` | 单文件解析诊断、后端选择、外部服务配置 |
+| `references/audit.md` | `lint` 与判断层分析（矛盾、过时、孤儿、重复） |
+| `references/sync.md` | 定时同步、读变更报告、失败退避 |
+| `references/troubleshooting.md` | 错误码、`doctor` 检查项、旧布局与常见症状 |
 
 装完在目标仓库根目录跑 `llm-wiki doctor` 自检。
 
 ## 服务操作说明
 
 第一次使用先初始化；其余命令在未初始化的仓库里会直接以 `E_NOT_INITIALISED`
-（exit 2）拒绝，并告诉你缺的是 `wiki.toml` 还是 `wiki/`：
+（exit 2）拒绝，并告诉你缺的是 `.wiki/wiki.toml` 还是 `.wiki/pages/`：
 
 ```bash
-llm-wiki init          # 写 wiki.toml / SCHEMA.md，建目录；可重复跑，已有文件不覆盖
+llm-wiki init          # 写 .wiki/wiki.toml / .wiki/SCHEMA.md，建目录；可重复跑，已有文件不覆盖
 llm-wiki doctor        # 在 init 前后都能跑，用来诊断
 ```
 
 日常一轮，按顺序：
 
 ```bash
-llm-wiki scan                              # 报告 source/ 的变更
+llm-wiki scan                              # 报告仓库根的变更
 llm-wiki convert --limit 5                 # 最多转换 5 个待转换源
 llm-wiki convert --key notes/a.md          # 指定源，已转换也重转
 llm-wiki parse --key docs/a.pdf            # 只看解析结果，不写任何文件
@@ -143,7 +148,7 @@ llm-wiki ingest begin --sources notes/a.md --pages concept/alpha
 # ……agent 把候选页写进 .wiki/staging/concept/alpha.md……
 llm-wiki ingest commit --pages concept/alpha
 llm-wiki lint --fix                        # 先修机械缺陷，再报告剩下的
-llm-wiki approve --confirm                 # 合并候选进 wiki/
+llm-wiki approve --confirm                 # 合并候选进 .wiki/pages/
 llm-wiki checkpoint --label "after alpha"
 
 llm-wiki graph                            # 链接图：枢纽页、孤立页、断链
@@ -165,14 +170,14 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `version` | 打印版本 |
 | `doctor` | 检查契约、目录、账本、FTS5、gitignore、锁、暂存区、token、外部后端 |
 | `init [--force]` | 写契约文件、建引擎目录 |
-| `scan [--apply-moves]` | 报告 `source/`、`raw/` 与账本的差异；`--apply-moves` 一并迁移改名 |
+| `scan [--apply-moves]` | 报告仓库根、`.wiki/raw/` 与账本的差异；`--apply-moves` 一并迁移改名 |
 | `convert [--key <KEY>] [--limit <N>]` | 转换待处理源（默认 10）；单个失败不中断 |
 | `parse --key <KEY> [--chunk <N>] [--range <A-B>] [--force-large]` | 只显示解析结果，不写文件；大文件按需分块；`--force-large` 越过尺寸上限只为看一眼 |
 | `ingest begin [--sources <K>]... [--pages <P>]... [--dry-run]` | 开一轮，报告受影响的页面 |
 | `ingest commit [--pages <P>]...` | 关闭本轮，刷新候选页与暂存清单 |
 | `ingest abort` | 丢弃本轮，保留已写候选页 |
 | `lint [--strict] [--fix]` | 十三条规则；`--strict` 让警告也失败 |
-| `checkpoint --label <LABEL>` | 把 `wiki/` 拍成新版本快照 |
+| `checkpoint --label <LABEL>` | 把 `.wiki/pages/` 拍成新版本快照 |
 | `approve [--confirm]` | 发布候选；不带 `--confirm` 只报告（exit 3） |
 | `reject --reason <REASON>` | 丢弃候选并记录原因 |
 | `instruct --text <TEXT>` | 给下一次 agent 会话留话（写入 `.wiki/next-instruction.md`） |
@@ -204,10 +209,10 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 
 ## 服务特殊说明
 
-- 配置只有仓库根目录的 `wiki.toml`（另有人类可读的 `SCHEMA.md`）。`[parse]` 与 `[parse.external]` 的每个键、默认值与校验规则见 [parse 配置](docs/readme/config/parse.md)；`[paths]`、`[formats]`、`[schema]`、`[ingest]`、`[audit]`、`[versions]`、`[sync]`、`[memory]` 的行为分别由对应模块读取。
+- 配置只有 `.wiki/wiki.toml`（另有人类可读的 `.wiki/SCHEMA.md`）。`[parse]` 与 `[parse.external]` 的每个键、默认值与校验规则见 [parse 配置](docs/readme/config/parse.md)；`[scan]`、`[formats]`、`[schema]`、`[ingest]`、`[audit]`、`[versions]`、`[sync]`、`[memory]` 的行为分别由对应模块读取。`[paths]` 已固定为 `.wiki/` 内，写进配置也会被忽略。
 - 解析外部服务的 token **只从环境变量读**：`[parse.external].auth_env` 存的是变量名，不是 token 字面量。把 `Bearer xxx`、`sk-...` 这类值写进 `auth_env` 会被 `Config::validate` 以 `E_TOKEN_IN_CONFIG` 拒绝，`doctor` 的 `token` 检查也会报 Fail。
 - `parse.primary` 取 `external` 却没写 `[parse.external]` 时，`doctor` 的 `external_backend` 直接报 Fail（每个解析都会以 `E_NO_EXTERNAL` 失败）；服务不可达只报 Warn，因为服务可能在别处恢复。
-- 内置解析后端的 id 会写进 `raw/` frontmatter：`builtin-text`、`builtin-html`、`builtin-asset`、`builtin-pdf`、`external-http`。升级解析器后可以据此筛出需要重转的源。
+- 内置解析后端的 id 会写进 `.wiki/raw/` frontmatter：`builtin-text`、`builtin-html`、`builtin-asset`、`builtin-pdf`、`external-http`。升级解析器后可以据此筛出需要重转的源。
 - 常见错误码：`E_NO_PARSER`（无后端认领扩展名）、`E_BAD_SOURCE`（后端认领但解不开）、`E_NO_AUTH_ENV`、`E_EXTERNAL`、`E_BOTH_FAILED`（`auto` 下内置与外部都失败）、`E_BAD_CONFIG`（外部后端配置残缺）、`E_OVERSIZE`（超过 `max_source_bytes`）、`E_STAGING_CORRUPT` / `E_STAGING_DRIFT`（暂存区与清单不一致）、`E_NO_SUMMARY` / `E_ALREADY_SEALED`（封存前置条件不满足）、`E_LOCKED`（仓库被占用）。
 - 版本快照在 `.wiki/versions/vNNN/`，只保留最近 `[versions].keep` 份（默认 5）；`log.md` 记录每次 `approve` / `checkpoint` / `seal`。
 - 仓库锁 `.wiki/lock` 的 TTL 是 600 秒；崩溃残留会被下一次运行回收，只有真正被别的进程持有时才以 exit 4 退出。

@@ -45,7 +45,7 @@ fn repo() -> TempDir {
     let d = TempDir::new().unwrap();
     let (code, _) = call(d.path(), &["init"]);
     assert_eq!(code, 0, "init must succeed in a fresh directory");
-    fs::write(d.path().join("source/a.md"), "# A\n\nalpha body\n").unwrap();
+    fs::write(d.path().join("a.md"), "# A\n\nalpha body\n").unwrap();
     d
 }
 
@@ -60,7 +60,7 @@ fn every_repository_command_refuses_an_uninitialised_directory() {
         vec!["lint"],
         vec!["graph"],
         vec!["sync", "--dry-run"],
-        vec!["ingest", "begin", "--sources", "raw/a.md"],
+        vec!["ingest", "begin", "--sources", ".wiki/raw/a.md"],
         vec!["approve"],
         vec!["checkpoint", "--label", "x"],
         vec!["query", "alpha"],
@@ -71,7 +71,7 @@ fn every_repository_command_refuses_an_uninitialised_directory() {
         assert_eq!(code, 2, "`{}` must be a usage error: {v}", args.join(" "));
         assert_eq!(v["ok"], false, "`{}`: {v}", args.join(" "));
         assert_eq!(v["error"]["code"], "E_NOT_INITIALISED", "{v}");
-        assert_eq!(v["error"]["detail"]["missing"], "wiki.toml", "{v}");
+        assert_eq!(v["error"]["detail"]["missing"], ".wiki/wiki.toml", "{v}");
         assert_eq!(v["error"]["detail"]["kind"], "file", "{v}");
         assert!(
             v["error"]["detail"]["hint"]
@@ -89,7 +89,7 @@ fn the_message_names_the_missing_path_and_the_command_that_creates_it() {
     let out = run(d.path(), &["scan"]);
     assert_eq!(out.status.code(), Some(2));
     let text = String::from_utf8_lossy(&out.stderr);
-    assert!(text.contains("wiki.toml"), "stderr: {text}");
+    assert!(text.contains(".wiki/wiki.toml"), "stderr: {text}");
     assert!(text.contains("not initialised"), "stderr: {text}");
     assert!(text.contains("llm-wiki init"), "stderr: {text}");
 }
@@ -97,11 +97,11 @@ fn the_message_names_the_missing_path_and_the_command_that_creates_it() {
 #[test]
 fn a_missing_product_directory_is_refused_even_when_the_contract_exists() {
     let d = repo();
-    fs::remove_dir_all(d.path().join("wiki")).unwrap();
+    fs::remove_dir_all(d.path().join(".wiki/pages")).unwrap();
     let (code, v) = call(d.path(), &["lint"]);
     assert_eq!(code, 2, "{v}");
     assert_eq!(v["error"]["code"], "E_NOT_INITIALISED", "{v}");
-    assert_eq!(v["error"]["detail"]["missing"], "wiki", "{v}");
+    assert_eq!(v["error"]["detail"]["missing"], ".wiki/pages", "{v}");
     assert_eq!(v["error"]["detail"]["kind"], "dir", "{v}");
 }
 
@@ -119,17 +119,23 @@ fn init_is_idempotent_so_the_advice_is_always_safe_to_follow() {
 }
 
 #[test]
-fn a_fresh_checkout_without_the_engine_directory_just_runs() {
-    // `.wiki/` is ignored by git, so a clone never has it. Refusing there would
-    // make "clone and run" impossible; the engine is provisioned instead.
+fn an_engine_deleted_in_full_asks_for_init() {
+    // The contract lives inside the engine, and the whole engine is out of git.
+    // A clone therefore starts with no wiki at all: the tool says how to make
+    // one instead of silently creating a default engine in an arbitrary
+    // directory.
     let d = repo();
     fs::remove_dir_all(d.path().join(".wiki")).unwrap();
     let (code, v) = call(d.path(), &["scan"]);
-    assert_eq!(code, 0, "scan must provision the engine directory: {v}");
-    assert!(d.path().join(".wiki").is_dir());
-    assert!(d.path().join(".wiki/staging").is_dir());
-    assert!(d.path().join(".wiki/cache").is_dir());
-    assert!(d.path().join(".wiki/versions").is_dir());
+    assert_eq!(code, 2, "no contract, no scan: {v}");
+    assert_eq!(v["error"]["code"], "E_NOT_INITIALISED", "{v}");
+    assert!(
+        v["error"]["detail"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("llm-wiki init"),
+        "the hint must name the fix: {v}"
+    );
 }
 
 #[test]

@@ -49,14 +49,14 @@ fn manifest_path(root: &std::path::Path) -> std::path::PathBuf {
 #[test]
 fn staging_is_a_real_copy_and_editing_it_leaves_wiki_untouched() {
     let (dir, cfg) = boot();
-    fs::create_dir_all(dir.path().join("wiki/concept")).unwrap();
-    fs::write(dir.path().join("wiki/concept/a.md"), "A").unwrap();
+    fs::create_dir_all(dir.path().join(".wiki/pages/concept")).unwrap();
+    fs::write(dir.path().join(".wiki/pages/concept/a.md"), "A").unwrap();
 
     let out = staging::ensure(dir.path(), &cfg).unwrap();
     assert!(out.created);
     assert_eq!(out.copied, 1);
 
-    let approved = dir.path().join("wiki/concept/a.md");
+    let approved = dir.path().join(".wiki/pages/concept/a.md");
     let staged = dir.path().join(".wiki/staging/concept/a.md");
     assert_eq!(fs::read_to_string(&staged).unwrap(), "A");
 
@@ -82,7 +82,7 @@ fn staging_is_a_real_copy_and_editing_it_leaves_wiki_untouched() {
 #[test]
 fn ensure_twice_does_not_recopy() {
     let (dir, cfg) = boot();
-    fs::write(dir.path().join("wiki/index.md"), "# 索引\n").unwrap();
+    fs::write(dir.path().join(".wiki/pages/index.md"), "# 索引\n").unwrap();
 
     let first = staging::ensure(dir.path(), &cfg).unwrap();
     assert!(first.created);
@@ -102,9 +102,9 @@ fn ensure_twice_does_not_recopy() {
 #[test]
 fn ensure_rebuilds_after_staging_is_deleted() {
     let (dir, cfg) = boot();
-    fs::create_dir_all(dir.path().join("wiki/concept")).unwrap();
-    fs::write(dir.path().join("wiki/concept/a.md"), "A").unwrap();
-    fs::write(dir.path().join("wiki/index.md"), "# 索引\n").unwrap();
+    fs::create_dir_all(dir.path().join(".wiki/pages/concept")).unwrap();
+    fs::write(dir.path().join(".wiki/pages/concept/a.md"), "A").unwrap();
+    fs::write(dir.path().join(".wiki/pages/index.md"), "# 索引\n").unwrap();
     staging::ensure(dir.path(), &cfg).unwrap();
 
     fs::remove_dir_all(dir.path().join(".wiki/staging")).unwrap();
@@ -121,7 +121,7 @@ fn ensure_rebuilds_after_staging_is_deleted() {
 #[test]
 fn ensure_keeps_unmerged_manifest_entries() {
     let (dir, cfg) = boot();
-    fs::write(dir.path().join("wiki/index.md"), "# 索引\n").unwrap();
+    fs::write(dir.path().join(".wiki/pages/index.md"), "# 索引\n").unwrap();
     staging::ensure(dir.path(), &cfg).unwrap();
 
     let mut manifest = staging::Manifest::load(dir.path()).unwrap();
@@ -156,14 +156,14 @@ fn write_page_accumulates_pages_per_source_without_duplicates() {
         dir.path(),
         &cfg,
         "concept/a",
-        &page("a", "甲", &["raw/x.md#p=1", "raw/x.md#p=2"]),
+        &page("a", "甲", &[".wiki/raw/x.md#p=1", ".wiki/raw/x.md#p=2"]),
     )
     .unwrap();
     staging::write_page(
         dir.path(),
         &cfg,
         "concept/b",
-        &page("b", "乙", &["raw/x.md"]),
+        &page("b", "乙", &[".wiki/raw/x.md"]),
     )
     .unwrap();
     // Writing the same page again must not append it a second time.
@@ -171,7 +171,7 @@ fn write_page_accumulates_pages_per_source_without_duplicates() {
         dir.path(),
         &cfg,
         "concept/a",
-        &page("a", "甲", &["raw/x.md"]),
+        &page("a", "甲", &[".wiki/raw/x.md"]),
     )
     .unwrap();
 
@@ -186,7 +186,7 @@ fn write_page_accumulates_pages_per_source_without_duplicates() {
 #[test]
 fn empty_wiki_yields_an_empty_manifest() {
     let (dir, cfg) = boot();
-    fs::remove_dir_all(dir.path().join("wiki")).unwrap();
+    fs::remove_dir_all(dir.path().join(".wiki/pages")).unwrap();
 
     let out = staging::ensure(dir.path(), &cfg).unwrap();
     assert!(out.created);
@@ -204,7 +204,7 @@ fn empty_wiki_yields_an_empty_manifest() {
 #[test]
 fn corrupt_manifest_is_reported_not_rebuilt() {
     let (dir, cfg) = boot();
-    fs::write(dir.path().join("wiki/index.md"), "# 索引\n").unwrap();
+    fs::write(dir.path().join(".wiki/pages/index.md"), "# 索引\n").unwrap();
     staging::ensure(dir.path(), &cfg).unwrap();
 
     let half = "{\"sources\": {";
@@ -237,7 +237,7 @@ fn write_page_rejects_paths_that_escape_staging() {
 #[test]
 fn pending_hashes_lists_only_sources_that_moved_since_baseline() {
     let (dir, cfg) = boot();
-    fs::write(dir.path().join("wiki/index.md"), "# 索引\n").unwrap();
+    fs::write(dir.path().join(".wiki/pages/index.md"), "# 索引\n").unwrap();
     staging::ensure(dir.path(), &cfg).unwrap();
 
     let mut manifest = staging::Manifest::default();
@@ -270,13 +270,13 @@ fn pending_hashes_lists_only_sources_that_moved_since_baseline() {
 #[test]
 fn ensure_copies_new_wiki_pages_without_overwriting_candidates() {
     let (dir, cfg) = boot();
-    fs::write(dir.path().join("wiki/index.md"), "# 索引\n").unwrap();
+    fs::write(dir.path().join(".wiki/pages/index.md"), "# 索引\n").unwrap();
     staging::ensure(dir.path(), &cfg).unwrap();
 
     // A candidate edit in staging must survive a later ensure.
     fs::write(dir.path().join(".wiki/staging/index.md"), "# 候选索引\n").unwrap();
-    fs::create_dir_all(dir.path().join("wiki/concept")).unwrap();
-    fs::write(dir.path().join("wiki/concept/b.md"), "B").unwrap();
+    fs::create_dir_all(dir.path().join(".wiki/pages/concept")).unwrap();
+    fs::write(dir.path().join(".wiki/pages/concept/b.md"), "B").unwrap();
 
     let out = staging::ensure(dir.path(), &cfg).unwrap();
     assert!(!out.created);
@@ -295,7 +295,7 @@ fn ensure_copies_new_wiki_pages_without_overwriting_candidates() {
 #[test]
 fn write_page_writes_the_page_and_creates_the_manifest() {
     let (dir, cfg) = boot();
-    let content = page("a", "甲", &["raw/doc.md"]);
+    let content = page("a", "甲", &[".wiki/raw/doc.md"]);
     staging::write_page(dir.path(), &cfg, "concept/a", &content).unwrap();
 
     assert_eq!(
@@ -303,7 +303,7 @@ fn write_page_writes_the_page_and_creates_the_manifest() {
         content
     );
     assert!(
-        !dir.path().join("wiki/concept/a.md").exists(),
+        !dir.path().join(".wiki/pages/concept/a.md").exists(),
         "write_page 只写候选区"
     );
     let manifest = staging::Manifest::load(dir.path()).unwrap();
@@ -350,7 +350,7 @@ fn a_missing_manifest_loads_as_empty() {
 #[test]
 fn pending_json_from_ingest_begin_takes_precedence() {
     let (dir, cfg) = boot();
-    fs::write(dir.path().join("wiki/index.md"), "# 索引\n").unwrap();
+    fs::write(dir.path().join(".wiki/pages/index.md"), "# 索引\n").unwrap();
     staging::ensure(dir.path(), &cfg).unwrap();
     let mut manifest = staging::Manifest::load(dir.path()).unwrap();
     manifest
@@ -384,7 +384,7 @@ fn pending_json_from_ingest_begin_takes_precedence() {
 #[test]
 fn a_lost_manifest_beside_candidates_is_not_rebuilt() {
     let (dir, cfg) = boot();
-    let content = page("a", "甲", &["raw/x.md"]);
+    let content = page("a", "甲", &[".wiki/raw/x.md"]);
     staging::write_page(dir.path(), &cfg, "concept/a", &content).unwrap();
     fs::remove_file(manifest_path(dir.path())).unwrap();
 

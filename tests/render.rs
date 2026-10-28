@@ -27,7 +27,7 @@ fn meta(id: &str, title: &str, typ: &str, status: &str) -> PageMeta {
 
 /// A page with the minimal frontmatter the reader accepts.
 fn write_page(root: &Path, typ: &str, id: &str, title: &str) {
-    let path = root.join("wiki").join(typ).join(format!("{id}.md"));
+    let path = root.join(".wiki/pages").join(typ).join(format!("{id}.md"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
@@ -236,7 +236,7 @@ fn write_index_reads_pages_and_leaves_log_and_audit_alone() {
     write_page(root, "entity", "beta", "乙");
     write_page(root, "audit", "audit-page", "审计");
 
-    let log = root.join("wiki/log.md");
+    let log = root.join(".wiki/pages/log.md");
     let log_before = "# 日志\n\n## [2026-01-01] init | 初始化\n";
     std::fs::write(&log, log_before).unwrap();
 
@@ -244,7 +244,7 @@ fn write_index_reads_pages_and_leaves_log_and_audit_alone() {
     let written = render::write_index(root, &cfg).unwrap();
     assert_eq!(written, 2, "audit/ 下的页面不算");
 
-    let index = std::fs::read_to_string(root.join("wiki/index.md")).unwrap();
+    let index = std::fs::read_to_string(root.join(".wiki/pages/index.md")).unwrap();
     assert!(index.contains("甲"));
     assert!(index.contains("乙"));
     assert!(!index.contains("审计"));
@@ -255,13 +255,13 @@ fn write_index_reads_pages_and_leaves_log_and_audit_alone() {
 fn write_index_overwrites_a_stale_index() {
     let d = tempdir().unwrap();
     let root = d.path();
-    std::fs::create_dir_all(root.join("wiki")).unwrap();
-    std::fs::write(root.join("wiki/index.md"), "陈旧内容\n").unwrap();
+    std::fs::create_dir_all(root.join(".wiki/pages")).unwrap();
+    std::fs::write(root.join(".wiki/pages/index.md"), "陈旧内容\n").unwrap();
     write_page(root, "concept", "alpha", "甲");
 
     let cfg = Config::default();
     assert_eq!(render::write_index(root, &cfg).unwrap(), 1);
-    let index = std::fs::read_to_string(root.join("wiki/index.md")).unwrap();
+    let index = std::fs::read_to_string(root.join(".wiki/pages/index.md")).unwrap();
     assert!(!index.contains("陈旧内容"));
     assert!(index.contains("甲"));
 }
@@ -302,7 +302,7 @@ fn index_leaves_the_archive_out() {
 
     let count = render::write_index(d.path(), &cfg).unwrap();
     assert_eq!(count, 1, "a summary is not a catalogue entry");
-    let index = std::fs::read_to_string(d.path().join("wiki/index.md")).unwrap();
+    let index = std::fs::read_to_string(d.path().join(".wiki/pages/index.md")).unwrap();
     assert!(index.contains("甲"), "{index}");
     assert!(!index.contains("五月"), "{index}");
     // The index is the only consumer that skips the archive; `lint` still reads

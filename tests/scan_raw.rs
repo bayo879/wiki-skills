@@ -51,8 +51,8 @@ fn metadata_only_change_on_source_does_not_trigger_raw_change() {
     let cfg = Config::load(d.path()).unwrap();
     let mut s = Store::open(&d.path().join(".wiki/state.db")).unwrap();
     s.migrate().unwrap();
-    fs::write(d.path().join("raw/a.md"), "正文").unwrap();
-    let hash = digest_of(d.path(), "raw/a.md");
+    fs::write(d.path().join(".wiki/raw/a.md"), "正文").unwrap();
+    let hash = digest_of(d.path(), ".wiki/raw/a.md");
     s.upsert_raw(&raw_row("a.md", &hash)).unwrap();
 
     let changes = scan::scan_raw(d.path(), &cfg, &s).unwrap();
@@ -61,7 +61,7 @@ fn metadata_only_change_on_source_does_not_trigger_raw_change() {
         .iter()
         .all(|c| c.kind != scan::ChangeKind::Changed));
 
-    fs::write(d.path().join("raw/a.md"), "正文变了").unwrap();
+    fs::write(d.path().join(".wiki/raw/a.md"), "正文变了").unwrap();
     let changes = scan::scan_raw(d.path(), &cfg, &s).unwrap();
     assert_eq!(
         changes
@@ -76,7 +76,7 @@ fn metadata_only_change_on_source_does_not_trigger_raw_change() {
 #[test]
 fn classifies_new_and_keeps_only_the_first_duplicate() {
     let (d, s, cfg) = setup();
-    let raw = d.path().join("raw");
+    let raw = d.path().join(".wiki/raw");
     fs::write(raw.join("a.md"), "alpha").unwrap();
     fs::write(raw.join("b.md"), "same").unwrap();
     fs::write(raw.join("c.md"), "same").unwrap();
@@ -93,14 +93,14 @@ fn classifies_new_and_keeps_only_the_first_duplicate() {
     assert_eq!(kind("c.md"), Some(scan::ChangeKind::Duplicate));
     // A duplicate still carries the digest it collided on.
     let c = rep.changes.iter().find(|c| c.key == "c.md").unwrap();
-    assert_eq!(c.hash, Some(digest_of(d.path(), "raw/b.md")));
+    assert_eq!(c.hash, Some(digest_of(d.path(), ".wiki/raw/b.md")));
 }
 
 #[test]
 fn raw_keys_are_relative_to_the_raw_directory() {
     let (d, s, cfg) = setup();
-    fs::create_dir_all(d.path().join("raw/sub")).unwrap();
-    fs::write(d.path().join("raw/sub/note.md"), "nested").unwrap();
+    fs::create_dir_all(d.path().join(".wiki/raw/sub")).unwrap();
+    fs::write(d.path().join(".wiki/raw/sub/note.md"), "nested").unwrap();
 
     let rep = scan::scan_raw(d.path(), &cfg, &s).unwrap();
     assert_eq!(rep.changes.len(), 1);
@@ -111,7 +111,7 @@ fn raw_keys_are_relative_to_the_raw_directory() {
 #[test]
 fn dot_paths_under_raw_are_skipped() {
     let (d, s, cfg) = setup();
-    let raw = d.path().join("raw");
+    let raw = d.path().join(".wiki/raw");
     fs::write(raw.join(".draft.md"), "hidden").unwrap();
     fs::create_dir_all(raw.join(".git")).unwrap();
     fs::write(raw.join(".git/inside.md"), "hidden").unwrap();
@@ -136,11 +136,11 @@ fn missing_raw_key_is_reported_without_a_hash() {
 #[test]
 fn pinned_raw_edited_by_hand_is_reported_changed() {
     let (d, mut s, cfg) = setup();
-    let raw = d.path().join("raw");
+    let raw = d.path().join(".wiki/raw");
     let pinned = "---\nsource: source/a.txt\nparser: builtin-text\n\
                   converted_at: 2026-10-27T10:00:00Z\npin: true\n---\n正文\n";
     fs::write(raw.join("a.md"), pinned).unwrap();
-    s.upsert_raw(&raw_row("a.md", &digest_of(d.path(), "raw/a.md")))
+    s.upsert_raw(&raw_row("a.md", &digest_of(d.path(), ".wiki/raw/a.md")))
         .unwrap();
 
     // The pin is convert's concern: the scan accepts the recorded content.
@@ -152,14 +152,17 @@ fn pinned_raw_edited_by_hand_is_reported_changed() {
     let rep = scan::scan_raw(d.path(), &cfg, &s).unwrap();
     assert_eq!(count(&rep, scan::ChangeKind::Changed), 1);
     assert_eq!(rep.changes[0].key, "a.md");
-    assert_eq!(rep.changes[0].hash, Some(digest_of(d.path(), "raw/a.md")));
+    assert_eq!(
+        rep.changes[0].hash,
+        Some(digest_of(d.path(), ".wiki/raw/a.md"))
+    );
 }
 
 #[test]
 fn converted_at_does_not_participate_in_the_comparison() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("raw/a.md"), "正文").unwrap();
-    s.upsert_raw(&raw_row("a.md", &digest_of(d.path(), "raw/a.md")))
+    fs::write(d.path().join(".wiki/raw/a.md"), "正文").unwrap();
+    s.upsert_raw(&raw_row("a.md", &digest_of(d.path(), ".wiki/raw/a.md")))
         .unwrap();
     let before = scan::scan_raw(d.path(), &cfg, &s).unwrap();
     assert!(before.changes.is_empty(), "{:?}", before.changes);
@@ -175,10 +178,10 @@ fn converted_at_does_not_participate_in_the_comparison() {
 #[test]
 fn crlf_and_trailing_newline_differences_are_changed() {
     let (d, mut s, cfg) = setup();
-    let raw = d.path().join("raw");
+    let raw = d.path().join(".wiki/raw");
 
     fs::write(raw.join("a.md"), "body\n").unwrap();
-    s.upsert_raw(&raw_row("a.md", &digest_of(d.path(), "raw/a.md")))
+    s.upsert_raw(&raw_row("a.md", &digest_of(d.path(), ".wiki/raw/a.md")))
         .unwrap();
     assert!(scan::scan_raw(d.path(), &cfg, &s)
         .unwrap()
@@ -208,8 +211,8 @@ fn crlf_and_trailing_newline_differences_are_changed() {
 #[test]
 fn scan_raw_is_read_only_and_stable() {
     let (d, s, cfg) = setup();
-    fs::write(d.path().join("raw/a.md"), "alpha").unwrap();
-    fs::write(d.path().join("raw/b.md"), "beta").unwrap();
+    fs::write(d.path().join(".wiki/raw/a.md"), "alpha").unwrap();
+    fs::write(d.path().join(".wiki/raw/b.md"), "beta").unwrap();
     let ledger = s.all_raws().unwrap();
 
     let first = scan::scan_raw(d.path(), &cfg, &s).unwrap();
@@ -221,7 +224,7 @@ fn scan_raw_is_read_only_and_stable() {
 #[test]
 fn convert_records_the_digest_that_scan_recomputes() {
     let (d, mut s, cfg) = setup();
-    fs::write(d.path().join("source/a.txt"), "正文\n").unwrap();
+    fs::write(d.path().join("a.txt"), "正文\n").unwrap();
 
     let outcome = convert::convert_one(d.path(), &cfg, &mut s, "a.txt").unwrap();
     assert!(!outcome.skipped);
@@ -230,26 +233,26 @@ fn convert_records_the_digest_that_scan_recomputes() {
     let recorded = s.get_raw(raw_key).unwrap().unwrap();
     assert_eq!(recorded.source_key, "a.txt");
     assert!(!recorded.converted_at.is_empty());
-    assert_eq!(recorded.hash, digest_of(d.path(), "raw/a.md"));
+    assert_eq!(recorded.hash, digest_of(d.path(), ".wiki/raw/a.md"));
     // The ledger key space is `raw/`-relative, not a repository path.
-    assert!(s.get_raw("raw/a.md").unwrap().is_none());
+    assert!(s.get_raw(".wiki/raw/a.md").unwrap().is_none());
 
     // The closed loop: a conversion must not look like pending work.
     let rep = scan::scan_raw(d.path(), &cfg, &s).unwrap();
     assert!(rep.changes.is_empty(), "{:?}", rep.changes);
 
     // Re-converting a changed source refreshes the row and stays in the loop.
-    fs::write(d.path().join("source/a.txt"), "正文第二版\n").unwrap();
+    fs::write(d.path().join("a.txt"), "正文第二版\n").unwrap();
     convert::convert_one(d.path(), &cfg, &mut s, "a.txt").unwrap();
     let refreshed = s.get_raw(raw_key).unwrap().unwrap();
     assert_ne!(refreshed.hash, recorded.hash);
-    assert_eq!(refreshed.hash, digest_of(d.path(), "raw/a.md"));
+    assert_eq!(refreshed.hash, digest_of(d.path(), ".wiki/raw/a.md"));
     let rep = scan::scan_raw(d.path(), &cfg, &s).unwrap();
     assert!(rep.changes.is_empty(), "{:?}", rep.changes);
 
     // A hand edit after the conversion is the only thing reported.
-    let text = fs::read_to_string(d.path().join("raw/a.md")).unwrap();
-    fs::write(d.path().join("raw/a.md"), format!("{text}补一段\n")).unwrap();
+    let text = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
+    fs::write(d.path().join(".wiki/raw/a.md"), format!("{text}补一段\n")).unwrap();
     let rep = scan::scan_raw(d.path(), &cfg, &s).unwrap();
     assert_eq!(count(&rep, scan::ChangeKind::Changed), 1);
     assert_eq!(rep.changes[0].key, raw_key);
@@ -258,13 +261,13 @@ fn convert_records_the_digest_that_scan_recomputes() {
 #[test]
 fn a_tracked_raw_is_never_demoted_to_a_duplicate() {
     let (d, mut s, cfg) = setup();
-    let raw = d.path().join("raw");
+    let raw = d.path().join(".wiki/raw");
     fs::write(raw.join("a.md"), "same").unwrap();
     fs::write(raw.join("b.md"), "same").unwrap();
     // Only the second key is tracked. Demoting it because an untracked copy
     // now sorts first would ask `sync` to delete a file `convert` owns, and the
     // next conversion would put it back: deduplication stays among `New` files.
-    s.upsert_raw(&raw_row("b.md", &digest_of(d.path(), "raw/b.md")))
+    s.upsert_raw(&raw_row("b.md", &digest_of(d.path(), ".wiki/raw/b.md")))
         .unwrap();
 
     let rep = scan::scan_raw(d.path(), &cfg, &s).unwrap();

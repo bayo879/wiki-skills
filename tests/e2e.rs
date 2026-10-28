@@ -79,7 +79,7 @@ id: alpha
 title: 重试与熔断
 type: concept
 summary: 重试与熔断的取舍
-sources: [\"raw/notes/retry.md\"]
+sources: [\".wiki/raw/notes/retry.md\"]
 status: draft
 updated: 2026-10-27
 ---";
@@ -90,6 +90,15 @@ fn page_body() -> String {
         "# 重试与熔断\n\n{}",
         "重试与熔断的决定逻辑写在这里。".repeat(20)
     )
+}
+
+/// Every regular file outside the engine, keyed by relative path, valued by
+/// content. This is the user's own tree; no command may write there.
+fn outside_engine(root: &Path) -> BTreeMap<String, String> {
+    snapshot(root)
+        .into_iter()
+        .filter(|(path, _)| !path.starts_with(".wiki/"))
+        .collect()
 }
 
 /// Every regular file under `root`, keyed by relative path, valued by content.
@@ -131,22 +140,31 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
             .is_some_and(|created| !created.is_empty()),
         "init reports what it made: {init}"
     );
-    assert!(root.join("wiki.toml").is_file());
-    assert!(root.join("SCHEMA.md").is_file());
-    assert!(root.join("source").is_dir());
+    assert!(root.join(".wiki/wiki.toml").is_file());
+    assert!(root.join(".wiki/SCHEMA.md").is_file());
+    assert!(root.join(".").is_dir());
 
     // -------------------------------------------------------------- fixtures
     write(
         root,
-        "source/notes/retry.md",
+        "notes/retry.md",
         format!("# 重试与熔断\n\n{}", page_body()),
     );
     write(
         root,
-        "source/notes/page.html",
+        "notes/page.html",
         "<html><body><h1>Retry</h1><p>Backoff and circuit breaking.</p></body></html>",
     );
-    write(root, "source/img/diagram.png", PNG);
+    write(root, "img/diagram.png", PNG);
+
+    // The sources are the user's files: the whole pipeline below must leave
+    // every byte outside `.wiki/` untouched.
+    let mut expected_outside = outside_engine(root);
+    // `notes/retry.md` is rewritten on purpose further down, to exercise the
+    // stability gate; it is checked separately.
+    expected_outside
+        .remove("notes/retry.md")
+        .expect("the source is there");
 
     // ---------------------------------------------------------------- scan
     let scan = ok_call(root, &["scan"]);
@@ -175,9 +193,15 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
             .unwrap()
             .to_string()
     };
-    assert_eq!(raw_of("raw/notes/retry.md"), "raw/notes/retry.md");
-    assert_eq!(raw_of("raw/notes/page.md"), "raw/notes/page.md");
-    assert_eq!(raw_of("raw/img/diagram.md"), "raw/img/diagram.md");
+    assert_eq!(
+        raw_of(".wiki/raw/notes/retry.md"),
+        ".wiki/raw/notes/retry.md"
+    );
+    assert_eq!(raw_of(".wiki/raw/notes/page.md"), ".wiki/raw/notes/page.md");
+    assert_eq!(
+        raw_of(".wiki/raw/img/diagram.md"),
+        ".wiki/raw/img/diagram.md"
+    );
     let backend = |rel: &str| -> String {
         converted
             .iter()
@@ -187,12 +211,12 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
             .unwrap()
             .to_string()
     };
-    assert_eq!(backend("raw/notes/retry.md"), "builtin-text");
-    assert_eq!(backend("raw/notes/page.md"), "builtin-html");
-    assert_eq!(backend("raw/img/diagram.md"), "builtin-asset");
-    let raw = read(root, "raw/notes/retry.md");
+    assert_eq!(backend(".wiki/raw/notes/retry.md"), "builtin-text");
+    assert_eq!(backend(".wiki/raw/notes/page.md"), "builtin-html");
+    assert_eq!(backend(".wiki/raw/img/diagram.md"), "builtin-asset");
+    let raw = read(root, ".wiki/raw/notes/retry.md");
     assert!(
-        raw.contains("source: source/notes/retry.md"),
+        raw.contains("source: notes/retry.md"),
         "raw frontmatter: {raw}"
     );
     assert!(
@@ -225,7 +249,7 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
     assert_eq!(commit["index_updated"], Value::Bool(true));
     assert!(root.join(".wiki/staging/concept/alpha.md").is_file());
     assert!(
-        !root.join("wiki/concept/alpha.md").exists(),
+        !root.join(".wiki/pages/concept/alpha.md").exists(),
         "commit only finishes staging; publishing is a human decision"
     );
 
@@ -249,17 +273,17 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
     let approve = ok_call(root, &["approve", "--confirm"]);
     assert_eq!(approve["version"], "v001");
     assert!(
-        root.join("wiki/concept/alpha.md").is_file(),
+        root.join(".wiki/pages/concept/alpha.md").is_file(),
         "the page is published"
     );
-    let index = read(root, "wiki/index.md");
+    let index = read(root, ".wiki/pages/index.md");
     assert!(
         index.contains("concept/alpha.md")
             && index.contains("重试与熔断")
             && !index.contains("](wiki/"),
         "the index lists the page with a wiki-relative link: {index}"
     );
-    let log = read(root, "wiki/log.md");
+    let log = read(root, ".wiki/pages/log.md");
     assert!(
         log.contains("approve") && log.contains("v001"),
         "publishing is journalled: {log}"
@@ -281,12 +305,12 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
         "the published page is searchable at once: {query}"
     );
     let hit = &query["hits"][0];
-    assert_eq!(hit["page"], "wiki/concept/alpha.md");
+    assert_eq!(hit["page"], ".wiki/pages/concept/alpha.md");
     assert_eq!(hit["title"], "重试与熔断");
     assert_eq!(hit["status"], "draft");
     assert_eq!(hit["archived"], Value::Bool(false));
     let sources = hit["sources"].as_array().expect("sources array");
-    assert_eq!(sources[0]["raw"], "raw/notes/retry.md");
+    assert_eq!(sources[0]["raw"], ".wiki/raw/notes/retry.md");
     assert_eq!(sources[0]["raw_available"], Value::Bool(true));
 
     let (code, missed) = call(root, &["query", "没有这个词"]);
@@ -295,11 +319,8 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
 
     // -------------------------------------------------------------- sync
     // A changed source is picked up by scan, then the dry run must not write.
-    write(
-        root,
-        "source/notes/retry.md",
-        format!("# 重试与熔断\n\n{}\n\n补充一句。", page_body()),
-    );
+    let edited_source = format!("# 重试与熔断\n\n{}\n\n补充一句。", page_body());
+    write(root, "notes/retry.md", &edited_source);
     let scan = ok_call(root, &["scan"]);
     assert!(
         scan["changes"]
@@ -329,7 +350,7 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
     // seal and re-hangs the citations.
     write(
         root,
-        "wiki/archive/2026-10.md",
+        ".wiki/pages/archive/2026-10.md",
         format!(
             "---\nid: 2026-10\ntitle: 重试与熔断\ntype: concept\nsummary: 十月会话\n\
              archived: true\nstatus: stable\nupdated: 2026-10-27\n---\n\n{}\n",
@@ -350,16 +371,19 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
         ],
     );
     assert_eq!(seal["action"], "seal");
-    assert_eq!(seal["key"], "wiki/archive/2026-10.md");
-    assert_eq!(seal["pages"], serde_json::json!(["wiki/concept/alpha.md"]));
+    assert_eq!(seal["key"], ".wiki/pages/archive/2026-10.md");
+    assert_eq!(
+        seal["pages"],
+        serde_json::json!([".wiki/pages/concept/alpha.md"])
+    );
     assert_eq!(seal["updated_pages"], 1);
-    let page = read(root, "wiki/concept/alpha.md");
+    let page = read(root, ".wiki/pages/concept/alpha.md");
     assert!(
-        page.contains("wiki/archive/2026-10.md"),
+        page.contains(".wiki/pages/archive/2026-10.md"),
         "the citing page now points at the sealed summary: {page}"
     );
     assert!(
-        !page.contains("raw/notes/retry.md"),
+        !page.contains(".wiki/raw/notes/retry.md"),
         "the raw citation is retired"
     );
 
@@ -387,4 +411,19 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
     let (code, missed) = call(root, &["recall", "没有这个词"]);
     assert_eq!(code, 1, "a recall miss is its own exit code: {missed}");
     assert_eq!(missed["error"]["code"], "E_NO_HIT");
+
+    // --------------------------------------------------- the boundary holds
+    let mut after = outside_engine(root);
+    let retry = after
+        .remove("notes/retry.md")
+        .expect("the edited source is still on disk");
+    assert_eq!(
+        retry,
+        llm_wiki::hash::hash_bytes(edited_source.as_bytes()),
+        "no command may touch a source"
+    );
+    assert_eq!(
+        after, expected_outside,
+        "a command created, changed or deleted a file outside .wiki/"
+    );
 }

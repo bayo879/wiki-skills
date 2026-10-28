@@ -16,8 +16,14 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// Name of the contract file at the wiki root.
-pub const CONFIG_FILE: &str = "wiki.toml";
+/// The hidden engine directory. Everything `llm-wiki` writes lives under it.
+pub const ENGINE_DIR: &str = ".wiki";
+
+/// Name of the contract file, relative to the repository root.
+pub const CONFIG_FILE: &str = ".wiki/wiki.toml";
+
+/// The schema page `init` writes, relative to the repository root.
+pub const SCHEMA_FILE: &str = ".wiki/SCHEMA.md";
 
 /// Failure while reading or validating `wiki.toml`.
 #[derive(Debug, thiserror::Error)]
@@ -58,7 +64,12 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Fixed at [`PathsCfg::default`]: the layout is not configurable, so a
+    /// hand-edited `[paths]` section cannot move writes outside the engine
+    /// directory. The field stays for call sites that read a location.
+    #[serde(skip)]
     pub paths: PathsCfg,
+    pub scan: ScanCfg,
     pub formats: FormatsCfg,
     pub schema: SchemaCfg,
     pub parse: ParseCfg,
@@ -186,9 +197,12 @@ impl Config {
     }
 }
 
-/// `[paths]`: where the five repository locations live, relative to the root.
+/// The fixed repository layout, relative to the root.
+///
+/// `source` is the empty string: every non-hidden file in the repository is a
+/// source. `raw`, `wiki` and `engine` all sit under `.wiki`, which is also what
+/// makes "never write outside the engine" structural rather than a convention.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
 pub struct PathsCfg {
     pub source: String,
     pub raw: String,
@@ -199,10 +213,30 @@ pub struct PathsCfg {
 impl Default for PathsCfg {
     fn default() -> Self {
         Self {
-            source: String::from("source"),
-            raw: String::from("raw"),
-            wiki: String::from("wiki"),
-            engine: String::from(".wiki"),
+            source: String::new(),
+            raw: String::from(".wiki/raw"),
+            wiki: String::from(".wiki/pages"),
+            engine: String::from(ENGINE_DIR),
+        }
+    }
+}
+
+/// `[scan]`: which directories under the repository root are not sources.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ScanCfg {
+    /// Directory names skipped anywhere in the tree, in addition to the
+    /// dot-directories [`crate::paths::is_ignored`] already skips.
+    pub ignore: Vec<String>,
+}
+
+impl Default for ScanCfg {
+    fn default() -> Self {
+        Self {
+            ignore: ["node_modules", "target", "dist", "build", "vendor", ".git"]
+                .iter()
+                .map(|name| String::from(*name))
+                .collect(),
         }
     }
 }

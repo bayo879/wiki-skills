@@ -24,7 +24,7 @@
 
 ### 2.3 技能表格与 CLI 输出是契约
 
-`skills/*/SKILL.md` 里的枚举表、字段表带标记（`<!-- enum: src/scan.rs::Layer -->`、`<!-- fields: ingest-begin -->`），`tests/docs_contract.rs` 拿真机 JSON 快照逐项比对。
+`skills/llm-wiki/SKILL.md` 与 `skills/llm-wiki/references/*.md` 里的枚举表、字段表带标记（`<!-- enum: src/scan.rs::Layer -->`、`<!-- fields: ingest-begin -->`），`tests/docs_contract.rs` 拿真机 JSON 快照逐项比对。
 改 CLI 输出形状 = 同时改技能表 + 更新 `tests/snapshots/cli-keys.json`（`LLM_WIKI_UPDATE_SNAPSHOTS=1` 重生成）。只改代码不改文档，测试会红。
 
 ### 2.4 schema 迁移必须与全新库同构
@@ -45,7 +45,16 @@
 
 诚实边界写在 [architecture.md 的「机器守卫」节](docs/readme/architecture.md)：它保证「文档没写错名字」，不保证「文档写得够全」。
 
-### 2.6 技能的价值在流程纪律，不在用法说明
+### 2.6 写入边界靠结构，不靠自觉
+
+引擎（契约、raw、pages、账本、暂存、版本）全部在隐藏目录 `.wiki/` 里，`Config.paths` 用 `#[serde(skip)]` 固定成常量，手写 `[paths]` 移不出去；`.wiki/.gitignore` 只有一行 `*`，整个引擎不进 git。`.wiki/` 之外的一切都是源，只读。
+`tests/e2e.rs::init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall` 在完整链路前后逐字节比对引擎外的文件，任何命令往引擎外写文件都会红。清理类命令（`archive purge`）只删 `.wiki/raw/` 与页面，**永远不删源文件**。
+
+### 2.7 一个技能，多份按需阅读的手册
+
+`skills/llm-wiki/SKILL.md` 是唯一入口（边界、路由、最小序列、决策门、退出码），细节拆到 `skills/llm-wiki/references/*.md`，agent 只在需要时读对应那份。`tests/skills_pack.rs` 断言只发一个技能，`tests/docs_contract.rs` 的 `COVERED` 把字段表钉在 reference 文件上——移动文件时两处都要改。
+
+### 2.8 技能的价值在流程纪律，不在用法说明
 
 用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——先 `convert --key` 再 `ingest begin`、候选页只能落 `.wiki/staging/`、`approve --confirm` 必须人做；
 flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复，加长技能文本收益很低，反而会和 CLI 漂移。

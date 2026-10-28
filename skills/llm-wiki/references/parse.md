@@ -1,15 +1,12 @@
----
-name: wiki-parse
-description: 某份源文件的解析结果不对、转换时报错、正文为空或乱码，或想确认某扩展名由哪个内置后端处理、自动回退是否换了结果、要不要接入外部解析服务时使用。说明单文件试解析与按块查看的用法、大文件按块取样而不整份读入、五个内置后端与三档后端选择、外部服务的令牌只从环境变量读取且不得写进配置、警告与错误码怎么读、扫描件与图片只产链接不做文字识别、失败时如何区分后端与配置问题，以及确认解析正常后如何交回批量转换。不负责扫描、批量转换与摄取。
----
+# 解析与排障（parse）
 
-# wiki-parse
+> 何时读：某份源文件的解析结果不对、转换时报错、正文为空或乱码，或想确认某扩展名由哪个内置后端处理、自动回退是否换了结果、要不要接入外部解析服务时使用。说明单文件试解析与按块查看的用法、大文件按块取样而不整份读入、五个内置后端与三档后端选择、外部服务的令牌只从环境变量读取且不得写进配置、警告与错误码怎么读、扫描件与图片只产链接不做文字识别、失败时如何区分后端与配置问题，以及确认解析正常后如何交回批量转换。不负责扫描、批量转换与摄取。
 
 命令是 `llm-wiki`；不在 PATH 上时，用仓库根的 `.wiki/llm-wiki`。
 
-`llm-wiki parse` 是 `convert` 的只读探针：同一解析层、同一后端、同一批警告，区别只是不写 `raw/`。用来回答「这份源为什么产出不对」。
+`llm-wiki parse` 是 `convert` 的只读探针：同一解析层、同一后端、同一批警告，区别只是不写 `.wiki/raw/`。用来回答「这份源为什么产出不对」。
 
-不碰：批量转换（`wiki-scan`）、摄取与正文写作（`wiki-ingest`）、扫描。
+不碰：批量转换（`references/scan.md`）、摄取与正文写作（`references/ingest.md`）、扫描。
 
 ## 何时用
 
@@ -24,7 +21,7 @@ description: 某份源文件的解析结果不对、转换时报错、正文为�
 llm-wiki doctor --json
 ```
 
-`data.checks` 里优先看 `token`（`wiki.toml` 是否写了凭据）与 `external_backend`（外部服务是否可达、`primary` 与配置是否对得上）。有 `fail` 项（退出码 1）就先修，别在坏仓库上解读解析结果。`--key` 是相对 `source/` 的路径（`/` 分隔），可从 `llm-wiki scan --json` 的清单里抄。
+`data.checks` 里优先看 `token`（`.wiki/wiki.toml` 是否写了凭据）与 `external_backend`（外部服务是否可达、`primary` 与配置是否对得上）。有 `fail` 项（退出码 1）就先修，别在坏仓库上解读解析结果。`--key` 是相对仓库根的路径（`/` 分隔），可从 `llm-wiki scan --json` 的清单里抄。
 
 ## 看一份源
 
@@ -46,7 +43,7 @@ llm-wiki parse --key <key> --range 1-3 --json    # 第 1 到第 3 块
 
 编号 1-based，`--range` 是闭区间、A ≤ B，两个参数互斥。越界或写法错是 `E_BAD_ARGS`。抽样 2–3 块足够判断，别一口气取几十块。
 
-`--json` 不写 `raw/`、不做转换；但大文件和 `--chunk`/`--range` 会把分块写到 `.wiki/cache/<hash>/`，可随时删。
+`--json` 不写 `.wiki/raw/`、不做转换；但大文件和 `--chunk`/`--range` 会把分块写到 `.wiki/cache/<hash>/`，可随时删。
 
 ## 五个内置后端
 
@@ -54,7 +51,7 @@ llm-wiki parse --key <key> --range 1-3 --json    # 第 1 到第 3 块
 |---|---|---|
 | `builtin-text` | `md` `markdown` `txt` | 去 BOM、统一换行、去源 frontmatter，基本直通 |
 | `builtin-html` | `html` `htm` | 抽正文，标签转 markdown，脚本与样式丢弃 |
-| `builtin-pdf` | `pdf` | 有文本层才抽；无文本层降级成指向 `../source/<key>` 的图片链接 |
+| `builtin-pdf` | `pdf` | 有文本层才抽；无文本层降级成指向 `../../<key>` 的图片链接（按 key 深度加 `../`） |
 | `builtin-asset` | `png` `jpg` `jpeg` `gif` `webp` `svg` | 不读内容，只产链接；不做 OCR |
 | `external-http` | `md` `markdown` `txt` `html` `htm` `pdf` | 配了 `[parse.external]` 才存在，POST 给外部服务取 markdown |
 
@@ -66,7 +63,7 @@ llm-wiki parse --key <key> --range 1-3 --json    # 第 1 到第 3 块
 - `builtin`：只用内置，忽略外部配置。
 - `external`：文本类强制外部；缺 `[parse.external]` 报 `E_BAD_CONFIG`，图片仍走 `builtin-asset`，其它扩展 `E_NO_PARSER`。
 
-改模式只改 `wiki.toml` 的 `[parse].primary`，改完重跑 `parse`。
+改模式只改 `.wiki/wiki.toml` 的 `[parse].primary`，改完重跑 `parse`。
 
 ## 外部服务怎么配
 
@@ -108,7 +105,7 @@ timeout_s = 120
 | 码 | 含义 |
 |---|---|
 | `E_NO_PARSER` | 没有后端认这个扩展名；先核对扩展名与 `primary` |
-| `E_IO` | 读不到 `source/<key>`；核对 key |
+| `E_IO` | 读不到 `<key>`（仓库相对路径）；核对 key |
 | `E_OVERSIZE` | 超过 `parse.max_source_bytes`（默认 100MB）。`--force-large` 可越过，只为看一眼：不落盘、不进账本 |
 | `E_BAD_SOURCE` | 后端认领后解码失败，如坏 PDF |
 | `E_BAD_CONFIG` | `[parse.external]` 不全：缺节、`type`≠`http`、`url`/`auth_env` 空、没有 `@file` 字段、`timeout_s` 为 0 |
@@ -123,7 +120,7 @@ timeout_s = 120
 
 1. `doctor` 确认仓库。
 2. `parse --json` 看 `backend` 和 `warnings`，先分清是谁产出。
-3. 按警告表分流：源问题就去换源或换编码，配置问题才改 `wiki.toml`。
+3. 按警告表分流：源问题就去换源或换编码，配置问题才改 `.wiki/wiki.toml`。
 4. 拿同扩展名的正常文件对比，确认不是全局配置坏了。
 5. 大文件抽 2–3 块，别把整份读进上下文。
 
@@ -133,4 +130,4 @@ timeout_s = 120
 
 ## 交接
 
-解析确认无误后回 `wiki-scan`，用 `llm-wiki convert --key <key> --json` 落盘（批量交给它）。不要拿 `parse` 的输出手抄成 raw，也不要在 parse 阶段改 staging。`backend` 会写进 raw frontmatter，后续可据此筛需要重转的源。
+解析确认无误后回 `references/scan.md`，用 `llm-wiki convert --key <key> --json` 落盘（批量交给它）。不要拿 `parse` 的输出手抄成 raw，也不要在 parse 阶段改 staging。`backend` 会写进 raw frontmatter，后续可据此筛需要重转的源。

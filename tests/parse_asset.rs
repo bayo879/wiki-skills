@@ -22,13 +22,13 @@ fn image_becomes_link_only_markdown() {
         .unwrap();
     assert!(out.asset);
     assert!(!out.no_text_layer);
-    assert_eq!(out.markdown.trim(), "![](../../source/dir/a.png)");
+    assert_eq!(out.markdown.trim(), "![](../../../dir/a.png)");
 }
 
 #[test]
 fn names_with_spaces_and_parens_are_angle_bracketed() {
     let link = link_for("dir/图 (1)#x.png");
-    assert_eq!(link, "![](<../../source/dir/图 (1)#x.png>)");
+    assert_eq!(link, "![](<../../../dir/图 (1)#x.png>)");
 }
 
 #[test]
@@ -39,23 +39,23 @@ fn empty_image_file_is_not_a_crash() {
     assert!(out.asset);
     assert!(out.warnings.iter().any(|w| w.code == "empty"));
     // The link is still emitted, and one component means one `../`.
-    assert_eq!(out.markdown.trim(), "![](../source/a.png)");
+    assert_eq!(out.markdown.trim(), "![](../../a.png)");
 }
 
 #[test]
 fn a_one_component_key_uses_a_single_parent() {
-    assert_eq!(link_for("a.png"), "![](../source/a.png)");
+    assert_eq!(link_for("a.png"), "![](../../a.png)");
     assert!(!link_for("a.png").contains('<'), "no escape is needed here");
 }
 
 #[test]
 fn a_three_component_key_uses_three_parents() {
-    assert_eq!(link_for("a/b/c.png"), "![](../../../source/a/b/c.png)");
+    assert_eq!(link_for("a/b/c.png"), "![](../../../../a/b/c.png)");
 }
 
 #[test]
 fn percent_and_angle_brackets_force_the_quoted_form() {
-    assert_eq!(link_for("a%20b<c>.png"), "![](<../source/a%20b<c>.png>)");
+    assert_eq!(link_for("a%20b<c>.png"), "![](<../../a%20b<c>.png>)");
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn init_template_lists_images_and_loads_back() {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
 
-    let template = std::fs::read_to_string(d.path().join("wiki.toml")).unwrap();
+    let template = std::fs::read_to_string(d.path().join(".wiki/wiki.toml")).unwrap();
     let allow_line = template
         .lines()
         .find(|line| line.trim_start().starts_with("allow"))

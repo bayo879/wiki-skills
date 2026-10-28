@@ -47,10 +47,10 @@ impl Fixture {
     /// Records a raw and its file, plus the source file it came from.
     fn put_converted_source(&mut self, key: &str) {
         self.put_source(key);
-        let raw = self.root().join("raw").join(key);
+        let raw = self.root().join(".wiki/raw").join(key);
         fs::create_dir_all(raw.parent().unwrap()).unwrap();
         fs::write(&raw, "---\nname: a\n---\n正文\n").unwrap();
-        let source = self.root().join("source").join(key);
+        let source = self.root().join(".").join(key);
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, "原始字节").unwrap();
         self.store
@@ -79,7 +79,10 @@ impl Fixture {
 
     /// Writes the summary the agent is expected to hand to `seal`.
     fn put_summary(&self, id: &str, sources: &[&str]) -> PathBuf {
-        let path = self.root().join("wiki/archive").join(format!("{id}.md"));
+        let path = self
+            .root()
+            .join(".wiki/pages/archive")
+            .join(format!("{id}.md"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut text = page_text(id, sources);
         text = text.replace("type: concept", "type: concept\narchived: true");
@@ -89,7 +92,10 @@ impl Fixture {
 
     /// Writes a page whose `sources` list is `sources`.
     fn put_page(&self, id: &str, sources: &[&str]) {
-        let path = self.root().join("wiki/concept").join(format!("{id}.md"));
+        let path = self
+            .root()
+            .join(".wiki/pages/concept")
+            .join(format!("{id}.md"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, page_text(id, sources)).unwrap();
     }
@@ -146,7 +152,11 @@ fn counts_sealed_summaries_and_live_session_records() {
     let mut f = Fixture::new();
     f.put_session("2026-05-01-sync");
     f.put_session("2026-05-02-lint");
-    f.seal("wiki/archive/2026-04.md", "2026-04-30", Some("2026-05-20"));
+    f.seal(
+        ".wiki/pages/archive/2026-04.md",
+        "2026-04-30",
+        Some("2026-05-20"),
+    );
 
     let report = status(&f);
     assert_eq!(report.archives, 1);
@@ -156,9 +166,9 @@ fn counts_sealed_summaries_and_live_session_records() {
 #[test]
 fn counts_only_archives_a_page_still_cites() {
     let mut f = Fixture::new();
-    f.seal("wiki/archive/2026-04.md", "2026-04-30", None);
-    f.seal("wiki/archive/2026-05.md", "2026-05-31", None);
-    f.put_page("sync", &["wiki/archive/2026-04.md"]);
+    f.seal(".wiki/pages/archive/2026-04.md", "2026-04-30", None);
+    f.seal(".wiki/pages/archive/2026-05.md", "2026-05-31", None);
+    f.put_page("sync", &[".wiki/pages/archive/2026-04.md"]);
 
     // Re-hanging `sources` is what keeps a summary alive; the count is how the
     // seal proves it actually rewired the pages instead of orphaning them.
@@ -170,9 +180,9 @@ fn purge_candidates_need_capacity_and_deadline_both() {
     let mut f = Fixture::new();
     // Three summaries against a cap of two: over capacity, but only the ones
     // whose last touch is past the deadline are candidates.
-    f.seal("wiki/archive/a.md", "2025-01-31", None);
-    f.seal("wiki/archive/b.md", "2025-01-31", None);
-    f.seal("wiki/archive/c.md", "2026-05-31", Some("2026-05-31"));
+    f.seal(".wiki/pages/archive/a.md", "2025-01-31", None);
+    f.seal(".wiki/pages/archive/b.md", "2025-01-31", None);
+    f.seal(".wiki/pages/archive/c.md", "2026-05-31", Some("2026-05-31"));
     f.cfg.memory.purge_cap = 2;
     f.cfg.memory.purge_days = 180;
 
@@ -184,8 +194,8 @@ fn nothing_is_a_candidate_without_capacity_pressure() {
     let mut f = Fixture::new();
     // Ancient summaries, but the archive is nowhere near its cap: a quiet wiki
     // keeps its history rather than clearing it on age alone.
-    f.seal("wiki/archive/a.md", "2024-01-31", None);
-    f.seal("wiki/archive/b.md", "2024-01-31", None);
+    f.seal(".wiki/pages/archive/a.md", "2024-01-31", None);
+    f.seal(".wiki/pages/archive/b.md", "2024-01-31", None);
     f.cfg.memory.purge_cap = 200;
     f.cfg.memory.purge_days = 180;
 
@@ -195,9 +205,9 @@ fn nothing_is_a_candidate_without_capacity_pressure() {
 #[test]
 fn a_recent_recall_postpones_the_deadline() {
     let mut f = Fixture::new();
-    f.seal("wiki/archive/a.md", "2024-01-31", Some("2026-05-31"));
-    f.seal("wiki/archive/b.md", "2024-01-31", None);
-    f.seal("wiki/archive/c.md", "2024-01-31", None);
+    f.seal(".wiki/pages/archive/a.md", "2024-01-31", Some("2026-05-31"));
+    f.seal(".wiki/pages/archive/b.md", "2024-01-31", None);
+    f.seal(".wiki/pages/archive/c.md", "2024-01-31", None);
     f.cfg.memory.purge_cap = 2;
     f.cfg.memory.purge_days = 180;
 
@@ -240,23 +250,29 @@ fn req_one(key: &str) -> SealRequest {
 fn seal_records_the_summary_and_rehangs_the_pages() {
     let mut f = Fixture::new();
     f.put_source("queries/2026-05.md");
-    f.put_summary("2026-05", &["raw/queries/2026-05.md"]);
-    f.put_page("sync", &["raw/queries/2026-05.md", "raw/docs/a.md"]);
+    f.put_summary("2026-05", &[".wiki/raw/queries/2026-05.md"]);
+    f.put_page(
+        "sync",
+        &[".wiki/raw/queries/2026-05.md", ".wiki/raw/docs/a.md"],
+    );
 
     let report = seal(&mut f, req_one("queries/2026-05.md")).unwrap();
-    assert_eq!(report.key, "wiki/archive/2026-05.md");
+    assert_eq!(report.key, ".wiki/pages/archive/2026-05.md");
     assert_eq!(report.updated_pages, 1);
 
     // 重挂是替换而不是追加：旧引用必须消失，否则清理原文后 L6 立刻报错。
-    let text = fs::read_to_string(f.root().join("wiki/concept/sync.md")).unwrap();
-    assert!(text.contains("raw/docs/a.md"), "无关键不能被顺手删掉");
-    assert!(text.contains("wiki/archive/2026-05.md"));
-    assert!(!text.contains("raw/queries/2026-05.md"), "会话引用应被替换");
+    let text = fs::read_to_string(f.root().join(".wiki/pages/concept/sync.md")).unwrap();
+    assert!(text.contains(".wiki/raw/docs/a.md"), "无关键不能被顺手删掉");
+    assert!(text.contains(".wiki/pages/archive/2026-05.md"));
+    assert!(
+        !text.contains(".wiki/raw/queries/2026-05.md"),
+        "会话引用应被替换"
+    );
     assert!(text.contains("updated: 2026-06-01"), "重挂要顺手更新日期");
 
     let row = f
         .store
-        .get_archive("wiki/archive/2026-05.md")
+        .get_archive(".wiki/pages/archive/2026-05.md")
         .unwrap()
         .expect("archive row");
     assert_eq!(row.period_start, "2026-05-01");
@@ -269,27 +285,27 @@ fn seal_records_the_summary_and_rehangs_the_pages() {
 #[test]
 fn seal_refuses_a_source_that_was_never_ingested() {
     let mut f = Fixture::new();
-    f.put_summary("2026-05", &["raw/queries/2026-05.md"]);
-    f.put_page("sync", &["raw/queries/2026-05.md"]);
+    f.put_summary("2026-05", &[".wiki/raw/queries/2026-05.md"]);
+    f.put_page("sync", &[".wiki/raw/queries/2026-05.md"]);
 
     let err = seal(&mut f, req_one("queries/2026-05.md")).unwrap_err();
     assert_eq!(err.code(), "E_NOT_LEDGERED");
     // 失败的封存不能留下半个摘要，否则页面已经换成摘要、账本里却没有记录。
     assert!(f
         .store
-        .get_archive("wiki/archive/2026-05.md")
+        .get_archive(".wiki/pages/archive/2026-05.md")
         .unwrap()
         .is_none());
-    let text = fs::read_to_string(f.root().join("wiki/concept/sync.md")).unwrap();
-    assert!(text.contains("raw/queries/2026-05.md"));
+    let text = fs::read_to_string(f.root().join(".wiki/pages/concept/sync.md")).unwrap();
+    assert!(text.contains(".wiki/raw/queries/2026-05.md"));
 }
 
 #[test]
 fn seal_refuses_to_seal_the_same_period_twice() {
     let mut f = Fixture::new();
     f.put_source("queries/2026-05.md");
-    f.put_summary("2026-05", &["raw/queries/2026-05.md"]);
-    f.put_page("sync", &["raw/queries/2026-05.md"]);
+    f.put_summary("2026-05", &[".wiki/raw/queries/2026-05.md"]);
+    f.put_page("sync", &[".wiki/raw/queries/2026-05.md"]);
     seal(&mut f, req_one("queries/2026-05.md")).unwrap();
 
     let err = seal(&mut f, req_one("queries/2026-05.md")).unwrap_err();
@@ -309,15 +325,15 @@ fn seal_needs_the_summary_the_agent_writes() {
 fn seal_leaves_pages_that_do_not_cite_the_source_alone() {
     let mut f = Fixture::new();
     f.put_source("queries/2026-05.md");
-    f.put_summary("2026-05", &["raw/queries/2026-05.md"]);
-    f.put_page("unrelated", &["raw/docs/a.md"]);
-    let before = fs::read_to_string(f.root().join("wiki/concept/unrelated.md")).unwrap();
+    f.put_summary("2026-05", &[".wiki/raw/queries/2026-05.md"]);
+    f.put_page("unrelated", &[".wiki/raw/docs/a.md"]);
+    let before = fs::read_to_string(f.root().join(".wiki/pages/concept/unrelated.md")).unwrap();
 
     let report = seal(&mut f, req_one("queries/2026-05.md")).unwrap();
     assert_eq!(report.updated_pages, 0);
     // 没引用的页不该被碰：连 updated 都不该动。
     assert_eq!(
-        fs::read_to_string(f.root().join("wiki/concept/unrelated.md")).unwrap(),
+        fs::read_to_string(f.root().join(".wiki/pages/concept/unrelated.md")).unwrap(),
         before
     );
 }
@@ -355,9 +371,9 @@ fn purge(f: &mut Fixture, dry_run: bool, yes: bool) -> llm_wiki::archive::PurgeR
 /// Seals one old summary over a converted source, ready to be purged.
 fn sealed_old(f: &mut Fixture) -> String {
     f.put_converted_source("queries/2026-01.md");
-    f.put_summary("2026-01", &["raw/queries/2026-01.md"]);
+    f.put_summary("2026-01", &[".wiki/raw/queries/2026-01.md"]);
     // 这一页引的是别的文档：被清理的会话没有任何页面依赖它，才清得干净。
-    f.put_page("sync", &["raw/docs/a.md"]);
+    f.put_page("sync", &[".wiki/raw/docs/a.md"]);
     seal(
         f,
         SealRequest {
@@ -370,7 +386,7 @@ fn sealed_old(f: &mut Fixture) -> String {
         },
     )
     .unwrap();
-    String::from("wiki/archive/2026-01.md")
+    String::from(".wiki/pages/archive/2026-01.md")
 }
 
 #[test]
@@ -383,12 +399,12 @@ fn purge_dry_run_reports_without_deleting() {
     let report = purge(&mut f, true, false);
     assert_eq!(report.candidates.len(), 1);
     assert_eq!(report.deleted, 0);
-    assert!(f.root().join("source/queries/2026-01.md").exists());
+    assert!(f.root().join("queries/2026-01.md").exists());
     assert!(f.root().join(&key).exists(), "dry-run 不能动摘要");
 }
 
 #[test]
-fn purge_clears_the_source_the_raw_and_the_summary() {
+fn purge_clears_the_raw_and_the_summary_but_never_the_source() {
     let mut f = Fixture::new();
     let key = sealed_old(&mut f);
     f.cfg.memory.purge_cap = 0;
@@ -396,8 +412,10 @@ fn purge_clears_the_source_the_raw_and_the_summary() {
 
     let report = purge(&mut f, false, true);
     assert_eq!(report.deleted, 1);
-    assert!(!f.root().join("source/queries/2026-01.md").exists());
-    assert!(!f.root().join("raw/queries/2026-01.md").exists());
+    // Sources are the user's files, outside the engine: a purge must never
+    // delete one, only the derived raw and the ledger row.
+    assert!(f.root().join("queries/2026-01.md").exists());
+    assert!(!f.root().join(".wiki/raw/queries/2026-01.md").exists());
     assert!(!f.root().join(&key).exists());
     assert!(f.store.get_archive(&key).unwrap().is_none());
     assert!(f.store.get_source("queries/2026-01.md").unwrap().is_none());

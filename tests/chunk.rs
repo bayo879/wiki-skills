@@ -220,10 +220,9 @@ fn read_range_reads_only_the_requested_chunks() {
 /// A repo whose parse budget is small enough that a few kilobytes are "large".
 fn tiny_repo() -> tempfile::TempDir {
     let d = tempdir().unwrap();
-    fs::create_dir_all(d.path().join("wiki")).unwrap();
-    fs::create_dir(d.path().join("source")).unwrap();
+    fs::create_dir_all(d.path().join(".wiki/pages")).unwrap();
     fs::write(
-        d.path().join("wiki.toml"),
+        d.path().join(".wiki/wiki.toml"),
         "[parse]\nchunk_threshold = \"1KB\"\nmax_source_bytes = \"10KB\"\nchunk_target = \"256B\"\n",
     )
     .unwrap();
@@ -263,7 +262,7 @@ fn only_cache_dir(repo: &Path) -> PathBuf {
 #[test]
 fn cli_small_source_stays_whole() {
     let d = tiny_repo();
-    fs::write(d.path().join("source/small.md"), "hello").unwrap();
+    fs::write(d.path().join("small.md"), "hello").unwrap();
 
     let out = run(d.path(), &["--json", "parse", "--key", "small.md"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
@@ -286,7 +285,7 @@ fn cli_small_source_stays_whole() {
 fn cli_large_source_reports_chunked_mode_and_materializes() {
     let d = tiny_repo();
     let body = "0123456789abcdef\n".repeat(400);
-    fs::write(d.path().join("source/big.md"), &body).unwrap();
+    fs::write(d.path().join("big.md"), &body).unwrap();
 
     let out = run(d.path(), &["--json", "parse", "--key", "big.md"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
@@ -317,7 +316,7 @@ fn cli_large_source_reports_chunked_mode_and_materializes() {
 fn cli_chunk_flag_materializes_on_demand() {
     let d = tiny_repo();
     let body = "abcdefghij".repeat(300);
-    fs::write(d.path().join("source/demand.md"), &body).unwrap();
+    fs::write(d.path().join("demand.md"), &body).unwrap();
 
     let out = run(
         d.path(),
@@ -342,7 +341,7 @@ fn cli_chunk_flag_materializes_on_demand() {
 fn cli_range_flag_joins_cached_chunks() {
     let d = tiny_repo();
     let body = "0123456789abcdef\n".repeat(400);
-    fs::write(d.path().join("source/big.md"), &body).unwrap();
+    fs::write(d.path().join("big.md"), &body).unwrap();
 
     let out = run(
         d.path(),
@@ -370,7 +369,7 @@ fn cli_range_flag_joins_cached_chunks() {
 #[test]
 fn cli_rejects_invalid_chunk_and_range_arguments() {
     let d = tiny_repo();
-    fs::write(d.path().join("source/big.md"), "abcdefghij".repeat(300)).unwrap();
+    fs::write(d.path().join("big.md"), "abcdefghij".repeat(300)).unwrap();
 
     for args in [
         vec!["--json", "parse", "--key", "big.md", "--chunk", "0"],
@@ -390,7 +389,7 @@ fn cli_rejects_invalid_chunk_and_range_arguments() {
 #[test]
 fn cli_rejects_a_source_above_max_source_bytes() {
     let d = tiny_repo();
-    fs::write(d.path().join("source/huge.md"), "x".repeat(11 * 1024)).unwrap();
+    fs::write(d.path().join("huge.md"), "x".repeat(11 * 1024)).unwrap();
 
     let out = run(d.path(), &["--json", "parse", "--key", "huge.md"]);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
@@ -402,7 +401,7 @@ fn cli_rejects_a_source_above_max_source_bytes() {
 #[test]
 fn cli_rejects_chunk_and_range_together() {
     let d = tiny_repo();
-    fs::write(d.path().join("source/big.md"), "abcdefghij".repeat(300)).unwrap();
+    fs::write(d.path().join("big.md"), "abcdefghij".repeat(300)).unwrap();
 
     let out = run(
         d.path(),

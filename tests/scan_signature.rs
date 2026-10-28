@@ -34,7 +34,7 @@ fn ledger_row(key: &str, hash: &str) -> SourceRow {
 #[test]
 fn classifies_new_changed_moved_missing_duplicate() {
     let (d, mut s, cfg) = setup();
-    let src = d.path().join("source");
+    let src = d.path().join(".");
     fs::write(src.join("a.md"), "alpha").unwrap();
     fs::write(src.join("b.md"), "same").unwrap();
     fs::write(src.join("c.md"), "same").unwrap();
@@ -70,7 +70,7 @@ fn classifies_new_changed_moved_missing_duplicate() {
 #[test]
 fn reports_changed_when_the_digest_differs_from_the_ledger() {
     let (d, mut s, cfg) = setup();
-    let src = d.path().join("source");
+    let src = d.path().join(".");
     fs::write(src.join("a.md"), "alpha").unwrap();
 
     let first = scan::scan_source(d.path(), &cfg, &s).unwrap();
@@ -120,14 +120,14 @@ fn reports_missing_for_a_ledger_key_no_longer_on_disk() {
 fn reports_oversize_without_hashing() {
     let (d, s, _) = setup();
     // A ten-byte file against a four-byte cap must not be read.
-    let path = d.path().join("wiki.toml");
+    let path = d.path().join(".wiki/wiki.toml");
     let text = fs::read_to_string(&path).unwrap();
     let text = text.replace("max_source_bytes = \"100MB\"", "max_source_bytes = \"4\"");
     fs::write(&path, text).unwrap();
     let cfg = Config::load(d.path()).unwrap();
     assert_eq!(cfg.parse.max_source_bytes, 4);
 
-    fs::write(d.path().join("source/big.md"), "0123456789").unwrap();
+    fs::write(d.path().join("big.md"), "0123456789").unwrap();
     let rep = scan::scan_source(d.path(), &cfg, &s).unwrap();
     let oversize = rep.changes.iter().find(|c| c.key == "big.md").unwrap();
     assert_eq!(oversize.kind, scan::ChangeKind::Oversize);
@@ -137,7 +137,7 @@ fn reports_oversize_without_hashing() {
 #[test]
 fn scanning_twice_yields_the_same_report() {
     let (d, s, cfg) = setup();
-    let src = d.path().join("source");
+    let src = d.path().join(".");
     fs::write(src.join("a.md"), "alpha").unwrap();
     fs::write(src.join("b.md"), "same").unwrap();
     fs::write(src.join("c.md"), "same").unwrap();
@@ -153,8 +153,8 @@ fn scanning_twice_yields_the_same_report() {
 #[test]
 fn keys_are_relative_to_the_source_directory() {
     let (d, s, cfg) = setup();
-    fs::create_dir_all(d.path().join("source/sub")).unwrap();
-    fs::write(d.path().join("source/sub/note.md"), "nested").unwrap();
+    fs::create_dir_all(d.path().join("sub")).unwrap();
+    fs::write(d.path().join("sub/note.md"), "nested").unwrap();
 
     let rep = scan::scan_source(d.path(), &cfg, &s).unwrap();
     assert_eq!(rep.changes.len(), 1);
@@ -165,7 +165,7 @@ fn keys_are_relative_to_the_source_directory() {
 #[test]
 fn extension_matching_ignores_case_and_dot_paths_are_skipped() {
     let (d, s, cfg) = setup();
-    let src = d.path().join("source");
+    let src = d.path().join(".");
     fs::write(src.join("NOTE.MD"), "upper").unwrap();
     fs::write(src.join(".draft.md"), "hidden").unwrap();
     fs::create_dir_all(src.join(".git")).unwrap();
@@ -182,7 +182,7 @@ fn extension_matching_ignores_case_and_dot_paths_are_skipped() {
 fn cli_scan_emits_json_changes() {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
-    fs::write(d.path().join("source/a.md"), "alpha").unwrap();
+    fs::write(d.path().join("a.md"), "alpha").unwrap();
 
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
@@ -224,7 +224,7 @@ fn convert_one(dir: &std::path::Path, key: &str) {
 fn cli_scan_reports_a_hand_edited_raw_file_under_the_raw_layer() {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
-    fs::write(d.path().join("source/a.md"), "# A\n\nalpha body\n").unwrap();
+    fs::write(d.path().join("a.md"), "# A\n\nalpha body\n").unwrap();
     convert_one(d.path(), "a.md");
 
     // Right after `convert` both layers are in sync.
@@ -237,7 +237,7 @@ fn cli_scan_reports_a_hand_edited_raw_file_under_the_raw_layer() {
 
     // A hand edit to the raw layer is invisible to the source layer, so only
     // the raw half of the scan can report it.
-    let raw = d.path().join("raw/a.md");
+    let raw = d.path().join(".wiki/raw/a.md");
     let mut text = fs::read_to_string(&raw).unwrap();
     text.push_str("\nhand edit\n");
     fs::write(&raw, text).unwrap();
@@ -255,13 +255,13 @@ fn cli_scan_reports_a_hand_edited_raw_file_under_the_raw_layer() {
 fn cli_scan_merges_both_layers_and_labels_each_change() {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
-    fs::write(d.path().join("source/a.md"), "# A\n\nalpha body\n").unwrap();
+    fs::write(d.path().join("a.md"), "# A\n\nalpha body\n").unwrap();
     convert_one(d.path(), "a.md");
 
     // One pending source in the source layer and one edited raw file in the raw
     // layer: the merged list must carry both, each with its own layer.
-    fs::write(d.path().join("source/b.md"), "# B\n\nbeta body\n").unwrap();
-    let raw = d.path().join("raw/a.md");
+    fs::write(d.path().join("b.md"), "# B\n\nbeta body\n").unwrap();
+    let raw = d.path().join(".wiki/raw/a.md");
     let mut text = fs::read_to_string(&raw).unwrap();
     text.push_str("\nhand edit\n");
     fs::write(&raw, text).unwrap();
@@ -289,10 +289,10 @@ fn cli_scan_merges_both_layers_and_labels_each_change() {
 fn cli_scan_is_idempotent_across_both_layers() {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
-    fs::write(d.path().join("source/a.md"), "# A\n\nalpha body\n").unwrap();
+    fs::write(d.path().join("a.md"), "# A\n\nalpha body\n").unwrap();
     convert_one(d.path(), "a.md");
-    fs::write(d.path().join("source/b.md"), "# B\n\nbeta body\n").unwrap();
-    let raw = d.path().join("raw/a.md");
+    fs::write(d.path().join("b.md"), "# B\n\nbeta body\n").unwrap();
+    let raw = d.path().join(".wiki/raw/a.md");
     let mut text = fs::read_to_string(&raw).unwrap();
     text.push_str("\nhand edit\n");
     fs::write(&raw, text).unwrap();

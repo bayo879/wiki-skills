@@ -1,9 +1,6 @@
----
-name: wiki-sync
-description: 当宿主定时任务唤起本技能，或上游同步服务刚把一批文件增删改同步进知识库的源目录时使用。它只做一件事：调用同步命令跑完一轮无人值守同步，依次拿锁、扫描、等待文件写稳、限量转换、稳定准入、开摄取轮、重建索引并写审计；随后读审计目录下的当日报告，按退出码区分正常、部分失败和锁被占用，并在同一源连续失败时退避。单个源的交互式摄取、仓库初始化、候选批准与合并都不在这里做，也不要把它拆成扫描、转换、摄取多步执行。每轮只跑一条命令，不替人拍板。
----
+# 无人值守同步（sync）
 
-# wiki-sync
+> 何时读：当宿主定时任务唤起本技能，或上游同步服务刚把一批文件增删改同步进知识库的源目录时使用。它只做一件事：调用同步命令跑完一轮无人值守同步，依次拿锁、扫描、等待文件写稳、限量转换、稳定准入、开摄取轮、重建索引并写审计；随后读审计目录下的当日报告，按退出码区分正常、部分失败和锁被占用，并在同一源连续失败时退避。单个源的交互式摄取、仓库初始化、候选批准与合并都不在这里做，也不要把它拆成扫描、转换、摄取多步执行。每轮只跑一条命令，不替人拍板。
 
 命令是 `llm-wiki`；不在 PATH 上时，用仓库根的 `.wiki/llm-wiki`。
 
@@ -12,10 +9,10 @@ description: 当宿主定时任务唤起本技能，或上游同步服务刚把�
 ## 何时用
 
 - 定时任务到点。
-- 上游同步服务刚把一批文件增删改同步进 `source/`。
+- 上游同步服务刚把一批文件增删改同步进仓库根。
 - 人问“昨晚同步跑了吗”“为什么新文件还没进 wiki”。
 
-不在本 skill：`init`、单个源的交互式摄取（交给 `wiki-ingest`）、批准与合并。
+不在本 skill：`init`、单个源的交互式摄取（交给 `references/ingest.md`）、批准与合并。
 
 ## 一条命令
 
@@ -33,13 +30,13 @@ llm-wiki sync --json
 ## 它自己做什么（不要重复）
 
 1. 拿 `.wiki/lock`；被别人占用退 4（写不了是 2）。
-2. 扫 `source/`，分类 new、changed、moved、missing、duplicate、oversize。
+2. 扫仓库根，分类 new、changed、moved、missing、duplicate、oversize。
 3. 跳过 settle 窗口内刚写过的文件（`sync.settle_seconds`，默认 10 秒），下一轮再来。
 4. 按 `--limit` 转换，没轮到的留在 `queued`。
-5. 复核 `raw/`：同一源连续 `sync.stable_streak`（默认 3）轮内容哈希一致，才算稳定。
+5. 复核 `.wiki/raw/`：同一源连续 `sync.stable_streak`（默认 3）轮内容哈希一致，才算稳定。
 6. `sync.auto_ingest` 为真且源已稳定时，调 `ingest begin --sources ...` 开一轮；否则不碰页。
-7. 重建 `wiki/index.md`。
-8. 追加 `wiki/audit/<日期>-sync.md`。
+7. 重建 `.wiki/pages/index.md`。
+8. 追加 `.wiki/pages/audit/<日期>-sync.md`。
 
 `auto_ingest` 默认关闭；是否开启由人一次性决定，本 skill 不改配置。agent 只读结果、解释、叫人；不要手跑 `scan`/`convert` 复核，也不要重复 `ingest begin`（会覆盖已开的轮次）。
 
@@ -56,7 +53,7 @@ llm-wiki sync --json
 
 ## 失败退避
 
-同一源连续失败 3 轮，CLI 把 `auto_ingest_disabled=1` 写进 `sync_state`（`.wiki/state.db`），不改 `wiki.toml`。
+同一源连续失败 3 轮，CLI 把 `auto_ingest_disabled=1` 写进 `sync_state`（`.wiki/state.db`），不改 `.wiki/wiki.toml`。
 
 - 看到退避，不要劝人重开 `auto_ingest`，也不要手改配置把门槛调低。
 - 先读 audit 的 `warnings`，定位是解析器、编码、超大文件，还是源本身坏了。
@@ -64,7 +61,7 @@ llm-wiki sync --json
 
 ## 每轮读 audit
 
-路径 `wiki/audit/<YYYY-MM-DD>-sync.md`，同一天多轮用 `---` 追加。读最后一段：
+路径 `.wiki/pages/audit/<YYYY-MM-DD>-sync.md`，同一天多轮用 `---` 追加。读最后一段：
 
 - `changes`：本轮变了什么（JSON 里是小写 `new`/`changed`/`moved`/`missing`/`duplicate`/`oversize`，audit 里是 `New`/`Changed` 等）。
 - `ingested`：交给摄取轮、进了 review 队列的源。
@@ -101,7 +98,7 @@ audit 只到源级。要看具体页，用 `changes` 里的 key（或 `ingested`
 PowerShell 注册计划任务（首次 09:00，之后每 15 分钟重复）：
 
 ```powershell
-Register-ScheduledTask wiki-sync -Trigger (New-ScheduledTaskTrigger -Once -At 09:00 -RepetitionInterval (New-TimeSpan -Minutes 15)) -Action (New-ScheduledTaskAction -Argument "sync --json --limit 20" -WorkingDirectory $env:WIKI_ROOT -Execute llm-wiki)
+Register-ScheduledTask references/sync.md -Trigger (New-ScheduledTaskTrigger -Once -At 09:00 -RepetitionInterval (New-TimeSpan -Minutes 15)) -Action (New-ScheduledTaskAction -Argument "sync --json --limit 20" -WorkingDirectory $env:WIKI_ROOT -Execute llm-wiki)
 ```
 
 ## 三条铁律
@@ -113,7 +110,7 @@ Register-ScheduledTask wiki-sync -Trigger (New-ScheduledTaskTrigger -Once -At 09
 ## 不要做
 
 - 不跑 `init`、不初始化仓库。
-- 不手改 `wiki.toml`、不改 `stable_streak`、不跳 settle 窗口。
+- 不手改 `.wiki/wiki.toml`、不改 `stable_streak`、不跳 settle 窗口。
 - 不在无人值守轮里执行 `approve`、`reject`、`instruct`、`defer`；这些要人给语义。
 - 不把 `--dry-run` 的结果当成本轮已同步来汇报。
 - 不因为 `failures` 是 0 就跳过 audit；安静轮次也要读 `warnings`。

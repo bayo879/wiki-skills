@@ -268,9 +268,15 @@ fn migrate_one(
     Ok(Outcome::Migrated(pages))
 }
 
-/// `base/rel`, with no double slash when `base` already ends in one.
+/// `base/rel`, tolerating an empty base (the source tree is the repository
+/// root, so `base` is `""` in the default layout).
 fn slash_join(base: &str, rel: &str) -> String {
-    format!("{}/{}", base.trim_end_matches('/'), rel)
+    let base = base.trim_matches('/');
+    if base.is_empty() {
+        String::from(rel)
+    } else {
+        format!("{base}/{rel}")
+    }
 }
 
 /// Rewrites `source:` in the raw file's frontmatter, and nothing else.
