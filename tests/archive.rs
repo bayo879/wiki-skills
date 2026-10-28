@@ -423,6 +423,26 @@ fn purge_clears_the_raw_and_the_summary_but_never_the_source() {
 }
 
 #[test]
+fn purge_leaves_a_summary_whose_only_source_is_ignored() {
+    let mut f = Fixture::new();
+    let key = sealed_old(&mut f);
+    f.cfg.memory.purge_cap = 0;
+    f.cfg.memory.purge_days = 1;
+    // 用户把这个源放进忽略列表，就是不想再看到它制造 churn；purge 是清理，
+    // 不是绕过用户决定，所以摘要、派生副本、账本行都不动。
+    fs::write(f.root().join(".wiki/ignore"), "queries/2026-01.md\n").unwrap();
+
+    let report = purge(&mut f, false, true);
+    assert_eq!(report.deleted, 0);
+    assert!(f.root().join(&key).exists(), "the summary stays");
+    assert!(
+        f.root().join(".wiki/raw/queries/2026-01.md").exists(),
+        "the derived raw stays"
+    );
+    assert!(f.store.get_source("queries/2026-01.md").unwrap().is_some());
+}
+
+#[test]
 fn purge_never_clears_a_summary_a_page_still_cites() {
     let mut f = Fixture::new();
     let key = sealed_old(&mut f);

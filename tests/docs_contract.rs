@@ -171,6 +171,20 @@ fn shapes() -> BTreeMap<String, BTreeSet<String>> {
         "ingest-begin",
         &["ingest", "begin", "--sources", "a.md", "--dry-run"],
     );
+    capture(&mut out, "ignore-list", &["ignore", "list"]);
+    capture(&mut out, "ignore-add", &["ignore", "add", "drafts/"]);
+    capture(
+        &mut out,
+        "ignore-check",
+        &["ignore", "check", "drafts/a.md"],
+    );
+    capture(&mut out, "ignore-remove", &["ignore", "remove", "drafts/"]);
+
+    capture(&mut out, "checkpoint", &["checkpoint", "--label", "smoke"]);
+    capture(&mut out, "history", &["history"]);
+    capture(&mut out, "diff", &["diff", "v001"]);
+    // Last: a rollback rewrites the working tree the commands above describe.
+    capture(&mut out, "rollback", &["rollback", "v001"]);
     out
 }
 

@@ -116,6 +116,9 @@ pub enum ArchiveError {
     /// The ledger failed.
     #[error(transparent)]
     Store(#[from] store::StoreError),
+    /// The ignore list could not be read.
+    #[error(transparent)]
+    Ignore(#[from] crate::ignore::IgnoreError),
 }
 
 impl ArchiveError {
@@ -134,6 +137,7 @@ impl ArchiveError {
             ArchiveError::EmptyQuery => "E_EMPTY_QUERY",
             ArchiveError::NoHit => "E_NO_HIT",
             ArchiveError::Store(_) => "E_DB",
+            ArchiveError::Ignore(err) => err.code(),
         }
     }
 }
@@ -538,8 +542,17 @@ pub fn purge_at(
         return Ok(report);
     }
 
+    let ignores = crate::ignore::IgnoreList::load(root)?;
     for row in &candidates {
+        let mut cleared = 0usize;
         for key in &row.sources {
+            // A source the user put on the ignore list is deliberately out of
+            // the wiki: purge leaves its derived copy and ledger row alone, so
+            // the exclusion cannot be undone by a cleanup run.
+            if ignores.is_ignored(key, false) {
+                continue;
+            }
+            cleared += 1;
             if let Some(source) = store.get_source(key)? {
                 // Sources are the user's own files, outside the engine: a purge
                 // drops this tool's derived copy and its ledger row, never the
@@ -550,6 +563,9 @@ pub fn purge_at(
                 Ledger::new(store).forget_source(key, source.raw_key.as_deref())?;
                 report.sources += 1;
             }
+        }
+        if !row.sources.is_empty() && cleared == 0 {
+            continue;
         }
         remove_file(root.join(&row.key))?;
         Ledger::new(store).forget_archive(&row.key)?;

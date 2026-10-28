@@ -34,6 +34,8 @@ description: 当用户要把仓库或一批文件变成可检索知识库、问�
 | 「这份 PDF 解析得不对」 | `llm-wiki parse --key <key> --json` | `references/parse.md` |
 | 「有没有矛盾」「体检」「哪些页是孤岛」 | `llm-wiki lint --json`、`llm-wiki graph --json` | `references/audit.md` |
 | 「定时同步」「一批一批地跟」 | `llm-wiki sync --dry-run --json` | `references/sync.md` |
+| 「退回上一版」「上次改坏了」 | `llm-wiki history --json`、`llm-wiki diff vNNN --json` | `references/automation.md` |
+| 「这个文件老是变，别再跟了」 | `llm-wiki ignore check <path> --json` | `references/automation.md` |
 | 「上次那批怎么样了」 | 停在这里 | 不读；走下面的决策门，等人选 |
 | 任何命令报错、退出码看不懂 | `llm-wiki doctor --json` | `references/troubleshooting.md` |
 
@@ -53,7 +55,7 @@ llm-wiki query --text "..." --json      # 检索
 
 ## 需要人拍板的地方
 
-退出码 3、暂存区有待批候选、或 `archive purge` 不带 `--yes` 时，**照抄这四个选项，不要自己发挥**：
+退出码 3、暂存区有待批候选、`reason: page_budget`、或 `archive purge` 不带 `--yes` 时，**照抄这四个选项，不要自己发挥**：
 
 1. 批准（`llm-wiki approve --confirm`）
 2. 不批准并说明原因（`llm-wiki reject --reason "..."`）
@@ -78,7 +80,7 @@ llm-wiki query --text "..." --json      # 检索
 ## 四条铁律
 
 1. **簿记归 CLI。** `index.md`、`log.md`、页面的 `updated` 全部由 CLI 生成，不手写、不手改、不补日期。
-2. **先汇报后落笔。** 摄取前先把要建、要改的页列出来（id + 一句 summary），等人点头。
+2. **不主动汇报。** 自动跑完不发摘要、不发变更清单；用户问「变了什么」再给 `history` / `diff` 的结论。摄取的页要先列出来等人点头，那是用户在要求摄取，不是推送。
 3. **先初始化，再干活。** 报 `E_NOT_INITIALISED` 就 `llm-wiki init`，不要手工造目录或契约文件。
 4. **结论先读正文。** `query` 只给摘要与片段，片段不是答案。
 
@@ -104,4 +106,5 @@ llm-wiki query --text "..." --json      # 检索
 | `references/parse.md` | 解析结果不对、要换后端、要看警告与外部服务 |
 | `references/audit.md` | 跑 `lint`、做判断层分析（矛盾/过时/孤儿/重复）、出体检报告 |
 | `references/sync.md` | 无人值守一轮、定时任务、退避与锁 |
+| `references/automation.md` | 页面预算、整版回退（`history`/`diff`/`rollback`）、`.wiki/ignore` 忽略列表、`sync --only` |
 | `references/troubleshooting.md` | 报错、退出码、`doctor` 检查项、旧布局残留在根目录 |

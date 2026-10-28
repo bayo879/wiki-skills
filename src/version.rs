@@ -1,10 +1,15 @@
 //! Version snapshots and the four-way decision gate.
 //!
-//! `wiki/` is the current approved version; `.wiki/versions/vNNN/` holds the
-//! history. A snapshot is a real byte copy of the whole wiki, bookkeeping and
-//! audit output included, so it needs no git and no re-derivation to read.
-//! Copies are never hard links: editing a snapshot must not reach the approved
-//! tree, and editing `wiki/` must not rewrite history.
+//! `.wiki/pages/` and `.wiki/raw/` are the current content; `.wiki/versions/vNNN/`
+//! holds the history. A snapshot records the path and the digest of every
+//! content file, and stores each distinct byte sequence once under
+//! `.wiki/objects/`. Two snapshots that differ in one page therefore cost one
+//! page, not two full copies, and `rollback` is a plain materialisation of a
+//! manifest — no git, no re-derivation, and no way for an edit of the live tree
+//! to rewrite history.
+//!
+//! The index is derived and never versioned: a rollback rebuilds it from the
+//! restored pages, so a version cannot disagree with what `query` returns.
 //!
 //! The decision gate has four outcomes. `approve` publishes the staged
 //! candidates and advances the baseline, `reject` throws them away and records
@@ -36,6 +41,18 @@ use crate::store::Store;
 ///
 /// A directory without it may be a hand-made backup, and is never deleted.
 const VERSION_FILE: &str = ".version.json";
+
+/// The content map of one snapshot: what each path held, by digest.
+const MANIFEST_FILE: &str = "manifest.json";
+
+/// Content-addressed store shared by every snapshot.
+const OBJECTS_DIR: &str = "objects";
+
+/// Prefix a snapshot path carries for a page.
+const PAGES_PREFIX: &str = "pages";
+
+/// Prefix a snapshot path carries for a raw file.
+const RAW_PREFIX: &str = "raw";
 
 /// The engine directory that holds snapshots and the pending instruction.
 const ENGINE: &str = ".wiki";
@@ -114,6 +131,29 @@ pub enum VersionError {
     /// The staging ledger could not be read or written.
     #[error(transparent)]
     Staging(#[from] staging::StagingError),
+    /// The index could not be rebuilt after a rollback.
+    #[error(transparent)]
+    Index(#[from] crate::query::QueryError),
+    /// A snapshot named on the command line does not exist.
+    #[error("there is no version named {name}")]
+    NoVersion {
+        /// The name the caller asked for.
+        name: String,
+    },
+    /// A snapshot exists but carries no content manifest.
+    #[error("version {name} has no content manifest; take a new `checkpoint`")]
+    NoManifest {
+        /// The name the caller asked for.
+        name: String,
+    },
+    /// A manifest names an object the store no longer holds.
+    #[error("object {sha} is missing from .wiki/objects; version {name} cannot be restored")]
+    MissingObject {
+        /// The version that referenced it.
+        name: String,
+        /// Digest of the missing object.
+        sha: String,
+    },
     /// The index or the log could not be regenerated.
     #[error(transparent)]
     Render(#[from] render::RenderError),
@@ -140,6 +180,9 @@ impl VersionError {
             VersionError::NoReason => "E_NO_REASON",
             VersionError::NoText => "E_NO_TEXT",
             VersionError::Staging(err) => err.code(),
+            VersionError::Index(err) => err.code(),
+            VersionError::NoVersion { .. } | VersionError::NoManifest { .. } => "E_NO_VERSION",
+            VersionError::MissingObject { .. } => "E_MISSING_OBJECT",
             VersionError::Render(err) => err.code(),
             VersionError::Db(_) => "E_DB",
         }
@@ -150,7 +193,7 @@ impl VersionError {
 pub type Result<T> = std::result::Result<T, VersionError>;
 
 /// The record written into every snapshot.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 struct VersionRecord {
     /// Why the snapshot was taken; free text.
     label: String,
@@ -158,6 +201,9 @@ struct VersionRecord {
     created_at: String,
     /// Number of pages in the snapshot, bookkeeping excluded.
     pages: usize,
+    /// `checkpoint`, `approve` or `rollback`; defaults for older snapshots.
+    #[serde(default)]
+    kind: String,
 }
 
 /// One staged page that differs from its counterpart in `wiki/`.
@@ -211,6 +257,23 @@ pub fn approve(
         }
     }
     check_sources(root, cfg)?;
+    // A page the wiki already holds is an overwrite, not growth, so only new
+    // paths count against the budget. Exceeding it keeps the candidates in
+    // `.wiki/staging/` and asks; `--confirm` is the human overruling the cap.
+    let new_pages = candidates
+        .iter()
+        .filter(|candidate| !candidate.wiki.is_file())
+        .count();
+    let budget = cfg.ingest.max_new_pages_per_run;
+    if new_pages > budget {
+        return Ok(ApproveOutcome::NeedsConfirmation {
+            reason: String::from("page_budget"),
+            detail: format!(
+                "本轮会新增 {new_pages} 页，超过 ingest.max_new_pages_per_run（{budget}）；\
+                 候选仍在 .wiki/staging/，确认后用 approve --confirm 合并"
+            ),
+        });
+    }
     if !confirm {
         return Ok(ApproveOutcome::NeedsConfirmation {
             reason: String::from("merge_staging"),
@@ -380,7 +443,149 @@ fn parse_version_name(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Copies the wiki into `.wiki/versions/<name>/` and records what it holds.
+/// One path in a snapshot, with the digest of the bytes it held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+struct ManifestEntry {
+    /// `pages/<rel>` or `raw/<rel>`, `/`-separated.
+    path: String,
+    /// `blake3:` digest of the content.
+    sha: String,
+}
+
+/// What one snapshot held.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct VersionManifest {
+    /// Every content file, sorted by path.
+    entries: Vec<ManifestEntry>,
+}
+
+/// One row of `llm-wiki history`.
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionRow {
+    /// `vNNN`.
+    pub version: String,
+    /// `checkpoint`, `approve` or `rollback`.
+    pub kind: String,
+    /// Why the snapshot was taken.
+    pub label: String,
+    /// UTC creation time.
+    pub created_at: String,
+    /// Pages the snapshot held.
+    pub pages: usize,
+}
+
+/// What a rollback changed.
+#[derive(Debug, Clone, Serialize)]
+pub struct RollbackOutcome {
+    /// The version that was restored.
+    pub restored: String,
+    /// The new version recording the rollback itself.
+    pub version: String,
+    /// Content files materialised from the store.
+    pub files: usize,
+}
+
+/// What one version holds, compared with the current working tree.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct VersionDiff {
+    /// Paths the current tree has and the version does not.
+    pub added: Vec<String>,
+    /// Paths the version has and the current tree does not.
+    pub removed: Vec<String>,
+    /// Paths both have, with different bytes.
+    pub changed: Vec<String>,
+}
+
+/// The directory of the content-addressed store.
+fn objects_dir(root: &Path) -> PathBuf {
+    root.join(ENGINE).join(OBJECTS_DIR)
+}
+
+/// Where one digest lives inside the store.
+fn object_path(root: &Path, sha: &str) -> PathBuf {
+    let hex = sha.strip_prefix("blake3:").unwrap_or(sha);
+    let shard = &hex[..hex.len().min(2)];
+    objects_dir(root).join(shard).join(hex)
+}
+
+/// The live location of a snapshot path, or `None` for an unknown prefix.
+fn content_path(root: &Path, cfg: &Config, path: &str) -> Option<PathBuf> {
+    if let Some(rel) = path
+        .strip_prefix(PAGES_PREFIX)
+        .and_then(|r| r.strip_prefix('/'))
+    {
+        return Some(paths::join_key(&root.join(&cfg.paths.wiki), rel));
+    }
+    let rel = path
+        .strip_prefix(RAW_PREFIX)
+        .and_then(|r| r.strip_prefix('/'))?;
+    Some(paths::join_key(&root.join(&cfg.paths.raw), rel))
+}
+
+/// Every content file, as `(snapshot path, live path)`, sorted by snapshot path.
+fn collect_content(root: &Path, cfg: &Config) -> Result<Vec<(String, PathBuf)>> {
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    for (prefix, dir) in [
+        (PAGES_PREFIX, root.join(&cfg.paths.wiki)),
+        (RAW_PREFIX, root.join(&cfg.paths.raw)),
+    ] {
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&dir).follow_links(false).sort_by_file_name() {
+            let entry = entry.map_err(|err| walk_error(&dir, err))?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry.path().strip_prefix(&dir).unwrap_or(entry.path());
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            out.push((format!("{prefix}/{rel}"), entry.path().to_path_buf()));
+        }
+    }
+    out.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(out)
+}
+
+/// Stores one file's bytes under their digest and returns the digest.
+fn store_object(root: &Path, source: &Path) -> Result<String> {
+    let bytes = fs::read(source).map_err(|err| io(source, err))?;
+    let digest = hash::hash_bytes(&bytes);
+    let target = object_path(root, &digest);
+    if !target.is_file() {
+        write_atomic(&target, &bytes)?;
+    }
+    Ok(digest)
+}
+
+/// Writes `body` to `path` through a temporary file in the same directory.
+fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent).map_err(|source| io(parent, source))?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp = parent.join(format!(".{name}.tmp"));
+    fs::write(&temp, body).map_err(|source| io(&temp, source))?;
+    fs::rename(&temp, path).map_err(|source| io(path, source))
+}
+
+/// Reads the manifest of a snapshot, naming it in every error.
+fn read_manifest(root: &Path, name: &str) -> Result<VersionManifest> {
+    let path = versions_dir(root).join(name).join(MANIFEST_FILE);
+    let body = match fs::read(&path) {
+        Ok(body) => body,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(VersionError::NoManifest {
+                name: String::from(name),
+            })
+        }
+        Err(source) => return Err(io(&path, source)),
+    };
+    serde_json::from_slice(&body).map_err(|source| VersionError::Encode { path, source })
+}
+
+/// Records the content of `.wiki/pages/` and `.wiki/raw/` as a new version.
+///
+/// Only bytes that are new to the object store are written, so the cost of a
+/// snapshot follows the size of the change, not the size of the wiki.
 fn snapshot(
     root: &Path,
     cfg: &Config,
@@ -391,13 +596,38 @@ fn snapshot(
 ) -> Result<String> {
     let dir = versions_dir(root).join(name);
     fs::create_dir_all(&dir).map_err(|source| io(&dir, source))?;
-    copy_tree(&root.join(&cfg.paths.wiki), &dir)?;
+
+    let mut entries = Vec::new();
+    for (path, live) in collect_content(root, cfg)? {
+        let sha = store_object(root, &live)?;
+        entries.push(ManifestEntry { path, sha });
+    }
+    let manifest = VersionManifest { entries };
+    let manifest_path = dir.join(MANIFEST_FILE);
+    let body = serde_json::to_vec_pretty(&manifest).map_err(|source| VersionError::Encode {
+        path: manifest_path.clone(),
+        source,
+    })?;
+    fs::write(&manifest_path, body).map_err(|source| io(&manifest_path, source))?;
 
     let created_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let record = VersionRecord {
         label: String::from(label),
         created_at: created_at.clone(),
-        pages: render::page_files(&dir)?.len(),
+        pages: manifest
+            .entries
+            .iter()
+            .filter(|entry| {
+                let Some(rel) = entry.path.strip_prefix("pages/") else {
+                    return false;
+                };
+                // Bookkeeping is in the snapshot but is not a page: `audit/` is
+                // a record of a run, `index.md`/`log.md` are generated.
+                let first = rel.split('/').next().unwrap_or("");
+                first != "audit" && rel != "index.md" && rel != "log.md"
+            })
+            .count(),
+        kind: String::from(kind),
     };
     let record_path = dir.join(VERSION_FILE);
     let body = serde_json::to_vec_pretty(&record).map_err(|source| VersionError::Encode {
@@ -409,6 +639,149 @@ fn snapshot(
     store.record_version(&created_at, label, kind)?;
     prune(root, cfg.versions.keep)?;
     Ok(String::from(name))
+}
+
+/// Restores `.wiki/pages/` and `.wiki/raw/` to what `name` held.
+///
+/// The live tree is replaced, not merged: a file the version does not have is
+/// deleted. The index is rebuilt from the restored pages, and the rollback
+/// itself is snapshotted, so the next rollback can undo this one.
+pub fn rollback(
+    root: &Path,
+    cfg: &Config,
+    store: &mut Store,
+    name: &str,
+) -> Result<RollbackOutcome> {
+    if !versions_dir(root).join(name).is_dir() {
+        return Err(VersionError::NoVersion {
+            name: String::from(name),
+        });
+    }
+    let manifest = read_manifest(root, name)?;
+
+    for entry in &manifest.entries {
+        let source = object_path(root, &entry.sha);
+        let body = match fs::read(&source) {
+            Ok(body) => body,
+            Err(source_err) if source_err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(VersionError::MissingObject {
+                    name: String::from(name),
+                    sha: entry.sha.clone(),
+                })
+            }
+            Err(source_err) => return Err(io(&source, source_err)),
+        };
+        let Some(target) = content_path(root, cfg, &entry.path) else {
+            continue;
+        };
+        write_atomic(&target, &body)?;
+    }
+
+    let keep: std::collections::BTreeSet<&str> = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    for (path, live) in collect_content(root, cfg)? {
+        if !keep.contains(path.as_str()) {
+            fs::remove_file(&live).map_err(|source| io(&live, source))?;
+        }
+    }
+
+    crate::query::reindex(root, cfg, store)?;
+    render::append_log(
+        &root.join(&cfg.paths.wiki).join("log.md"),
+        &LogEntry {
+            date: today(),
+            action: String::from("rollback"),
+            title: String::from(name),
+            detail: None,
+        },
+    )?;
+
+    let new_name = next_version_name(root)?;
+    snapshot(
+        root,
+        cfg,
+        store,
+        &new_name,
+        &format!("rollback {name}"),
+        "rollback",
+    )?;
+    Ok(RollbackOutcome {
+        restored: String::from(name),
+        version: new_name,
+        files: manifest.entries.len(),
+    })
+}
+
+/// Every snapshot, newest first.
+pub fn history(root: &Path) -> Result<Vec<VersionRow>> {
+    let dir = versions_dir(root);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(io(&dir, source)),
+    };
+    let mut rows = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| io(&dir, source))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if parse_version_name(&name).is_none() {
+            continue;
+        }
+        let record_path = entry.path().join(VERSION_FILE);
+        let Ok(body) = fs::read(&record_path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<VersionRecord>(&body) else {
+            continue;
+        };
+        rows.push(VersionRow {
+            version: name,
+            kind: record.kind,
+            label: record.label,
+            created_at: record.created_at,
+            pages: record.pages,
+        });
+    }
+    rows.sort_by(|left, right| right.version.cmp(&left.version));
+    Ok(rows)
+}
+
+/// Compares what `name` held with the current working tree.
+pub fn diff(root: &Path, cfg: &Config, name: &str) -> Result<VersionDiff> {
+    if !versions_dir(root).join(name).is_dir() {
+        return Err(VersionError::NoVersion {
+            name: String::from(name),
+        });
+    }
+    let manifest = read_manifest(root, name)?;
+    let recorded: std::collections::BTreeMap<&str, &str> = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.sha.as_str()))
+        .collect();
+    let mut current: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for (path, live) in collect_content(root, cfg)? {
+        let bytes = fs::read(&live).map_err(|source| io(&live, source))?;
+        current.insert(path, hash::hash_bytes(&bytes));
+    }
+
+    let mut out = VersionDiff::default();
+    for (path, sha) in &current {
+        match recorded.get(path.as_str()) {
+            None => out.added.push(path.clone()),
+            Some(recorded_sha) if *recorded_sha != sha.as_str() => out.changed.push(path.clone()),
+            Some(_) => {}
+        }
+    }
+    for path in recorded.keys() {
+        if !current.contains_key(*path) {
+            out.removed.push(String::from(*path));
+        }
+    }
+    Ok(out)
 }
 
 /// Deletes the oldest snapshots beyond `keep`.
@@ -438,32 +811,6 @@ fn prune(root: &Path, keep: usize) -> Result<()> {
     for (_, name) in owned.into_iter().skip(keep) {
         let victim = dir.join(&name);
         fs::remove_dir_all(&victim).map_err(|source| io(&victim, source))?;
-    }
-    Ok(())
-}
-
-/// Copies every regular file of `src` into `dst`, recreating the directories.
-fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
-    if !src.is_dir() {
-        return Ok(());
-    }
-    for entry in WalkDir::new(src).follow_links(false).sort_by_file_name() {
-        let entry = entry.map_err(|err| walk_error(src, err))?;
-        let rel = entry.path().strip_prefix(src).unwrap_or(entry.path());
-        let target = dst.join(rel);
-        if entry.file_type().is_dir() {
-            fs::create_dir_all(&target).map_err(|source| io(&target, source))?;
-            continue;
-        }
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|source| io(parent, source))?;
-        }
-        // `fs::copy` copies bytes; sharing an inode would let a snapshot edit
-        // rewrite the approved page.
-        fs::copy(entry.path(), &target).map_err(|source| io(&target, source))?;
     }
     Ok(())
 }

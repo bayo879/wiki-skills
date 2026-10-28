@@ -60,6 +60,23 @@
 flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复，加长技能文本收益很低，反而会和 CLI 漂移。
 所以：技能里写「什么时候做什么、做错了怎么判」，不写「这个参数是什么意思」。
 
+### 2.9 版本是 manifest + 对象，不是目录拷贝
+
+`checkpoint` 不复制目录：它把 `pages/` 与 `raw/` 每条路径的 blake3 写进 `manifest.json`，字节按摘要存进 `.wiki/objects/`。
+所以「改一页」不会让整版体积翻倍，但**任何直接改写内容文件的代码都必须走 `version::write_atomic`**——就地截断会同时改掉历史版本共享的那个对象。
+回退按 manifest 还原两棵树并 `query::reindex`，回退本身也记一个 `kind: rollback` 版本；不做单页回退。
+
+### 2.10 忽略列表只有一个解释入口
+
+`src/ignore.rs::IgnoreList` 是唯一读 `.wiki/ignore` 的地方：`scan`/`convert` 用它跳过、`archive purge` 用它不清。
+不要在调用点自己拼通配，也不要把它和 `[scan].ignore`（只按目录名粗过滤）混用——两者语义不同，混了就会出现「列表里明明写了却还被扫到」。
+显式 `convert --key` 绕开忽略是故意的：先看一眼再决定要不要永久挡住。
+
+### 2.11 页面预算是刹车，不是审批
+
+`approve` 不带 `--confirm` 时先算本轮新增页数（已存在的页算覆盖），超过 `[ingest].max_new_pages_per_run` 就返回 `reason: page_budget`，候选留在暂存区。
+它只防「一次建出几百页」，不替人做内容判断；`--confirm` 是显式越权，所以不要为了压测或图省事把预算调到很大再一路 confirm。
+
 ## 3. 提交前自查
 
 ```bash

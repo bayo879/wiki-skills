@@ -1,4 +1,9 @@
 {
+  "checkpoint": [
+    "cmd",
+    "data.version",
+    "ok"
+  ],
   "convert": [
     "cmd",
     "data.converted[].backend",
@@ -9,6 +14,13 @@
     "data.converted[].skipped",
     "data.converted[].warnings[]",
     "data.failures[]",
+    "ok"
+  ],
+  "diff": [
+    "cmd",
+    "data.added[]",
+    "data.changed[]",
+    "data.removed[]",
     "ok"
   ],
   "doctor": [
@@ -27,6 +39,43 @@
     "data.nodes[].out_degree",
     "data.nodes[].page",
     "data.orphans[]",
+    "ok"
+  ],
+  "history": [
+    "cmd",
+    "data.versions[].created_at",
+    "data.versions[].kind",
+    "data.versions[].label",
+    "data.versions[].pages",
+    "data.versions[].version",
+    "ok"
+  ],
+  "ignore-add": [
+    "cmd",
+    "data.action",
+    "data.added[]",
+    "data.patterns[]",
+    "ok"
+  ],
+  "ignore-check": [
+    "cmd",
+    "data.action",
+    "data.ignored",
+    "data.path",
+    "data.rule",
+    "ok"
+  ],
+  "ignore-list": [
+    "cmd",
+    "data.action",
+    "data.patterns[]",
+    "ok"
+  ],
+  "ignore-remove": [
+    "cmd",
+    "data.action",
+    "data.patterns[]",
+    "data.removed[]",
     "ok"
   ],
   "ingest-begin": [
@@ -84,6 +133,13 @@
   "query-reindex": [
     "cmd",
     "data.indexed",
+    "ok"
+  ],
+  "rollback": [
+    "cmd",
+    "data.files",
+    "data.restored",
+    "data.version",
     "ok"
   ],
   "scan": [

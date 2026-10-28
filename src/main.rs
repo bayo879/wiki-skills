@@ -12,12 +12,13 @@ use serde_json::json;
 
 use llm_wiki::archive;
 use llm_wiki::chunk;
-use llm_wiki::cli::{ArchiveCommand, Cli, Command, IngestCommand, ScopeArg};
+use llm_wiki::cli::{ArchiveCommand, Cli, Command, IgnoreCommand, IngestCommand, ScopeArg};
 use llm_wiki::config::Config;
 use llm_wiki::convert;
 use llm_wiki::doctor::{self, Check, Level};
 use llm_wiki::graph;
 use llm_wiki::hash;
+use llm_wiki::ignore;
 use llm_wiki::ingest;
 use llm_wiki::init;
 use llm_wiki::lint;
@@ -81,6 +82,10 @@ fn dispatch(cli: Cli) -> ! {
         Command::Reject { reason } => run_reject(reason),
         Command::Instruct { text } => run_instruct(text),
         Command::Defer => run_defer(),
+        Command::Ignore { command } => run_ignore(command),
+        Command::Rollback { version } => run_rollback(version),
+        Command::History => run_history(),
+        Command::Diff { version } => run_diff(version),
         Command::Archive { command } => run_archive(command),
         Command::Recall { query, full } => run_recall(query, full),
         Command::Query {
@@ -95,7 +100,8 @@ fn dispatch(cli: Cli) -> ! {
             limit,
             dry_run,
             force,
-        } => run_sync(limit, dry_run, force),
+            only,
+        } => run_sync(limit, dry_run, force, only),
     }
 }
 
@@ -221,7 +227,7 @@ fn human_doctor(data: &DoctorData) -> String {
 /// failures are findings (exit 1), and the caller can read them off the report.
 /// A held lock is exit 4, so a scheduler can tell "someone else is working" from
 /// "this round found problems". Anything else is an environment error (exit 2).
-fn run_sync(limit: Option<usize>, dry_run: bool, force: bool) -> ! {
+fn run_sync(limit: Option<usize>, dry_run: bool, force: bool, only: Vec<String>) -> ! {
     let root = wiki_root("sync");
     let cfg = open_repo("sync", &root);
     let mut store = open_store("sync", &root, &cfg);
@@ -229,6 +235,7 @@ fn run_sync(limit: Option<usize>, dry_run: bool, force: bool) -> ! {
         limit: limit.unwrap_or(cfg.sync.max_per_run),
         dry_run,
         force,
+        only,
     };
     match sync::run(&root, &cfg, &mut store, &args) {
         Ok(report) => {
@@ -709,6 +716,141 @@ fn run_defer() -> ! {
         Ok(()) => report::emit("defer", json!({})),
         Err(err) => fail_version("defer", &err),
     }
+}
+
+/// `ignore` reads and edits the project ignore list in `.wiki/ignore`.
+///
+/// The list is the user's answer to "this source keeps churning": `sync` and
+/// `convert` never see an ignored path, and `archive purge` leaves its derived
+/// copy alone, so the exclusion survives a cleanup.
+fn run_ignore(command: IgnoreCommand) -> ! {
+    let cmd = "ignore";
+    let root = wiki_root(cmd);
+    let _ = open_repo(cmd, &root);
+
+    match command {
+        IgnoreCommand::List => match ignore::IgnoreList::load(&root) {
+            Ok(list) => report::emit(
+                cmd,
+                json!({ "action": "list", "patterns": list.patterns() }),
+            ),
+            Err(err) => fail_ignore(cmd, &err),
+        },
+        IgnoreCommand::Add { patterns } => match ignore::add(&root, &patterns) {
+            Ok(added) => {
+                let all = match ignore::IgnoreList::load(&root) {
+                    Ok(list) => list.patterns(),
+                    Err(err) => fail_ignore(cmd, &err),
+                };
+                report::emit(
+                    cmd,
+                    json!({ "action": "add", "added": added, "patterns": all }),
+                )
+            }
+            Err(err) => fail_ignore(cmd, &err),
+        },
+        IgnoreCommand::Remove { patterns } => match ignore::remove(&root, &patterns) {
+            Ok(removed) => {
+                let all = match ignore::IgnoreList::load(&root) {
+                    Ok(list) => list.patterns(),
+                    Err(err) => fail_ignore(cmd, &err),
+                };
+                report::emit(
+                    cmd,
+                    json!({ "action": "remove", "removed": removed, "patterns": all }),
+                )
+            }
+            Err(err) => fail_ignore(cmd, &err),
+        },
+        IgnoreCommand::Check { path } => {
+            let key = path
+                .trim_end_matches('/')
+                .trim_start_matches("./")
+                .replace('\\', "/");
+            let is_dir = path.ends_with('/') || root.join(&key).is_dir();
+            match ignore::IgnoreList::load(&root) {
+                Ok(list) => {
+                    let rule = list.deciding_pattern(&key, is_dir);
+                    let ignored = list.is_ignored(&key, is_dir);
+                    report::emit(
+                        cmd,
+                        json!({
+                            "action": "check",
+                            "path": key,
+                            "ignored": ignored,
+                            "rule": rule,
+                        }),
+                    )
+                }
+                Err(err) => fail_ignore(cmd, &err),
+            }
+        }
+    }
+}
+
+/// `rollback` materialises a recorded version into the working tree.
+fn run_rollback(version: String) -> ! {
+    let cmd = "rollback";
+    let root = wiki_root(cmd);
+    let cfg = open_repo(cmd, &root);
+    let mut store = open_store(cmd, &root, &cfg);
+    match version::rollback(&root, &cfg, &mut store, &version) {
+        Ok(outcome) => report::emit_with(cmd, outcome, Exit::Ok, human_rollback),
+        Err(err) => fail_version(cmd, &err),
+    }
+}
+
+/// `history` lists the recorded versions, newest first.
+fn run_history() -> ! {
+    let cmd = "history";
+    let root = wiki_root(cmd);
+    let _ = open_repo(cmd, &root);
+    match version::history(&root) {
+        Ok(rows) => report::emit(cmd, json!({ "versions": rows })),
+        Err(err) => fail_version(cmd, &err),
+    }
+}
+
+/// `diff` compares one version with the working tree.
+fn run_diff(version: String) -> ! {
+    let cmd = "diff";
+    let root = wiki_root(cmd);
+    let cfg = open_repo(cmd, &root);
+    match version::diff(&root, &cfg, &version) {
+        Ok(outcome) => report::emit_with(cmd, outcome, Exit::Ok, human_diff),
+        Err(err) => fail_version(cmd, &err),
+    }
+}
+
+/// Human rendering of a rollback: what came back, and the version that records it.
+fn human_rollback(outcome: &version::RollbackOutcome) -> String {
+    format!(
+        "restored {} ({} files) into pages/ and raw/; recorded as {}\n",
+        outcome.restored, outcome.files, outcome.version
+    )
+}
+
+/// Human rendering of a diff, one line per path.
+fn human_diff(diff: &version::VersionDiff) -> String {
+    let mut out = String::new();
+    for path in &diff.added {
+        out.push_str(&format!("+ {path}\n"));
+    }
+    for path in &diff.removed {
+        out.push_str(&format!("- {path}\n"));
+    }
+    for path in &diff.changed {
+        out.push_str(&format!("~ {path}\n"));
+    }
+    if out.is_empty() {
+        out.push_str("no differences\n");
+    }
+    out
+}
+
+/// An unreadable ignore file is an environment problem, not a finding.
+fn fail_ignore(cmd: &str, err: &ignore::IgnoreError) -> ! {
+    report::fail(cmd, Exit::Error, err.code(), &err.to_string())
 }
 
 /// A drift or a stale source is a finding (exit 1); everything else — a missing

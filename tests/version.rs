@@ -180,27 +180,34 @@ fn checkpoint_copies_current_wiki_and_prunes_old() {
     let expected: Vec<String> = (4..=8).map(|seq| format!("v{seq:03}")).collect();
     assert_eq!(owned, expected);
 
-    // The snapshot is a byte copy of wiki/, both pages and bookkeeping.
+    // A snapshot is a manifest of digests, not a copy: the bytes live once in
+    // the object store, and `.wiki/versions/v008/` holds no page at all.
     let snapshot = root.join(".wiki/versions/v008");
-    assert_eq!(
-        fs::read_to_string(snapshot.join("concept/alpha.md")).unwrap(),
-        text
-    );
     assert!(
-        snapshot.join("audit").is_dir(),
-        ".wiki/pages/audit is part of the snapshot"
+        !snapshot.join("concept/alpha.md").exists(),
+        "no byte copies"
     );
-    assert_eq!(
-        fs::read_to_string(snapshot.join("log.md")).unwrap(),
-        "# 日志\n\n## [2026-01-01] init | test\n"
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(snapshot.join("manifest.json")).unwrap()).unwrap();
+    let entries = manifest["entries"].as_array().unwrap();
+    let entry = entries
+        .iter()
+        .find(|entry| entry["path"] == "pages/concept/alpha.md")
+        .expect("the page is in the manifest");
+    let sha = entry["sha"].as_str().unwrap().to_string();
+    let hex = sha.strip_prefix("blake3:").unwrap();
+    let object = root.join(".wiki/objects").join(&hex[..2]).join(hex);
+    assert_eq!(fs::read_to_string(object).unwrap(), text);
+    assert!(
+        entries.iter().any(|entry| entry["path"] == "pages/log.md"),
+        "bookkeeping is content too"
     );
 
-    // Editing the snapshot must not reach the approved wiki.
-    fs::write(snapshot.join("concept/alpha.md"), "改了\n").unwrap();
-    assert_eq!(
-        fs::read_to_string(root.join(".wiki/pages/concept/alpha.md")).unwrap(),
-        text
-    );
+    // Editing the live page must not reach the object the snapshot points at.
+    fs::write(root.join(".wiki/pages/concept/alpha.md"), "改了\n").unwrap();
+    let hex = sha.strip_prefix("blake3:").unwrap();
+    let object = root.join(".wiki/objects").join(&hex[..2]).join(hex);
+    assert_eq!(fs::read_to_string(object).unwrap(), text);
 }
 
 #[test]
@@ -535,4 +542,135 @@ fn defer_changes_nothing_else() {
         "no page moves"
     );
     assert!(version_dirs(root).is_empty(), "defer creates no version");
+}
+
+#[test]
+fn rollback_restores_pages_and_raws_and_records_itself() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    write_file(
+        root,
+        ".wiki/pages/concept/alpha.md",
+        &page_text("alpha", "Alpha"),
+    );
+    write_file(root, ".wiki/raw/a.md", "# raw a\n");
+    let before = version::checkpoint(root, &cfg, &mut store, "before").unwrap();
+
+    // Both trees move, and a page appears that the version never had.
+    write_file(
+        root,
+        ".wiki/pages/concept/alpha.md",
+        &page_text("alpha", "Changed"),
+    );
+    write_file(root, ".wiki/raw/a.md", "# changed\n");
+    write_file(
+        root,
+        ".wiki/pages/concept/beta.md",
+        &page_text("beta", "Beta"),
+    );
+
+    let outcome = version::rollback(root, &cfg, &mut store, &before).unwrap();
+    assert_eq!(outcome.restored, before);
+    assert_eq!(outcome.files, 2, "one page and one raw");
+    assert_eq!(
+        fs::read_to_string(root.join(".wiki/pages/concept/alpha.md")).unwrap(),
+        page_text("alpha", "Alpha")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".wiki/raw/a.md")).unwrap(),
+        "# raw a\n"
+    );
+    assert!(
+        !root.join(".wiki/pages/concept/beta.md").exists(),
+        "a page the version lacks is removed, not merged"
+    );
+
+    // The rollback is a version of its own, so it can be undone.
+    let rows = version::history(root).unwrap();
+    assert_eq!(rows[0].version, outcome.version);
+    assert_eq!(rows[0].kind, "rollback");
+    assert_eq!(rows[0].pages, 1, "only concept/alpha.md counts as a page");
+    assert_eq!(version::diff(root, &cfg, &before).unwrap().changed.len(), 0);
+}
+
+#[test]
+fn diff_reports_added_removed_and_changed_paths() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    write_file(
+        root,
+        ".wiki/pages/concept/alpha.md",
+        &page_text("alpha", "Alpha"),
+    );
+    write_file(
+        root,
+        ".wiki/pages/concept/beta.md",
+        &page_text("beta", "Beta"),
+    );
+    let before = version::checkpoint(root, &cfg, &mut store, "before").unwrap();
+
+    write_file(
+        root,
+        ".wiki/pages/concept/alpha.md",
+        &page_text("alpha", "Edited"),
+    );
+    fs::remove_file(root.join(".wiki/pages/concept/beta.md")).unwrap();
+    write_file(
+        root,
+        ".wiki/pages/concept/gamma.md",
+        &page_text("gamma", "Gamma"),
+    );
+
+    let diff = version::diff(root, &cfg, &before).unwrap();
+    assert_eq!(diff.added, vec![String::from("pages/concept/gamma.md")]);
+    assert_eq!(diff.removed, vec![String::from("pages/concept/beta.md")]);
+    assert_eq!(diff.changed, vec![String::from("pages/concept/alpha.md")]);
+}
+
+#[test]
+fn an_unknown_version_is_an_error_not_a_silent_noop() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    let err = version::rollback(root, &cfg, &mut store, "v999").unwrap_err();
+    assert_eq!(err.code(), "E_NO_VERSION");
+    let err = version::diff(root, &cfg, "v999").unwrap_err();
+    assert_eq!(err.code(), "E_NO_VERSION");
+    assert!(version::history(root).unwrap().is_empty());
+}
+
+#[test]
+fn approve_asks_when_a_round_would_add_too_many_pages() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    for seq in 0..21 {
+        stage(
+            root,
+            &cfg,
+            &mut store,
+            &format!("concept/p{seq:02}.md"),
+            &format!("P{seq}"),
+        );
+    }
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::NeedsConfirmation { reason, detail } => {
+            assert_eq!(reason, "page_budget");
+            assert!(detail.contains("21"), "{detail}");
+        }
+        other => panic!("expected page_budget, got {other:?}"),
+    }
+    assert!(
+        staging::dir(root).join("concept/p00.md").is_file(),
+        "the candidates stay staged: nothing was published"
+    );
+
+    // One fewer page fits the budget, so the only remaining reason to ask is
+    // the merge itself.
+    fs::remove_file(staging::dir(root).join("concept/p20.md")).unwrap();
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::NeedsConfirmation { reason, .. } => {
+            assert_eq!(reason, "merge_staging");
+        }
+        other => panic!("expected merge_staging, got {other:?}"),
+    }
 }

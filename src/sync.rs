@@ -49,6 +49,8 @@ pub struct SyncArgs {
     pub dry_run: bool,
     /// Ignore the settle window and the stable-streak gate.
     pub force: bool,
+    /// Convert only these repo-relative keys; empty means every pending source.
+    pub only: Vec<String>,
 }
 
 /// What one round did.
@@ -159,12 +161,28 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
 
     // 3. The settle window: a file written moments ago may still be growing, so
     //    it waits for the next round. `--force` is the human override.
+    // A key named on the command line is an explicit request: it skips the
+    // settle window, which exists to guess whether a file is still being
+    // written. Nothing else is converted in such a round.
+    let explicit = !args.only.is_empty();
+    if explicit {
+        for key in &args.only {
+            if !changes.iter().any(|change| &change.key == key) {
+                warnings.push(format!(
+                    "--only {key}: no new or changed source has that key"
+                ));
+            }
+        }
+    }
     let mut pending: Vec<&scan::Change> = Vec::new();
     for change in &changes {
         if !matches!(change.kind, ChangeKind::New | ChangeKind::Changed) {
             continue;
         }
-        if args.force || cfg.sync.settle_seconds == 0 {
+        if explicit && !args.only.iter().any(|key| key == &change.key) {
+            continue;
+        }
+        if args.force || explicit || cfg.sync.settle_seconds == 0 {
             pending.push(change);
             continue;
         }

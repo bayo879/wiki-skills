@@ -375,11 +375,13 @@ impl Default for ExternalResponse {
     }
 }
 
-/// `[ingest]`: page-count cap and the review gate.
+/// `[ingest]`: page-count caps and the review gate.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct IngestCfg {
     pub max_pages_per_source: usize,
+    /// New pages one merge may add before `approve` stops and asks.
+    pub max_new_pages_per_run: usize,
     pub review_before_write: bool,
 }
 
@@ -387,6 +389,7 @@ impl Default for IngestCfg {
     fn default() -> Self {
         Self {
             max_pages_per_source: 12,
+            max_new_pages_per_run: 20,
             review_before_write: true,
         }
     }

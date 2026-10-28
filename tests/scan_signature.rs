@@ -305,3 +305,41 @@ fn cli_scan_is_idempotent_across_both_layers() {
     assert_eq!(first["data"]["changes"].as_array().unwrap().len(), 2);
     assert_eq!(first["data"]["ignored_count"], 0);
 }
+
+#[test]
+fn an_entry_of_the_ignore_list_is_invisible_to_the_scan() {
+    let (d, s, cfg) = setup();
+    fs::write(d.path().join("keep.md"), "keep").unwrap();
+    fs::write(d.path().join("notes.md"), "notes").unwrap();
+    fs::create_dir_all(d.path().join("notes")).unwrap();
+    fs::write(d.path().join("notes/other.md"), "other").unwrap();
+    fs::write(d.path().join(".wiki/ignore"), "notes.md\n").unwrap();
+
+    let rep = scan::scan_source(d.path(), &cfg, &s).unwrap();
+    assert!(
+        rep.changes.iter().all(|change| change.key != "notes.md"),
+        "an ignored file is not even a change"
+    );
+    assert!(rep.changes.iter().any(|change| change.key == "keep.md"));
+    assert!(rep
+        .changes
+        .iter()
+        .any(|change| change.key == "notes/other.md"));
+}
+
+#[test]
+fn a_negated_rule_brings_a_path_back() {
+    let (d, s, cfg) = setup();
+    fs::write(d.path().join("draft.md"), "draft").unwrap();
+    fs::write(d.path().join("keep.md"), "keep").unwrap();
+    fs::write(d.path().join(".wiki/ignore"), "*.md\n!keep.md\n").unwrap();
+
+    let rep = scan::scan_source(d.path(), &cfg, &s).unwrap();
+    let keys: Vec<&str> = rep
+        .changes
+        .iter()
+        .map(|change| change.key.as_str())
+        .collect();
+    assert!(!keys.contains(&"draft.md"), "{keys:?}");
+    assert!(keys.contains(&"keep.md"), "{keys:?}");
+}

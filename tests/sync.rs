@@ -43,6 +43,7 @@ fn args(limit: usize) -> sync::SyncArgs {
         limit,
         dry_run: false,
         force: false,
+        only: Vec::new(),
     }
 }
 
@@ -204,6 +205,7 @@ fn dry_run_writes_nothing() {
             limit: 10,
             dry_run: true,
             force: false,
+            only: Vec::new(),
         },
     )
     .unwrap();

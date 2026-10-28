@@ -12,6 +12,7 @@ pub mod convert;
 pub mod doctor;
 pub mod graph;
 pub mod hash;
+pub mod ignore;
 pub mod ingest;
 pub mod init;
 pub mod ledger;

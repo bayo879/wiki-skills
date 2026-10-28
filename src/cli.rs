@@ -112,6 +112,23 @@ pub enum Command {
     },
     /// Keep the queue for later without changing any state.
     Defer,
+    /// List, add, remove or explain entries of `.wiki/ignore`.
+    Ignore {
+        #[command(subcommand)]
+        command: IgnoreCommand,
+    },
+    /// Restore the pages and raws of a recorded version into the working tree.
+    Rollback {
+        /// Version name such as `v003`.
+        version: String,
+    },
+    /// List the recorded versions, newest first.
+    History,
+    /// Show what one version adds, removes or changes against the working tree.
+    Diff {
+        /// Version name such as `v003`.
+        version: String,
+    },
     /// Inspect, seal or clear the conversation summaries.
     Archive {
         #[command(subcommand)]
@@ -155,6 +172,31 @@ pub enum Command {
         /// Ignore the settle window and the stable-streak gate.
         #[arg(long)]
         force: bool,
+        /// Convert only these repo-relative sources; repeatable.
+        #[arg(long = "only", value_name = "PATH")]
+        only: Vec<String>,
+    },
+}
+
+/// The four verbs of the project ignore list.
+#[derive(Debug, Subcommand)]
+pub enum IgnoreCommand {
+    /// Print every pattern, in file order.
+    List,
+    /// Append patterns; a duplicate is not added twice.
+    Add {
+        /// `.gitignore`-style patterns.
+        patterns: Vec<String>,
+    },
+    /// Remove patterns by exact text.
+    Remove {
+        /// Patterns to drop.
+        patterns: Vec<String>,
+    },
+    /// Say whether one path is ignored, and which pattern decided it.
+    Check {
+        /// Path relative to the repository root.
+        path: String,
     },
 }
 

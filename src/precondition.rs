@@ -45,9 +45,10 @@ const REQUIRED_DIRS: [&str; 1] = [".wiki/pages"];
 ///
 /// Parents come before children so a single `create_dir_all` per entry works
 /// even on a fresh checkout.
-const PROVISIONED: [&str; 8] = [
+const PROVISIONED: [&str; 9] = [
     ".wiki",
     ".wiki/cache",
+    ".wiki/objects",
     ".wiki/pages/archive",
     ".wiki/pages/audit",
     ".wiki/raw",

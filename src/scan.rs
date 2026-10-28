@@ -127,6 +127,9 @@ pub enum ScanError {
     /// The ledger could not be read.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// The ignore list could not be read.
+    #[error(transparent)]
+    Ignore(#[from] crate::ignore::IgnoreError),
 }
 
 /// Result of the scan helpers.
@@ -153,7 +156,8 @@ struct DiskFile {
 /// `store` is only read; the function never writes to it.
 pub fn scan_source(root: &Path, cfg: &Config, store: &Store) -> Result<ScanReport> {
     let source_root = root.join(&cfg.paths.source);
-    let walked = walk_source(&source_root, cfg)?;
+    let ignores = crate::ignore::IgnoreList::load(root)?;
+    let walked = walk_source(&source_root, cfg, &ignores)?;
     let ledger = store.all_sources()?;
     let changes = classify(&walked.disk, &walked.present, &ledger);
     Ok(ScanReport {
@@ -390,7 +394,11 @@ struct Walked {
 /// Dot-paths are skipped by [`paths::is_ignored`], so `.wiki/` and `.git/` never
 /// appear, and `[scan].ignore` skips noisy build directories. A missing root is
 /// impossible in practice; an unreadable one is treated as empty.
-fn walk_source(source_root: &Path, cfg: &Config) -> Result<Walked> {
+fn walk_source(
+    source_root: &Path,
+    cfg: &Config,
+    ignores: &crate::ignore::IgnoreList,
+) -> Result<Walked> {
     let mut disk = Vec::new();
     let mut present = BTreeSet::new();
     let mut ignored_count = 0usize;
@@ -399,7 +407,7 @@ fn walk_source(source_root: &Path, cfg: &Config) -> Result<Walked> {
         let walker = WalkDir::new(source_root)
             .follow_links(false)
             .into_iter()
-            .filter_entry(|entry| !is_ignored_source(source_root, entry, cfg));
+            .filter_entry(|entry| !is_ignored_source(source_root, entry, cfg, ignores));
         for entry in walker {
             let entry = entry?;
             if !entry.file_type().is_file() {
@@ -445,9 +453,19 @@ fn is_ignored_path(root: &Path, entry: &walkdir::DirEntry) -> bool {
 ///
 /// Only directories are matched by name: a *file* called `build` is a normal
 /// source, it is the build tree next to it that is noise.
-fn is_ignored_source(root: &Path, entry: &walkdir::DirEntry, cfg: &Config) -> bool {
+fn is_ignored_source(
+    root: &Path,
+    entry: &walkdir::DirEntry,
+    cfg: &Config,
+    ignores: &crate::ignore::IgnoreList,
+) -> bool {
     if is_ignored_path(root, entry) {
         return true;
+    }
+    if let Ok(key) = paths::identity_key(root, entry.path()) {
+        if !key.is_empty() && ignores.is_ignored(&key, entry.file_type().is_dir()) {
+            return true;
+        }
     }
     if !entry.file_type().is_dir() {
         return false;

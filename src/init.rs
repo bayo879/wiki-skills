@@ -14,9 +14,10 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 /// Directories that must exist after `init`, parents before children.
-const DIRS: [&str; 9] = [
+const DIRS: [&str; 10] = [
     ".wiki",
     ".wiki/cache",
+    ".wiki/objects",
     ".wiki/pages",
     ".wiki/pages/archive",
     ".wiki/pages/audit",
@@ -148,6 +149,7 @@ min_chars        = 200      # below this a builtin result may fall back to the e
 
 [ingest]
 max_pages_per_source = 12
+max_new_pages_per_run = 20
 review_before_write  = true
 
 [audit]

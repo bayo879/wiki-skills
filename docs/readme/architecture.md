@@ -22,7 +22,7 @@
 仓库根 ──scan──▶ state.db ──convert──▶ .wiki/raw/ ──ingest 轮次──▶ .wiki/staging/
                                                                    │ approve --confirm
                                                                    ▼
-              .wiki/pages/ ◀── lint / checkpoint ──▶ .wiki/versions/vNNN/
+              .wiki/pages/ ◀── lint / checkpoint ──▶ .wiki/versions/vNNN/ + .wiki/objects/
                     │
                     ├── sync：scan → convert → 门槛 → 审计（.wiki/pages/audit/<date>-sync.md）
                     ├── query：FTS5 索引（.wiki/pages/ 与 .wiki/pages/archive/）
@@ -35,7 +35,7 @@
 3. **ingest** 一轮读写：`begin` 把涉及的源与预判页面写进 `pending` 表，`commit` 把候选页与暂存清单对齐，`abort` 丢弃本轮但保留已写候选页。
 4. **staging → pages**：候选页放在 `.wiki/staging/<type>/<id>.md`；`approve` 只在 `--confirm` 下合并进 `.wiki/pages/` 并写 `log.md`、重建 `index.md`，`reject` 记录原因后清空暂存。
 5. **lint** 跑十三条规则（`L1`–`L13`），`--fix` 只修不需要判断的机械缺陷，`--strict` 把警告也算失败。
-6. **checkpoint** 把 `.wiki/pages/` 拷进 `.wiki/versions/vNNN/`，只保留最近 `[versions].keep` 份。
+6. **checkpoint** 记一份 manifest（`pages/` 与 `raw/` 每条路径的 blake3 摘要）到 `.wiki/versions/vNNN/manifest.json`，字节按摘要存进 `.wiki/objects/`，同一内容只存一份；只保留最近 `[versions].keep` 份。`rollback vNNN` 按 manifest 把两棵树还原、重建索引，并把自己记成新版本；`history` / `diff` 读同一份 manifest。
 7. **sync** 无人值守串起 scan → convert → 稳定门槛 → lint，并把本轮写进审计文件；`--dry-run` 不写任何文件。
 8. **archive / recall** 是分层记忆：agent 先写 `.wiki/pages/archive/<YYYY-MM>.md` 摘要，`seal` 校验账本、改写引用页的 `sources`、登记 `archive` 表；`recall` 子串检索摘要，`query` 用 FTS5 检索全库。
 9. **query** 是派生索引：`page_meta` 存每页哈希，每次搜索前增量刷新，`--reindex` 全量重建。`page_meta` 有哈希但索引里没有该页时（例如 `approve` 刚发布的页），同样会补建索引。
@@ -58,7 +58,8 @@
 | `src/ingest.rs` | 一轮 ingest 的账本操作 |
 | `src/staging.rs` | 暂存区与清单 `pending.json` |
 | `src/lint.rs` | 十三条规则与 `--fix` |
-| `src/version.rs` | 版本快照与保留策略 |
+| `src/version.rs` | 版本 manifest 与对象库、`rollback` / `history` / `diff`、`approve` 决策门与页面预算 |
+| `src/ignore.rs` | `.wiki/ignore` 的解析与增删；`scan` / `convert` / `archive purge` 共用的唯一判定 |
 | `src/lock.rs` | 仓库锁（TTL 600s） |
 | `src/store.rs` | SQLite 账本、schema 迁移、FTS5 |
 | `src/ledger.rs` | 账本唯一的写入口：登记转换、跟随改名、遗忘删除 |
@@ -72,7 +73,7 @@
 
 ## 不变量
 
-- 账本只由 CLI 写；仓库根是唯一输入，`.wiki/raw/` 与 `.wiki/pages/` 都是派生产物，且都与账本一起留在 `.wiki/` 里。**任何命令都不写 `.wiki/` 之外**（检查：tests/e2e.rs::init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall）（检查：tests/invariants.rs::only_store_writes_sql）
+- 账本只由 CLI 写；仓库根是唯一输入，`.wiki/raw/` 与 `.wiki/pages/` 都是派生产物，且都与账本一起留在 `.wiki/` 里。**任何命令都不写 `.wiki/` 之外**（检查：tests/e2e.rs::init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall）
 - 账本表只有 `src/store.rs` 能执行 SQL，业务写入只有 `src/ledger.rs` 一个入口：`convert` 登记、`moves` 改键、`archive purge` 删行都表达成 `ledger::Ledger` 的一次调用，顺序与失败语义写在 `ledger.rs` 的注释里。想加第四个意图，加 `Ledger` 的方法，不要绕回 `store`。（检查：tests/invariants.rs::only_ledger_writes_the_ledger）
 - 先文件后账本：`convert` 先原子写 `.wiki/raw/`，再登记两张表，两步之间没有跨表事务。中断留下的缺口由 `scan`（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露，所以「账本与磁盘暂时不一致」是被允许并会被检出的状态，不是靠事务禁止的状态。（未机器化：没有崩溃注入测试，无法证明两次写入的先后）
 - 对账只有一个答案：`scan::classify`（仓库根）与 `scan::classify_raw`（`.wiki/raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan` 输出的 `layer` 字段、`lint` `L7`、`ingest begin` 的 `orphan_pages` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这三处必须同答。（检查：tests/reconcile.rs::an_unledgered_raw_is_reported_the_same_way_by_all_three）
@@ -80,7 +81,9 @@
 - 页面必须有 frontmatter 七字段：`id`、`title`、`type`、`summary`、`sources`、`status`、`updated`；`type` 取自 `[schema].types`。（检查：tests/lint.rs::l1_reports_each_missing_required_field）
 - 候选页只能经 `.wiki/staging/` 由 `approve --confirm` 进入 `.wiki/pages/`；覆盖已存在页面同样需要确认。（检查：tests/version.rs::approve_without_confirm_asks_a_human）
 - `archive seal` 先改引用页、后写账本：中途崩溃时重跑能补齐，不会留下引用已删记录的页面。（未机器化：靠 seal 的幂等实现，没有崩溃注入测试）
-- `archive purge` 只在「总数超 `purge_cap`」且「超过 `purge_days`」时才删，且跳过仍被引用的摘要。（检查：tests/archive.rs::purge_candidates_need_capacity_and_deadline_both）
+- `archive purge` 只在「总数超 `purge_cap`」且「超过 `purge_days`」时才删，且跳过仍被引用的摘要，也不清忽略列表上的源。（检查：tests/archive.rs::purge_candidates_need_capacity_and_deadline_both）
+- 版本是 manifest + 内容寻址对象，不是目录拷贝；回退按 manifest 还原两棵树并重建索引，回退本身也记一个版本。（检查：tests/version.rs::rollback_restores_pages_and_raws_and_records_itself）
+- 忽略列表只有一个解释入口 `ignore::IgnoreList`：`scan`/`convert` 跳过、`archive purge` 不清，不许在调用点各自拼通配。`[scan].ignore` 只是目录名的粗过滤，两者不混用。（检查：tests/scan_signature.rs::an_entry_of_the_ignore_list_is_invisible_to_the_scan）
 - 索引与暂存清单都是派生状态，可以从 `.wiki/pages/` 与账本重建；`--reindex` 是兜底。（检查：tests/query.rs::reindex_is_what_makes_a_new_page_searchable）
 
 ## 机器守卫
