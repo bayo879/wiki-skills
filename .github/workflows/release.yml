@@ -80,6 +80,26 @@ jobs:
       - name: List the assets
         run: ls -l dist
 
+      # Earlier releases carried a tarball per platform. The CLI is published as
+      # a bare binary now, so anything that is not one gets dropped instead of
+      # piling up beside it.
+      - name: Drop assets from the packaged era
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[].name' |
+            while read -r name; do
+              case "$name" in
+                llm-wiki-*) ;;
+                *) echo "deleting $name"; gh release delete-asset "$TAG" "$name" --yes ;;
+              esac
+            done
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/llm-wiki-*
