@@ -111,8 +111,7 @@ description: 当用户提到知识库、wiki、摄取材料、解析文件、体
 |---|---|---|
 | 0 | 成功；`query` 无命中、`doctor` 只有 Warn 也是 0 | 继续 |
 | 1 | 命令失败（含部分源失败），或 `lint` 有 error，`recall` 无命中 | 报失败项，问是否处理 |
-| 2 | 用法、配置或环境错误 | 多半没在仓库根跑，或 `wiki.toml` 有问题；修环境，不要硬重试 |
-| 2 | `E_NOT_INITIALISED`（`error.code`） | 仓库还没初始化：`detail.missing` 说是 `wiki.toml` 还是 `wiki/`。先跑 `llm-wiki init`，再重试原命令。不要手工补文件、不要绕过去读目录 |
+| 2 | 用法、配置或环境错误；`E_NOT_INITIALISED` 是其中一种 | 多半没在仓库根跑，或 `wiki.toml` 有问题：修环境，不要硬重试。仓库没初始化时 `detail.missing` 说是缺 `wiki.toml` 还是 `wiki/`，先跑 `llm-wiki init` 再重试原命令；不要手工补文件、不要绕过去读目录 |
 | 3 | 需要人拍板 | 走决策门，给四选项，停下 |
 | 4 | 仓库被另一个进程锁住 | 等一会儿重试；不要删 `.wiki/lock` |
 

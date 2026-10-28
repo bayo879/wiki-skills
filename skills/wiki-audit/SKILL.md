@@ -59,7 +59,7 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 | status 非法 | error | 只认 `draft`/`stable`/`stale` | 团队自定义 `review`、大写 `Draft` |
 | updated 格式 | warning | 必须是 `YYYY-MM-DD` | 写成时间戳 `2026-10-27T10:00:00Z` |
 | 缺源 | error | `sources` 指的文件不存在 | 写了 `source/` 原文路径而不是 `raw/` 产物；归档引用豁免 |
-| 未入账 raw | warning | `raw/` 里有账本不认识的文件 | 新 clone 后 `state.db` 为空，整层都报；`scan` 只读不记账，要 `convert` 才补 |
+| 未入账 raw | warning | `raw/` 里有账本不认识的文件 | 新 clone 后 `state.db` 为空，整层都报。补账本：raw 的 frontmatter 有 `source:` 且没有 `pin: true` 时，`llm-wiki convert --key <源key>` 会认领它并登记（批量 `convert` 只挑 source 层待转换项，已入账源不会重转）。认领不了的文件（无 `source:`、或 `pin: true`）只能删——`raw/` 是派生产物，内容本该进 `source/`。两种情况都不要手改账本或 `.wiki/state.db` |
 | 空页 | warning | 正文短于 `[audit].min_page_chars`（默认 200 字符） | 导航页、目录页本来就短；归档页豁免 |
 | 改了没跟日期 | warning | 文件哈希变了而 `updated` 没动 | 只改了 `tags`/`summary`，正文其实没变 |
 | 共享 raw 过多 | info | 一份 raw 被超过 3 页引用 | 规范页被多页引用是合理的 |

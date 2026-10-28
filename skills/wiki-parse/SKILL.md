@@ -109,7 +109,7 @@ timeout_s = 120
 |---|---|
 | `E_NO_PARSER` | 没有后端认这个扩展名；先核对扩展名与 `primary` |
 | `E_IO` | 读不到 `source/<key>`；核对 key |
-| `E_OVERSIZE` | 超过 `parse.max_source_bytes`（默认 100MB），无放行开关 |
+| `E_OVERSIZE` | 超过 `parse.max_source_bytes`（默认 100MB）。`--force-large` 可越过，只为看一眼：不落盘、不进账本 |
 | `E_BAD_SOURCE` | 后端认领后解码失败，如坏 PDF |
 | `E_BAD_CONFIG` | `[parse.external]` 不全：缺节、`type`≠`http`、`url`/`auth_env` 空、没有 `@file` 字段、`timeout_s` 为 0 |
 | `E_NO_AUTH_ENV` | 变量未设 |

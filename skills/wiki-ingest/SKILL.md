@@ -18,6 +18,7 @@ llm-wiki doctor --json
 ```
 
 - 用它取仓库根，确认 `.wiki/state.db` 可用。
+- 动笔前先读仓库根的 `SCHEMA.md`：类型枚举、必填字段、`status` 三态、图片路径都以它为准，本 skill 不再重述。
 - 源必须是 `raw/<key>.md`，且已在账本里。没有就先 scan 和 convert，回 `wiki-scan`。
 - `begin` 只认账本里的源；不在账本报 `source ... is not in the ledger`。
 - 源在这一轮之后还会变的话，先把它转换固定下来再开始。
@@ -62,8 +63,35 @@ llm-wiki ingest begin \
 
 - **正文是你要写的东西**。已有页的 frontmatter 交给 CLI，不要手工维护 `updated`。
 - `id` 不要自己编：它必须等于文件名。新页照抄文件名，已有页别动。
-- 新页要自己建 frontmatter 骨架，并**必须带 `updated:` 这一行**（写占位日期即可）。`commit` 只改值、不补行，缺了报 `no 'updated:' field`。
 - 结论先行，再给依据；不写「本文介绍…」这类空转。
+
+新页照这份骨架起笔，字段含义见 `SCHEMA.md`，`type` 必须取自 `wiki.toml` 的 `[schema].types`：
+
+```markdown
+---
+id: order-retry
+title: 订单超时重试
+type: concept
+summary: 一句话说清这页回答哪个问题
+sources:
+  - raw/order-timeout.md
+status: draft
+updated: 1970-01-01
+---
+```
+
+`updated:` **必须自己写一行**，占位日期即可：`commit` 只改值、不补行，缺了报 `no 'updated:' field`。
+
+正文好坏对照：
+
+```markdown
+<!-- 差：自述式开头，读完不知道结论，也没有落点 -->
+本文介绍了订单超时重试的相关机制，分为以下几个部分。
+
+<!-- 好：一句结论，一句依据，读者立刻能判断信不信 -->
+重试上限是 3 次，第 4 次直接判失败（`raw/order-timeout.md`）。
+超过上限没有退避——这是当前实现的已知问题，源里写明了。
+```
 
 ## 3. frontmatter 归属
 
