@@ -393,15 +393,19 @@ fn check_legacy(root: &Path) -> Check {
     if root.join("source").is_dir() {
         found.push("source/");
     }
+    if root.join(".wiki/pages/log.md").is_file() {
+        found.push(".wiki/pages/log.md");
+    }
     if found.is_empty() {
-        Check::ok(NAME, "no pre-.wiki layout files at the repository root")
+        Check::ok(NAME, "no files from the pre-.wiki or pre-journal layout")
     } else {
         Check::warn(
             NAME,
             format!(
-                "{} at the root are from the old layout; this build reads {} — delete them and run `llm-wiki init` to rebuild",
+                "{} is from an older layout; this build reads {} and journals to .wiki/{} — delete it and run `llm-wiki init` to rebuild",
                 found.join(", "),
-                CONFIG_FILE
+                CONFIG_FILE,
+                crate::journal::JOURNAL_FILE
             ),
         )
     }

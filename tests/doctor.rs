@@ -235,6 +235,20 @@ fn a_root_contract_from_the_old_layout_is_a_warning() {
 }
 
 #[test]
+fn a_page_log_from_the_old_journal_layout_is_a_warning() {
+    let dir = repo();
+    fs::write(dir.path().join(".wiki/pages/log.md"), "# 日志\n").expect("writable");
+    let (code, json) = doctor(dir.path());
+    assert_eq!(code, 0);
+    assert_eq!(level(&json, "legacy_layout"), "warn");
+    let detail = check_detail(&json, "legacy_layout");
+    assert!(
+        detail.contains(".wiki/pages/log.md"),
+        "the finding names it: {detail}"
+    );
+}
+
+#[test]
 fn a_live_lock_is_a_warning_and_a_stale_one_is_not() {
     let dir = repo();
     let path = dir.path().join(".wiki/lock");
