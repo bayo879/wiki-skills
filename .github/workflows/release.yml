@@ -53,18 +53,21 @@ jobs:
           set -eu
           triple=$(rustc -vV | sed -n 's/^host: //p')
           name="llm-wiki-${triple}"
+          mkdir -p dist
           if [ -f target/release/llm-wiki.exe ]; then
             name="${name}.exe"
-            cp target/release/llm-wiki.exe "dist-${name}"
+            cp target/release/llm-wiki.exe "dist/${name}"
           else
-            cp target/release/llm-wiki "dist-${name}"
+            cp target/release/llm-wiki "dist/${name}"
           fi
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 
+      # `path: dist/` keeps the file's own name inside the artifact, so the
+      # published asset is `llm-wiki-<triple>` and nothing else.
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.os }}
-          path: dist-*
+          path: dist/
           if-no-files-found: error
 
   release:
