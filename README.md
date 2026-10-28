@@ -56,56 +56,59 @@ llm-wiki doctor            # 十一项健康检查，有 Fail 则退出码 1
 llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"checks":[...]}}
 ```
 
-`init` 生成的 `.wiki/.gitignore` 只忽略可重建的状态（`cache/`、`staging/`、`sessions/`、`state.db*`、`lock`）；`wiki/`、`raw/`、`source/` 与 `.wiki/versions/` 都进 git。CI 在 Ubuntu / macOS / Windows 三平台跑 `build`、`test`、`test --release`、`fmt --check`、`clippy -D warnings`，不安装 poppler/pandoc（PDF 测试用模板现造）。
+`init` 生成的 `.wiki/.gitignore` 只忽略可重建的状态（`cache/`、`staging/`、`sessions/`、`state.db*`、`lock`）与本地 CLI 副本（`llm-wiki`）；`wiki/`、`raw/`、`source/` 与 `.wiki/versions/` 都进 git。CI 在 Ubuntu / macOS / Windows 三平台跑 `build`、`test`、`test --release`、`fmt --check`、`clippy -D warnings`，不安装 poppler/pandoc（PDF 测试用模板现造）。
 
 ### Agent skills 安装
 
-6 个 skill 是给 Claude Code 用的薄指令层，所有簿记与判定逻辑都在 `llm-wiki` 里。一次装好：
+6 个 skill 是给 Claude Code 用的薄指令层，所有簿记与判定逻辑都在 `llm-wiki` 里。
+skill 只有 markdown，复制即可；CLI 是另一个可执行文件，按下面的方式放到能调用的地方。
 
 ```bash
-./scripts/install.sh            # mac / linux
-.\scripts\install.ps1           # windows
+# CLI：编译一次，放到 PATH 上
+cargo build --release --locked
+install -m 0755 target/release/llm-wiki ~/.local/bin/llm-wiki
+llm-wiki version
+
+# skill：复制进 agent 的技能根目录
+cp -R skills/* ~/.claude/skills/
 ```
 
-脚本做三件事：`cargo build --release --locked` 后把二进制装到 `~/.local/bin/llm-wiki`（Windows 为 `%LOCALAPPDATA%\Programs\llm-wiki`）；用 `scripts/vendor.sh` 把同一个二进制打进 `skills/llm-wiki/bin/vendor/<triple>/`；再把 `skills/*` 复制到 `~/.claude/skills/`。安装目录可用 `CLAUDE_SKILLS_DIR` / `WIKI_BIN_DIR` 覆盖，`--dry-run` 只打印动作不落盘，`--skip-build` 复用已有的 `target/release/llm-wiki`。
+不装 Rust 的机器从 Release 页取对应平台的二进制，放到同一位置即可。
 
-#### 把 skill 包同步给别人
+#### CLI 的两种放法
 
-`skills/` 可以直接整个复制进对方的技能根目录（`~/.dsh/skills/`、`~/.claude/skills/` 等），
-那台机器**不需要 Rust、不需要联网、不需要本仓库**——包里带着当前平台的预编译二进制。
+| 放法 | 调用 | 适合 |
+|---|---|---|
+| PATH 上的目录（如 `~/.local/bin/llm-wiki`） | `llm-wiki ...` | 一个人维护多个 wiki 仓库 |
+| 仓库根的 `.wiki/llm-wiki` | `.wiki/llm-wiki ...` | 单个仓库自带工具，随仓库走 |
 
-二进制本身**不进 git**（见下节 Release）。本地要自己产一份，跑一次：
+`.wiki/llm-wiki` 已在 `init` 生成的 `.wiki/.gitignore` 里，不会被提交。
+两种放法都要求在**仓库根目录**执行；CLI 不向上查找根。
 
-```bash
-cargo build --release && ./scripts/vendor.sh
-```
+#### 把 skill 同步给别人
 
-这也是本地跑测试的前提：`tests/skills_install.rs` 会复制整包并执行它，缺二进制就失败，
-报错会直接告诉你要跑上面这条命令。
+`skills/` 是纯文本，整个复制进对方的技能根目录即可，不需要本仓库、不需要 Rust。
+对方另外需要一份 `llm-wiki`，从 Release 页按平台取：
 
-```bash
-# 在包内技能目录，跑一次就把 CLI 装到 PATH；幂等，重复跑不覆盖可用安装
-sh ~/.dsh/skills/llm-wiki/bin/bootstrap.sh
-```
+| 平台 | 资产 |
+|---|---|
+| macOS（Apple Silicon） | `llm-wiki-aarch64-apple-darwin` |
+| macOS（Intel） | `llm-wiki-x86_64-apple-darwin` |
+| Linux x86_64 | `llm-wiki-x86_64-unknown-linux-gnu` |
+| Linux ARM64 | `llm-wiki-aarch64-unknown-linux-gnu` |
+| Windows x86_64 | `llm-wiki-x86_64-pc-windows-msvc.exe` |
 
-`bin/llm-wiki` 是免安装启动器，直接 `sh <包路径>/bin/llm-wiki version` 也能跑。
-换平台时先在对应平台上 `cargo build --release && ./scripts/vendor.sh` 补齐
-`bin/vendor/<triple>/`，否则 `bootstrap` 会退出码 2 并指名缺哪个 triple。
-`tests/skills_install.rs` 会把这个流程当验收项跑（复制包 → 清空环境 → bootstrap → 跑通）。
-
-#### 从 Release 取现成产物
+#### 发布
 
 本机打不出 Linux / Windows 的二进制（缺目标平台的 C 工具链，`libsqlite3-sys` 是 bundled C）。
-这三个平台由 CI 出：推一个 tag，`Release` workflow 会在三个原生 runner 上各打一份包，
-并挂到 Release 页：
+推一个 tag，`Release` workflow 在三个原生 runner 上各跑一遍 `cargo test --release`，
+产出对应平台的一个二进制并挂到 Release 页：
 
 ```bash
-git tag v0.1.0 && git push --tags
+git tag v0.1.1 && git push origin v0.1.1
 ```
 
-产物是 `llm-wiki-skills-<version>-<triple>.tar.gz`，解压后把 `skills/*` 复制进对方技能根目录即可，
-里面的 `bin/vendor/` 已经是对应平台的二进制，不需要再跑 `vendor.sh`。没有 tag 时也可以去
-Actions 页面手动跑 `Release` workflow（`workflow_dispatch`）。
+没有 tag 时也可以去 Actions 页面手动跑 `Release`（`workflow_dispatch`）。
 
 | skill | 管什么 |
 |---|---|

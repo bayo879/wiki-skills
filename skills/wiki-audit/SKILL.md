@@ -5,7 +5,7 @@ description: 当用户要求给知识库做体检、问「有没有说法不一�
 
 # wiki-audit
 
-命令 `llm-wiki` 由 llm-wiki 技能包提供；报 command not found 时先跑该包的 `bin/bootstrap.sh`。
+命令是 `llm-wiki`；不在 PATH 上时，用仓库根的 `.wiki/llm-wiki`。
 
 ## 何时用
 

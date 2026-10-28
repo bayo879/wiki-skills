@@ -5,7 +5,7 @@ description: 当宿主定时任务唤起本技能，或上游同步服务刚把�
 
 # wiki-sync
 
-命令 `llm-wiki` 由 llm-wiki 技能包提供；报 command not found 时先跑该包的 `bin/bootstrap.sh`。
+命令是 `llm-wiki`；不在 PATH 上时，用仓库根的 `.wiki/llm-wiki`。
 
 无人值守的一轮同步。调度器唤起后，先跑一条命令，读结论，决定要不要叫人。
 

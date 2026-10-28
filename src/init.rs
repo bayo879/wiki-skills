@@ -31,7 +31,10 @@ const CONTRACT_FILES: [(&str, &str); 2] = [("wiki.toml", WIKI_TOML), ("SCHEMA.md
 /// `versions/` is deliberately absent. A snapshot is the history a rollback
 /// needs, so it is content and belongs in git; the ledger, the cache and the
 /// staging area are rebuilt by running the tool.
-const GITIGNORE: &str = "cache/\nstaging/\nsessions/\nstate.db\nstate.db-wal\nstate.db-shm\nlock\n";
+// `llm-wiki` here is the optional local copy of the CLI: the tool itself is a
+// single file a user may drop into the engine directory instead of putting it on
+// PATH, and it must never be committed into the repository it operates on.
+const GITIGNORE: &str = "cache/\nstaging/\nsessions/\nstate.db\nstate.db-wal\nstate.db-shm\nlock\nllm-wiki\nllm-wiki.exe\n";
 
 /// What one `init` run did, split by path so the caller can show both sides.
 #[derive(Debug, Clone, Default, Serialize)]

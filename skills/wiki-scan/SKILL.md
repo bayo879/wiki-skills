@@ -5,7 +5,7 @@ description: 当用户说「同步过来一批新文件」「扫一下有什么�
 
 # wiki-scan
 
-命令 `llm-wiki` 由 llm-wiki 技能包提供；报 command not found 时先跑该包的 `bin/bootstrap.sh`。
+命令是 `llm-wiki`；不在 PATH 上时，用仓库根的 `.wiki/llm-wiki`。
 
 把 `source/` 的变化翻成两句话：哪些要转换，哪些要重新摄取。只调 `llm-wiki scan` 和 `llm-wiki convert`，其余判断交给下游。
 

@@ -5,7 +5,7 @@ description: 某份源文件的解析结果不对、转换时报错、正文为�
 
 # wiki-parse
 
-命令 `llm-wiki` 由 llm-wiki 技能包提供；报 command not found 时先跑该包的 `bin/bootstrap.sh`。
+命令是 `llm-wiki`；不在 PATH 上时，用仓库根的 `.wiki/llm-wiki`。
 
 `llm-wiki parse` 是 `convert` 的只读探针：同一解析层、同一后端、同一批警告，区别只是不写 `raw/`。用来回答「这份源为什么产出不对」。
 

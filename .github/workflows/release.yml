@@ -1,9 +1,12 @@
 name: Release
 
-# Publishes the skill package with a native binary for each platform, so
-# consumers download a ready-to-copy directory instead of building anything.
-# Trigger it by pushing a tag (`git tag v0.1.0 && git push --tags`) or by hand
-# from the Actions page.
+# Publishes the CLI itself: one static-ish executable per platform, attached to
+# the tagged release. The skills are plain files and travel with the repository,
+# so there is nothing to package around them.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# or run this workflow by hand from the Actions page.
 on:
   push:
     tags: ['v*']
@@ -16,8 +19,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  package:
-    name: package (${{ matrix.os }})
+  build:
+    name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,41 +32,44 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release binary
-        run: cargo build --release --locked
-
-      # Same step as CI: the package only works elsewhere if it carries a
-      # binary for that platform.
-      - name: Vendor the binary into the package
-        shell: bash
-        run: ./scripts/vendor.sh
-
-      # The archive would be untested otherwise: these are the tests that prove
-      # a copied package runs, so run them before shipping it.
-      - name: Test the package
+      # The artifact *is* the binary, so the shipped profile has to be the one
+      # that passes the suite. No packaging step follows that could mask it.
+      - name: Test the release profile
         run: cargo test --release --locked
 
-      - name: Package the skill bundle
+      - name: Build
+        run: cargo build --release --locked
+
+      # Strip the debug-looking tail off unix builds; Windows has no `strip`
+      # for PE binaries in the runner image, and its symbols are already small.
+      - name: Shrink (unix)
+        if: runner.os != 'Windows'
+        run: strip -x target/release/llm-wiki
+
+      - name: Name the asset
+        id: asset
         shell: bash
         run: |
           set -eu
-          version="${GITHUB_REF_NAME#v}"
-          [ -n "$version" ] || version=dev
           triple=$(rustc -vV | sed -n 's/^host: //p')
-          mkdir -p dist
-          name="llm-wiki-skills-${version}-${triple}.tar.gz"
-          tar -czf "dist/$name" skills scripts README.md
-          echo "packaged dist/$name"
+          name="llm-wiki-${triple}"
+          if [ -f target/release/llm-wiki.exe ]; then
+            name="${name}.exe"
+            cp target/release/llm-wiki.exe "dist-${name}"
+          else
+            cp target/release/llm-wiki "dist-${name}"
+          fi
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bundle-${{ matrix.os }}
-          path: dist/*.tar.gz
+          name: binary-${{ matrix.os }}
+          path: dist-*
           if-no-files-found: error
 
   release:
     name: publish release
-    needs: package
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -76,6 +82,6 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: dist/llm-wiki-*
           generate_release_notes: true
           fail_on_unmatched_files: true

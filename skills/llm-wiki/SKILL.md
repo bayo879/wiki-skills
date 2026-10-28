@@ -27,16 +27,18 @@ description: 当用户提到知识库、wiki、摄取材料、解析文件、体
 
 ## 开场第一步
 
-0. 先确认命令在 PATH 上：
+0. 先确认命令可用：
 
        llm-wiki version
 
-   报 command not found 说明这台机器还没装。本技能包里带着当前平台的预编译二进制，
-   跑一次下面这条即可（幂等、离线、不需要 Rust；不要自己 build，也不要另找下载）：
+   报 command not found 说明这台机器还没就位。CLI 是单个可执行文件，两种放法二选一：
 
-       sh ~/.dsh/skills/llm-wiki/bin/bootstrap.sh || sh ~/.claude/skills/llm-wiki/bin/bootstrap.sh
+   - 放进 PATH 上的目录（如 `~/.local/bin/llm-wiki`），之后全库通用；
+   - 放进当前 wiki 仓库根的 `.wiki/llm-wiki`，之后命令写成 `.wiki/llm-wiki ...`
+     （该文件已在 `.wiki/.gitignore` 里，不会入库）。
 
-   两条路径都不存在就换成你所在 agent 的技能根目录再试，装好后重跑 `llm-wiki version` 验证。
+   二进制从 Release 页按平台取 `llm-wiki-<triple>[.exe]`，不需要装 Rust，也不要自己编译。
+   放好后重跑 `llm-wiki version` 验证。
 1. `llm-wiki doctor --json`：读 `data.checks` 看健康。CLI 的根就是当前目录，它不向上查找。
 2. 没有 `wiki.toml` / `SCHEMA.md` 就 `llm-wiki init`；不要手工造目录、手写契约。
 3. 所有命令都在这个根目录下跑。

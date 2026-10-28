@@ -330,7 +330,7 @@ fn init_writes_the_engine_gitignore() {
     assert_eq!(out.status.code(), Some(0));
     let body = std::fs::read_to_string(d.path().join(".wiki/.gitignore")).unwrap();
     assert_eq!(
-        body, "cache/\nstaging/\nsessions/\nstate.db\nstate.db-wal\nstate.db-shm\nlock\n",
+        body, "cache/\nstaging/\nsessions/\nstate.db\nstate.db-wal\nstate.db-shm\nlock\nllm-wiki\nllm-wiki.exe\n",
         "the engine ignores what it can rebuild, and only that"
     );
 }

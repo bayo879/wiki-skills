@@ -792,39 +792,43 @@ Claude Code 硬约束：frontmatter 只有 `name`(≤64) 与 `description`(≤10
 - 路径在 JSON 与 log 里统一 `/`；写文件统一 LF，读入容忍 CRLF。
 - 大小写不归一：`doctor` 检测文件系统是否 case-insensitive 并警告「同名不同大小写会打架」。
 - 符号链接默认不跟随；`.` 开头文件忽略；`source/` 与 `raw/` 下都允许嵌套目录（`raw/` 镜像 `source/` 的相对路径）。
-- 安装按**内部使用**处理：不建 release 流水线。`cargo build --release` 出单二进制，
-  `install.sh` / `install.ps1` 负责复制到 PATH 并把 skill 目录同步到技能根目录。
+- 分发按**两件东西**处理：`skills/` 是纯文本，复制即用；`llm-wiki` 是单二进制，
+  按平台从 Release 取。不写安装脚本，不把两者打进同一个包。
 
-### 8.1 skill 包必须自足
+### 8.1 skill 与 CLI 分开分发
 
-`skills/` 是**分发的单位**，不是源码的附属品：它被整个复制进另一个 agent 的技能根目录
-（`~/.dsh/skills/`、`~/.claude/skills/` 等），此后必须能直接工作——那台机器不装 Rust、
-不联网、也没有本仓库的 `target/`。所以包里必须自己带 CLI：
+`skills/` 和 `llm-wiki` 是两种东西，走两条路：
 
-- `skills/llm-wiki/bin/vendor/<target-triple>/llm-wiki`：预编译二进制，按 triple 分目录，
-  **不进 git**（`.gitignore` 已排除）。本地用 `scripts/vendor.sh` 从 `target/release/`
-  填充（strip 后约 8 MB/平台），发布由 `.github/workflows/release.yml` 在三个原生
-  runner 上生成 `llm-wiki-skills-<版本>-<triple>.tar.gz` 挂到 Release。
-- `bin/platform.sh`：把 `uname -s`/`uname -m` 映射成 triple，启动器与安装器共用这一份。
-- `bin/llm-wiki`（POSIX）与 `bin/llm-wiki.cmd`（Windows）：自定位启动器，选中本平台的
-  vendor 二进制后 `exec`，一个参数都不改。
-- `bin/bootstrap.sh` / `bin/bootstrap.ps1`：把 vendor 二进制复制到 PATH
-  （`WIKI_BIN_DIR`，默认 `~/.local/bin`），幂等、离线、不需要编译器、不 sudo；
-  已有可用安装时不覆盖，除非 `--force`。
+- **skill 是纯文本**：`skills/<name>/SKILL.md`，没有附属文件、没有二进制、没有启动器。
+  整个目录复制进任何 agent 的技能根目录（`~/.dsh/skills/`、`~/.claude/skills/` 等）即可，
+  不需要本仓库、不需要 Rust、不需要联网。
+- **CLI 是单文件可执行产物**：Release 页按平台提供 `llm-wiki-<triple>[.exe]`，下载即用。
+
+两种放法，二选一：
+
+| 放法 | 调用 | 适合 |
+|---|---|---|
+| PATH 上的目录（如 `~/.local/bin/llm-wiki`） | `llm-wiki ...` | 一人维护多个 wiki 仓库 |
+| 仓库根的 `.wiki/llm-wiki` | `.wiki/llm-wiki ...` | 单仓库自带工具，随仓库走 |
+
+`.wiki/llm-wiki` 与 `.wiki/llm-wiki.exe` 写进 `init` 生成的 `.wiki/.gitignore`：
+它是可选的本地副本，永远不该进被维护仓库的历史。两种放法都要求在**仓库根目录**执行，
+CLI 不向上查找根（见 §12 决策 46）。
 
 三条纪律：
 
-1. SKILL.md 第 0 步写清「报 command not found 就跑 `bin/bootstrap.sh`」，六份 SKILL.md
-   都要写这一句——下级 skill 可能被单独加载，不能只知道 `llm-wiki` 这个名字。
-2. `bootstrap` 只做复制，**不 build、不下载**。拿不到本平台二进制时退出码 2 并指名
-   `scripts/vendor.sh <triple> <path>`，不让接收方掉进编译需求。
-3. 每个平台都要先 vendor 再同步；`tests/skills_install.rs` 把这件事变成硬门禁——它复制
-   整个 `skills/` 到临时目录、清空环境（`PATH=/usr/bin:/bin`、`HOME` 指向临时目录）、
-   跑 `bootstrap.sh`，然后要求装出来的二进制能 `version`。CI 三步矩阵先
-   `cargo build --release` + `scripts/vendor.sh` 再跑测试，所以 linux/windows 上这条
-   也是真的。
+1. SKILL.md 只写「命令是 `llm-wiki`；不在 PATH 上时用仓库根的 `.wiki/llm-wiki`」，
+   不写下载地址、不写安装步骤——上级 skill 与下级 skill 各自可被单独加载，话术必须一致。
+2. **发布物就是被测物**：Release workflow 在每个原生 runner 上先跑
+   `cargo test --release --locked` 再 `cargo build --release --locked`，产出的就是挂上去的
+   那个文件，中间没有打包、没有加壳、没有裁剪目录。
+3. CI 与 Release 的分工不重叠：CI 在分支上跑三平台测试，产出**不可分发**的调试验证；
+   Release 只在 tag 上跑，产出**可分发**的二进制。tag push 不触发 CI，一次发布只编译一轮。
 
----
+拒绝的方案（都试过并放弃）：把二进制塞进 `skills/llm-wiki/bin/vendor/<triple>/` 再配
+`bin/llm-wiki` 启动器与 `bin/bootstrap.sh`（包变重、git 历史里留下 8 MB 不可回收的 blob、
+每个平台还要单独 vendor 一次）；写 `install.sh` / `install.ps1` 替用户复制文件
+（多一个要维护的入口，而它做的事一条 `install -m 0755` 就够）。
 
 ## 9. 失败模式
 
@@ -985,12 +989,11 @@ query skill（CLI 的 `query` 已在 v1 实现，v2 只加 skill 包装）；向
     反过来，`source/`、`raw/`、`wiki/audit/`、`wiki/archive/` 与整个引擎目录属于**派生态**：
     每次命令入口按需创建，否则「克隆下来直接跑」就不可能（引擎目录被 gitignore）。
     判据是「工具不创建就没法继续 vs. 用户没做过的决定」，不是「init 建了哪些目录」。
-50. **skill 包自带 CLI，但二进制不进 git**：`skills/` 是分发单位，复制到别的 agent
-   必须即成活，所以包里要带 `bin/vendor/<triple>/llm-wiki`；但这份二进制不提交进仓库，
-   一律由 Release 流程产出（推 tag → 三平台原生 runner 构建 → 打 tar.gz 挂 Release）。
-   理由：① 本机交叉不出 linux/windows（`libsqlite3-sys` 是 bundled C，缺目标平台工具链），
-   提交一个平台等于暗示支持它；② 每平台 8 MB 进 git 不可回收。代价：**本地 clone 后跑
-   `cargo test` 前要先 `cargo build --release && ./scripts/vendor.sh`**，否则
-   `tests/skills_install.rs` 会失败并指名这条命令——这是有意的门，不是噪音。
-   拒绝的方案：让 SKILL.md 教人装 Rust（接收方没有工具链）；把 vendored 二进制提交进 git
-   （仓库随平台线性膨胀，且只有开发者那一个平台是真的）。
+50. **skill 只发 markdown，CLI 只发单二进制**：`skills/` 是纯文本，复制即用；
+    CLI 由 Release 按平台产出 `llm-wiki-<triple>[.exe]`，放进 PATH 或仓库根的 `.wiki/`。
+    不写安装脚本，不把二进制打进 skill 包，不打 tar.gz。理由：① 二进制进包会让包随平台
+    变重，且 git 历史里留下不可回收的 8 MB blob；② 安装脚本做的事（复制一个文件）不值得
+    单独维护两个平台的版本；③ 发布物就该是 `cargo test --release` 测过的那个文件，中间
+    少一层打包就少一层「发出去的东西没被测过」的可能。
+    拒绝的方案：包里带 `bin/vendor/<triple>/` + 自定位启动器 + `bootstrap.sh`（重、且只有
+    开发者那一个平台是真的）；让 SKILL.md 教接收方装 Rust 自己编译（接收方没有工具链）。
