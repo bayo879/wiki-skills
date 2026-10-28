@@ -29,7 +29,7 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
 ```
 
 1. **scan** 对比 `source/` 与账本表 `sources`，得出新增 / 修改 / 删除 / 改名。
-2. **convert** 把源交给解析后端（`src/parse/`），写 `raw/<key>.md` 并登记 `raws` 表，同时记录 `source_pages` 反查。
+2. **convert** 把源交给解析后端（`src/parse/`），写 `raw/<key>.md`，再登记 `sources` 行（记 `raw_key`）与 `raws` 行（记 `source_key`）。反查由这两列互指完成，v5 迁移已删除独立的 `source_pages` 表。
 3. **ingest** 一轮读写：`begin` 把涉及的源与预判页面写进 `pending` 表，`commit` 把候选页与暂存清单对齐，`abort` 丢弃本轮但保留已写候选页。
 4. **staging → wiki**：候选页放在 `.wiki/staging/<type>/<id>.md`；`approve` 只在 `--confirm` 下合并进 `wiki/` 并写 `log.md`、重建 `index.md`，`reject` 记录原因后清空暂存。
 5. **lint** 跑十三条规则（`L1`–`L13`），`--fix` 只修不需要判断的机械缺陷，`--strict` 把警告也算失败。
@@ -47,7 +47,7 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
 | `src/config.rs` | `wiki.toml` 解析、默认值、`validate` |
 | `src/init.rs` | 契约文件与引擎目录的初始内容 |
 | `src/paths.rs` | 路径归一（`identity_key`）与安全拼接 |
-| `src/scan.rs` | `source/` ↔ 账本的差异 |
+| `src/scan.rs` | 两层对账（`source/`、`raw/` ↔ 账本）；唯一分类引擎与「账本认不认识这个 raw」的唯一答案 |
 | `src/convert.rs` | 转换一轮的调度与写盘 |
 | `src/parse/` | 解析后端与 `auto` 回退（`text`/`html`/`asset`/`pdf`/`external`） |
 | `src/chunk.rs` | 大文件的按需分块 |
@@ -70,6 +70,10 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
 ## 不变量
 
 - 账本只由 CLI 写；`source/` 是唯一输入，`raw/` 与 `wiki/` 都是派生产物，但都进 git。
+- 账本表只有 `src/store.rs` 能写；`sources` 与 `raws` 的业务写入口只有三处：`convert` 登记、`moves` 改键、`archive purge` 删行。想加第四处，先确认它不是前三种变更的另一种写法。
+- 先文件后账本：`convert` 先原子写 `raw/`，再登记两张表，两步之间没有跨表事务。中断留下的缺口由 `scan`（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露，所以「账本与磁盘暂时不一致」是被允许并会被检出的状态，不是靠事务禁止的状态。
+- 对账只有一个答案：`scan::classify`（`source/`）与 `scan::classify_raw`（`raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan --layer raw`、`lint` `L7`、`ingest begin` 的 `orphan_pages` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这三处必须同答。
+- 页面 `sources` 里的 raw 键必须在 `raws` 账本内；违反由 `ingest begin` 的 `orphan_pages` 报告，只报不修。
 - 页面必须有 frontmatter 七字段：`id`、`title`、`type`、`summary`、`sources`、`status`、`updated`；`type` 取自 `[schema].types`。
 - 候选页只能经 `.wiki/staging/` 由 `approve --confirm` 进入 `wiki/`；覆盖已存在页面同样需要确认。
 - `archive seal` 先改引用页、后写账本：中途崩溃时重跑能补齐，不会留下引用已删记录的页面。

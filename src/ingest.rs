@@ -29,6 +29,7 @@ use crate::hash;
 use crate::page;
 use crate::paths;
 use crate::render;
+use crate::scan::RawLedger;
 use crate::staging;
 use crate::store::{PageMetaRow, Store, StoreError};
 
@@ -132,6 +133,9 @@ pub enum IngestError {
     /// A candidate could not be digested.
     #[error(transparent)]
     Hash(#[from] hash::HashError),
+    /// The `raws` ledger could not be read for the orphan check.
+    #[error(transparent)]
+    Scan(#[from] crate::scan::ScanError),
     /// The wiki directory could not be walked.
     #[error("cannot walk {}: {source}", path.display())]
     Walk {
@@ -158,6 +162,7 @@ impl IngestError {
             IngestError::Page(err) => err.code(),
             IngestError::Db(_) => "E_DB",
             IngestError::Hash(_) => "E_IO",
+            IngestError::Scan(_) => "E_IO",
             IngestError::Walk { .. } => "E_IO",
         }
     }
@@ -257,10 +262,12 @@ pub fn begin(
         }
     }
 
-    let known: BTreeSet<String> = store.all_raws()?.into_iter().map(|row| row.key).collect();
+    // `scan` owns the "does the ledger know this raw" join; a page citing an
+    // unknown key is the same defect `lint` `L7` reports, seen from the wiki side.
+    let ledger = RawLedger::load(store)?;
     let mut orphan_pages: Vec<String> = Vec::new();
     for entry in &wiki {
-        let orphaned = entry.keys.iter().any(|key| !known.contains(key));
+        let orphaned = entry.keys.iter().any(|key| !ledger.knows(key));
         if orphaned && !orphan_pages.contains(&entry.id) {
             orphan_pages.push(entry.id.clone());
         }

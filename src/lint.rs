@@ -39,7 +39,6 @@ use std::path::Path;
 
 use chrono::{Local, NaiveDate};
 use serde::Serialize;
-use walkdir::WalkDir;
 
 use crate::archive;
 use crate::config::Config;
@@ -47,6 +46,7 @@ use crate::hash;
 use crate::page::{self, PageError};
 use crate::paths;
 use crate::render;
+use crate::scan::{self, RawLedger};
 use crate::staging;
 use crate::store::{PageMetaRow, Store, StoreError};
 
@@ -137,6 +137,9 @@ pub enum LintError {
     /// A page could not be read or rewritten.
     #[error(transparent)]
     Page(#[from] PageError),
+    /// `raw/` could not be walked for `L7`.
+    #[error(transparent)]
+    Scan(#[from] scan::ScanError),
 }
 
 impl LintError {
@@ -147,6 +150,7 @@ impl LintError {
             LintError::Store(_) => "E_DB",
             LintError::Hash(_) => "E_IO",
             LintError::Page(err) => err.code(),
+            LintError::Scan(_) => "E_IO",
         }
     }
 }
@@ -489,34 +493,31 @@ fn check_short_pages(cfg: &Config, pages: &[PageInfo], found: &mut Vec<Finding>)
 
 /// `L7`: a file under `raw/` that the ledger does not know is invisible to
 /// every other check, so it is reported.
+///
+/// Both halves of the question come from `scan`: [`scan::raw_keys`] is the file
+/// set `scan --layer raw` classifies, and [`scan::RawLedger`] is the ledger join.
+/// Answering either one here again is how this rule once kept its own copy of
+/// "known" and drifted from `scan`.
 fn check_unledgered_raws(
     root: &Path,
     cfg: &Config,
     store: &Store,
     found: &mut Vec<Finding>,
 ) -> Result<()> {
-    let raw_dir = root.join(&cfg.paths.raw);
-    if !raw_dir.is_dir() {
-        return Ok(());
-    }
-    let known: BTreeSet<String> = store.all_raws()?.into_iter().map(|row| row.key).collect();
-    for entry in WalkDir::new(&raw_dir).follow_links(false) {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = entry.path().strip_prefix(&raw_dir).unwrap_or(entry.path());
-        let key = paths::to_slash(rel);
-        if paths::is_ignored(&key) || known.contains(&key) {
+    let ledger = RawLedger::load(store)?;
+    for key in scan::raw_keys(root, cfg)? {
+        if ledger.knows(&key) {
             continue;
         }
         found.push(Finding::new(
             "L7",
             Level::Warning,
             None,
-            format!("raw `{key}` is not in the ledger; run `scan` to register it"),
+            format!(
+                "raw `{key}` is not in the ledger; if it declares `source:` and is not pinned, \
+                 `convert --key <that source key>` registers it, otherwise delete it \
+                 (`raw/` is derived: a file that cannot name its source is never adopted)"
+            ),
         ));
     }
     Ok(())

@@ -36,9 +36,16 @@
 //! judgement, so touching a file does not schedule a re-ingest. A digest that
 //! moves across `chunk_threshold` switches from full to sampled and is reported
 //! as `Changed` once, which is accepted.
+//!
+//! Two pieces here are shared on purpose, because other modules ask the same
+//! questions this module answers. [`RawLedger`] is the only place that decides
+//! whether the `raws` ledger knows a key — `lint` `L7` and `ingest begin` call it
+//! rather than joining the table themselves. [`raw_keys`] is the only raw-layer
+//! file set, so `lint` reports the same names `scan` classifies, without paying
+//! for a digest it does not read.
 
-use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use walkdir::WalkDir;
@@ -46,7 +53,7 @@ use walkdir::WalkDir;
 use crate::config::Config;
 use crate::hash;
 use crate::paths;
-use crate::store::{RawRow, SourceRow, Store, StoreError};
+use crate::store::{SourceRow, Store, StoreError};
 
 /// How one key differs from the ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -163,7 +170,7 @@ pub fn scan_source(root: &Path, cfg: &Config, store: &Store) -> Result<ScanRepor
 pub fn scan_raw(root: &Path, cfg: &Config, store: &Store) -> Result<ScanReport> {
     let raw_root = root.join(&cfg.paths.raw);
     let disk = walk_raw(&raw_root)?;
-    let ledger = store.all_raws()?;
+    let ledger = RawLedger::load(store)?;
     Ok(ScanReport {
         changes: classify_raw(&disk, &ledger),
         ignored_count: 0,
@@ -188,19 +195,62 @@ pub fn scan_all(root: &Path, cfg: &Config, store: &Store) -> Result<ScanReport> 
     })
 }
 
-/// One raw file found under `raw/`, with the digest of its full content.
-struct RawFile {
-    /// Path identity key relative to `raw/`.
-    key: String,
-    /// `blake3:` digest of every byte on disk, frontmatter included.
-    hash: String,
+/// What the `raws` ledger knows — the one answer to "did `convert` register this
+/// file?".
+///
+/// Three callers ask that question: [`scan_raw`] turns an unknown key into `New`,
+/// `lint` `L7` reports the files no row explains, and `ingest begin` reports the
+/// pages that cite a key no row explains. Answering it at each call site is how
+/// those three drift apart, so the join lives here and nowhere else.
+#[derive(Debug, Default)]
+pub struct RawLedger {
+    /// Ledger key (relative to `raw/`) → digest recorded when it was written.
+    rows: BTreeMap<String, String>,
 }
 
-/// Walks `raw/` and digests every file completely.
+impl RawLedger {
+    /// Reads every `raws` row. The ledger is never mutated here.
+    pub fn load(store: &Store) -> Result<Self> {
+        let mut rows = BTreeMap::new();
+        for row in store.all_raws()? {
+            rows.insert(row.key, row.hash);
+        }
+        Ok(Self { rows })
+    }
+
+    /// Whether `convert` registered `key`; the digest is not consulted.
+    pub fn knows(&self, key: &str) -> bool {
+        self.rows.contains_key(key)
+    }
+
+    /// Every known key, in key order.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.rows.keys().map(String::as_str)
+    }
+
+    /// The digest `convert` recorded, or `None` for an unknown key.
+    fn hash(&self, key: &str) -> Option<&str> {
+        self.rows.get(key).map(String::as_str)
+    }
+}
+
+/// One file found under `raw/`, before its content is read.
+struct RawEntry {
+    /// Path identity key relative to `raw/`.
+    key: String,
+    /// Where the file is, so a caller that needs the digest can read it.
+    path: PathBuf,
+}
+
+/// Walks `raw/` once, keeping the file set every caller shares.
+///
+/// `scan_raw` digests each file and `lint` only needs the names, so the walk
+/// lives here: a second traversal at a call site is how the two would start
+/// disagreeing about which files exist.
 ///
 /// A missing `raw/` directory is treated as an empty one: every ledger key is
 /// then missing, which is what a deleted tree means.
-fn walk_raw(raw_root: &Path) -> Result<Vec<RawFile>> {
+fn walk_raw_entries(raw_root: &Path) -> Result<Vec<RawEntry>> {
     let mut disk = Vec::new();
     if raw_root.is_dir() {
         let walker = WalkDir::new(raw_root)
@@ -212,11 +262,50 @@ fn walk_raw(raw_root: &Path) -> Result<Vec<RawFile>> {
             if !entry.file_type().is_file() {
                 continue;
             }
-            disk.push(RawFile {
+            disk.push(RawEntry {
                 key: paths::identity_key(raw_root, entry.path())?,
-                hash: hash::hash_file(entry.path(), true)?,
+                path: entry.path().to_path_buf(),
             });
         }
+    }
+    Ok(disk)
+}
+
+/// Keys of every file under `raw/`, relative to `raw/` and sorted.
+///
+/// This is the same key set [`scan_raw`] classifies; only the names are
+/// collected, so a caller asking "which files exist?" pays for the walk alone.
+pub fn raw_keys(root: &Path, cfg: &Config) -> Result<Vec<String>> {
+    let mut keys: Vec<String> = walk_raw_entries(&root.join(&cfg.paths.raw))?
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect();
+    // Walk order is filesystem order; every later step wants a stable one.
+    keys.sort();
+    Ok(keys)
+}
+
+/// One raw file found under `raw/`, with the digest of its full content.
+struct RawFile {
+    /// Path identity key relative to `raw/`.
+    key: String,
+    /// `blake3:` digest of every byte on disk, frontmatter included.
+    hash: String,
+}
+
+/// Walks `raw/` and digests every file completely.
+///
+/// Unlike the source layer there is no size cap: `convert` owns everything under
+/// `raw/`, so a sampled digest would hide the hand edits this layer exists to
+/// catch.
+fn walk_raw(raw_root: &Path) -> Result<Vec<RawFile>> {
+    let mut disk = Vec::new();
+    for entry in walk_raw_entries(raw_root)? {
+        let hash = hash::hash_file(&entry.path, true)?;
+        disk.push(RawFile {
+            key: entry.key,
+            hash,
+        });
     }
     // Walk order is filesystem order; every later step wants a stable one.
     disk.sort_by(|a, b| a.key.cmp(&b.key));
@@ -234,18 +323,14 @@ fn walk_raw(raw_root: &Path) -> Result<Vec<RawFile>> {
 /// way [`classify`] restricts its own duplicate rule to the `New` candidates: a
 /// tracked raw that still matches its row is never demoted, so a duplicated
 /// content pair cannot make `sync` delete and re-convert the same file forever.
-fn classify_raw(disk: &[RawFile], ledger: &[RawRow]) -> Vec<Change> {
+fn classify_raw(disk: &[RawFile], ledger: &RawLedger) -> Vec<Change> {
     let mut changes: Vec<Change> = Vec::new();
-    let mut by_key: HashMap<&str, &RawRow> = HashMap::new();
-    for row in ledger {
-        by_key.insert(row.key.as_str(), row);
-    }
-
     let mut new_candidates: Vec<&RawFile> = Vec::new();
+
     for file in disk {
-        match by_key.get(file.key.as_str()) {
+        match ledger.hash(&file.key) {
             None => new_candidates.push(file),
-            Some(row) if row.hash == file.hash => {}
+            Some(hash) if hash == file.hash => {}
             Some(_) => changes.push(change(
                 Layer::Raw,
                 ChangeKind::Changed,
@@ -278,15 +363,9 @@ fn classify_raw(disk: &[RawFile], ledger: &[RawRow]) -> Vec<Change> {
     }
 
     let present: BTreeSet<&str> = disk.iter().map(|file| file.key.as_str()).collect();
-    for row in ledger {
-        if !present.contains(row.key.as_str()) {
-            changes.push(change(
-                Layer::Raw,
-                ChangeKind::Missing,
-                &row.key,
-                None,
-                None,
-            ));
+    for key in ledger.keys() {
+        if !present.contains(key) {
+            changes.push(change(Layer::Raw, ChangeKind::Missing, key, None, None));
         }
     }
 
