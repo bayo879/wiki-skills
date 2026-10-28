@@ -116,7 +116,7 @@ llm-wiki ingest submit --pages concept/order-retry --json
 
 `submit` 依次做：刷 `updated`、把本轮 `.wiki/raw/<key>` 补进 `sources`、记录页哈希、重建 `.wiki/staging/index.md`、盖 manifest、删 `pending.json`。
 
-- 它**不写 `.wiki/pages/`**，也**不写 `.wiki/pages/index.md` 与 `.wiki/pages/log.md`**：前者由 `approve` 重建，后者由 `approve`/`reject` 追加。submit 之后不要自己再改这两个文件。
+- 它**不写 `.wiki/pages/`**，也**不写 `.wiki/pages/index.md`**：前者由 `approve` 合并，后者由 `approve` 重建。决策记录在 `.wiki/journal.jsonl`，submit 之后不要自己动这两个文件。
 - **`submit` 之后不要再改候选正文**。`approve` 会拿记录的哈希比对，改了就报 drift，只能 abort 重来。
 - 中途失败可以整轮重试；`pending.json` 还在，轮次就没关。
 
@@ -148,7 +148,7 @@ llm-wiki ingest abort
 2. 要改哪些页，改哪一段、为什么；
 3. `orphan_pages` 怎么处理：补来源，还是弃页。
 
-汇报里把整条序列一次说全，别等人问「然后呢」：`begin` → 写候选页到 `.wiki/staging/` → `submit` → 人跑 `approve --confirm` 并入 `.wiki/pages/`。前两步你做，最后一步是人做。
+汇报里把整条序列一次说全，别等人问「然后呢」：`begin` → 写候选页到 `.wiki/staging/` → `submit` → `approve` 并入 `.wiki/pages/`。最后一跑不需要人：三道刹车会自己扣住该扣的候选。
 
 讲完等确认。人没点头就不 submit。
 
@@ -158,6 +158,6 @@ llm-wiki ingest abort
 llm-wiki checkpoint --label "ingest order-retry"
 ```
 
-- `checkpoint` 把**已批准的 `.wiki/pages/`** 登记成一个版本；候选页还在 staging，要人 `approve --confirm` 才进 `.wiki/pages/`。
+- `checkpoint` 把 **`.wiki/pages/` 的当前内容**登记成一个版本；候选页还在 staging 时不算数，得先 `approve`。
 - 告诉人：不满意可以 `llm-wiki reject --reason "..."` 撤回本轮，staging 会回滚到 `.wiki/pages/` 的样子。
 - 回复里写清这一轮改了哪些页、留了什么没做，别只说「已提交」。

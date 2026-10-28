@@ -46,7 +46,7 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 - `warning`：要人拍板。能不能接受取决于场景，别默认「顺手修掉」
 - `info`：只报告，不动手。它经常是正常的
 
-### 十三条检查（按内容）
+### 十二条检查（按内容）
 
 | 检查 | 级别 | 人话 | 常见误报 |
 |---|---|---|---|
@@ -60,7 +60,6 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 | 空页 | warning | 正文短于 `[audit].min_page_chars`（默认 200 字符） | 导航页、目录页本来就短；归档页豁免 |
 | 改了没跟日期 | warning | 文件哈希变了而 `updated` 没动 | 只改了 `tags`/`summary`，正文其实没变 |
 | 共享 raw 过多 | info | 一份 raw 被超过 3 页引用 | 规范页被多页引用是合理的 |
-| 日志格式 | warning | `log.md` 的 `##` 行不是 `## [date] action \| title` | 手写的说明性二级标题 |
 | 未引用 asset | info | 图片等 asset 没被任何页引用 | 刚 `convert` 完还没用上 |
 | 归档页零入链 | info | 归档摘要无入链且超 `[memory].idle_days` 未 `recall` | 只用 `recall` 查、不写链接的归档 |
 
@@ -123,7 +122,7 @@ llm-wiki lint --fix             # 先修机械缺陷，再报剩下的
 
 ## 别做
 
-- 不手写 `index.md`、`log.md`、`updated`
+- 不手写 `index.md`、`updated`；决策记录在 `.wiki/journal.jsonl`，也不用它代替页面内容
 - 不用 `--fix` 掩盖要判断的问题；它只修 `updated`、正文变了没跟日期、索引漂移
 - 发现矛盾不直接改页，不猜哪个对
 - 不把所有 `info` 倒给用户

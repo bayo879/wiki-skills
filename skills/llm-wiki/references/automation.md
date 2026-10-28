@@ -23,23 +23,17 @@ llm-wiki sync --limit 5 --dry-run --json       # 只看这一轮会做什么
 
 定时任务只跑 `sync`。它不写页面、不合并候选，所以不需要人盯；页面仍然由 agent 在用户要求时写。
 
-## 一轮最多新增多少页
+## 三道刹车各自扣住谁
 
-`approve` 在**不带** `--confirm` 时先算这一轮会新增多少页（已存在的页算覆盖，不算新增）：
+`approve` **不需要人**：它按顺序过三道刹车，命中的那一个候选留在 `.wiki/staging/`，其余的照常发布。下一轮这些候选还会被拿出来再试（页面预算是每轮重算的；切片预算是累计的，要腾额度得先归档或删旧页）。
 
-- 不超过 `[ingest].max_new_pages_per_run`（默认 20）→ 照常返回「N 页候选待批」（exit 3）。
-- 超过 → 返回 `NEEDS_CONFIRMATION`，`reason` 是 `page_budget`，候选**全部留在** `.wiki/staging/`。
+- **近义**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选引用的源全是某张已发布页引用过的。详情点名对端页，改 `id`/`title` 或补一个新源再 `submit`。
+- **切片预算**（`reason: page_slice_budget`）：同一份源的第 N 个切片已经养出 `[ingest].max_pages_per_slice` 页（默认 5，0 不限）。
+- **页面预算**（`reason: page_budget`）：本轮新增页超过 `[ingest].max_new_pages_per_run`（默认 20，0 不限）；已存在的页算覆盖，不占预算。
 
-看到 `page_budget` 不要自己决定，把数字和清单给用户：
+发布成功的页会出现在 `data.published`，被扣下的在 `data.held_back`（`page` / `reason` / `detail`）。**只有 `held_back` 覆盖了全部候选**时才 exit 3——那才是真需要人看一眼的时刻。
 
-1. 批准（`llm-wiki approve --confirm`）——人显式越过预算。
-2. 不批准并说明原因（`llm-wiki reject --reason "..."`）——候选丢弃，但这一轮的源按当前字节记为已复核，下一轮不再报同一变动。
-3. 补充要求（`llm-wiki instruct --text "..."`）——让下一轮少建几页。
-4. 先放着（`llm-wiki defer`）。
-
-真觉得预算太小就改 `.wiki/wiki.toml` 的 `[ingest].max_new_pages_per_run`，不要靠反复 `--confirm` 绕过。
-
-比「一轮多少页」更细的一道是**切片预算**（`reason: page_slice_budget`）：同一个切片最多养出 `[ingest].max_pages_per_slice`（默认 5）页。
+真要越过刹车，`llm-wiki approve --confirm` 是唯一的显式越权；别为了省事把预算调大再一路 confirm。
 
 切片就是页面 `sources` 里 `#p=<n>` 指的那一段；没带片段就是整份文件算一个切片。大文件按 `parse.chunk_target` 切块，所以一份两百页的手册天然有几十个切片、可以产出几十页，而一页速记只有一个切片、最多五页——限额跟着信息量走，不跟着文件个数走。
 

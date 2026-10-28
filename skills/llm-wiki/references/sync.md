@@ -105,12 +105,12 @@ Register-ScheduledTask references/sync.md -Trigger (New-ScheduledTaskTrigger -On
 
 1. 不删页、不合并页、不删源。
 2. 自动写出的页一律 `status: draft`，人工审后才改 `stable`。
-3. 不可逆动作一律进队列等人拍板，不自动执行。
+3. 只有「这一轮所有候选都被刹车扣下」才算是要人拍板的时刻，其余自动发布。
 
 ## 不要做
 
 - 不跑 `init`、不初始化仓库。
 - 不手改 `.wiki/wiki.toml`、不改 `stable_streak`、不跳 settle 窗口。
-- 不在无人值守轮里执行 `approve`、`reject`、`instruct`、`defer`；这些要人给语义。
+- `approve` 可以放进无人值守轮（刹车自己扣候选）；`reject`、`instruct`、`defer` 仍要人给语义，不要自动跑。
 - 不把 `--dry-run` 的结果当成本轮已同步来汇报。
 - 不因为 `failures` 是 0 就跳过 audit；安静轮次也要读 `warnings`。

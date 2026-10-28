@@ -663,23 +663,36 @@ fn run_checkpoint(label: String) -> ! {
     }
 }
 
-/// `approve` publishes the staged candidates, but only when a human confirmed.
+/// `approve` publishes the staged candidates that fit the brakes.
 ///
-/// Without `--confirm`, a ready merge is reported as `NEEDS_CONFIRMATION` with
-/// exit 3: exiting 0 would read as "published" and exiting 1 as "failed", while
-/// the human decision is a third outcome with its own code.
+/// Nothing is asked: the three brakes hold pages back instead of stopping the
+/// run, so an unattended chain still publishes what is safe. `--confirm`
+/// publishes everything and ignores the brakes. Exit 3 is reserved for the case
+/// where every candidate was held back and nothing could be published — that is
+/// the only outcome a human has to look at.
 fn run_approve(confirm: bool) -> ! {
     let root = wiki_root("approve");
     let cfg = open_repo("approve", &root);
     let mut store = open_store("approve", &root, &cfg);
     match version::approve(&root, &cfg, &mut store, confirm) {
-        Ok(ApproveOutcome::Applied { version }) => report::emit("approve", ApproveData { version }),
-        Ok(ApproveOutcome::NeedsConfirmation { reason, detail }) => report::fail_detail(
+        Ok(ApproveOutcome::Applied {
+            version,
+            published,
+            held_back,
+        }) => report::emit(
+            "approve",
+            ApproveData {
+                version,
+                published,
+                held_back,
+            },
+        ),
+        Ok(ApproveOutcome::NothingPublished { held_back }) => report::fail_detail(
             "approve",
             Exit::NeedsConfirm,
             "NEEDS_CONFIRMATION",
-            &format!("{reason}: {detail}"),
-            Some(json!({ "reason": reason, "detail": detail })),
+            &format!("{} 页全部被刹车拦下，没有可发布的候选", held_back.len()),
+            Some(json!({ "held_back": held_back })),
         ),
         Err(err) => fail_version("approve", &err),
     }
@@ -1295,6 +1308,8 @@ struct CheckpointData {
 #[derive(Serialize)]
 struct ApproveData {
     version: String,
+    published: Vec<String>,
+    held_back: Vec<llm_wiki::version::HeldBack>,
 }
 
 /// Payload of the `reject` success envelope.

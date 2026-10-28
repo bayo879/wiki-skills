@@ -19,9 +19,8 @@
 //! - `L8` warning: the body is shorter than `[audit].min_page_chars` characters.
 //! - `L9` warning: the body changed but `updated` did not.
 //! - `L10` info: one raw file is cited by more than three pages.
-//! - `L11` warning: a `log.md` entry does not match `## [date] action | title`.
-//! - `L12` info: an asset raw file is cited by no page.
-//! - `L13` info: a sealed summary nothing cites and nobody recalled.
+//! - `L11` info: an asset raw file is cited by no page.
+//! - `L12` info: a sealed summary nothing cites and nobody recalled.
 //!
 //! Two of the rules are easy to get wrong, so they are called out here:
 //!
@@ -78,7 +77,7 @@ impl std::fmt::Display for Level {
 /// One lint finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Finding {
-    /// Rule identifier, `L1` through `L13`.
+    /// Rule identifier, `L1` through `L12`.
     pub rule: &'static str,
     /// Severity.
     pub level: Level,
@@ -189,7 +188,6 @@ pub fn lint(root: &Path, cfg: &Config, store: &Store) -> Result<Vec<Finding>> {
     let cited = cited_raws(cfg, &pages);
     check_over_shared_raws(&cited, &mut found);
     check_page_meta(root, store, &pages, &mut found)?;
-    check_log(root, cfg, &mut found);
     check_unreferenced_assets(store, &cited, &mut found)?;
     check_idle_summaries(root, cfg, store, &pages, &mut found)?;
 
@@ -607,30 +605,7 @@ fn check_page_meta(
     Ok(())
 }
 
-/// `L11`: every `## ` line of `log.md` must be a log entry.
-fn check_log(root: &Path, cfg: &Config, found: &mut Vec<Finding>) {
-    let path = root.join(&cfg.paths.wiki).join("log.md");
-    let Ok(text) = fs::read_to_string(&path) else {
-        return;
-    };
-    let key = format!("{}/log.md", cfg.paths.wiki.trim_end_matches('/'));
-    for (index, line) in text.lines().enumerate() {
-        let line = line.trim_end();
-        if line.starts_with("## ") && !line.starts_with("## [") {
-            found.push(Finding::new(
-                "L11",
-                Level::Warning,
-                Some(key.clone()),
-                format!(
-                    "log line {}: `{line}` does not match `## [date] action | title`",
-                    index + 1
-                ),
-            ));
-        }
-    }
-}
-
-/// `L12`: an asset raw file no page cites cannot be reached from the wiki.
+/// `L11`: an asset raw file no page cites cannot be reached from the wiki.
 fn check_unreferenced_assets(
     store: &Store,
     cited: &BTreeMap<String, Vec<String>>,
@@ -641,7 +616,7 @@ fn check_unreferenced_assets(
             continue;
         }
         found.push(Finding::new(
-            "L12",
+            "L11",
             Level::Info,
             None,
             format!("asset `{}` is not referenced by any page", row.key),
@@ -690,7 +665,7 @@ fn resolved_reference(target: &str, cfg: &Config) -> String {
     normalise_link(text, &cfg.paths.wiki)
 }
 
-/// `L13`: a summary nothing cites and nobody recalled is dead weight.
+/// `L12`: a summary nothing cites and nobody recalled is dead weight.
 ///
 /// The age counts from the last `recall`, falling back to the seal: a summary no
 /// page points at and no session has read is invisible to the wiki, and the next
@@ -749,7 +724,7 @@ fn check_idle_summaries(
             continue;
         }
         found.push(Finding::new(
-            "L13",
+            "L12",
             Level::Info,
             Some(row.key.clone()),
             format!("no page cites this summary and it has not been recalled in {idle} days"),

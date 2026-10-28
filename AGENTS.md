@@ -72,20 +72,21 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 不要在调用点自己拼通配，也不要把它和 `[scan].ignore`（只按目录名粗过滤）混用——两者语义不同，混了就会出现「列表里明明写了却还被扫到」。
 显式 `convert --key` 绕开忽略是故意的：先看一眼再决定要不要永久挡住。
 
-### 2.11 三道刹车，都只走「问」的那条路
+### 2.11 三道刹车只扣住命中的候选
 
-`approve` 不带 `--confirm` 时依次过三道，命中就停在 `.wiki/staging/` 不动：
+`approve` 不带 `--confirm` 时依次过三道，**命中就扣住那一个候选**（留在 `.wiki/staging/`，下一轮还能再试），其余的照常发布：
 
-1. **近义页**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选页的 `sources` 是某张已发布页 `sources` 的子集（没引入新证据）。只比 frontmatter，不读正文、不调模型——语义级「近义」在这里是做不到的，别试图加。
-2. **切片预算**（`reason: page_slice_budget`）：一个切片养出的页数超过 `[ingest].max_pages_per_slice`（默认 5）。切片是 `#p=<n>` 指的那一块，没带片段算整份文件一块；按块而不是按文件计数，是因为「一个源」这一个源可能是一页笔记，也可能是两百页手册——按文件数计，要么卡死大文档，要么放过小文件被拆成十页。`#p=1-999999` 这种宽到离谱的区间按整份文件算，别让人用大区间刷页数；小于 `parse.chunk_threshold` 的文件，页面上写什么 `#p=` 都并到整份文件那一个切片——否则给一页速记编个 `#p=7` 就能凭空多出一个切片。
-3. **页面预算**（`reason: page_budget`）：本轮新增页数超过 `[ingest].max_new_pages_per_run`（默认 20）；已存在的页算覆盖，不占预算。
+1. **近义页**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选页的 `sources` 是某张已发布页 `sources` 的子集（没引入新证据）。只比 frontmatter，不读正文、不调模型——语义级「近义」在这里做不到，别试图加。
+2. **切片预算**（`reason: page_slice_budget`）：同一份源的第 N 个切片已经养出 `[ingest].max_pages_per_slice` 页（默认 5，0 不限）。切片是 `#p=<n>` 指的那一段；小于 `parse.chunk_threshold` 的文件，页面上写什么片段都算整份文件。
+3. **页面预算**（`reason: page_budget`）：本轮新增页数超过 `[ingest].max_new_pages_per_run`（默认 20，0 不限）；已存在的页算覆盖，不占预算。
 
-`--confirm` 是显式越权，三道都不拦它；所以别为了省事把预算调大再一路 confirm。另有一条容易踩的：这三道都写在 `if !confirm` 里，曾经写在它外面，结果 `--confirm` 也被拦，人没法越权（tests/version.rs 的 `approve_confirm_overrules_*` 钉住）。
+只有**每个**候选都被扣下时才 exit 3（`NEEDS_CONFIRMATION`，`data.held_back` 列出原因）——那才是真要人看一眼的时刻。`--confirm` 是显式越过全部三道。
+另有一条容易踩的：这几道都必须写在 `if !confirm` 里，曾经写在外面，结果 `--confirm` 也被拦（`tests/version.rs` 的 `approve_confirm_overrules_*` 钉住）。
 
 ### 2.12 同步在 CLI 之外
 
-`.wiki/` 是单机事实源。不要加 `sync --push/--pull`、不要读远端、不要假设网络、不要为多机场景改账本：这里只保证「目录内没有绝对路径」（键一律来自 `paths::identity_key`，是仓库相对路径），所以整个目录可以被任意文件级工具搬走。
-搬的三条纪律写在 [README 的服务特殊说明](README.md)：停机搬、排除 `lock` 与 `cache/`、单写者。要合并多台机器的账本是新设计，不是小改。
+`.wiki/` 是这台机器唯一的事实源，**明确不考虑跨机器**：不要加 `sync --push/--pull`、不要读远端、不要假设网络、不要为多机场景改账本，也不要在文档里教人搬目录或合并账本——两边各写再拼会得到互相矛盾的 `source_hash`。
+目录内仍然只存仓库相对路径（键一律来自 `paths::identity_key`），这是「不写死绝对路径」的卫生要求，不是为搬移做准备。
 
 ### 2.13 否决也是对源的表决
 
@@ -94,6 +95,10 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 摘要必须按 `scan` 的选法算（小文件全量、大文件采样，见 `accept_reviewed_sources`），否则下一次 `scan` 立刻报假 `changed`；`tests/version.rs::reject_accepts_the_source_bytes_so_it_is_not_reported_again` 钉住。超大读不了的文件跳过，让它继续报 `oversize`。
 
 这道表决依赖 `ingest submit` 把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `reject`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`reject` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
+
+### 2.14 决策日志不是内容
+
+每次 `approve` / `reject` / `instruct` / `defer` / `seal` / `rollback` 只往 `.wiki/journal.jsonl` 追加一行 JSON（`journal::append`），不再写 `pages/log.md`。三条后果要记住：日志不进版本（`collect_content` 只走 `pages/` 与 `raw/`），所以 `rollback` 抹不掉它；它不参与 `query` 索引，所以搜不到；`detail` 里的换行被 JSON 转义，多行 `--reason` 不会破坏格式。想给它加读者就加，但别把它塞回页面树——那会让「回退会不会改历史」重新变成一个问题。
 
 ## 3. 提交前自查
 

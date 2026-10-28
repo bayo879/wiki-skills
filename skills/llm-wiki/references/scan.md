@@ -104,6 +104,6 @@ llm-wiki convert --key notes/a.md --json
 
 - 不手改 `.wiki/raw/` 下的文件。`.wiki/raw/` 是 `convert` 的产物，手改会在下次转换被覆盖。
 - 唯一例外：确实要修正抽取质量（多栏错位、表格错乱）时可以手改，但必须把该文件 frontmatter 的 `pin` 改成 `true`，并告诉用户「`convert` 以后会跳过它，源再变也不会自动更新」。没 `pin` 的修改一律视为临时。
-- 不手写 `.wiki/pages/index.md`、`.wiki/pages/log.md` 和页面的 `updated`；那些由 CLI 生成。
+- 不手写 `.wiki/pages/index.md` 和页面的 `updated`；那些由 CLI 生成，决策记录在 `.wiki/journal.jsonl`。
 - 不改 `.wiki/wiki.toml`、`.wiki/SCHEMA.md`。需要调 `max_source_bytes`、`formats.allow` 时，说明影响后让用户改。
 - `scan` 只读，可以反复跑；`convert` 会写 `.wiki/raw/` 与账本，同一批不要并发跑。

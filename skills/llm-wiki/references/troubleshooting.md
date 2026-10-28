@@ -5,7 +5,7 @@
 先记住三件事：
 
 1. **先 `llm-wiki doctor --json`**，`data.checks[]` 每条是 `{name, level, detail}`；`level: fail` 的那条通常直接说明原因。
-2. **不要手改 `.wiki/state.db`、`.wiki/staging/` 或 `index.md`/`log.md`。** 手工修账本会让下次运行报更奇怪的错。
+2. **不要手改 `.wiki/state.db`、`.wiki/staging/` 或 `index.md`。** 手工修账本会让下次运行报更奇怪的错。
 3. **`.wiki/` 之外的文件是源，永远只读。** 任何「把源删了再重建」的修法都是错的。
 
 ## 退出码对照
@@ -34,7 +34,8 @@
 | `E_STAGING_STALE` | 批准时候选页与基线漂了（源在中间变过） | `llm-wiki reject` 撤回本轮，重新 `ingest begin` |
 | `E_STAGING_DRIFT` / `E_STAGING_CORRUPT` | 暂存区被手改，或清单与文件对不上 | 不要手修，`reject` 回滚后重来 |
 | `E_NOTHING_TO_APPROVE` | 暂存区是空的 | 先 `ingest begin` 并写候选页 |
-| `E_NEEDS_CONFIRMATION` | `approve` / `purge` 没带确认参数 | 这是设计如此：交给人拍板 |
+| `E_NEEDS_CONFIRMATION` | `archive purge` 没带 `--yes` | 这是设计如此：交给人拍板 |
+| exit 3 + `NEEDS_CONFIRMATION` | `approve` 这一轮每个候选都被刹车扣下 | 看 `data.held_back` 的 `reason`，给用户四选项 |
 | `E_IO` | 读写失败 | 看路径权限；`parse` 的 `E_IO` 常是 key 写错了 |
 
 ## `doctor` 检查项

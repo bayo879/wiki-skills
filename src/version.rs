@@ -27,15 +27,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, NaiveDate, Utc};
+use chrono::Utc;
 use serde::Serialize;
 use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::hash;
+use crate::journal;
 use crate::ledger::Ledger;
 use crate::paths;
-use crate::render::{self, LogEntry};
+use crate::render;
 use crate::staging::{self, Manifest};
 use crate::store::{SourceRow, Store};
 
@@ -59,20 +60,33 @@ const RAW_PREFIX: &str = "raw";
 /// The engine directory that holds snapshots and the pending instruction.
 const ENGINE: &str = ".wiki";
 
+/// A candidate the brakes kept in staging, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HeldBack {
+    /// Page id, relative to the wiki root (`concept/alpha.md`).
+    pub page: String,
+    /// Stable reason code: `page_overlap`, `page_slice_budget`, `page_budget`.
+    pub reason: String,
+    /// Human-readable explanation.
+    pub detail: String,
+}
+
 /// What a call to [`approve`] decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApproveOutcome {
-    /// The candidates were published and a new version now exists.
+    /// Some candidates were published and a new version now exists.
     Applied {
         /// Name of the version the merge produced.
         version: String,
+        /// Pages that landed in `wiki/`.
+        published: Vec<String>,
+        /// Pages the brakes kept in staging.
+        held_back: Vec<HeldBack>,
     },
-    /// The merge is ready but a human has not confirmed it yet.
-    NeedsConfirmation {
-        /// Stable reason code: `merge_staging`.
-        reason: String,
-        /// Human-readable explanation.
-        detail: String,
+    /// Every candidate was held back, so nothing was published.
+    NothingPublished {
+        /// Pages the brakes kept in staging.
+        held_back: Vec<HeldBack>,
     },
 }
 
@@ -156,7 +170,10 @@ pub enum VersionError {
         /// Digest of the missing object.
         sha: String,
     },
-    /// The index or the log could not be regenerated.
+    /// The engine journal could not be appended to.
+    #[error(transparent)]
+    Journal(#[from] crate::journal::JournalError),
+    /// The index could not be regenerated.
     #[error(transparent)]
     Render(#[from] render::RenderError),
     /// The ledger could not be read or written.
@@ -185,6 +202,7 @@ impl VersionError {
             VersionError::Index(err) => err.code(),
             VersionError::NoVersion { .. } | VersionError::NoManifest { .. } => "E_NO_VERSION",
             VersionError::MissingObject { .. } => "E_MISSING_OBJECT",
+            VersionError::Journal(err) => err.code(),
             VersionError::Render(err) => err.code(),
             VersionError::Db(_) => "E_DB",
         }
@@ -238,8 +256,6 @@ struct Published {
 
 /// A staged candidate, reduced to the facts the brakes compare.
 struct Staged {
-    /// Path relative to the wiki root, `/`-separated (`concept/alpha.md`).
-    rel: String,
     /// Case-, space- and punctuation-insensitive title.
     title: String,
     /// The `sources` entries verbatim, fragments included.
@@ -341,11 +357,7 @@ fn published(root: &Path, cfg: &Config) -> Vec<Published> {
             continue;
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
-        if rel == "index.md"
-            || rel == "log.md"
-            || rel.starts_with("audit/")
-            || rel.starts_with("archive/")
-        {
+        if rel == "index.md" || rel.starts_with("audit/") || rel.starts_with("archive/") {
             continue;
         }
         let Ok(raw) = fs::read(&path) else {
@@ -399,15 +411,20 @@ pub fn checkpoint(root: &Path, cfg: &Config, store: &mut Store, label: &str) -> 
     snapshot(root, cfg, store, &name, label, "checkpoint")
 }
 
-/// Publishes the staging candidates into `wiki/`, or asks for confirmation.
+/// Publishes the staging candidates that fit the brakes into `wiki/`.
 ///
-/// The checks run in this order, and a refusal never writes anything: nothing
-/// to approve, a candidate that drifted after it was written, a pending source
-/// that changed after it was processed, and only then the confirmation gate.
-/// The page budget lives inside that gate: it only decides whether to ask, so
-/// `--confirm` passes through it.
-/// `confirm == true` renames the candidates into `wiki/`, regenerates the
-/// index, logs the merge, snapshots the result and advances the baseline.
+/// Nothing is asked: the unattended path has no human to ask, so the three
+/// brakes filter instead of blocking. A candidate that overlaps a published
+/// page, or that would push a slice or the run past its budget, stays in
+/// `.wiki/staging/` with a reason; the rest are renamed into `wiki/`,
+/// `index.md` is regenerated, the merge is journalled and snapshotted, and the
+/// baseline advances.
+///
+/// `confirm == true` is the explicit override: it publishes every candidate and
+/// ignores the brakes. The two checks that make a merge unsafe — a candidate
+/// edited after it was submitted, a source that changed after it was processed
+/// — still refuse instead of filtering, because publishing them would publish
+/// synthesis of bytes nobody saw.
 pub fn approve(
     root: &Path,
     cfg: &Config,
@@ -430,95 +447,24 @@ pub fn approve(
         }
     }
     check_sources(root, cfg)?;
-    if !confirm {
-        // The two content brakes only run on the asking path: `--confirm` is
-        // the human overruling them, not another question.
-        let existing = published(root, cfg);
-        let staged: Vec<Staged> = candidates
-            .iter()
-            .filter_map(|candidate| {
-                let raw = fs::read(&candidate.staging).ok()?;
-                // A page that does not parse is `lint`'s problem, not a reason
-                // to refuse a merge.
-                let (front, _body) = crate::page::parse(&raw).ok()?;
-                Some(Staged {
-                    rel: candidate.rel.clone(),
-                    title: title_key(&front.title),
-                    sources: front.sources,
-                })
-            })
-            .collect();
 
-        for candidate in &staged {
-            let keys = cited_sources(cfg, &candidate.sources);
-            if let Some(why) = overlap_reason(&candidate.rel, &candidate.title, &keys, &existing) {
-                return Ok(ApproveOutcome::NeedsConfirmation {
-                    reason: String::from("page_overlap"),
-                    detail: format!(
-                        "{why}；确认后可用 approve --confirm 合并，或改 id/title 后重新 ingest submit"
-                    ),
-                });
-            }
-        }
-
-        // Information-density brake: one slice of a source justifies a bounded
-        // number of pages, so a long document earns room in proportion to its
-        // length instead of its file count.
-        let limit = cfg.ingest.max_pages_per_slice;
-        if limit > 0 {
-            let mut counts: BTreeMap<Slice, Vec<String>> = BTreeMap::new();
-            for page in &existing {
-                for slice in page_slices(root, cfg, &page.refs) {
-                    counts.entry(slice).or_default().push(page.rel.clone());
-                }
-            }
-            for page in &staged {
-                for slice in page_slices(root, cfg, &page.sources) {
-                    counts.entry(slice).or_default().push(page.rel.clone());
-                }
-            }
-            if let Some(((key, index), who)) = counts.iter().find(|(_, who)| who.len() > limit) {
-                let subject = if *index == 0 {
-                    format!("整份 `{key}`")
-                } else {
-                    format!("`{key}` 的第 {index} 个切片")
-                };
-                return Ok(ApproveOutcome::NeedsConfirmation {
-                    reason: String::from("page_slice_budget"),
-                    detail: format!(
-                        "{subject} 已经养出 {} 页（{}），超过 ingest.max_pages_per_slice（{limit}）；\
-                         切片是 `#p=<n>`，一个切片该讲的事通常一页就够，确认后可用 approve --confirm 合并",
-                        who.len(),
-                        who.join("、")
-                    ),
-                });
-            }
-        }
-
-        // A page the wiki already holds is an overwrite, not growth, so only
-        // new paths count against the budget.
-        let new_pages = candidates
-            .iter()
-            .filter(|candidate| !candidate.wiki.is_file())
-            .count();
-        let budget = cfg.ingest.max_new_pages_per_run;
-        if new_pages > budget {
-            return Ok(ApproveOutcome::NeedsConfirmation {
-                reason: String::from("page_budget"),
-                detail: format!(
-                    "本轮会新增 {new_pages} 页，超过 ingest.max_new_pages_per_run（{budget}）；\
-                     候选仍在 .wiki/staging/，确认后用 approve --confirm 合并"
-                ),
-            });
-        }
-        return Ok(ApproveOutcome::NeedsConfirmation {
-            reason: String::from("merge_staging"),
-            detail: format!("{} 页待合并到 wiki/", candidates.len()),
-        });
+    let (published, held_back) = if confirm {
+        (
+            candidates.iter().map(|c| c.rel.clone()).collect::<Vec<_>>(),
+            Vec::new(),
+        )
+    } else {
+        screen(root, cfg, &candidates)?
+    };
+    if published.is_empty() {
+        return Ok(ApproveOutcome::NothingPublished { held_back });
     }
 
     let name = next_version_name(root)?;
     for candidate in &candidates {
+        if !published.iter().any(|rel| rel == &candidate.rel) {
+            continue;
+        }
         if let Some(parent) = candidate.wiki.parent() {
             fs::create_dir_all(parent).map_err(|source| io(parent, source))?;
         }
@@ -526,17 +472,12 @@ pub fn approve(
             .map_err(|source| io(&candidate.staging, source))?;
     }
     render::write_index(root, cfg)?;
-    // The version name is known before the snapshot, so the merge line is part
-    // of the snapshot it describes.
-    render::append_log(
-        &root.join(&cfg.paths.wiki).join("log.md"),
-        &LogEntry {
-            date: today(),
-            action: String::from("approve"),
-            title: name.clone(),
-            detail: None,
-        },
-    )?;
+    let detail = if held_back.is_empty() {
+        format!("{} 页", published.len())
+    } else {
+        format!("{} 页，{} 页留在暂存区", published.len(), held_back.len())
+    };
+    journal::append(root, "approve", Some(&name), &detail)?;
     snapshot(root, cfg, store, &name, "approve", "approve")?;
 
     let mut manifest = Manifest::load(root)?;
@@ -546,7 +487,127 @@ pub fn approve(
     Manifest::save(root, &manifest)?;
     staging::clear_pending(root)?;
 
-    Ok(ApproveOutcome::Applied { version: name })
+    Ok(ApproveOutcome::Applied {
+        version: name,
+        published,
+        held_back,
+    })
+}
+
+/// Splits the candidates into what can be published now and what waits.
+///
+/// Order matters: earlier candidates keep their place, the ones that would
+/// cross a limit wait, so a run publishes the pages the agent wrote first rather
+/// than an arbitrary subset. A candidate that does not parse is not held here —
+/// a broken page is `lint`'s finding, not a reason to stop publishing.
+fn screen(
+    root: &Path,
+    cfg: &Config,
+    candidates: &[Candidate],
+) -> Result<(Vec<String>, Vec<HeldBack>)> {
+    let existing = published(root, cfg);
+    let mut held_back: Vec<HeldBack> = Vec::new();
+
+    let mut parsed: Vec<Option<Staged>> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let page = fs::read(&candidate.staging).ok().and_then(|raw| {
+            crate::page::parse(&raw).ok().map(|(front, _body)| Staged {
+                title: title_key(&front.title),
+                sources: front.sources,
+            })
+        });
+        parsed.push(page);
+    }
+
+    // 1. Overlap: a page that says what the wiki already says is not published.
+    let mut accepted: Vec<&Candidate> = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if let Some(page) = &parsed[index] {
+            let keys = cited_sources(cfg, &page.sources);
+            if let Some(why) = overlap_reason(&candidate.rel, &page.title, &keys, &existing) {
+                held_back.push(HeldBack {
+                    page: candidate.rel.clone(),
+                    reason: String::from("page_overlap"),
+                    detail: format!("{why}；改 id/title 或补一个新源后再 submit"),
+                });
+                continue;
+            }
+        }
+        accepted.push(candidate);
+    }
+
+    // 2. Slice budget: a slice of a source justifies a bounded number of pages,
+    //    so a long document earns room in proportion to its length rather than
+    //    its file count.
+    let limit = cfg.ingest.max_pages_per_slice;
+    if limit > 0 {
+        let mut counts: BTreeMap<Slice, Vec<String>> = BTreeMap::new();
+        for page in &existing {
+            for slice in page_slices(root, cfg, &page.refs) {
+                counts.entry(slice).or_default().push(page.rel.clone());
+            }
+        }
+        let mut kept: Vec<&Candidate> = Vec::new();
+        for candidate in accepted {
+            let index = candidates
+                .iter()
+                .position(|other| other.rel == candidate.rel)
+                .unwrap_or(0);
+            let slices: BTreeSet<Slice> = parsed[index]
+                .as_ref()
+                .map(|page| page_slices(root, cfg, &page.sources))
+                .unwrap_or_default();
+            let over = slices.iter().find_map(|slice| {
+                let used = counts.get(slice).map(|who| who.len()).unwrap_or(0);
+                (used >= limit).then(|| (slice.clone(), used))
+            });
+            if let Some(((key, slice), used)) = over {
+                let subject = if slice == 0 {
+                    format!("整份 `{key}`")
+                } else {
+                    format!("`{key}` 的第 {slice} 个切片")
+                };
+                held_back.push(HeldBack {
+                    page: candidate.rel.clone(),
+                    reason: String::from("page_slice_budget"),
+                    detail: format!(
+                        "{subject} 已经有 {used} 页，再加这一页就超过 ingest.max_pages_per_slice（{limit}）；\
+                         删掉旧页，或确认后用 approve --confirm 合并"
+                    ),
+                });
+                continue;
+            }
+            for slice in slices {
+                counts.entry(slice).or_default().push(candidate.rel.clone());
+            }
+            kept.push(candidate);
+        }
+        accepted = kept;
+    }
+
+    // 3. Page budget: a page the wiki already holds is an overwrite, not growth.
+    let budget = cfg.ingest.max_new_pages_per_run;
+    let mut kept: Vec<&Candidate> = Vec::new();
+    let mut new_pages = 0usize;
+    for candidate in accepted {
+        if !candidate.wiki.is_file() {
+            if budget > 0 && new_pages >= budget {
+                held_back.push(HeldBack {
+                    page: candidate.rel.clone(),
+                    reason: String::from("page_budget"),
+                    detail: format!(
+                        "本轮新增页已达 ingest.max_new_pages_per_run（{budget}），\
+                         这一页留到下一轮；确认后用 approve --confirm 立刻合并"
+                    ),
+                });
+                continue;
+            }
+            new_pages += 1;
+        }
+        kept.push(candidate);
+    }
+
+    Ok((kept.into_iter().map(|c| c.rel.clone()).collect(), held_back))
 }
 
 /// Discards the candidates and records why.
@@ -590,15 +651,7 @@ pub fn reject(root: &Path, cfg: &Config, store: &mut Store, reason: &str) -> Res
     }
     Manifest::save(root, &manifest)?;
     staging::clear_pending(root)?;
-    render::append_log(
-        &wiki_dir.join("log.md"),
-        &LogEntry {
-            date: today(),
-            action: String::from("reject"),
-            title: String::from(reason),
-            detail: None,
-        },
-    )?;
+    journal::append(root, "reject", None, reason)?;
     Ok(())
 }
 
@@ -694,7 +747,7 @@ fn reviewed_digest(cfg: &Config, path: &Path) -> Result<Option<(String, i64, i64
 /// trailing newline is added when the text does not end with one, and nothing
 /// else about the file is touched. The instruction is guidance for the agent,
 /// not a version-ledger entry, so it is deliberately not snapshotted here.
-pub fn instruct(root: &Path, cfg: &Config, _store: &mut Store, text: &str) -> Result<()> {
+pub fn instruct(root: &Path, _cfg: &Config, _store: &mut Store, text: &str) -> Result<()> {
     if text.is_empty() {
         return Err(VersionError::NoText);
     }
@@ -706,15 +759,7 @@ pub fn instruct(root: &Path, cfg: &Config, _store: &mut Store, text: &str) -> Re
     let parent = path.parent().unwrap_or(root);
     fs::create_dir_all(parent).map_err(|source| io(parent, source))?;
     fs::write(&path, body.as_bytes()).map_err(|source| io(&path, source))?;
-    render::append_log(
-        &root.join(&cfg.paths.wiki).join("log.md"),
-        &LogEntry {
-            date: today(),
-            action: String::from("instruct"),
-            title: String::from(text),
-            detail: None,
-        },
-    )?;
+    journal::append(root, "instruct", None, text)?;
     Ok(())
 }
 
@@ -723,27 +768,14 @@ pub fn instruct(root: &Path, cfg: &Config, _store: &mut Store, text: &str) -> Re
 /// Staging, the ledger and `wiki/` are left exactly as they were; only the log
 /// gains a line, which is how a later reader tells "deferred" from "never
 /// looked at".
-pub fn defer(root: &Path, cfg: &Config, _store: &mut Store) -> Result<()> {
-    render::append_log(
-        &root.join(&cfg.paths.wiki).join("log.md"),
-        &LogEntry {
-            date: today(),
-            action: String::from("defer"),
-            title: String::new(),
-            detail: None,
-        },
-    )?;
+pub fn defer(root: &Path, _cfg: &Config, _store: &mut Store) -> Result<()> {
+    journal::append(root, "defer", None, "")?;
     Ok(())
 }
 
 /// The snapshot directory for `root`.
 fn versions_dir(root: &Path) -> PathBuf {
     root.join(ENGINE).join("versions")
-}
-
-/// Today's date, matching the page and log stamps the other commands write.
-fn today() -> NaiveDate {
-    Local::now().date_naive()
 }
 
 /// The next free version name, `vNNN`.
@@ -956,9 +988,9 @@ fn snapshot(
                     return false;
                 };
                 // Bookkeeping is in the snapshot but is not a page: `audit/` is
-                // a record of a run, `index.md`/`log.md` are generated.
+                // a record of a run, `index.md` is generated.
                 let first = rel.split('/').next().unwrap_or("");
-                first != "audit" && rel != "index.md" && rel != "log.md"
+                first != "audit" && rel != "index.md"
             })
             .count(),
         kind: String::from(kind),
@@ -1023,15 +1055,7 @@ pub fn rollback(
     }
 
     crate::query::reindex(root, cfg, store)?;
-    render::append_log(
-        &root.join(&cfg.paths.wiki).join("log.md"),
-        &LogEntry {
-            date: today(),
-            action: String::from("rollback"),
-            title: String::from(name),
-            detail: None,
-        },
-    )?;
+    journal::append(root, "rollback", Some(name), "")?;
 
     let new_name = next_version_name(root)?;
     snapshot(

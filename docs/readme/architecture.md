@@ -9,7 +9,7 @@
 | 源 | 仓库根（`.wiki/` 之外） | 是 | 唯一输入；只读，工具从不在其下写文件 |
 | 契约 | `.wiki/wiki.toml`、`.wiki/SCHEMA.md` | 否 | 配置与页面类型枚举；人和 agent 都读 |
 | 中间层 | `.wiki/raw/` | 否 | 解析产物，可重建；frontmatter 记录来源、哈希、解析后端 |
-| 知识层 | `.wiki/pages/` | 否 | 页面、`index.md`、`log.md`、`audit/`、`archive/` |
+| 知识层 | `.wiki/pages/` | 否 | 页面、`index.md`、`audit/`、`archive/` |
 | 引擎状态 | `.wiki/` 其余 | 否 | 账本 `state.db`、`staging/`、`versions/`、`sessions/`、`cache/`、`lock` |
 
 `.wiki/.gitignore` 只有一行 `*`：整个引擎都不进 git。仓库里进 git 的只有源文件；工具不修改根 `.gitignore`。
@@ -33,8 +33,8 @@
 1. **scan** 对比仓库根与账本表 `sources`，得出新增 / 修改 / 删除 / 改名。
 2. **convert** 把源交给解析后端（`src/parse/`），写 `.wiki/raw/<key>.md`，再登记 `sources` 行（记 `raw_key`）与 `raws` 行（记 `source_key`）。反查由这两列互指完成，v5 迁移已删除独立的 `source_pages` 表。
 3. **ingest** 一轮读写：`begin` 把涉及的源与预判页面写进 `pending` 表，`submit` 把候选页与暂存清单对齐，`abort` 丢弃本轮但保留已写候选页。
-4. **staging → pages**：候选页放在 `.wiki/staging/<type>/<id>.md`；`approve` 只在 `--confirm` 下合并进 `.wiki/pages/` 并写 `log.md`、重建 `index.md`，`reject` 记录原因后清空暂存；它同时把这一轮的源按磁盘上的当前字节记进账本，这是「人看过并否决」的落点——变动的字节被承认为已知状态，否则同一文件会一轮轮报 `changed`。
-5. **lint** 跑十三条规则（`L1`–`L13`），`--fix` 只修不需要判断的机械缺陷，`--strict` 把警告也算失败。
+4. **staging → pages**：候选页放在 `.wiki/staging/<type>/<id>.md`；`approve` 合并进 `.wiki/pages/` 并重建 `index.md`，三道刹车只扣住命中的候选，其余照常发布（`--confirm` 越过全部刹车），所以无人值守链路不需要人；`reject` 清空暂存，同时把这一轮的源按磁盘上的当前字节记进账本，这是「人看过并否决」的落点——变动的字节被承认为已知状态，否则同一文件会一轮轮报 `changed`。两种决策只往 `.wiki/journal.jsonl` 追加一行 JSON。
+5. **lint** 跑十二条规则（`L1`–`L12`），`--fix` 只修不需要判断的机械缺陷，`--strict` 把警告也算失败。
 6. **checkpoint** 记一份 manifest（`pages/` 与 `raw/` 每条路径的 blake3 摘要）到 `.wiki/versions/vNNN/manifest.json`，字节按摘要存进 `.wiki/objects/`，同一内容只存一份；只保留最近 `[versions].keep` 份。`rollback vNNN` 按 manifest 把两棵树还原、重建索引，并把自己记成新版本；`history` / `diff` 读同一份 manifest。
 7. **sync** 无人值守串起 scan → convert → 稳定门槛 → lint，并把本轮写进审计文件；`--dry-run` 不写任何文件。
 8. **archive / recall** 是分层记忆：agent 先写 `.wiki/pages/archive/<YYYY-MM>.md` 摘要，`seal` 校验账本、改写引用页的 `sources`、登记 `archive` 表；`recall` 子串检索摘要，`query` 用 FTS5 检索全库。
@@ -54,10 +54,11 @@
 | `src/parse/` | 解析后端与 `auto` 回退（`text`/`html`/`asset`/`pdf`/`external`） |
 | `src/chunk.rs` | 大文件的按需分块 |
 | `src/page.rs` | 页面 frontmatter 的读写与校验 |
-| `src/render.rs` | `index.md`、`log.md` 与人类可读渲染 |
+| `src/render.rs` | `index.md` 与人类可读渲染 |
+| `src/journal.rs` | `.wiki/journal.jsonl`：每次决策一行 JSON |
 | `src/ingest.rs` | 一轮 ingest 的账本操作 |
 | `src/staging.rs` | 暂存区与清单 `pending.json` |
-| `src/lint.rs` | 十三条规则与 `--fix` |
+| `src/lint.rs` | 十二条规则与 `--fix` |
 | `src/version.rs` | 版本 manifest 与对象库、`rollback` / `history` / `diff`、`approve` 决策门与页面预算 |
 | `src/ignore.rs` | `.wiki/ignore` 的解析与增删；`scan` / `convert` / `archive purge` 共用的唯一判定 |
 | `src/lock.rs` | 仓库锁（TTL 600s） |
@@ -79,11 +80,12 @@
 - 对账只有一个答案：`scan::classify`（仓库根）与 `scan::classify_raw`（`.wiki/raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan` 输出的 `layer` 字段、`lint` `L7`、`ingest begin` 的 `orphan_pages` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这三处必须同答。（检查：tests/reconcile.rs::an_unledgered_raw_is_reported_the_same_way_by_all_three）
 - 页面 `sources` 里的 raw 键必须在 `raws` 账本内；违反由 `ingest begin` 的 `orphan_pages` 报告，只报不修。（检查：tests/ingest.rs::begin_reports_orphan_pages）
 - 页面必须有 frontmatter 七字段：`id`、`title`、`type`、`summary`、`sources`、`status`、`updated`；`type` 取自 `[schema].types`。（检查：tests/lint.rs::l1_reports_each_missing_required_field）
-- 候选页只能经 `.wiki/staging/` 由 `approve --confirm` 进入 `.wiki/pages/`；覆盖已存在页面同样需要确认。（检查：tests/version.rs::approve_without_confirm_asks_a_human）
+- 候选页只能经 `.wiki/staging/` 由 `approve` 进入 `.wiki/pages/`；三道刹车（近义、切片预算、页面预算）只扣住命中的候选，其余照常发布，`--confirm` 是显式越权。（检查：tests/version.rs::approve_holds_back_the_pages_past_the_budget）
 - `archive seal` 先改引用页、后写账本：中途崩溃时重跑能补齐，不会留下引用已删记录的页面。（未机器化：靠 seal 的幂等实现，没有崩溃注入测试）
 - `archive purge` 只在「总数超 `purge_cap`」且「超过 `purge_days`」时才删，且跳过仍被引用的摘要，也不清忽略列表上的源。（检查：tests/archive.rs::purge_candidates_need_capacity_and_deadline_both）
 - 版本是 manifest + 内容寻址对象，不是目录拷贝；回退按 manifest 还原两棵树并重建索引，回退本身也记一个版本。（检查：tests/version.rs::rollback_restores_pages_and_raws_and_records_itself）
 - 忽略列表只有一个解释入口 `ignore::IgnoreList`：`scan`/`convert` 跳过、`archive purge` 不清，不许在调用点各自拼通配。`[scan].ignore` 只是目录名的粗过滤，两者不混用。（检查：tests/scan_signature.rs::an_entry_of_the_ignore_list_is_invisible_to_the_scan）
+- 决策只写 `.wiki/journal.jsonl`：一行一个 JSON，`detail` 里的换行不会破坏格式；它不进版本、不被 `rollback` 抹掉，也不参与检索。（检查：tests/version.rs::approve_with_confirm_merges_into_wiki）
 - 索引与暂存清单都是派生状态，可以从 `.wiki/pages/` 与账本重建；`--reindex` 是兜底。（检查：tests/query.rs::reindex_is_what_makes_a_new_page_searchable）
 
 ## 机器守卫
@@ -92,7 +94,7 @@
 
 | 文件 | 抓什么 |
 | --- | --- |
-| `tests/invariants.rs` | 代码结构：SQL 只在 `store.rs`、账本写入只在 `ledger.rs`、对账只有 `scan`、不变量标注指向真实测试、迁移步数等于 `SCHEMA_VERSION`、`L1`–`L13` 三方一致 |
+| `tests/invariants.rs` | 代码结构：SQL 只在 `store.rs`、账本写入只在 `ledger.rs`、对账只有 `scan`、不变量标注指向真实测试、迁移步数等于 `SCHEMA_VERSION`、`L1`–`L12` 三方一致 |
 | `tests/docs_contract.rs` | 文档与 CLI 一致：JSON 形状快照、flag 真存在、表格与枚举等于代码、被点名对象的字段在对应技能里有枚举行、文档里的 `snake_case` 名字与 `E_*` 码闭世界 |
 | `tests/snapshots/cli-keys.json` | 各命令 `--json` 的键路径。改输出必须改快照；置 `LLM_WIKI_UPDATE_SNAPSHOTS=1` 重跑 `tests/docs_contract.rs` 会重写它，之后人工过一遍 |
 | `tests/docs_tokens.allow` | 白名单：文档里合理出现、但不是本仓词汇的名字，每条写理由 |

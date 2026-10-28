@@ -11,8 +11,8 @@
 | 源 | 仓库根（`.wiki/` 之外） | 唯一输入，任意格式，工具只读；`[scan].ignore` 可排除目录 |
 | 契约 | `.wiki/wiki.toml`、`.wiki/SCHEMA.md` | 配置与页面类型枚举，人和 agent 都读 |
 | 中间层 | `.wiki/raw/` | 解析产物，可重建；frontmatter 记录来源、哈希、解析后端 |
-| 知识层 | `.wiki/pages/` | 页面、`index.md`、`log.md`、`audit/`、`archive/` |
-| 引擎状态 | `.wiki/` 其余 | SQLite 账本、暂存区、版本 manifest 与对象库、会话、锁 |
+| 知识层 | `.wiki/pages/` | 页面、`index.md`、`audit/`、`archive/` |
+| 引擎状态 | `.wiki/` 其余 | SQLite 账本、暂存区、版本 manifest 与对象库、决策日志 `journal.jsonl`、会话、锁 |
 
 写入边界是结构性的：契约、页面、账本全在 `.wiki/` 里，手写 `[paths]` 也移不出去。
 
@@ -21,9 +21,9 @@
 1. **扫描**：`scan` 对比仓库根与账本 `state.db`，得出新增 / 修改 / 删除 / 改名。
 2. **解析**：`convert` 把源交给解析后端，写 `.wiki/raw/<key>.md`，frontmatter 记录来源、`source_hash`、`parser` 与 `pin`。
 3. **成页**：agent 读 `.wiki/raw/`，把候选页写进 `.wiki/staging/<type>/<id>.md`；`ingest begin / submit / abort` 管住一轮的读写——`submit` 只是交稿，发布永远是 `approve`。
-4. **发布**：`approve --confirm` 把候选合并进 `.wiki/pages/` 并重建 `index.md`、追加 `log.md`；`reject` 记录原因后丢弃候选，并把这一轮的源按当前字节记为已复核。
-5. **校验**：`lint` 跑十三条规则，`--fix` 修掉不需要判断的机械缺陷。
-6. **留痕**：`checkpoint` 记一份 manifest（`pages/` 与 `raw/` 每条的 blake3），字节按摘要存进 `.wiki/objects/`；`sync` 把「扫描 → 转换 → 稳定门槛 → 审计」串成无人值守的一轮。`history` / `diff` 读同一份 manifest，`rollback <vNNN>` 整版还原并把自己记成新版本；`.wiki/ignore` 挡住反复制造变动的源，页面超预算时 `approve` 会以 `page_budget` 停下。
+4. **发布**：`approve` 直接把候选合并进 `.wiki/pages/` 并重建 `index.md`——不等人，三道刹车只扣住命中的候选，其余的照常发布；`--confirm` 是显式越权。`reject` 丢弃候选并把这一轮的源按当前字节记为已复核（否决即是对源的表决）。两种决策都只追加一行 `.wiki/journal.jsonl`。
+5. **校验**：`lint` 跑十二条规则，`--fix` 修掉不需要判断的机械缺陷。
+6. **留痕**：`checkpoint` 记一份 manifest（`pages/` 与 `raw/` 每条的 blake3），字节按摘要存进 `.wiki/objects/`；`sync` 把「扫描 → 转换 → 稳定门槛 → 审计」串成无人值守的一轮。`history` / `diff` 读同一份 manifest，`rollback <vNNN>` 整版还原并把自己记成新版本；`.wiki/ignore` 挡住反复制造变动的源，超出刹车额度的候选留在 `.wiki/staging/` 等下一轮。
 7. **检索与续命**：`query` 用 FTS5 检索全库；`archive seal` 把会话摘要封存，`recall` 检索摘要，`archive purge` 按容量与时限清理。
 
 解析层是可替换的后端集合：文本、HTML、图片、PDF 各有一个内置后端，另有一个可选的 `external-http` 后端把扫描件之类「内置读不出字」的文档交给外部 HTTP 服务。分层、数据流、模块表与不变量见 [架构与模块](docs/readme/architecture.md)，后端选择与回退规则见 [解析后端与 auto 回退](docs/readme/parse/external.md)。
@@ -149,7 +149,7 @@ llm-wiki ingest begin --sources notes/a.md --pages concept/alpha
 # ……agent 把候选页写进 .wiki/staging/concept/alpha.md……
 llm-wiki ingest submit --pages concept/alpha
 llm-wiki lint --fix                        # 先修机械缺陷，再报告剩下的
-llm-wiki approve --confirm                 # 合并候选进 .wiki/pages/
+llm-wiki approve                           # 刹车放行的候选进 .wiki/pages/
 llm-wiki checkpoint --label "after alpha"
 llm-wiki history                           # 打过哪些版本
 llm-wiki diff v003                         # 与当前工作树差了什么
@@ -182,7 +182,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `ingest begin [--sources <K>]... [--pages <P>]... [--dry-run]` | 开一轮，报告受影响的页面 |
 | `ingest submit [--pages <P>]...` | 交稿：刷新候选页与暂存清单，**不发布**（发布是 `approve`） |
 | `ingest abort` | 丢弃本轮，保留已写候选页 |
-| `lint [--strict] [--fix]` | 十三条规则；`--strict` 让警告也失败 |
+| `lint [--strict] [--fix]` | 十二条规则；`--strict` 让警告也失败 |
 | `checkpoint --label <LABEL>` | 记 manifest 与内容对象，成为新版本（只保留最近 `[versions].keep` 份） |
 | `history` | 列出版本：`version` / `kind` / `label` / `created_at` / `pages` |
 | `diff <VERSION>` | 该版本与当前工作树的差异：`added` / `removed` / `changed` |
@@ -190,7 +190,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `ignore list` | 列出 `.wiki/ignore` 的规则 |
 | `ignore add <PATTERN>...` / `ignore remove <PATTERN>...` | 增删忽略规则（`.gitignore` 语法，`#` 注释、`!` 取反、`/` 锚定、`**` 跨目录） |
 | `ignore check <PATH>` | 报 `ignored`、命中的 `rule` 与归一化后的 `path` |
-| `approve [--confirm]` | 发布候选；不带 `--confirm` 只报告（exit 3） |
+| `approve [--confirm]` | 发布候选：三道刹车只扣住命中的，其余照发；`--confirm` 越过全部刹车；全部被扣下才 exit 3 |
 | `reject --reason <REASON>` | 丢弃候选、记录原因，并把本轮的源按当前字节记为已复核（下一轮不再报同一变动） |
 | `instruct --text <TEXT>` | 给下一次 agent 会话留话（写入 `.wiki/next-instruction.md`） |
 | `defer` | 保留队列，不改变任何状态 |
@@ -216,7 +216,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `0` | 成功；`query` 无命中、`doctor` 只有 Warn 也是 0 |
 | `1` | 命令执行失败（含部分源失败），或 `lint` 有 error / `--strict` 下有 warning，或 `recall` 无命中、`doctor` 有 Fail |
 | `2` | 用法、配置或环境错误 |
-| `3` | 需要人拍板：`approve` 未带 `--confirm`（含 `page_budget` 超预算、`page_slice_budget` 单切片页数超限、`page_overlap` 疑似重复页）、`archive purge` 未带 `--yes` |
+| `3` | 需要人看一眼：`approve` 这一轮**每个**候选都被刹车扣下（`page_overlap` / `page_slice_budget` / `page_budget`），一页也没发出去；`archive purge` 未带 `--yes` |
 | `4` | 引擎被另一个进程锁住（`lock` 真正被占用，不是过期残留） |
 
 ## 服务特殊说明
@@ -226,12 +226,12 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 - `parse.primary` 取 `external` 却没写 `[parse.external]` 时，`doctor` 的 `external_backend` 直接报 Fail（每个解析都会以 `E_NO_EXTERNAL` 失败）；服务不可达只报 Warn，因为服务可能在别处恢复。
 - 内置解析后端的 id 会写进 `.wiki/raw/` frontmatter：`builtin-text`、`builtin-html`、`builtin-asset`、`builtin-pdf`、`external-http`。升级解析器后可以据此筛出需要重转的源。
 - 常见错误码：`E_NO_PARSER`（无后端认领扩展名）、`E_BAD_SOURCE`（后端认领但解不开）、`E_NO_AUTH_ENV`、`E_EXTERNAL`、`E_BOTH_FAILED`（`auto` 下内置与外部都失败）、`E_BAD_CONFIG`（外部后端配置残缺）、`E_OVERSIZE`（超过 `max_source_bytes`）、`E_STAGING_CORRUPT` / `E_STAGING_DRIFT`（暂存区与清单不一致）、`E_NO_SUMMARY` / `E_ALREADY_SEALED`（封存前置条件不满足）、`E_LOCKED`（仓库被占用）。
-- 版本在 `.wiki/versions/vNNN/`：`manifest.json` 记路径与摘要，`.version.json` 记 `kind` / `label` / `pages`，字节按摘要存在 `.wiki/objects/`（同一内容只存一份）。只保留最近 `[versions].keep` 份（默认 5）；`log.md` 记录每次 `approve` / `checkpoint` / `seal` / `rollback`。索引不进版本，回退后自动重建。
-- 页面预算：`[ingest].max_new_pages_per_run`（默认 20）限制 `approve` 一轮新增的页数，超出时返回 `reason: page_budget` 并把候选留在 `.wiki/staging/`；`approve --confirm` 是人显式越过预算。
-- 切片预算：`[ingest].max_pages_per_slice`（默认 5）限制「同一个切片养出多少页」。切片是 `#p=<n>` 指向的那一段（大文件按 `parse.chunk_target` 切块），没带片段的页算整份文件一个切片。所以长文档按信息量拿页数，短文件不能靠拆 id 刷页；小于切块阈值的文件，页面上写的任何 `#p=` 都算整份文件那一个切片，编造不存在的切片换不到额度。超过返回 `reason: page_slice_budget`，`detail` 点名是哪份源的第几个切片。
-- 近义页判定：`approve` 还会拦两种「同一页写了两遍」——标题归一化后与已发布页相同（`Retry Policy` = `retry_policy`），或候选页引用的源全部是某张已发布页引用过的（没有新证据）。命中返回 `reason: page_overlap`，`detail` 点名对端页；判定只比 frontmatter，不读正文，所以不花钱、不误判语义。显式 `approve --confirm` 同样可越过。
+- 版本在 `.wiki/versions/vNNN/`：`manifest.json` 记路径与摘要，`.version.json` 记 `kind` / `label` / `pages`，字节按摘要存在 `.wiki/objects/`（同一内容只存一份）。只保留最近 `[versions].keep` 份（默认 5）；`.wiki/journal.jsonl` 记录每次 `approve` / `reject` / `instruct` / `defer` / `seal` / `rollback`（一行一个 JSON，不进版本、不被回退抹掉）。索引不进版本，回退后自动重建。
+- 三道刹车都在 `approve` 不带 `--confirm` 时生效，命中的候选留在 `.wiki/staging/`、其余照常发布，所以无人值守链路也能跑完：近义（`page_overlap`）、切片预算（`page_slice_budget`）、页面预算（`page_budget`，默认 20，0 表示不限）。只有全部候选都被扣下时才 exit 3，此时确实需要人看一眼；`--confirm` 是显式越过全部三道。
+- 切片预算：`[ingest].max_pages_per_slice`（默认 5，0 表示不限）限制「同一个切片养出多少页」。切片是 `#p=<n>` 指向的那一段（大文件按 `parse.chunk_target` 切块），没带片段的页算整份文件一个切片。所以长文档按信息量拿页数，短文件不能靠拆 id 刷页；小于切块阈值的文件，页面上写的任何 `#p=` 都算整份文件那一个切片，编造不存在的切片换不到额度。超出时这一页被扣下（`reason: page_slice_budget`），已在库里的页继续算数，所以要腾额度得先归档或删旧页。
+- 近义页判定：`approve` 会扣下两种「同一页写了两遍」——标题归一化后与已发布页相同（`Retry Policy` = `retry_policy`），或候选页引用的源全部是某张已发布页引用过的（没有新证据）。命中的候选不发布（`reason: page_overlap`），`detail` 点名对端页；判定只比 frontmatter，不读正文，所以不花钱、不误判语义。
 - 忽略列表 `.wiki/ignore` 用 `.gitignore` 语法，`scan` / `convert` 跳过、`archive purge` 不清；显式 `convert --key` 仍可读单个文件。`.wiki/` 不随 git 共享，所以忽略列表也是每台机器一份。
-- `.wiki/` 是这台机器的事实源，**不随仓库共享，CLI 也不提供同步**。要带到别的机器，用任意文件级手段（`rsync`、`unison`、私有 git 仓、网盘）整目录搬，遵守三条：搬时不能有 llm-wiki 在跑（SQLite 账本必须一致）；排除 `.wiki/lock` 与 `.wiki/cache/`；同一时刻只有一个写者——账本无法合并，两边各写再拼会得到互相矛盾的 `source_hash`。目录内只存仓库相对路径（键由 `paths::identity_key` 产出），换机器不用改配置。
+- `.wiki/` 是这台机器的事实源，**不随仓库共享，CLI 也不提供同步**。不考虑跨机器：不要手动搬、不要合并账本，两边各写再拼会得到互相矛盾的 `source_hash`。目录内只存仓库相对路径（键由 `paths::identity_key` 产出）。
 - 仓库锁 `.wiki/lock` 的 TTL 是 600 秒；崩溃残留会被下一次运行回收，只有真正被别的进程持有时才以 exit 4 退出。
 - 索引是派生状态：`query` 前会增量刷新，刚 `approve` 的页也能立刻搜到；怀疑索引不一致时用 `query --reindex` 全量重建。
 - `sync` 的 `--dry-run` 保证不写盘（`settle_seconds` 与 `stable_streak` 门槛在演练里同样生效），`--force` 才跳过早写门槛。

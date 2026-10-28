@@ -15,6 +15,7 @@ pub mod hash;
 pub mod ignore;
 pub mod ingest;
 pub mod init;
+pub mod journal;
 pub mod ledger;
 pub mod lint;
 pub mod lock;

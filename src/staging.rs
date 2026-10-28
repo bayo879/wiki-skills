@@ -167,7 +167,7 @@ fn has_candidates(staging: &Path) -> Result<bool> {
 
 /// Whether a staging-relative path is the directory's own bookkeeping.
 ///
-/// `manifest.json` and `pending.json` are ledgers, `index.md` and `log.md` at
+/// `manifest.json` and `pending.json` are ledgers, `index.md` at
 /// the root are generated summaries, and `audit/` holds audit output: none of
 /// them is a candidate page awaiting review.
 fn is_bookkeeping(relative: &str) -> bool {
@@ -175,7 +175,6 @@ fn is_bookkeeping(relative: &str) -> bool {
     relative == MANIFEST
         || relative == PENDING
         || relative == "index.md"
-        || relative == "log.md"
         || relative.starts_with("audit/")
 }
 

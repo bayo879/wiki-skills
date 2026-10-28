@@ -1,30 +1,22 @@
-//! Bookkeeping rendering: the generated `wiki/index.md` and the append-only
-//! `wiki/log.md`.
+//! Bookkeeping rendering: the generated `.wiki/pages/index.md`.
 //!
-//! Both files sit beside the pages and are maintained by the CLI, never by the
-//! agent, so their rules are deliberately mechanical:
+//! The index sits beside the pages and is maintained by the CLI, never by the
+//! agent, so its rules are deliberately mechanical: it is regenerated from the
+//! pages on disk. It is a pure function of the page set and the configured type
+//! order, which is why [`render_index`] takes plain [`PageMeta`] values and no
+//! paths: the same pages always produce the same bytes, and a rewritten index
+//! carries no drift from the previous one. Draft pages stay in the catalogue but
+//! are marked, so a reader can tell a conclusion from a note that is still being
+//! written.
 //!
-//! - `index.md` is regenerated from the pages on disk. It is a pure function of
-//!   the page set and the configured type order, which is why [`render_index`]
-//!   takes plain [`PageMeta`] values and no paths: the same pages always produce
-//!   the same bytes, and a rewritten index carries no drift from the previous
-//!   one. Draft pages stay in the catalogue but are marked, so a reader can tell
-//!   a conclusion from a note that is still being written.
-//! - `log.md` is append-only. Every byte already in the file is preserved
-//!   verbatim and the new entry is spliced onto the end; rewriting it would let
-//!   a bookkeeping pass silently drop history. The log therefore has no
-//!   validator — a human or agent may hand-write entries — and the only escaping
-//!   it does is on the separator itself, so a title cannot be mistaken for the
-//!   `action | title` split.
-//!
-//! Both writers go through [`write_atomic`] (temporary sibling plus rename), so
-//! a reader never observes a half-written catalogue, and a crash leaves either
-//! the old file or the new one.
+//! The writer goes through [`write_atomic`] (temporary sibling plus rename), so a
+//! reader never observes a half-written catalogue, and a crash leaves either the
+//! old file or the new one. Decisions are not recorded here: they live in the
+//! engine journal, outside the page tree.
 
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use chrono::NaiveDate;
 use walkdir::WalkDir;
 
 use crate::archive;
@@ -41,9 +33,6 @@ const SUMMARY_MAX: usize = 80;
 
 /// Marker appended to a page whose `status` is `draft`.
 const DRAFT_MARK: &str = "（草稿）";
-
-/// Header written when `log.md` does not exist yet.
-const LOG_HEADER: &str = "# 日志\n\n";
 
 /// Failure while rendering the bookkeeping files.
 #[derive(Debug, thiserror::Error)]
@@ -88,41 +77,6 @@ pub struct PageMeta {
     pub summary: String,
     /// Lifecycle state as written in frontmatter (`draft` adds the marker).
     pub status: String,
-}
-
-/// One entry of `log.md`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogEntry {
-    /// Date of the action.
-    pub date: NaiveDate,
-    /// Short verb, e.g. `ingest` or `lint`.
-    pub action: String,
-    /// What was acted on.
-    pub title: String,
-    /// Optional body, written as its own block below the heading.
-    pub detail: Option<String>,
-}
-
-impl LogEntry {
-    /// Renders the heading line: `## [YYYY-MM-DD] <action> | <title>`.
-    ///
-    /// A ` | ` inside the title becomes the full-width `｜`, so the first
-    /// separator is always the action/title split and a parser can rely on it.
-    pub fn to_line(&self) -> String {
-        let mut out = String::with_capacity(self.title.len() + self.action.len() + 20);
-        out.push_str("## [");
-        out.push_str(&self.date.format("%Y-%m-%d").to_string());
-        out.push_str("] ");
-        out.push_str(&self.action);
-        out.push_str(" | ");
-        out.push_str(&escape_pipe(&self.title));
-        out
-    }
-}
-
-/// Replaces the log separator inside free text with its full-width twin.
-fn escape_pipe(text: &str) -> String {
-    text.replace(" | ", " ｜ ")
 }
 
 /// Renders the whole `index.md` document.
@@ -218,40 +172,6 @@ fn push_truncated(out: &mut String, text: &str) {
     }
 }
 
-/// Appends one entry to `log.md`, preserving every existing byte.
-///
-/// A missing file is created with the `# 日志` header; an existing file is
-/// treated as opaque history, so an empty one gets no header, and a file whose
-/// last line has no newline gets exactly one inserted before the entry. The
-/// `detail` block, when present, is surrounded by blank lines.
-pub fn append_log(path: &Path, e: &LogEntry) -> Result<()> {
-    let mut body = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::from(LOG_HEADER),
-        Err(source) => {
-            return Err(RenderError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        }
-    };
-
-    if !body.is_empty() && !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push_str(&e.to_line());
-    body.push('\n');
-    if let Some(detail) = &e.detail {
-        body.push('\n');
-        body.push_str(detail);
-        if !detail.ends_with('\n') {
-            body.push('\n');
-        }
-        body.push('\n');
-    }
-    write_atomic(path, body.as_bytes())
-}
-
 /// Regenerates `wiki/index.md` from the pages on disk and returns the count.
 pub fn write_index(root: &Path, cfg: &Config) -> Result<usize> {
     write_index_in(&root.join(&cfg.paths.wiki), &cfg.schema.types)
@@ -323,7 +243,7 @@ fn is_summary(wiki_dir: &Path, path: &Path) -> bool {
 /// Every page file under `dir`, sorted by path.
 ///
 /// A missing directory has no pages: a wiki that has not been populated yet
-/// still produces a valid, header-only index. `index.md` and `log.md` at the
+/// still produces a valid, header-only index. `index.md` at the
 /// root are the bookkeeping files themselves and are skipped, and so is
 /// everything under `audit/`: audit reports are not catalogue entries.
 pub fn page_files(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -363,8 +283,8 @@ pub fn page_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// Whether a path relative to the wiki root is a bookkeeping file or audit
 /// output rather than a page.
 ///
-/// `index.md` and `log.md` are only bookkeeping at the root; a page that happens
-/// to be named `index.md` inside a type directory is still a page.
+/// `index.md` is only bookkeeping at the root; a page that happens to be named
+/// `index.md` inside a type directory is still a page.
 fn is_bookkeeping(rel: &Path) -> bool {
     let mut components = rel.components();
     match components.next() {
@@ -374,7 +294,7 @@ fn is_bookkeeping(rel: &Path) -> bool {
     rel.components().count() == 1
         && matches!(
             rel.file_name().and_then(|name| name.to_str()),
-            Some("index.md" | "log.md")
+            Some("index.md")
         )
 }
 

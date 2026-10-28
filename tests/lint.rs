@@ -368,25 +368,7 @@ fn l10_does_not_fire_at_three_pages() {
 }
 
 #[test]
-fn l11_reports_a_log_line_that_is_not_a_log_entry() {
-    let f = Fixture::new();
-    let log = "## [2026-10-27] ingest | ok\n\n- detail\n\n## 2026-10-27 manual\n";
-    fs::write(f.root().join(".wiki/pages/log.md"), log).unwrap();
-
-    let findings = f.lint();
-    let l11 = only(&findings, "L11");
-    assert_eq!(l11.len(), 1, "{findings:?}");
-    assert_eq!(l11[0].level, Level::Warning);
-    assert_eq!(l11[0].page.as_deref(), Some(".wiki/pages/log.md"));
-    assert!(
-        l11[0].msg.contains("line 5"),
-        "the line number locates it: {}",
-        l11[0].msg
-    );
-}
-
-#[test]
-fn l12_reports_an_unreferenced_asset() {
+fn l11_reports_an_unreferenced_asset() {
     let mut f = Fixture::new();
     f.db()
         .upsert_raw(&RawRow {
@@ -406,10 +388,10 @@ fn l12_reports_an_unreferenced_asset() {
         .unwrap();
 
     let findings = f.lint();
-    let l12 = only(&findings, "L12");
-    assert_eq!(l12.len(), 1, "{l12:?}");
-    assert_eq!(l12[0].level, Level::Info);
-    assert!(l12[0].msg.contains("img.png"));
+    let l11 = only(&findings, "L11");
+    assert_eq!(l11.len(), 1, "{l11:?}");
+    assert_eq!(l11[0].level, Level::Info);
+    assert!(l11[0].msg.contains("img.png"));
 }
 
 // ------------------------------------------------------------- ordering, exit
@@ -437,7 +419,7 @@ fn findings_are_sorted_by_level_then_rule_then_page() {
 
     assert_eq!(
         rules(&f.lint()),
-        vec!["L2", "L5", "L8", "L12"],
+        vec!["L2", "L5", "L8", "L11"],
         "error, then warnings by rule, then info"
     );
 }
@@ -445,7 +427,7 @@ fn findings_are_sorted_by_level_then_rule_then_page() {
 #[test]
 fn fails_is_strict_about_warnings_only() {
     let info = Finding {
-        rule: "L12",
+        rule: "L11",
         level: Level::Info,
         page: None,
         msg: String::from("x"),
@@ -626,7 +608,7 @@ fn cli_lint_info_does_not_fail_even_strict() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["data"]["findings"][0]["rule"], "L12");
+    assert_eq!(v["data"]["findings"][0]["rule"], "L11");
 }
 
 #[test]
@@ -794,24 +776,24 @@ fn l8_exempts_an_archived_page() {
 }
 
 #[test]
-fn l13_reports_an_idle_summary_nothing_cites() {
+fn l12_reports_an_idle_summary_nothing_cites() {
     let mut f = Fixture::new();
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
     seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 200, None);
 
     let findings = f.lint();
-    let l13 = only(&findings, "L13");
-    assert_eq!(l13.len(), 1, "{findings:?}");
-    assert_eq!(l13[0].level, Level::Info);
+    let l12 = only(&findings, "L12");
+    assert_eq!(l12.len(), 1, "{findings:?}");
+    assert_eq!(l12[0].level, Level::Info);
     assert_eq!(
-        l13[0].page.as_deref(),
+        l12[0].page.as_deref(),
         Some(".wiki/pages/archive/2026-01.md")
     );
-    assert!(l13[0].msg.contains("200"), "{}", l13[0].msg);
+    assert!(l12[0].msg.contains("200"), "{}", l12[0].msg);
 }
 
 #[test]
-fn l13_ignores_a_summary_a_page_still_cites() {
+fn l12_ignores_a_summary_a_page_still_cites() {
     let mut f = Fixture::new();
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
     let text = page_text("a", "concept", BODY).replace(
@@ -820,11 +802,11 @@ fn l13_ignores_a_summary_a_page_still_cites() {
     );
     f.put_page("concept", "a", &text);
     seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 200, None);
-    assert!(only(&f.lint(), "L13").is_empty());
+    assert!(only(&f.lint(), "L12").is_empty());
 }
 
 #[test]
-fn l13_counts_a_wikilink_as_an_inbound_reference() {
+fn l12_counts_a_wikilink_as_an_inbound_reference() {
     let mut f = Fixture::new();
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
     f.put_page(
@@ -833,31 +815,31 @@ fn l13_counts_a_wikilink_as_an_inbound_reference() {
         &page_text("a", "concept", &format!("{BODY} 详见 [[2026-01]]。")),
     );
     seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 200, None);
-    assert!(only(&f.lint(), "L13").is_empty(), "{:?}", f.lint());
+    assert!(only(&f.lint(), "L12").is_empty(), "{:?}", f.lint());
 }
 
 #[test]
-fn l13_ignores_a_summary_recalled_recently() {
+fn l12_ignores_a_summary_recalled_recently() {
     let mut f = Fixture::new();
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
     // The deadline runs from the last read, not the seal: a recall resets it.
     seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 400, Some(3));
-    assert!(only(&f.lint(), "L13").is_empty());
+    assert!(only(&f.lint(), "L12").is_empty());
 }
 
 #[test]
-fn l13_ignores_a_summary_sealed_within_the_window() {
+fn l12_ignores_a_summary_sealed_within_the_window() {
     let mut f = Fixture::new();
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
     seal_archive(&mut f, ".wiki/pages/archive/2026-01.md", 5, None);
-    assert!(only(&f.lint(), "L13").is_empty());
+    assert!(only(&f.lint(), "L12").is_empty());
 }
 
 #[test]
-fn l13_ignores_an_archive_page_with_no_ledger_row() {
+fn l12_ignores_an_archive_page_with_no_ledger_row() {
     let f = Fixture::new();
     // A hand-written page under `archive/` was never sealed, so nothing knows
     // its period; reporting it would be a guess about age.
     f.put_page("archive", "2026-01", &archived_page("2026-01"));
-    assert!(only(&f.lint(), "L13").is_empty());
+    assert!(only(&f.lint(), "L12").is_empty());
 }

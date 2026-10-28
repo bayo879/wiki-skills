@@ -261,16 +261,9 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
         "a well-formed page lints clean: {lint}"
     );
 
-    // -------------------------------------------------- approve (confirmed)
-    let (code, refused) = call(root, &["approve"]);
-    assert_eq!(
-        code, 3,
-        "publishing without confirmation is refused: {refused}"
-    );
-    assert_eq!(refused["ok"], Value::Bool(false));
-    assert_eq!(refused["error"]["code"], "NEEDS_CONFIRMATION");
-
-    let approve = ok_call(root, &["approve", "--confirm"]);
+    // ------------------------------------------------- approve (unattended)
+    // No brake fires, so the page publishes without a human in the loop.
+    let approve = ok_call(root, &["approve"]);
     assert_eq!(approve["version"], "v001");
     assert!(
         root.join(".wiki/pages/concept/alpha.md").is_file(),
@@ -283,7 +276,7 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
             && !index.contains("](wiki/"),
         "the index lists the page with a wiki-relative link: {index}"
     );
-    let log = read(root, ".wiki/pages/log.md");
+    let log = read(root, ".wiki/journal.jsonl");
     assert!(
         log.contains("approve") && log.contains("v001"),
         "publishing is journalled: {log}"

@@ -152,8 +152,8 @@ fn read_maybe(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
-fn log_of(root: &Path, cfg: &Config) -> String {
-    read_maybe(&root.join(&cfg.paths.wiki).join("log.md"))
+fn log_of(root: &Path, _cfg: &Config) -> String {
+    read_maybe(&root.join(".wiki/journal.jsonl"))
 }
 
 #[test]
@@ -178,11 +178,7 @@ fn checkpoint_copies_current_wiki_and_prunes_old() {
     let text = page_text("alpha", "Alpha");
     write_file(root, ".wiki/pages/concept/alpha.md", &text);
     write_file(root, ".wiki/pages/index.md", "# 索引\n");
-    write_file(
-        root,
-        ".wiki/pages/log.md",
-        "# 日志\n\n## [2026-01-01] init | test\n",
-    );
+    write_file(root, ".wiki/journal.jsonl", "{\"action\":\"init\"}\n");
 
     for seq in 1..=8 {
         let name = version::checkpoint(root, &cfg, &mut store, "manual").unwrap();
@@ -220,8 +216,8 @@ fn checkpoint_copies_current_wiki_and_prunes_old() {
     let object = root.join(".wiki/objects").join(&hex[..2]).join(hex);
     assert_eq!(fs::read_to_string(object).unwrap(), text);
     assert!(
-        entries.iter().any(|entry| entry["path"] == "pages/log.md"),
-        "bookkeeping is content too"
+        !entries.iter().any(|entry| entry["path"] == "pages/log.md"),
+        "the journal is not content and never enters a snapshot"
     );
 
     // Editing the live page must not reach the object the snapshot points at.
@@ -294,7 +290,7 @@ fn checkpoint_record_names_label_and_page_count() {
 }
 
 #[test]
-fn approve_without_confirm_asks_a_human() {
+fn approve_publishes_without_a_human_when_no_brake_fires() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
     write_file(root, ".wiki/raw/a.md", "one\n");
@@ -304,15 +300,19 @@ fn approve_without_confirm_asks_a_human() {
 
     let outcome = version::approve(root, &cfg, &mut store, false).unwrap();
     match outcome {
-        ApproveOutcome::NeedsConfirmation { reason, detail } => {
-            assert_eq!(reason, "merge_staging");
-            assert_eq!(detail, "1 页待合并到 wiki/");
+        ApproveOutcome::Applied {
+            published,
+            held_back,
+            ..
+        } => {
+            assert_eq!(published, vec![String::from("concept/alpha.md")]);
+            assert!(held_back.is_empty(), "{held_back:?}");
         }
-        other => panic!("expected NeedsConfirmation, got {other:?}"),
+        other => panic!("expected Applied, got {other:?}"),
     }
     assert!(
-        !root.join(".wiki/pages/concept/alpha.md").exists(),
-        "nothing may reach wiki without confirm"
+        root.join(".wiki/pages/concept/alpha.md").is_file(),
+        "no brake fired, so the page publishes without a human"
     );
 }
 
@@ -327,7 +327,7 @@ fn approve_with_confirm_merges_into_wiki() {
 
     let outcome = version::approve(root, &cfg, &mut store, true).unwrap();
     match outcome {
-        ApproveOutcome::Applied { version } => assert_eq!(version, "v001"),
+        ApproveOutcome::Applied { version, .. } => assert_eq!(version, "v001"),
         other => panic!("expected Applied, got {other:?}"),
     }
 
@@ -343,7 +343,10 @@ fn approve_with_confirm_merges_into_wiki() {
         .unwrap()
         .contains("Alpha"));
     let log = log_of(root, &cfg);
-    assert!(log.contains("approve"), "log.md records the merge: {log}");
+    assert!(
+        log.contains("approve"),
+        "the journal records the merge: {log}"
+    );
     assert!(log.contains("v001"));
     assert!(staging::manifest_pending(root).unwrap().is_empty());
     assert!(!staging::dir(root).join("pending.json").exists());
@@ -466,10 +469,13 @@ fn reject_restores_staging_to_the_wiki_mirror() {
     assert!(staging::manifest_pending(root).unwrap().is_empty());
     assert!(!staging::dir(root).join("pending.json").exists());
     let log = log_of(root, &cfg);
-    assert!(log.contains("reject"), "log.md records the reject: {log}");
+    assert!(
+        log.contains("reject"),
+        "the journal records the reject: {log}"
+    );
     assert!(
         log.contains("内容不对"),
-        "the reason survives in log.md: {log}"
+        "the reason survives in the journal: {log}"
     );
 }
 
@@ -511,7 +517,7 @@ fn reject_requires_a_reason() {
     let err = version::reject(root, &cfg, &mut store, "").unwrap_err();
     assert_eq!(err.code(), "E_NO_REASON");
     assert!(
-        !root.join(".wiki/pages/log.md").exists(),
+        !root.join(".wiki/journal.jsonl").exists(),
         "a refused reject writes nothing"
     );
     assert!(staging::dir(root).join("concept/alpha.md").exists());
@@ -713,7 +719,7 @@ fn approve_confirm_overrules_the_page_budget() {
 }
 
 #[test]
-fn approve_asks_when_a_round_would_add_too_many_pages() {
+fn approve_holds_back_the_pages_past_the_budget() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
     for seq in 0..21 {
@@ -727,25 +733,36 @@ fn approve_asks_when_a_round_would_add_too_many_pages() {
     }
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NeedsConfirmation { reason, detail } => {
-            assert_eq!(reason, "page_budget");
-            assert!(detail.contains("21"), "{detail}");
+        ApproveOutcome::Applied {
+            published,
+            held_back,
+            ..
+        } => {
+            assert_eq!(published.len(), 20, "the budget is spent in order");
+            assert_eq!(held_back.len(), 1);
+            assert_eq!(held_back[0].page, "concept/p20.md");
+            assert_eq!(held_back[0].reason, "page_budget");
         }
-        other => panic!("expected page_budget, got {other:?}"),
+        other => panic!("expected the first 20 to publish, got {other:?}"),
     }
+    assert!(root.join(".wiki/pages/concept/p00.md").is_file());
     assert!(
-        staging::dir(root).join("concept/p00.md").is_file(),
-        "the candidates stay staged: nothing was published"
+        staging::dir(root).join("concept/p20.md").is_file(),
+        "the page past the budget waits for the next round"
     );
 
-    // One fewer page fits the budget, so the only remaining reason to ask is
-    // the merge itself.
-    fs::remove_file(staging::dir(root).join("concept/p20.md")).unwrap();
+    // The next round starts with a fresh budget, so the leftover publishes
+    // without a human.
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NeedsConfirmation { reason, .. } => {
-            assert_eq!(reason, "merge_staging");
+        ApproveOutcome::Applied {
+            published,
+            held_back,
+            ..
+        } => {
+            assert_eq!(published, vec![String::from("concept/p20.md")]);
+            assert!(held_back.is_empty(), "{held_back:?}");
         }
-        other => panic!("expected merge_staging, got {other:?}"),
+        other => panic!("expected the leftover to publish, got {other:?}"),
     }
 }
 
@@ -768,11 +785,12 @@ fn approve_asks_when_a_candidate_repeats_a_published_title() {
     );
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NeedsConfirmation { reason, detail } => {
-            assert_eq!(reason, "page_overlap");
-            assert!(detail.contains("concept/alpha.md"), "{detail}");
+        ApproveOutcome::NothingPublished { held_back } => {
+            assert_eq!(held_back.len(), 1);
+            assert_eq!(held_back[0].reason, "page_overlap");
+            assert!(held_back[0].detail.contains("concept/alpha.md"));
         }
-        other => panic!("expected page_overlap, got {other:?}"),
+        other => panic!("expected the page to be held back, got {other:?}"),
     }
     assert!(staging::dir(root).join("concept/retry-policy.md").is_file());
 }
@@ -796,11 +814,11 @@ fn approve_asks_when_a_candidate_adds_no_new_source() {
     );
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NeedsConfirmation { reason, detail } => {
-            assert_eq!(reason, "page_overlap");
-            assert!(detail.contains("没有新证据"), "{detail}");
+        ApproveOutcome::NothingPublished { held_back } => {
+            assert_eq!(held_back[0].reason, "page_overlap");
+            assert!(held_back[0].detail.contains("没有新证据"));
         }
-        other => panic!("expected page_overlap, got {other:?}"),
+        other => panic!("expected the page to be held back, got {other:?}"),
     }
 }
 
@@ -822,8 +840,15 @@ fn a_candidate_citing_a_new_source_is_not_an_overlap() {
     );
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NeedsConfirmation { reason, .. } => assert_eq!(reason, "merge_staging"),
-        other => panic!("expected merge_staging, got {other:?}"),
+        ApproveOutcome::Applied {
+            published,
+            held_back,
+            ..
+        } => {
+            assert_eq!(published, vec![String::from("concept/beta.md")]);
+            assert!(held_back.is_empty(), "{held_back:?}");
+        }
+        other => panic!("expected the new evidence to publish, got {other:?}"),
     }
 }
 
@@ -864,11 +889,17 @@ fn approve_asks_when_one_slice_feeds_too_many_pages() {
     }
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NeedsConfirmation { reason, detail } => {
-            assert_eq!(reason, "page_slice_budget");
-            assert!(detail.contains("a.md"), "{detail}");
+        ApproveOutcome::Applied {
+            published,
+            held_back,
+            ..
+        } => {
+            assert_eq!(published.len(), 5, "the slice feeds five pages");
+            assert_eq!(held_back.len(), 1);
+            assert_eq!(held_back[0].reason, "page_slice_budget");
+            assert!(held_back[0].detail.contains("a.md"));
         }
-        other => panic!("expected page_slice_budget, got {other:?}"),
+        other => panic!("expected the sixth page to be held back, got {other:?}"),
     }
 }
 
@@ -889,8 +920,11 @@ fn a_fragment_on_a_small_file_still_counts_as_the_whole_file() {
     }
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NeedsConfirmation { reason, .. } => assert_eq!(reason, "page_slice_budget"),
-        other => panic!("expected page_slice_budget, got {other:?}"),
+        ApproveOutcome::Applied { held_back, .. } => {
+            assert_eq!(held_back.len(), 1);
+            assert_eq!(held_back[0].reason, "page_slice_budget");
+        }
+        other => panic!("expected the sixth page to be held back, got {other:?}"),
     }
 }
 
@@ -905,8 +939,11 @@ fn the_whole_file_counts_as_one_slice() {
     }
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NeedsConfirmation { reason, .. } => assert_eq!(reason, "page_slice_budget"),
-        other => panic!("expected page_slice_budget, got {other:?}"),
+        ApproveOutcome::Applied { held_back, .. } => {
+            assert_eq!(held_back.len(), 1);
+            assert_eq!(held_back[0].reason, "page_slice_budget");
+        }
+        other => panic!("expected the sixth page to be held back, got {other:?}"),
     }
 }
 
@@ -930,8 +967,15 @@ fn a_long_source_earns_one_page_per_slice() {
     }
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NeedsConfirmation { reason, .. } => assert_eq!(reason, "merge_staging"),
-        other => panic!("expected merge_staging, got {other:?}"),
+        ApproveOutcome::Applied {
+            published,
+            held_back,
+            ..
+        } => {
+            assert_eq!(published.len(), 6, "one page per slice fits");
+            assert!(held_back.is_empty(), "{held_back:?}");
+        }
+        other => panic!("expected every slice to earn a page, got {other:?}"),
     }
 }
 

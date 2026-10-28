@@ -13,7 +13,7 @@ description: 当用户要把仓库或一批文件变成可检索知识库、问�
 - **只写 `.wiki/`。** 所有写入都在 `.wiki/` 内；`.wiki/` 之外的文件是源，只读——不改、不删、不移。
 - 三层一条链：仓库根 → `.wiki/raw/` → `.wiki/pages/`。页面的 `sources` 指向 `.wiki/raw/...`，
   raw 的 frontmatter `source:` 指回仓库根。页面永远不直接引用源文件。
-- `.wiki/` 里的 `index.md`、`log.md`、`audit/`、`versions/`、`state.db`、`staging/` 都是 CLI 的产物，只读。
+- `.wiki/` 里的 `index.md`、`journal.jsonl`、`audit/`、`versions/`、`state.db`、`staging/` 都是 CLI 的产物，只读。
 - 手写 `[paths]` 无效：路径固定，写入无法被配置移出 `.wiki/`。
 
 ## 开场三步
@@ -47,7 +47,7 @@ llm-wiki convert --limit 20 --json      # 源 → .wiki/raw/
 llm-wiki ingest begin --sources a.md --json   # 开一轮，看 affected
 #   写候选页到 .wiki/staging/<type>/<id>.md
 llm-wiki ingest submit --json           # 盖清单，等批
-llm-wiki approve --confirm              # 人拍板后才进 .wiki/pages/
+llm-wiki approve                        # 刹车放行的候选进 .wiki/pages/，不等人
 llm-wiki query --text "..." --json      # 检索
 ```
 
@@ -55,14 +55,14 @@ llm-wiki query --text "..." --json      # 检索
 
 ## 需要人拍板的地方
 
-退出码 3、暂存区有待批候选、`reason: page_budget`、`page_slice_budget` 或 `page_overlap`、或 `archive purge` 不带 `--yes` 时，**照抄这四个选项，不要自己发挥**：
+`approve` 不等人：三道刹车（近义 `page_overlap`、切片预算 `page_slice_budget`、页面预算 `page_budget`）只扣住命中的候选，其余照常发布。**只有当每个候选都被扣下、一页也没发出去**（exit 3，`NEEDS_CONFIRMATION` + `data.held_back`）时，才轮到人——或者 `archive purge` 不带 `--yes` 时。这时**照抄这四个选项，不要自己发挥**：
 
-1. 批准（`llm-wiki approve --confirm`）
+1. 越权发布（`llm-wiki approve --confirm`）——越过全部三道刹车
 2. 不批准并说明原因（`llm-wiki reject --reason "..."`）
 3. 我自己补充要求（`llm-wiki instruct --text "..."`）
 4. 先放着（`llm-wiki defer`）
 
-只汇报数量与清单，不替人选。两个都不合并，差别在落点：2 写原因进日志，并把这一轮的源按当前字节记为已复核（下一轮不再报同一变动）；4 什么都不写，下一轮仍会重新提出。
+只汇报数量与清单，不替人选。1 越过刹车全发；2 丢弃候选并往 `.wiki/journal.jsonl` 记原因，同时把这一轮的源按当前字节记为已复核（下一轮不再报同一变动）；4 什么都不写，下一轮仍会重新提出。
 
 ## 把 `--json` 说成人话
 
@@ -73,14 +73,14 @@ llm-wiki query --text "..." --json      # 检索
 |---|---|
 | `scan` 的 `changes[].kind` | `new` 新文件、`changed` 内容变了、`moved` 改名、`missing` 源没了、`duplicate` 内容重复、`oversize` 太大 |
 | `lint` 的 `findings[]` | 「L6 在 `.wiki/pages/concept/x.md` 报 error：`sources` 指向不存在的文件」，按规则号归类，不逐条念 |
-| `approve` 的 `NEEDS_CONFIRMATION` | 「N 页候选待批」，紧接着给上面的四选项 |
+| `approve` 的 `NEEDS_CONFIRMATION` | 「N 页全被刹车扣下，一页也没发出去」+ 每页的 `reason`，紧接着给上面的四选项 |
 | `sync` 的 `converted` / `ingested` / `queued` / `failures` | 「转了 3、摄了 2、余 5」；`failures` 大于 0 必须点名失败的源 |
 | `query` 的 `count` 与 `hits[].snippet` | 页面路径 + 标题 + 片段，并说明「要结论得读正文」 |
 
 ## 四条铁律
 
-1. **簿记归 CLI。** `index.md`、`log.md`、页面的 `updated` 全部由 CLI 生成，不手写、不手改、不补日期。
-2. **不主动汇报。** 自动跑完不发摘要、不发变更清单；用户问「变了什么」再给 `history` / `diff` 的结论。摄取的页要先列出来等人点头，那是用户在要求摄取，不是推送。
+1. **簿记归 CLI。** `index.md`、`.wiki/journal.jsonl`、页面的 `updated` 全部由 CLI 生成，不手写、不手改、不补日期。
+2. **不主动汇报。** 自动跑完不发摘要、不发变更清单；用户问「变了什么」再给 `history` / `diff` 的结论。发布也不等人——刹车已经替你做了筛选，被扣下的候选才需要问。
 3. **先初始化，再干活。** 报 `E_NOT_INITIALISED` 就 `llm-wiki init`，不要手工造目录或契约文件。
 4. **结论先读正文。** `query` 只给摘要与片段，片段不是答案。
 

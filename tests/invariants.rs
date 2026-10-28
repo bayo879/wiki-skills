@@ -363,8 +363,8 @@ fn every_lint_rule_agrees_with_the_skill_table() {
             .iter()
             .map(|(number, _)| *number)
             .collect::<Vec<_>>(),
-        (1..=13).collect::<Vec<u32>>(),
-        "src/lint.rs must declare L1..L13 once each, in order"
+        (1..=12).collect::<Vec<u32>>(),
+        "src/lint.rs must declare L1..L12 once each, in order"
     );
 
     let skill = fs::read_to_string("skills/llm-wiki/references/audit.md")
