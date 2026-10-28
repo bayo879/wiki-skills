@@ -639,6 +639,30 @@ fn an_unknown_version_is_an_error_not_a_silent_noop() {
 }
 
 #[test]
+fn approve_confirm_overrules_the_page_budget() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    for seq in 0..21 {
+        stage(
+            root,
+            &cfg,
+            &mut store,
+            &format!("concept/p{seq:02}.md"),
+            &format!("P{seq}"),
+        );
+    }
+
+    // 21 new pages against a budget of 20: the asking path refuses, but
+    // `--confirm` is the human overruling the cap, not another ask.
+    match version::approve(root, &cfg, &mut store, true).unwrap() {
+        ApproveOutcome::Applied { .. } => {}
+        other => panic!("expected the merge to go through, got {other:?}"),
+    }
+    assert!(root.join(".wiki/pages/concept/p00.md").is_file());
+    assert!(root.join(".wiki/pages/concept/p20.md").is_file());
+}
+
+#[test]
 fn approve_asks_when_a_round_would_add_too_many_pages() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();

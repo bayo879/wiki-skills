@@ -233,6 +233,8 @@ pub fn checkpoint(root: &Path, cfg: &Config, store: &mut Store, label: &str) -> 
 /// The checks run in this order, and a refusal never writes anything: nothing
 /// to approve, a candidate that drifted after it was written, a pending source
 /// that changed after it was processed, and only then the confirmation gate.
+/// The page budget lives inside that gate: it only decides whether to ask, so
+/// `--confirm` passes through it.
 /// `confirm == true` renames the candidates into `wiki/`, regenerates the
 /// index, logs the merge, snapshots the result and advances the baseline.
 pub fn approve(
@@ -257,24 +259,24 @@ pub fn approve(
         }
     }
     check_sources(root, cfg)?;
-    // A page the wiki already holds is an overwrite, not growth, so only new
-    // paths count against the budget. Exceeding it keeps the candidates in
-    // `.wiki/staging/` and asks; `--confirm` is the human overruling the cap.
-    let new_pages = candidates
-        .iter()
-        .filter(|candidate| !candidate.wiki.is_file())
-        .count();
-    let budget = cfg.ingest.max_new_pages_per_run;
-    if new_pages > budget {
-        return Ok(ApproveOutcome::NeedsConfirmation {
-            reason: String::from("page_budget"),
-            detail: format!(
-                "本轮会新增 {new_pages} 页，超过 ingest.max_new_pages_per_run（{budget}）；\
-                 候选仍在 .wiki/staging/，确认后用 approve --confirm 合并"
-            ),
-        });
-    }
     if !confirm {
+        // A page the wiki already holds is an overwrite, not growth, so only
+        // new paths count against the budget. `--confirm` is the human
+        // overruling the cap, so the budget only applies to the asking path.
+        let new_pages = candidates
+            .iter()
+            .filter(|candidate| !candidate.wiki.is_file())
+            .count();
+        let budget = cfg.ingest.max_new_pages_per_run;
+        if new_pages > budget {
+            return Ok(ApproveOutcome::NeedsConfirmation {
+                reason: String::from("page_budget"),
+                detail: format!(
+                    "本轮会新增 {new_pages} 页，超过 ingest.max_new_pages_per_run（{budget}）；\
+                     候选仍在 .wiki/staging/，确认后用 approve --confirm 合并"
+                ),
+            });
+        }
         return Ok(ApproveOutcome::NeedsConfirmation {
             reason: String::from("merge_staging"),
             detail: format!("{} 页待合并到 wiki/", candidates.len()),
