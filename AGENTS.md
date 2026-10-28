@@ -22,10 +22,10 @@
 `scan::RawLedger` 负责这个判断，`lint` 的 L7 与 `ingest begin` 的 `orphan_pages` 都必须调它，不许各自再写一遍 `raws` 表的 join——以前就是三处各写一遍，才出现「L7 提示的修法根本跑不通」。
 `tests/reconcile.rs` 钉住三处同答。
 
-### 2.3 技能表格与 CLI 输出是契约
+### 2.3 技能不复述 CLI 的输出形状
 
-`skills/llm-wiki/SKILL.md` 与 `skills/llm-wiki/references/*.md` 里的枚举表、字段表带标记（`<!-- enum: src/scan.rs::Layer -->`、`<!-- fields: ingest-begin -->`），`tests/docs_contract.rs` 拿真机 JSON 快照逐项比对。
-改 CLI 输出形状 = 同时改技能表 + 更新 `tests/snapshots/cli-keys.json`（`LLM_WIKI_UPDATE_SNAPSHOTS=1` 重生成）。只改代码不改文档，测试会红。
+`skills/llm-wiki/` 只写流程与判断；JSON 字段路径、必填字段、候选路径、报错码含义都由 CLI 现打（`ingest begin` 给 `write_to`/`type`，`submit` 点名缺哪个字段），技能里不再有枚举表、字段表、错误码表和 `data.*` 路径。
+`tests/docs_contract.rs::the_skill_states_no_json_field_paths` 禁止技能文件出现 `data.*`（只放过 `error.code`/`error.message`/`error.detail`）；`tests/snapshots/cli-keys.json` 仍锁每条命令的输出形状（`LLM_WIKI_UPDATE_SNAPSHOTS=1` 重生成）。改输出形状时改快照即可，不需要同步技能。
 
 ### 2.4 schema 迁移必须与全新库同构
 
@@ -34,12 +34,13 @@
 
 ### 2.5 文档一致性由机器守，不靠人记
 
-四类守卫，改文档前先知道它们在管什么：
+五类守卫，改文档前先知道它们在管什么：
 
 | 守卫 | 抓什么 |
 |---|---|
-| `tests/invariants.rs` | SQL 单点、账本单入口、对账唯一、不变量都有测试、lint 规则三方一致 |
-| `tests/docs_contract.rs` | flag 存在、枚举/字段表与真机输出一致、闭世界词表（文档不许出现代码里没有的名字） |
+| `tests/invariants.rs` | SQL 单点、账本单入口、对账唯一、不变量都有测试、每条 lint 规则有 `l{n}_` 测试（不再比技能表） |
+| `tests/docs_contract.rs` | flag 存在、闭世界词表、`E_*` 存在、技能不写 JSON 字段路径 |
+| `tests/skills_pack.rs` | 只发一个技能、frontmatter 只有两项、正文行数上限、引用的子命令真实存在 |
 | `tests/snapshots/cli-keys.json` | 每条命令输出的键路径 |
 | `tests/docs_tokens.allow` | 词表白名单，加名字要有理由 |
 
@@ -50,13 +51,14 @@
 引擎（契约、raw、pages、账本、暂存、版本）全部在隐藏目录 `.wiki/` 里，`Config.paths` 用 `#[serde(skip)]` 固定成常量，手写 `[paths]` 移不出去；`.wiki/.gitignore` 只有一行 `*`，整个引擎不进 git。`.wiki/` 之外的一切都是源，只读。
 `tests/e2e.rs::init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall` 在完整链路前后逐字节比对引擎外的文件，任何命令往引擎外写文件都会红。清理类命令（`archive purge`）只删 `.wiki/raw/` 与页面，**永远不删源文件**。
 
-### 2.7 一个技能，多份按需阅读的手册
+### 2.7 一个技能，三份文件
 
-`skills/llm-wiki/SKILL.md` 是唯一入口（边界、路由、最小序列、决策门、退出码），细节拆到 `skills/llm-wiki/references/*.md`，agent 只在需要时读对应那份。`tests/skills_pack.rs` 断言只发一个技能，`tests/docs_contract.rs` 的 `COVERED` 把字段表钉在 reference 文件上——移动文件时两处都要改。
+`skills/llm-wiki/SKILL.md` 是唯一入口（边界、开场、路由、最小序列、门禁、`approve` 选项、退出码）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、同步、冲突与回退、忽略、叫人）。
+拆分只为了让 agent 按需只读一份，不是新的契约；`tests/skills_pack.rs` 断言只发一个技能、正文行数不超限。
 
 ### 2.8 技能的价值在流程纪律，不在用法说明
 
-用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——先 `convert --key` 再 `ingest begin`、候选页只能落 `.wiki/staging/`、`approve --confirm` 必须人做；
+用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——先 `convert --key` 再 `ingest begin`、候选只能写到 `begin` 给的 `write_to`、`approve` 只有每个候选都被扣住才 exit 3；
 flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复，加长技能文本收益很低，反而会和 CLI 漂移。
 所以：技能里写「什么时候做什么、做错了怎么判」，不写「这个参数是什么意思」。
 
@@ -76,7 +78,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 `approve` 不带 `--confirm` 时依次过三道，**命中就扣住那一个候选**（留在 `.wiki/staging/`，下一轮还能再试），其余的照常发布：
 
-1. **近义页**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选页的 `sources` 是某张已发布页 `sources` 的子集（没引入新证据）。只比 frontmatter，不读正文、不调模型——语义级「近义」在这里做不到，别试图加。
+1. **近义页**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选页的 `sources` 是某张已发布页 `sources` 的子集（没引入新证据）。只比 frontmatter，不读正文、不调模型——语义级「近义」在这里做不到，别试图加。候选自己的路径不算重叠：改同一页不触发（`src/version.rs::overlap_reason` 跳过相同路径）。
 2. **切片预算**（`reason: page_slice_budget`）：同一份源的第 N 个切片已经养出 `[ingest].max_pages_per_slice` 页（默认 5，0 不限）。切片是 `#p=<n>` 指的那一段；小于 `parse.chunk_threshold` 的文件，页面上写什么片段都算整份文件。
 3. **页面预算**（`reason: page_budget`）：本轮新增页数超过 `[ingest].max_new_pages_per_run`（默认 20，0 不限）；已存在的页算覆盖，不占预算。
 
@@ -99,6 +101,11 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 ### 2.14 决策日志不是内容
 
 每次 `approve` / `reject` / `instruct` / `defer` / `seal` / `rollback` 只往 `.wiki/journal.jsonl` 追加一行 JSON（`journal::append`），不再写 `pages/log.md`。三条后果要记住：日志不进版本（`collect_content` 只走 `pages/` 与 `raw/`），所以 `rollback` 抹不掉它；它不参与 `query` 索引，所以搜不到；`detail` 里的换行被 JSON 转义，多行 `--reason` 不会破坏格式。想给它加读者就加，但别把它塞回页面树——那会让「回退会不会改历史」重新变成一个问题。
+
+### 2.15 发布后要清 `page_meta`，否则搜索停在旧正文
+
+`ingest submit` 把候选的摘要写进 `page_meta`，`approve` 用它对账「交稿后有没有人手改」。但 `approve` 只把字节移进 `wiki/`，不写 FTS；`query::refresh` 的跳过条件是「摘要相同且索引里已有这个 key」，于是改过的旧页会被永久跳过，直到 `query --reindex`。所以 `approve` 发布后要对每个已发布页 `delete_page_meta`，让下一次 refresh 重建索引；`tests/version.rs::publishing_a_page_drops_the_index_record_so_the_next_query_reindexes_it` 钉住。
+
 
 ## 3. 提交前自查
 

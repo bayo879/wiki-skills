@@ -82,6 +82,8 @@
     "cmd",
     "data.affected[].id",
     "data.affected[].path",
+    "data.affected[].type",
+    "data.affected[].write_to",
     "data.new_pages",
     "data.orphan_pages[]",
     "data.pending_hash",

@@ -20,7 +20,7 @@
 
 ```
 仓库根 ──scan──▶ state.db ──convert──▶ .wiki/raw/ ──ingest 轮次──▶ .wiki/staging/
-                                                                   │ approve --confirm
+                                                                   │ approve            
                                                                    ▼
               .wiki/pages/ ◀── lint / checkpoint ──▶ .wiki/versions/vNNN/ + .wiki/objects/
                     │
@@ -94,11 +94,11 @@
 
 | 文件 | 抓什么 |
 | --- | --- |
-| `tests/invariants.rs` | 代码结构：SQL 只在 `store.rs`、账本写入只在 `ledger.rs`、对账只有 `scan`、不变量标注指向真实测试、迁移步数等于 `SCHEMA_VERSION`、`L1`–`L12` 三方一致 |
-| `tests/docs_contract.rs` | 文档与 CLI 一致：JSON 形状快照、flag 真存在、表格与枚举等于代码、被点名对象的字段在对应技能里有枚举行、文档里的 `snake_case` 名字与 `E_*` 码闭世界 |
+| `tests/invariants.rs` | 代码结构：SQL 只在 `store.rs`、账本写入只在 `ledger.rs`、对账只有 `scan`、不变量标注指向真实测试、迁移步数等于 `SCHEMA_VERSION`、每条 lint 规则有 `l{n}_` 测试 |
+| `tests/docs_contract.rs` | 文档与 CLI 一致：JSON 形状快照、flag 真存在、`snake_case` 名字与 `E_*` 码闭世界、技能不写 `data.*` 字段路径（只放过 `error.*` 信封） |
 | `tests/snapshots/cli-keys.json` | 各命令 `--json` 的键路径。改输出必须改快照；置 `LLM_WIKI_UPDATE_SNAPSHOTS=1` 重跑 `tests/docs_contract.rs` 会重写它，之后人工过一遍 |
 | `tests/docs_tokens.allow` | 白名单：文档里合理出现、但不是本仓词汇的名字，每条写理由 |
 
 行为层面的守卫在不变量行尾点名（`tests/lint.rs`、`tests/version.rs`、`tests/archive.rs`、`tests/ingest.rs`、`tests/query.rs`、`tests/reconcile.rs`）。
 
-诚实边界：快照只证明「键还在」，不证明语义对；枚举与字段检查要求文档保持表格/枚举行形态，改写成散文即失效；闭世界词表只证明「这个名字在代码里出现过」，抓不到「代码里有但已废弃」；`invariants.rs` 是文本扫描，注释里出现针脚也会触发（宁可误报）。
+诚实边界：快照只证明「键还在」，不证明语义对；技能禁字段路径只抓 `data.*` 字面量，换成文字同义改写即失效；闭世界词表只证明「这个名字在代码里出现过」，抓不到「代码里有但已废弃」；`invariants.rs` 是文本扫描，注释里出现针脚也会触发（宁可误报）。

@@ -61,7 +61,7 @@ fn setup() -> (TempDir, Config) {
 /// A page whose `sources` is an inline array.
 fn page_inline(id: &str, title: &str, sources: &[&str]) -> String {
     format!(
-        "---\nid: {id}\ntitle: {title}\ntype: concept\nstatus: stable\nupdated: 2026-01-01\nsources: [{}]\n---\n正文\n",
+        "---\nid: {id}\ntitle: {title}\ntype: concept\nsummary: 摘要\nstatus: stable\nupdated: 2026-01-01\nsources: [{}]\n---\n正文\n",
         sources.join(", ")
     )
 }
@@ -75,14 +75,14 @@ fn page_block(id: &str, title: &str, sources: &[&str]) -> String {
         items.push('\n');
     }
     format!(
-        "---\nid: {id}\ntitle: {title}\ntype: concept\nstatus: stable\nupdated: 2026-01-01\nsources:\n{items}---\n正文\n"
+        "---\nid: {id}\ntitle: {title}\ntype: concept\nsummary: 摘要\nstatus: stable\nupdated: 2026-01-01\nsources:\n{items}---\n正文\n"
     )
 }
 
 /// A page with no `sources:` key at all.
 fn page_bare(id: &str, title: &str) -> String {
     format!(
-        "---\nid: {id}\ntitle: {title}\ntype: concept\nstatus: draft\nupdated: 2026-01-01\n---\n正文\n"
+        "---\nid: {id}\ntitle: {title}\ntype: concept\nsummary: 摘要\nstatus: draft\nupdated: 2026-01-01\n---\n正文\n"
     )
 }
 
@@ -541,4 +541,114 @@ fn a_round_reports_no_warnings() {
 
     let report = ingest::submit(root, &cfg, &mut store, &args(&["concept/one"])).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+}
+
+#[test]
+fn begin_names_the_staging_path_of_a_new_page() {
+    let (d, cfg) = setup();
+    let root = d.path();
+    let mut store = open(root);
+    let report = ingest::begin(
+        root,
+        &cfg,
+        &mut store,
+        &ingest::BeginInput {
+            sources: args(&[".wiki/raw/a.md"]),
+            pages: args(&["concept/new-page"]),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    let page = report
+        .affected
+        .iter()
+        .find(|page| page.id == "new-page")
+        .expect("the new page is in `affected`");
+    assert_eq!(page.typ, "concept");
+    assert_eq!(page.path, "", "a page without a file has no published path");
+    assert_eq!(page.write_to, ".wiki/staging/concept/new-page.md");
+    assert_eq!(report.new_pages, 1);
+    assert!(root.join(".wiki/staging/concept").is_dir());
+}
+
+#[test]
+fn begin_rejects_a_new_page_without_a_type() {
+    let (d, cfg) = setup();
+    let root = d.path();
+    let mut store = open(root);
+    let err = ingest::begin(
+        root,
+        &cfg,
+        &mut store,
+        &ingest::BeginInput {
+            sources: args(&[".wiki/raw/a.md"]),
+            pages: args(&["new-page"]),
+            dry_run: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "E_PAGE_TYPE_REQUIRED", "{err}");
+    assert!(err.to_string().contains("concept/new-page"), "{err}");
+}
+
+#[test]
+fn begin_rejects_a_page_type_the_schema_does_not_declare() {
+    let (d, cfg) = setup();
+    let root = d.path();
+    let mut store = open(root);
+    let err = ingest::begin(
+        root,
+        &cfg,
+        &mut store,
+        &ingest::BeginInput {
+            sources: args(&[".wiki/raw/a.md"]),
+            pages: args(&["nope/thing"]),
+            dry_run: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "E_UNKNOWN_PAGE_TYPE", "{err}");
+}
+
+#[test]
+fn submit_inserts_updated_when_the_candidate_leaves_it_out() {
+    let (d, cfg) = setup();
+    let root = d.path();
+    let mut store = open(root);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
+    write_file(
+        root,
+        ".wiki/staging/concept/retry.md",
+        "---\nid: retry\ntitle: 重试\ntype: concept\nsummary: 摘要\nstatus: stable\nsources: [.wiki/raw/a.md]\n---\n正文\n",
+    );
+
+    ingest::submit(root, &cfg, &mut store, &args(&["retry"])).unwrap();
+
+    let front = page::read(&root.join(".wiki/staging/concept/retry.md"))
+        .unwrap()
+        .0;
+    assert_eq!(front.updated, today());
+}
+
+#[test]
+fn submit_names_the_missing_field_and_shows_a_skeleton() {
+    let (d, cfg) = setup();
+    let root = d.path();
+    let mut store = open(root);
+    begin(root, &cfg, &mut store, &[".wiki/raw/a.md"], &[]);
+    write_file(
+        root,
+        ".wiki/staging/concept/retry.md",
+        "---\nid: retry\ntitle: 重试\ntype: concept\nstatus: stable\nsources: [.wiki/raw/a.md]\n---\n正文\n",
+    );
+
+    let err = ingest::submit(root, &cfg, &mut store, &args(&["retry"])).unwrap_err();
+    assert_eq!(err.code(), "E_PAGE_MISSING_FIELD", "{err}");
+    let text = err.to_string();
+    assert!(text.contains("summary"), "{text}");
+    assert!(
+        text.contains("---"),
+        "the example frontmatter is missing: {text}"
+    );
 }

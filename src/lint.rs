@@ -1,4 +1,4 @@
-//! `lint`: the thirteen audit rules over `wiki/`, and the mechanical `--fix`.
+//! `lint`: the twelve audit rules over `wiki/`, and the mechanical `--fix`.
 //!
 //! `lint` reads the wiki directory and the ledger and returns findings sorted by
 //! severity, rule and page, so the output is a stable value that can be
@@ -6,8 +6,7 @@
 //! malformed `updated`, an `updated` that did not move when the body changed,
 //! and a stale `index.md` — then re-runs `lint` and reports what is left.
 //!
-//! The list below is the contract: `tests/lint.rs` holds one test per rule, and
-//! `skills/wiki-audit/SKILL.md` is the operator-facing version of the same list:
+//! The list below is the contract: `tests/lint.rs` holds one test per rule:
 //!
 //! - `L1` error: a page is missing `id`, `title` or `status`.
 //! - `L2` error: a `[[wikilink]]` names no page.
@@ -217,7 +216,7 @@ pub fn fix(root: &Path, cfg: &Config, store: &mut Store) -> Result<FixReport> {
             // A page whose frontmatter cannot be repaired at all is already
             // reported as unreadable; fixing the other pages is still useful,
             // so a refusal here leaves the finding in `remaining`.
-            if set_updated_lenient(&root.join(key), today).is_ok() {
+            if page::write_updated_lenient(&root.join(key), today).is_ok() {
                 fixed += 1;
             }
         }
@@ -226,7 +225,7 @@ pub fn fix(root: &Path, cfg: &Config, store: &mut Store) -> Result<FixReport> {
     for finding in found.iter().filter(|f| f.rule == "L9") {
         if let Some(key) = &finding.page {
             let path = root.join(key);
-            set_updated_lenient(&path, today)?;
+            page::write_updated_lenient(&path, today).map_err(LintError::Page)?;
             store.upsert_page_meta(&PageMetaRow {
                 page_key: key.clone(),
                 hash: hash::hash_file(&path, true)?,
@@ -596,7 +595,7 @@ fn check_page_meta(
                 Level::Warning,
                 Some(info.key.clone()),
                 format!(
-                    "body changed but `updated` is still {}; bump it or run `lint --fix`",
+                    "body changed but `updated` is still {}; run `lint --fix`",
                     row.updated
                 ),
             ));
@@ -877,66 +876,6 @@ fn probe(text: &str) -> Option<(page::FrontMatter, String)> {
 
 /// 0-based index of the frontmatter's closing `---` line.
 fn close_index(lines: &[String]) -> Option<usize> {
-    lines
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(_, line)| line.trim_end() == "---")
-        .map(|(index, _)| index)
-}
-
-/// Writes `date` into the page's `updated` field, inserting the line when it is
-/// absent or unusable.
-///
-/// The reader's own `write_updated` refuses to invent a missing field, which is
-/// the right default for a tool that must not guess; `--fix` is the explicit
-/// request, so it may.
-fn set_updated_lenient(path: &Path, date: NaiveDate) -> Result<()> {
-    let text = fs::read_to_string(path).map_err(|source| {
-        LintError::Page(PageError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
-    })?;
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(close) = close_index_lines(&lines) else {
-        return Err(LintError::Page(PageError::BadFrontmatter {
-            line: 1,
-            message: String::from("page has no frontmatter block"),
-        }));
-    };
-    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut out = String::new();
-    let mut replaced = false;
-    for (index, line) in lines.iter().enumerate() {
-        if index > 0 && index < close && line.trim_start().starts_with("updated:") {
-            if !replaced {
-                out.push_str(&format!("updated: {date}"));
-                out.push_str(eol);
-                replaced = true;
-            }
-            continue;
-        }
-        if index == close && !replaced {
-            out.push_str(&format!("updated: {date}"));
-            out.push_str(eol);
-        }
-        out.push_str(line);
-        out.push_str(eol);
-    }
-    fs::write(path, out).map_err(|source| {
-        LintError::Page(PageError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
-    })
-}
-
-/// Like [`close_index`] but over borrowed lines.
-fn close_index_lines(lines: &[&str]) -> Option<usize> {
-    if lines.first().map(|line| line.trim_end()) != Some("---") {
-        return None;
-    }
     lines
         .iter()
         .enumerate()

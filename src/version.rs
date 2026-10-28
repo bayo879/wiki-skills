@@ -379,6 +379,10 @@ fn published(root: &Path, cfg: &Config) -> Vec<Published> {
 }
 
 /// Why `candidate` looks like a page the wiki already holds, if it does.
+///
+/// A candidate that rewrites an existing page is compared only with *other*
+/// pages: the page it overwrites is its own predecessor, so matching its title
+/// or citing a subset of its sources is the normal case, not an overlap.
 fn overlap_reason(
     candidate: &str,
     title: &str,
@@ -386,6 +390,9 @@ fn overlap_reason(
     pages: &[Published],
 ) -> Option<String> {
     for page in pages {
+        if page.rel == candidate {
+            continue;
+        }
         if !title.is_empty() && title == page.title {
             return Some(format!("`{candidate}` 与已发布的 `{}` 标题相同", page.rel));
         }
@@ -470,6 +477,14 @@ pub fn approve(
         }
         fs::rename(&candidate.staging, &candidate.wiki)
             .map_err(|source| io(&candidate.staging, source))?;
+    }
+    // `submit` records each candidate's digest so the drift check above can
+    // spot a hand edit. Publishing moves the bytes but not the FTS row, and
+    // `query::refresh` would see a matching digest over an already-indexed key
+    // and skip the page, so the search would keep answering with the pre-edit
+    // body. Drop the record: the next refresh sees no digest and reindexes.
+    for rel in &published {
+        store.delete_page_meta(&format!("{prefix}/{rel}"))?;
     }
     render::write_index(root, cfg)?;
     let detail = if held_back.is_empty() {

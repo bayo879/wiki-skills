@@ -796,6 +796,65 @@ fn approve_asks_when_a_candidate_repeats_a_published_title() {
 }
 
 #[test]
+fn updating_the_same_page_is_not_an_overlap() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    publish(
+        root,
+        "concept/alpha.md",
+        &page_text("alpha", "Retry Policy"),
+    );
+    // Same path, same title: this is the page being revised, not a second page
+    // about the same subject.
+    stage_text(
+        root,
+        &cfg,
+        &mut store,
+        "concept/alpha.md",
+        "---\nid: alpha\ntitle: Retry Policy\ntype: concept\nstatus: draft\nupdated: 2026-01-02\n---\n改过的正文\n",
+    );
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::Applied {
+            published,
+            held_back,
+            ..
+        } => {
+            assert_eq!(published, vec![String::from("concept/alpha.md")]);
+            assert!(held_back.is_empty(), "{held_back:?}");
+        }
+        other => panic!("expected the revision to publish, got {other:?}"),
+    }
+}
+
+#[test]
+fn publishing_a_page_drops_the_index_record_so_the_next_query_reindexes_it() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    stage_text(
+        root,
+        &cfg,
+        &mut store,
+        "concept/alpha.md",
+        &page_text("alpha", "Retry Policy"),
+    );
+    let key = format!("{}/concept/alpha.md", cfg.paths.wiki.trim_end_matches('/'));
+    assert!(
+        store.get_page_meta(&key).unwrap().is_some(),
+        "submit records the digest that approve checks for drift"
+    );
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::Applied { .. } => {}
+        other => panic!("expected the page to publish, got {other:?}"),
+    }
+    assert!(
+        store.get_page_meta(&key).unwrap().is_none(),
+        "a published page must not keep the digest that makes refresh skip it"
+    );
+}
+
+#[test]
 fn approve_asks_when_a_candidate_adds_no_new_source() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();

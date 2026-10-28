@@ -122,6 +122,17 @@ pub fn dir(root: &Path) -> PathBuf {
     root.join(".wiki").join("staging")
 }
 
+/// Repository-relative path of the candidate for a type-qualified id.
+pub fn candidate_rel(rel: &str) -> String {
+    format!(".wiki/staging/{rel}.md")
+}
+
+/// Creates the type directory a new candidate will be written under.
+pub fn ensure_type(root: &Path, typ: &str) -> Result<()> {
+    let dir = dir(root).join(typ);
+    fs::create_dir_all(&dir).map_err(|source| StagingError::Io { path: dir, source })
+}
+
 /// The ledger path for `root`.
 fn manifest_path(root: &Path) -> PathBuf {
     dir(root).join(MANIFEST)

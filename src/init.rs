@@ -150,7 +150,6 @@ min_chars        = 200      # below this a builtin result may fall back to the e
 [ingest]
 max_pages_per_slice = 5
 max_new_pages_per_run = 20
-review_before_write  = true
 
 [audit]
 min_page_chars = 200

@@ -63,8 +63,10 @@ llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"c
 ### Agent skills 安装
 
 1 个 skill 是给 Claude Code 用的薄指令层，所有簿记与判定逻辑都在 `llm-wiki` 里。
-`skills/llm-wiki/SKILL.md` 是入口与路由，`skills/llm-wiki/references/` 下是六份按需阅读的手册
-（扫描、摄取、解析、审计、同步、排障）：agent 只在需要时读对应那份，不把全部细节塞进上下文。
+`skills/llm-wiki/SKILL.md` 是入口（边界、开场、路由、最小序列、门禁、退出码）；
+`content.md` 写「写什么」（建页判断、新源、切片、矛盾、去重），`ops.md` 写「坏了怎么看」
+（体检、判断层、同步、冲突与回退、忽略、叫人）。三份都短，agent 按需只读一份。
+字段名、候选路径、缺失字段、报错码含义由 CLI 现打，技能不复述。
 skill 只有 markdown，复制即可；CLI 是另一个可执行文件，按下面的方式放到能调用的地方。
 
 ```bash
@@ -116,14 +118,9 @@ git tag v0.1.1 && git push origin v0.1.1
 
 | 文件 | 管什么 |
 |---|---|
-| `skills/llm-wiki/SKILL.md` | 入口：边界、路由、最小序列、决策门、退出码、把 `--json` 翻成人话 |
-| `references/scan.md` | `scan` / `convert`，七种变更的判读 |
-| `references/ingest.md` | `ingest begin/submit/abort`，唯一要 agent 写正文的环节 |
-| `references/parse.md` | 单文件解析诊断、后端选择、外部服务配置 |
-| `references/audit.md` | `lint` 与判断层分析（矛盾、过时、孤儿、重复） |
-| `references/sync.md` | 定时同步、读变更报告、失败退避 |
-| `references/automation.md` | 页面预算、整版回退、`.wiki/ignore` 忽略列表、`sync --only` |
-| `references/troubleshooting.md` | 错误码、`doctor` 检查项、旧布局与常见症状 |
+| `skills/llm-wiki/SKILL.md` | 入口：边界、开场、路由、最小序列、门禁、`approve` 选项、退出码 |
+| `skills/llm-wiki/content.md` | 写什么：一页一事、新源怎么处理、切片、前后矛盾、重复 |
+| `skills/llm-wiki/ops.md` | 坏了怎么办：体检、判断层、同步、冲突与回退、忽略、叫人 |
 
 装完在目标仓库根目录跑 `llm-wiki doctor` 自检。
 

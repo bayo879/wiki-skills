@@ -188,6 +188,39 @@ pub fn write_updated(p: &Path, d: NaiveDate) -> Result<()> {
     )
 }
 
+/// Writes `d` into the `updated:` line, inserting the line when it is absent or
+/// unusable.
+///
+/// [`write_updated`] refuses to invent the field because a reader must not
+/// guess. `submit` and `lint --fix` are explicit write requests, so they use
+/// this variant: the page is about to be rewritten anyway, and refusing here
+/// would push the same "write a placeholder date" instruction back onto the
+/// agent.
+pub fn write_updated_lenient(p: &Path, d: NaiveDate) -> Result<()> {
+    let bytes = read_bytes(p)?;
+    let block = find_block(&bytes)?;
+    let stamp = format!("updated: {}", d.format("%Y-%m-%d"));
+    match find_field_line(&bytes, &block, UPDATED) {
+        // Replace the whole line, not just the scalar: a malformed value is
+        // exactly the case this variant exists for.
+        Some((start, end, _)) => write_bytes(p, splice(&bytes, start, end, stamp.as_bytes())),
+        None => {
+            let eol: &[u8] = if bytes[..block.content_start].ends_with(b"\r\n") {
+                b"\r\n"
+            } else {
+                b"\n"
+            };
+            let mut inserted = Vec::new();
+            inserted.extend_from_slice(stamp.as_bytes());
+            inserted.extend_from_slice(eol);
+            write_bytes(
+                p,
+                splice(&bytes, block.content_start, block.content_start, &inserted),
+            )
+        }
+    }
+}
+
 /// Replaces the scalar of the `status:` line with `s`, touching nothing else.
 ///
 /// `status` is optional in the schema (absent means [`Status::Draft`]), so a

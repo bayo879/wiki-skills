@@ -1,6 +1,6 @@
 //! What the shipped documentation claims, held against what the binary does.
 //!
-//! The six skills and `docs/readme/` describe a JSON shape, a set of flags and
+//! The shipped skill and `docs/readme/` describe a JSON shape, a set of flags and
 //! a set of error codes. Nothing in the compiler connects those sentences to
 //! the code, so this file does it mechanically:
 //!
@@ -10,7 +10,9 @@
 //! * every backticked `snake_case` name in the docs must be a JSON key, a
 //!   `wiki.toml` key, a `SCHEMA.md` field or a name listed in
 //!   `tests/docs_tokens.allow`;
-//! * every `E_*` code named in the docs must exist in `src/`.
+//! * every `E_*` code named in the docs must exist in `src/`;
+//! * the skill must not quote `data.*` field paths (only the `error.*` envelope
+//!   is allowed), so shapes stay the CLI's business.
 //!
 //! Run with `LLM_WIKI_UPDATE_SNAPSHOTS=1` to rewrite the shape snapshot after
 //! deliberately changing a command's output.
@@ -222,6 +224,41 @@ fn the_json_shape_of_each_command_matches_the_snapshot() {
     );
 }
 
+/// The skill must not restate a JSON field path.
+///
+/// The contract the reposition rests on: whatever the agent needs to know about
+/// a command's output is printed by the command — `ingest begin` says where the
+/// candidate goes, `submit` names the field that is missing. Only the envelope
+/// keys survive in prose, because they are how a failure is read at all.
+#[test]
+fn the_skill_states_no_json_field_paths() {
+    let allowed = ["error.code", "error.message", "error.detail"];
+    let skills = workspace().join("skills");
+    let mut found = Vec::new();
+    for (path, text) in shipped_markdown() {
+        if !path.starts_with(&skills) {
+            continue;
+        }
+        for line in text.lines() {
+            for (at, _) in line.match_indices("data.") {
+                found.push(format!("{}:{}: {}", path.display(), at + 1, line.trim()));
+            }
+            for (at, _) in line.match_indices("error.") {
+                if !allowed.iter().any(|name| line[at..].starts_with(name)) {
+                    found.push(format!("{}:{}: {}", path.display(), at + 1, line.trim()));
+                }
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    assert!(
+        found.is_empty(),
+        "the skill restates a JSON field path; make the CLI hand it over instead:\n{}",
+        found.join("\n")
+    );
+}
+
 /// Every flag the binary accepts, walking `--help` down the subcommand tree.
 fn known_flags() -> BTreeSet<String> {
     fn visit(path: &[String], flags: &mut BTreeSet<String>) {
@@ -318,264 +355,6 @@ fn every_flag_the_docs_name_exists() {
         unknown.is_empty(),
         "the docs name flags the binary does not accept:\n{}",
         unknown.join("\n")
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Field and enum tables
-// ---------------------------------------------------------------------------
-
-/// `CamelCase` to the `snake_case` serde writes on the wire.
-fn snake_case(name: &str) -> String {
-    let mut out = String::new();
-    for (index, character) in name.chars().enumerate() {
-        if character.is_uppercase() {
-            if index > 0 {
-                out.push('_');
-            }
-            out.extend(character.to_lowercase());
-        } else {
-            out.push(character);
-        }
-    }
-    out
-}
-
-/// The wire names of a `#[serde(rename_all = "snake_case")]` enum's variants.
-fn enum_variants(source: &Path, name: &str) -> Vec<String> {
-    let text =
-        fs::read_to_string(source).unwrap_or_else(|_| panic!("{} is missing", source.display()));
-    let start = text
-        .find(&format!("pub enum {name} {{"))
-        .unwrap_or_else(|| panic!("{} has no `pub enum {name}`", source.display()));
-    // The serde attribute sits on the line above the declaration, so look at a
-    // window that straddles it.
-    let attribute_window = &text[start.saturating_sub(300)..start];
-    let body = &text[start..];
-    let body = &body[..body.find("\n}").expect("an enum without a closing brace")];
-    assert!(
-        attribute_window.contains("rename_all = \"snake_case\""),
-        "{}::{name} no longer renames variants to snake_case; update this check",
-        source.display()
-    );
-    let mut variants = Vec::new();
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("///") || trimmed.starts_with('#') || trimmed.is_empty() {
-            continue;
-        }
-        if let Some(variant) = trimmed.split(|c: char| !c.is_ascii_alphanumeric()).next() {
-            if variant.chars().next().is_some_and(|c| c.is_uppercase()) {
-                variants.push(snake_case(variant));
-            }
-        }
-    }
-    variants.sort();
-    variants
-}
-
-/// The first column of the table that follows the marker comment on the line
-/// `line`, trimmed of backticks, as a sorted set.
-fn table_under(lines: &[&str], at: usize) -> Vec<String> {
-    let mut rows = Vec::new();
-    let mut in_rows = false;
-    for line in &lines[at + 1..] {
-        let trimmed = line.trim();
-        if trimmed.starts_with("| 字段 |") || (trimmed.starts_with('|') && !in_rows) {
-            in_rows = true;
-            continue;
-        }
-        if !trimmed.starts_with('|') {
-            if !rows.is_empty() {
-                break;
-            }
-            if trimmed.is_empty() || trimmed.starts_with("| 字段 |") {
-                continue;
-            }
-            break;
-        }
-        let cell = trimmed.split('|').nth(1).unwrap_or("").trim();
-        if cell.starts_with("---") {
-            continue;
-        }
-        rows.push(cell.trim_matches('`').trim().to_string());
-    }
-    rows.sort();
-    rows
-}
-
-/// Finds `<!-- enum: path::Type -->` and `<!-- fields: <snapshot target> -->`
-/// markers and the table each introduces.
-fn marked_tables() -> Vec<(String, String, Vec<String>, PathBuf)> {
-    let mut out = Vec::new();
-    for (path, text) in shipped_markdown() {
-        let lines: Vec<&str> = text.lines().collect();
-        for (index, line) in lines.iter().enumerate() {
-            let trimmed = line.trim();
-            for kind in ["enum", "fields"] {
-                let Some(rest) = trimmed.strip_prefix(&format!("<!-- {kind}:")) else {
-                    continue;
-                };
-                let target = rest.trim_end_matches("-->").trim().to_string();
-                out.push((
-                    kind.to_string(),
-                    target,
-                    table_under(&lines, index),
-                    path.clone(),
-                ));
-            }
-        }
-    }
-    out
-}
-
-#[test]
-fn every_marked_enum_table_lists_the_variants_the_code_has() {
-    let mut checked = 0;
-    for (kind, target, rows, path) in marked_tables() {
-        if kind != "enum" {
-            continue;
-        }
-        let (file, name) = target
-            .split_once("::")
-            .unwrap_or_else(|| panic!("{}: `{target}` is not `file::Type`", path.display()));
-        let mut expected = enum_variants(&workspace().join(file), name);
-        expected.sort();
-        assert_eq!(
-            rows,
-            expected,
-            "{}: the table under `<!-- enum: {target} -->` does not list the variants of {name}",
-            path.display()
-        );
-        checked += 1;
-    }
-    assert!(
-        checked >= 2,
-        "expected at least the two scan tables to be marked"
-    );
-}
-
-#[test]
-fn every_marked_field_table_lists_the_keys_the_command_prints() {
-    let shapes = shapes();
-    let mut checked = 0;
-    for (kind, target, rows, path) in marked_tables() {
-        if kind != "fields" {
-            continue;
-        }
-        let (command, rest) = target.split_once('.').unwrap_or((target.as_str(), ""));
-        let all = shapes
-            .get(command)
-            .unwrap_or_else(|| panic!("{}: `{target}` names no captured command", path.display()));
-        let prefix = if rest.is_empty() {
-            String::from("data.")
-        } else {
-            format!("data.{rest}.")
-        };
-        let mut expected: Vec<String> = all
-            .iter()
-            .filter_map(|leaf| leaf.strip_prefix(&prefix))
-            .map(|leaf| {
-                leaf.split(['.', '['])
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            })
-            .collect();
-        expected.sort();
-        expected.dedup();
-        assert_eq!(
-            rows, expected,
-            "{}: the table under `<!-- fields: {target} -->` does not list the keys the command prints",
-            path.display()
-        );
-        checked += 1;
-    }
-    assert!(
-        checked >= 1,
-        "expected at least one fields table to be marked"
-    );
-}
-
-/// Objects whose every printed field must be named in the skill that documents
-/// them. A field can be added to a command without the doc noticing; this is
-/// the direction the snapshot alone cannot catch.
-const COVERED: &[(&str, &str, &str)] = &[
-    ("skills/llm-wiki/references/scan.md", "scan", "changes[]"),
-    (
-        "skills/llm-wiki/references/scan.md",
-        "convert",
-        "converted[]",
-    ),
-    ("skills/llm-wiki/references/audit.md", "lint", "findings[]"),
-    ("skills/llm-wiki/references/audit.md", "doctor", "checks[]"),
-    (
-        "skills/llm-wiki/references/ingest.md",
-        "ingest-begin",
-        "affected[]",
-    ),
-];
-
-#[test]
-fn every_printed_field_of_a_documented_object_is_named_in_its_skill() {
-    let shapes = shapes();
-    let mut missing = Vec::new();
-    for (skill, command, object) in COVERED {
-        let text = fs::read_to_string(workspace().join(skill)).expect("a covered skill is missing");
-        let prefix = format!("data.{object}.");
-        let all = shapes
-            .get(*command)
-            .expect("a covered command was not captured");
-        let name = object.trim_end_matches("[]");
-        let fields: Vec<String> = all
-            .iter()
-            .filter(|leaf| leaf.starts_with(&prefix))
-            .map(|leaf| {
-                leaf.strip_prefix(&prefix)
-                    .unwrap()
-                    .split(['.', '['])
-                    .next()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        // The line that enumerates an object's fields is the one that names
-        // several of them. Anything else that happens to mention the object is
-        // prose, and naming a field there does not document the shape: drop
-        // `layer` from the enumeration and the old, whole-file check stayed
-        // green because a later sentence still said "filter by `layer`".
-        let named_on = |line: &str, field: &str| {
-            line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .any(|word| word == field)
-        };
-        let candidates: Vec<&str> = text.lines().filter(|line| line.contains(name)).collect();
-        // A prose sentence can easily name two fields by accident ("filter by
-        // `layer`, do not guess from `key`"), so demand half of them at least.
-        let enough = std::cmp::max(2, fields.len().div_ceil(2));
-        let enumerating: Vec<&str> = candidates
-            .iter()
-            .copied()
-            .filter(|line| fields.iter().filter(|field| named_on(line, field)).count() >= enough)
-            .collect();
-        let considered = if enumerating.is_empty() {
-            &candidates
-        } else {
-            &enumerating
-        };
-        for field in &fields {
-            if !considered.iter().any(|line| named_on(line, field)) {
-                missing.push(format!(
-                    "{skill}: {command} prints `{field}`, no line enumerating `{object}` names it"
-                ));
-            }
-        }
-    }
-    missing.sort();
-    missing.dedup();
-    assert!(
-        missing.is_empty(),
-        "documented objects have fields the docs do not mention on their field list:\n{}",
-        missing.join("\n")
     );
 }
 

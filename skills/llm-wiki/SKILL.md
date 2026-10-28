@@ -1,110 +1,75 @@
 ---
 name: llm-wiki
-description: 当用户要把仓库或一批文件变成可检索知识库、问「文档里怎么说的」「上次那个结论在哪」、要同步/体检/排障 llm-wiki 时使用。llm-wiki 只在隐藏的 .wiki/ 内写入，把仓库其余文件当只读源。本 skill 是唯一入口：判断意图、给命令序列、把 --json 翻成人话、在需要人拍板时停下；具体操作手册按需读 references/ 下的对应文件。
+description: 当要在仓库里查历史结论、把材料沉淀成可检索的知识页、体检或同步既有 wiki、处理 wiki 报错时使用。触发词：查 wiki、写页、摄取、沉淀、体检、同步、回退、报错。
 ---
 
 # llm-wiki
 
-把仓库里的文件（Markdown / 网页 / PDF / 图片…）变成可全文检索的知识库：
-仓库根（源）→ `.wiki/raw/`（转换出的 markdown）→ `.wiki/pages/`（一页一事的知识页）。
+## 这是什么
 
-## 边界（动手前先记住）
+- 源文件只读。要留下来的结论写进 wiki 页面，页面先进候选区，再由 CLI 发布。
+- 页面是给后来人读的结论，不是源文件的转述。一页讲清一件事。
+- 引擎都在隐藏目录里：页面树、索引、账本、版本、锁。这些由 CLI 维护，不要手改。
 
-- **只写 `.wiki/`。** 所有写入都在 `.wiki/` 内；`.wiki/` 之外的文件是源，只读——不改、不删、不移。
-- 三层一条链：仓库根 → `.wiki/raw/` → `.wiki/pages/`。页面的 `sources` 指向 `.wiki/raw/...`，
-  raw 的 frontmatter `source:` 指回仓库根。页面永远不直接引用源文件。
-- `.wiki/` 里的 `index.md`、`journal.jsonl`、`audit/`、`versions/`、`state.db`、`staging/` 都是 CLI 的产物，只读。
-- 手写 `[paths]` 无效：路径固定，写入无法被配置移出 `.wiki/`。
+## 开场
 
-## 开场三步
+1. 先 `doctor` 一次，确认目录、配置、锁、暂存区都正常。
+2. 命令不在 PATH 上就找项目里的构建产物。
+3. 新仓库且用户要建 wiki 时才 `init`；已经有 wiki.toml 就不要重新初始化。
 
-1. `llm-wiki version` 确认命令可用；不在 PATH 上就用仓库根的 `.wiki/llm-wiki`。
-2. `llm-wiki doctor --json`：`data.checks[]` 里 `level: fail` 的先修，只有 warn 可以继续。
-3. 没有 `.wiki/wiki.toml` 就 `llm-wiki init`（可重复跑，不覆盖已有文件）。所有命令都在仓库根执行。
+## 用与不用
 
-## 路由
-
-先看用户要什么，再决定要不要读手册。拿不准就先问一句，不要猜着往下做。
-
-| 用户说 | 先跑 | 再读 |
-|---|---|---|
-| 「搜一下」「上次那个结论在哪」 | `llm-wiki query --text "..." --json` | 不用读手册；但**答结论前先读 `hits[].page` 的正文** |
-| 「有新文件了」「扫一下变了什么」 | `llm-wiki scan --json` | `references/scan.md` |
-| 「把这份材料写进 wiki」 | `llm-wiki ingest begin --sources <key> --dry-run --json` | `references/ingest.md` |
-| 「这份 PDF 解析得不对」 | `llm-wiki parse --key <key> --json` | `references/parse.md` |
-| 「有没有矛盾」「体检」「哪些页是孤岛」 | `llm-wiki lint --json`、`llm-wiki graph --json` | `references/audit.md` |
-| 「定时同步」「一批一批地跟」 | `llm-wiki sync --dry-run --json` | `references/sync.md` |
-| 「退回上一版」「上次改坏了」 | `llm-wiki history --json`、`llm-wiki diff vNNN --json` | `references/automation.md` |
-| 「这个文件老是变，别再跟了」 | `llm-wiki ignore check <path> --json` | `references/automation.md` |
-| 「上次那批怎么样了」 | 停在这里 | 不读；走下面的决策门，等人选 |
-| 任何命令报错、退出码看不懂 | `llm-wiki doctor --json` | `references/troubleshooting.md` |
-
-## 最小可用序列
-
-```bash
-llm-wiki scan --json                    # 仓库根有什么新/变/删
-llm-wiki convert --limit 20 --json      # 源 → .wiki/raw/
-llm-wiki ingest begin --sources a.md --json   # 开一轮，看 affected
-#   写候选页到 .wiki/staging/<type>/<id>.md
-llm-wiki ingest submit --json           # 盖清单，等批
-llm-wiki approve                        # 刹车放行的候选进 .wiki/pages/，不等人
-llm-wiki query --text "..." --json      # 检索
-```
-
-只做检索不需要前面任何一步；只想看变化，跑完 `scan` 就可以停，不会破坏任何东西。
-
-## 需要人拍板的地方
-
-`approve` 不等人：三道刹车（近义 `page_overlap`、切片预算 `page_slice_budget`、页面预算 `page_budget`）只扣住命中的候选，其余照常发布。**只有当每个候选都被扣下、一页也没发出去**（exit 3，`NEEDS_CONFIRMATION` + `data.held_back`）时，才轮到人——或者 `archive purge` 不带 `--yes` 时。这时**照抄这四个选项，不要自己发挥**：
-
-1. 越权发布（`llm-wiki approve --confirm`）——越过全部三道刹车
-2. 不批准并说明原因（`llm-wiki reject --reason "..."`）
-3. 我自己补充要求（`llm-wiki instruct --text "..."`）
-4. 先放着（`llm-wiki defer`）
-
-只汇报数量与清单，不替人选。1 越过刹车全发；2 丢弃候选并往 `.wiki/journal.jsonl` 记原因，同时把这一轮的源按当前字节记为已复核（下一轮不再报同一变动）；4 什么都不写，下一轮仍会重新提出。
-
-## 把 `--json` 说成人话
-
-每条命令都可加 `--json`：stdout 一行 JSON，失败时 `ok:false`，错误码在 `error.code`。
-汇报只讲结论与下一步，不贴原始 JSON。
-
-| 拿到 | 说成 |
+| 情形 | 怎么做 |
 |---|---|
-| `scan` 的 `changes[].kind` | `new` 新文件、`changed` 内容变了、`moved` 改名、`missing` 源没了、`duplicate` 内容重复、`oversize` 太大 |
-| `lint` 的 `findings[]` | 「L6 在 `.wiki/pages/concept/x.md` 报 error：`sources` 指向不存在的文件」，按规则号归类，不逐条念 |
-| `approve` 的 `NEEDS_CONFIRMATION` | 「N 页全被刹车扣下，一页也没发出去」+ 每页的 `reason`，紧接着给上面的四选项 |
-| `sync` 的 `converted` / `ingested` / `queued` / `failures` | 「转了 3、摄了 2、余 5」；`failures` 大于 0 必须点名失败的源 |
-| `query` 的 `count` 与 `hits[].snippet` | 页面路径 + 标题 + 片段，并说明「要结论得读正文」 |
+| 从零搭 wiki，或大改结构 | 用本技能，走完整摄取 |
+| 找方案、查上次的结论 | `query` 搜；不要为了查而写页 |
+| 一次性代码问题 | 直接读代码，不要写进 wiki |
+| 简单问答 | 直接答；确定要留结论再写页 |
+| 源文件本身 | 只读；要改去改源 |
 
-## 四条铁律
+## 开工三问
 
-1. **簿记归 CLI。** `index.md`、`.wiki/journal.jsonl`、页面的 `updated` 全部由 CLI 生成，不手写、不手改、不补日期。
-2. **不主动汇报。** 自动跑完不发摘要、不发变更清单；用户问「变了什么」再给 `history` / `diff` 的结论。发布也不等人——刹车已经替你做了筛选，被扣下的候选才需要问。
-3. **先初始化，再干活。** 报 `E_NOT_INITIALISED` 就 `llm-wiki init`，不要手工造目录或契约文件。
-4. **结论先读正文。** `query` 只给摘要与片段，片段不是答案。
+1. 查还是写？
+2. 值不值得写？三个月后还会有人查吗？
+3. 源在哪？先 `scan`，再 `convert`，最后才决定动哪些页。
 
-## 退出码
+## 最小序列
 
-| 码 | 含义 | 怎么做 |
-|---|---|---|
-| 0 | 成功；`query` 无命中、`doctor` 只有 warn 也是 0 | 继续 |
-| 1 | 命令跑完但内容有问题（部分源失败、`lint` 有 error） | 报失败项，问是否处理 |
-| 2 | 用法、配置或环境错误（含 `E_NOT_INITIALISED`） | 修环境：多半没在仓库根跑，或 `.wiki/wiki.toml` 有问题；先 `doctor` |
-| 3 | 需要人拍板 | 走决策门，给四选项，停下 |
-| 4 | 仓库被另一个进程锁住 | 等一会重试；**不要删 `.wiki/lock`** |
+1. `scan` 看变动；`convert` 把源转成可读的 raw。
+2. `ingest begin` 带上 `--sources`；需要新页时再带 `--pages <type>/<id>`。
+3. 读响应里列出的受影响页，按《写页》改候选。
+4. `ingest submit`，然后 `approve`。发布不需要人点头。
+5. `query` 复验新页搜得到。
 
-1 与 2 的分界：跑完了但内容有问题 = 1；根本没跑起来 = 2。别把 2 当 1 去改页面。
-`sync --dry-run` 演练走同一套退出码，它不写盘。
+## 三个停点
+
+- 全部候选被刹车扣下、`approve` 返回退出码 3：停下来，把被扣的页和原因交给用户；只有用户明说要越过时才加 `--confirm`。
+- 内容判断拿不准：两个结论冲突、该不该合并、要不要删页。停下来问。
+- 同步连续失败，或 `lint` 有 error：先修；不要用 `--confirm` 绕过。
+
+## 报错跟随
+
+- `error.code` 是分类，`error.message` 是下一步。先照 message 做，不要自己发明修法。
+- `error.detail` 给出具体位置或原因时，以 detail 为准。
+- 退出码 1：跑完了，但内容有问题，按 findings 修。
+- 退出码 2：没跑起来，按 message 修。
+- 退出码 3：全部候选被扣，找人。
+- 退出码 4：被锁，等正在跑的进程结束。
+
+## 写页
+
+- 一页一件事；单源短内容并进已有页；三个以上独立源才值得新建。
+- 结论变了不要静默覆盖：先写「以前认为……现在……」，再写改判依据。
+- 证据只写源和页面，不写过程。
+- 正文要能独立读懂；字段照 `SCHEMA.md`，拿不准就让 `submit` 的报错点名。
+
+## 汇报
+
+- 先说结论，再说写到哪一页；不要贴 JSON，也不要罗列执行过的命令。
+- 没发布就说没发布；被扣下的说原因。
+- 用户没问就不说内部账本、版本号、哈希。
 
 ## 按需阅读
 
-| 文件 | 什么时候读 |
-|---|---|
-| `references/scan.md` | 要看差分、跑 `convert`、解释七种 `kind`、判断是不是摄取队列 |
-| `references/ingest.md` | 要开一轮摄取、写页面正文、理解 `begin/submit/abort` 与 frontmatter 归属 |
-| `references/parse.md` | 解析结果不对、要换后端、要看警告与外部服务 |
-| `references/audit.md` | 跑 `lint`、做判断层分析（矛盾/过时/孤儿/重复）、出体检报告 |
-| `references/sync.md` | 无人值守一轮、定时任务、退避与锁 |
-| `references/automation.md` | 页面预算、整版回退（`history`/`diff`/`rollback`）、`.wiki/ignore` 忽略列表、`sync --only` |
-| `references/troubleshooting.md` | 报错、退出码、`doctor` 检查项、旧布局残留在根目录 |
+- content.md：建页判断、写页、改写已有页。
+- ops.md：体检、同步、冲突与回退、忽略列表。

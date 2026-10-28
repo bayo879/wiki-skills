@@ -51,6 +51,11 @@ pub struct PageRef {
     pub id: String,
     /// Repository-relative path, empty when the page does not exist yet.
     pub path: String,
+    /// Page type: the first path segment, known even for a new page.
+    #[serde(rename = "type")]
+    pub typ: String,
+    /// Repository-relative candidate path under `.wiki/staging/`.
+    pub write_to: String,
 }
 
 /// What `begin` found.
@@ -118,6 +123,30 @@ pub enum IngestError {
         /// The competing type-qualified ids, comma separated.
         candidates: String,
     },
+    /// A new page was named without the type directory it belongs in.
+    #[error("new page `{page}` has no type; write `--pages <type>/{page}` (for example `concept/{page}`)")]
+    NewPageNeedsType {
+        /// The id as the caller wrote it.
+        page: String,
+    },
+    /// A new page names a type the schema does not define.
+    #[error("page type `{typ}` is not in wiki.toml; use one of: {known}")]
+    UnknownPageType {
+        /// The type the caller wrote.
+        typ: String,
+        /// Types the schema accepts, comma separated.
+        known: String,
+    },
+    /// `submit` found a required frontmatter field missing or empty.
+    #[error("candidate `{page}` is missing `{field}`; add it. Example:\n{example}")]
+    MissingField {
+        /// Type-qualified id of the candidate.
+        page: String,
+        /// Field name that is empty.
+        field: String,
+        /// A minimal frontmatter block to copy.
+        example: String,
+    },
     /// The staging directory or its ledger is damaged.
     #[error(transparent)]
     Staging(#[from] staging::StagingError),
@@ -157,6 +186,9 @@ impl IngestError {
             IngestError::NoStagedPage { .. } | IngestError::AmbiguousStagedPage { .. } => {
                 "E_NO_STAGED_PAGE"
             }
+            IngestError::NewPageNeedsType { .. } => "E_PAGE_TYPE_REQUIRED",
+            IngestError::UnknownPageType { .. } => "E_UNKNOWN_PAGE_TYPE",
+            IngestError::MissingField { .. } => "E_PAGE_MISSING_FIELD",
             IngestError::Staging(err) => err.code(),
             IngestError::Render(err) => err.code(),
             IngestError::Page(err) => err.code(),
@@ -197,8 +229,9 @@ impl WikiPage {
 /// `sources` cite one of the round's sources, and every page the caller named
 /// explicitly. The scan is a suggestion — `submit` only ever touches the pages
 /// it is given — but it is what lets an agent find the pages it does not know
-/// about. A named page without a file is counted in `new_pages` and reported
-/// with an empty path: the type directory it will live in is not known yet.
+/// about. A named page without a file must carry its type (`concept/retry`):
+/// it is counted in `new_pages`, keeps an empty `path`, and `write_to` names the
+/// candidate the agent has to author.
 ///
 /// `orphan_pages` reports, without fixing, pages citing a raw file the ledger
 /// does not have: a page cannot be traced back to a converted source, which is
@@ -233,6 +266,8 @@ pub fn begin(
                 PageRef {
                     id: entry.id.clone(),
                     path: entry.path.clone(),
+                    typ: String::from(entry.rel.split('/').next().unwrap_or(&entry.rel)),
+                    write_to: staging::candidate_rel(&entry.rel),
                 },
             );
         }
@@ -246,16 +281,31 @@ pub fn begin(
                 PageRef {
                     id: entry.id.clone(),
                     path: entry.path.clone(),
+                    typ: String::from(entry.rel.split('/').next().unwrap_or(&entry.rel)),
+                    write_to: staging::candidate_rel(&entry.rel),
                 },
             ),
             None => {
-                let id = new_page_id(id);
-                if affected.iter().any(|seen| seen.id == id) {
+                let rel = strip_md(id);
+                let Some((typ, stem)) = split_type(rel) else {
+                    return Err(IngestError::NewPageNeedsType {
+                        page: String::from(rel),
+                    });
+                };
+                if !cfg.schema.types.iter().any(|known| known == typ) {
+                    return Err(IngestError::UnknownPageType {
+                        typ: String::from(typ),
+                        known: cfg.schema.types.join(", "),
+                    });
+                }
+                if affected.iter().any(|seen| seen.id == stem) {
                     continue;
                 }
                 affected.push(PageRef {
-                    id,
+                    id: String::from(stem),
                     path: String::new(),
+                    typ: String::from(typ),
+                    write_to: staging::candidate_rel(rel),
                 });
                 new_pages += 1;
             }
@@ -281,6 +331,9 @@ pub fn begin(
         // only after `begin` returns: without this, that candidate would look
         // like a staging directory whose ledger was lost.
         staging::Manifest::ensure(root)?;
+        for page in affected.iter().filter(|page| page.path.is_empty()) {
+            staging::ensure_type(root, &page.typ)?;
+        }
         staging::write_pending(root, &pending)?;
     }
 
@@ -331,8 +384,9 @@ pub fn submit(
     let prefix = clean_prefix(&cfg.paths.raw);
     let mut written: Vec<String> = Vec::new();
     for (rel, path) in &targets {
-        page::write_updated(path, today)?;
+        page::write_updated_lenient(path, today)?;
         let (front, _body) = page::read(path)?;
+        require_fields(rel, &front)?;
         let present = staging::source_keys(&front.sources, prefix);
         let missing: Vec<String> = pending
             .keys()
@@ -509,10 +563,46 @@ fn push_affected(affected: &mut Vec<PageRef>, page: PageRef) {
     affected.push(page);
 }
 
-/// The page id inside a caller-written id: `concept/retry.md` → `retry`.
-fn new_page_id(id: &str) -> String {
-    let id = strip_md(id);
-    String::from(id.rsplit('/').next().unwrap_or(id))
+/// The page id inside a caller-written id: `concept/retry.md` → (`concept`,
+/// `retry`). A new page must name both halves; a bare id has no type.
+fn split_type(id: &str) -> Option<(&str, &str)> {
+    let (typ, stem) = id.split_once('/')?;
+    if typ.is_empty() || stem.is_empty() || stem.contains('/') {
+        return None;
+    }
+    Some((typ, stem))
+}
+
+/// A minimal candidate the missing-field error can quote.
+const PAGE_EXAMPLE: &str = "\
+---
+id: retry-policy
+title: 重试策略
+type: concept
+summary: 一句话说清这一页的结论
+---";
+
+/// Refuses a candidate whose required frontmatter fields are empty.
+///
+/// `submit` is the last bookkeeping step before approval, so this is where a
+/// page that would fail `lint` anyway is stopped with a concrete example
+/// instead of being published half-formed.
+fn require_fields(page: &str, front: &page::FrontMatter) -> Result<()> {
+    for (field, value) in [
+        ("id", front.id.as_str()),
+        ("title", front.title.as_str()),
+        ("type", front.typ.as_str()),
+        ("summary", front.summary.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(IngestError::MissingField {
+                page: String::from(page),
+                field: String::from(field),
+                example: String::from(PAGE_EXAMPLE),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The file stem of a type-qualified id.

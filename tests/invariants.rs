@@ -328,12 +328,11 @@ fn migrate_steps_through_every_schema_version() {
     );
 }
 
-/// The thirteen rules exist in three places that can drift apart: the doc
-/// comment in `src/lint.rs` (rule and severity), the operator table in
-/// `skills/wiki-audit/SKILL.md` (severity), and `tests/lint.rs` (one `l{n}_`
-/// test per rule). This holds all three against rule numbers 1..=13.
+/// The twelve rules exist in two places that can drift apart: the doc comment
+/// in `src/lint.rs` (rule and severity) and `tests/lint.rs` (one `l{n}_` test
+/// per rule). This holds both against rule numbers 1..=12.
 #[test]
-fn every_lint_rule_agrees_with_the_skill_table() {
+fn every_lint_rule_has_a_test() {
     let lint = fs::read_to_string("src/lint.rs").expect("src/lint.rs is missing");
     let mut declared: Vec<(u32, String)> = Vec::new();
     for line in lint.lines() {
@@ -366,41 +365,6 @@ fn every_lint_rule_agrees_with_the_skill_table() {
         (1..=12).collect::<Vec<u32>>(),
         "src/lint.rs must declare L1..L12 once each, in order"
     );
-
-    let skill = fs::read_to_string("skills/llm-wiki/references/audit.md")
-        .expect("skills/llm-wiki/references/audit.md is missing");
-    let mut rows: Vec<(String, String)> = Vec::new();
-    let mut in_table = false;
-    for line in skill.lines() {
-        if line.starts_with("| 检查 |") {
-            in_table = true;
-            continue;
-        }
-        if !in_table {
-            continue;
-        }
-        if !line.starts_with('|') {
-            break;
-        }
-        let cells: Vec<&str> = line.split('|').collect();
-        if cells.len() < 4 || cells[1].trim().starts_with("---") {
-            continue;
-        }
-        rows.push((cells[1].trim().to_string(), cells[2].trim().to_string()));
-    }
-    assert_eq!(
-        rows.len(),
-        declared.len(),
-        "skills/wiki-audit/SKILL.md lists {} rules, src/lint.rs declares {}",
-        rows.len(),
-        declared.len()
-    );
-    for ((number, level), (label, table_level)) in declared.iter().zip(&rows) {
-        assert_eq!(
-            level, table_level,
-            "L{number} (`{label}`) is `{level}` in src/lint.rs but `{table_level}` in the skill table"
-        );
-    }
 
     let tests = fs::read_to_string("tests/lint.rs").expect("tests/lint.rs is missing");
     for (number, _) in &declared {
