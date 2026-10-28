@@ -95,11 +95,15 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             exit 0
           fi
+          # The assets this workflow produces are bare binaries; the bundled
+          # tarballs of the earlier design match `llm-wiki-*` too, so they are
+          # matched by shape rather than by prefix.
           gh release view "$TAG" --json assets --jq '.assets[].name' |
             while read -r name; do
               case "$name" in
-                llm-wiki-*) ;;
-                *) echo "deleting $name"; gh release delete-asset "$TAG" "$name" --yes ;;
+                *skills*|*.tar.gz|*.tgz|*.zip)
+                  echo "deleting $name"
+                  gh release delete-asset "$TAG" "$name" --yes ;;
               esac
             done
 
