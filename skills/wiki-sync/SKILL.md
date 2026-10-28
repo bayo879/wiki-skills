@@ -77,7 +77,7 @@ audit 只到源级。要看具体页，用 `changes` 里的 key（或 `ingested`
 
 - `changes` 里有 `changed`：对 key 执行 `llm-wiki ingest begin --dry-run --sources <KEY>`，`affected` 里有 `status: stable` 的页就叫醒人，说明已批准的结论可能过期。
 - `changes` 出现 `oversize`：超过 `max_source_bytes`，不会被自动转换；列清单，别静默跳过。
-- `blocked_by_stability`：大文件持续被写，多轮仍是 `changed` 或卡在 settle，永远到不了 `stable_streak`；说明情况，不要反复空跑。
+- 一直卡在 settle 或稳定计数：大文件持续被写，多轮仍是 `changed`，`warnings` 里反复出现 `settle: ... waiting another Ns`，永远到不了 `stable_streak`；说明情况，不要反复空跑。
 - 退避已触发：同一源连续 3 轮失败。
 
 叫醒时用四选项，不替人选：

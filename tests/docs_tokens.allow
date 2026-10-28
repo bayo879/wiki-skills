@@ -1,0 +1,5 @@
+# Names the docs legitimately use that are not this codebase's vocabulary.
+# One name per line; a `#` reason keeps the list honest.
+#
+# serde attribute, named in config/parse.md only to say it is *not* used.
+deny_unknown_fields

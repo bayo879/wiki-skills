@@ -45,12 +45,14 @@ llm-wiki ingest begin \
 - 已存在的页也可以写进 `--pages`，会跟扫码结果合并。
 - `--dry-run` 只算不写 `pending.json`，可以反复跑。
 
-`--json` 返回：
+`--json` 返回（`data` 的键）：
+
+<!-- fields: ingest-begin -->
 
 | 字段 | 含义 |
 |---|---|
 | `source_keys` | 本轮归一化后的 raw key |
-| `affected` | 本轮会碰的页；`path` 为空的就是还没建的页 |
+| `affected` | 本轮会碰的页；`id` 是页 id，`path` 为空的就是还没建的页 |
 | `new_pages` | 上面这种空 `path` 条目的**数量**，不是清单 |
 | `orphan_pages` | `sources` 引用了账本不认识的 raw 的页，可能失去全部来源 |
 | `pending_hash` | 本轮 `pending.json` 的摘要；重试对不上说明轮次被动过 |

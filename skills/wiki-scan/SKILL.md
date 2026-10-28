@@ -23,6 +23,8 @@ description: 当用户说「同步过来一批新文件」「扫一下有什么�
 
 一次 `llm-wiki scan` 同时比两层，结果合并在同一个 `data.changes[]` 里，每条带 `layer` 字段。**按 `layer` 过滤，不要靠 key 猜**——两层共用同一 key 空间。
 
+<!-- enum: src/scan.rs::Layer -->
+
 | layer | 比什么 | 变化意味着 |
 |---|---|---|
 | `source` | `source/` ↔ `sources` 账本 | 待转换清单，交给 `convert` |
@@ -54,7 +56,7 @@ llm-wiki scan --json
 llm-wiki convert --limit 20 --json
 ```
 
-`data.converted[]` 每条有 `raw_path`、`chars`、`backend`、`warnings`、`skipped`、`skip_reason`。`skipped: true` 且 `skip_reason: "pinned"` 表示该 raw 被人工固定，没有被覆盖。
+`data.converted[]` 每条有 `raw_path`、`chars`、`backend`、`duration_ms`、`warnings`、`skipped`、`skip_reason`。`skipped: true` 且 `skip_reason: "pinned"` 表示该 raw 被人工固定，没有被覆盖。
 
 指定单个源，已转换也会重转：
 
@@ -69,6 +71,8 @@ llm-wiki convert --key notes/a.md --json
 ## 七种 kind 怎么讲
 
 同一种 kind 在两层意思不同：`layer: "raw"` 的 `new` / `changed` 是完整性信号，不是摄取信号。
+
+<!-- enum: src/scan.rs::ChangeKind -->
 
 | kind | 人话 | 该不该动手 |
 |---|---|---|

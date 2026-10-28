@@ -1,0 +1,104 @@
+{
+  "convert": [
+    "cmd",
+    "data.converted[].backend",
+    "data.converted[].chars",
+    "data.converted[].duration_ms",
+    "data.converted[].raw_path",
+    "data.converted[].skip_reason",
+    "data.converted[].skipped",
+    "data.converted[].warnings[]",
+    "data.failures[]",
+    "ok"
+  ],
+  "doctor": [
+    "cmd",
+    "data.checks[].detail",
+    "data.checks[].level",
+    "data.checks[].name",
+    "ok"
+  ],
+  "graph": [
+    "cmd",
+    "data.broken[]",
+    "data.edges[].from",
+    "data.edges[].to",
+    "data.nodes[].in_degree",
+    "data.nodes[].out_degree",
+    "data.nodes[].page",
+    "data.orphans[]",
+    "ok"
+  ],
+  "ingest-begin": [
+    "cmd",
+    "data.affected[].id",
+    "data.affected[].path",
+    "data.new_pages",
+    "data.orphan_pages[]",
+    "data.pending_hash",
+    "data.source_keys[]",
+    "ok"
+  ],
+  "init": [
+    "cmd",
+    "data.created[]",
+    "data.skipped[]",
+    "ok"
+  ],
+  "lint": [
+    "cmd",
+    "data.findings[].level",
+    "data.findings[].msg",
+    "data.findings[].page",
+    "data.findings[].rule",
+    "ok"
+  ],
+  "parse": [
+    "cmd",
+    "data.backend",
+    "data.chars",
+    "data.markdown_head",
+    "data.mode",
+    "data.warnings[]",
+    "ok"
+  ],
+  "query": [
+    "cmd",
+    "data.count",
+    "data.hits[].archived",
+    "data.hits[].backlinks",
+    "data.hits[].links[]",
+    "data.hits[].links[].title",
+    "data.hits[].links[].to",
+    "data.hits[].page",
+    "data.hits[].score",
+    "data.hits[].snippet",
+    "data.hits[].sources[].raw",
+    "data.hits[].sources[].raw_available",
+    "data.hits[].sources[].source",
+    "data.hits[].status",
+    "data.hits[].summary",
+    "data.hits[].title",
+    "ok"
+  ],
+  "query-reindex": [
+    "cmd",
+    "data.indexed",
+    "ok"
+  ],
+  "scan": [
+    "cmd",
+    "data.changes[].hash",
+    "data.changes[].key",
+    "data.changes[].kind",
+    "data.changes[].layer",
+    "data.changes[].moved_from",
+    "data.ignored_count",
+    "ok"
+  ],
+  "version": [
+    "cmd",
+    "data.version",
+    "ok"
+  ]
+}

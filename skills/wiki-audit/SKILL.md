@@ -29,7 +29,7 @@ description: 当用户要求给知识库做体检、问「有没有说法不一�
 
 ## 机械层
 
-先确认仓库就绪：`llm-wiki doctor --json` 的 `checks[].level` 有 `fail` 就先处理，缺 `wiki.toml` 跑 `llm-wiki init`。`doctor` 退出 1 只表示有检查项失败，不代表 wiki 坏了。
+先确认仓库就绪：`llm-wiki doctor --json` 的 `checks[]` 每条是 `{name, level, detail}`——`level` 有 `fail` 就先看同名 `detail` 再处理，缺 `wiki.toml` 跑 `llm-wiki init`。`doctor` 退出 1 只表示有检查项失败，不代表 wiki 坏了。
 
 ```bash
 llm-wiki lint --json            # 默认：有 error 才 exit 1

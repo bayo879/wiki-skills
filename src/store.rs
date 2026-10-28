@@ -838,6 +838,47 @@ mod tests {
             .unwrap()
     }
 
+    /// Every object SQLite knows about, with the SQL that defines it, sorted.
+    ///
+    /// Two databases that agree on this agree on their tables, columns,
+    /// indexes, triggers and FTS5 shadow tables — everything a migration can
+    /// add or drop.
+    fn schema_dump(store: &Store) -> Vec<(String, String, Option<String>)> {
+        let mut stmt = store
+            .conn
+            .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap();
+        rows.map(|row| row.unwrap()).collect()
+    }
+
+    #[test]
+    fn a_database_upgraded_from_v1_ends_with_the_fresh_schema() {
+        let d = tempdir().unwrap();
+
+        // The long way: a file written by the v1 build, upgraded step by step.
+        let old = d.path().join("old").join("state.db");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        write_v1_database(&old);
+        let mut upgraded = Store::open(&old).unwrap();
+        upgraded.migrate().unwrap();
+
+        // The short way: an empty file, migrated from version 0.
+        let fresh = d.path().join("fresh").join("state.db");
+        let mut created = Store::open(&fresh).unwrap();
+        created.migrate().unwrap();
+
+        assert_eq!(user_version(&upgraded), SCHEMA_VERSION);
+        assert_eq!(user_version(&created), SCHEMA_VERSION);
+        assert_eq!(
+            schema_dump(&upgraded),
+            schema_dump(&created),
+            "a migrated database must not differ from a fresh one"
+        );
+    }
+
     #[test]
     fn a_v1_database_is_upgraded_in_place() {
         let d = tempdir().unwrap();

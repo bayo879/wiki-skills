@@ -69,13 +69,28 @@ source/ ──scan──▶ state.db ──convert──▶ raw/ ──ingest �
 
 ## 不变量
 
-- 账本只由 CLI 写；`source/` 是唯一输入，`raw/` 与 `wiki/` 都是派生产物，但都进 git。
-- 账本表只有 `src/store.rs` 能写；`sources` 与 `raws` 的业务写入口只有三处：`convert` 登记、`moves` 改键、`archive purge` 删行。想加第四处，先确认它不是前三种变更的另一种写法。
-- 先文件后账本：`convert` 先原子写 `raw/`，再登记两张表，两步之间没有跨表事务。中断留下的缺口由 `scan`（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露，所以「账本与磁盘暂时不一致」是被允许并会被检出的状态，不是靠事务禁止的状态。
-- 对账只有一个答案：`scan::classify`（`source/`）与 `scan::classify_raw`（`raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan --layer raw`、`lint` `L7`、`ingest begin` 的 `orphan_pages` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这三处必须同答。
-- 页面 `sources` 里的 raw 键必须在 `raws` 账本内；违反由 `ingest begin` 的 `orphan_pages` 报告，只报不修。
-- 页面必须有 frontmatter 七字段：`id`、`title`、`type`、`summary`、`sources`、`status`、`updated`；`type` 取自 `[schema].types`。
-- 候选页只能经 `.wiki/staging/` 由 `approve --confirm` 进入 `wiki/`；覆盖已存在页面同样需要确认。
-- `archive seal` 先改引用页、后写账本：中途崩溃时重跑能补齐，不会留下引用已删记录的页面。
-- `archive purge` 只在「总数超 `purge_cap`」且「超过 `purge_days`」时才删，且跳过仍被引用的摘要。
-- 索引与暂存清单都是派生状态，可以从 `wiki/` 与账本重建；`--reindex` 是兜底。
+- 账本只由 CLI 写；`source/` 是唯一输入，`raw/` 与 `wiki/` 都是派生产物，但都进 git。（检查：tests/invariants.rs::only_store_writes_sql）
+- 账本表只有 `src/store.rs` 能写；`sources` 与 `raws` 的业务写入口只有三处：`convert` 登记、`moves` 改键、`archive purge` 删行。想加第四处，先确认它不是前三种变更的另一种写法。（检查：tests/invariants.rs::only_three_modules_write_the_ledger）
+- 先文件后账本：`convert` 先原子写 `raw/`，再登记两张表，两步之间没有跨表事务。中断留下的缺口由 `scan`（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露，所以「账本与磁盘暂时不一致」是被允许并会被检出的状态，不是靠事务禁止的状态。（未机器化：没有崩溃注入测试，无法证明两次写入的先后）
+- 对账只有一个答案：`scan::classify`（`source/`）与 `scan::classify_raw`（`raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan` 输出的 `layer` 字段、`lint` `L7`、`ingest begin` 的 `orphan_pages` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这三处必须同答。（检查：tests/reconcile.rs::an_unledgered_raw_is_reported_the_same_way_by_all_three）
+- 页面 `sources` 里的 raw 键必须在 `raws` 账本内；违反由 `ingest begin` 的 `orphan_pages` 报告，只报不修。（检查：tests/ingest.rs::begin_reports_orphan_pages）
+- 页面必须有 frontmatter 七字段：`id`、`title`、`type`、`summary`、`sources`、`status`、`updated`；`type` 取自 `[schema].types`。（检查：tests/lint.rs::l1_reports_each_missing_required_field）
+- 候选页只能经 `.wiki/staging/` 由 `approve --confirm` 进入 `wiki/`；覆盖已存在页面同样需要确认。（检查：tests/version.rs::approve_without_confirm_asks_a_human）
+- `archive seal` 先改引用页、后写账本：中途崩溃时重跑能补齐，不会留下引用已删记录的页面。（未机器化：靠 seal 的幂等实现，没有崩溃注入测试）
+- `archive purge` 只在「总数超 `purge_cap`」且「超过 `purge_days`」时才删，且跳过仍被引用的摘要。（检查：tests/archive.rs::purge_candidates_need_capacity_and_deadline_both）
+- 索引与暂存清单都是派生状态，可以从 `wiki/` 与账本重建；`--reindex` 是兜底。（检查：tests/query.rs::reindex_is_what_makes_a_new_page_searchable）
+
+## 机器守卫
+
+上面每条不变量都在 CI 里有执行点，按「被违反时哪一层会红」分工：
+
+| 文件 | 抓什么 |
+| --- | --- |
+| `tests/invariants.rs` | 代码结构：SQL 只在 `store.rs`、账本只有三个写入口、对账只有 `scan`、不变量标注指向真实测试、迁移步数等于 `SCHEMA_VERSION`、`L1`–`L13` 三方一致 |
+| `tests/docs_contract.rs` | 文档与 CLI 一致：JSON 形状快照、flag 真存在、表格与枚举等于代码、被点名对象的字段在对应技能里有枚举行、文档里的 `snake_case` 名字与 `E_*` 码闭世界 |
+| `tests/snapshots/cli-keys.json` | 各命令 `--json` 的键路径。改输出必须改快照；置 `LLM_WIKI_UPDATE_SNAPSHOTS=1` 重跑 `tests/docs_contract.rs` 会重写它，之后人工过一遍 |
+| `tests/docs_tokens.allow` | 白名单：文档里合理出现、但不是本仓词汇的名字，每条写理由 |
+
+行为层面的守卫在不变量行尾点名（`tests/lint.rs`、`tests/version.rs`、`tests/archive.rs`、`tests/ingest.rs`、`tests/query.rs`、`tests/reconcile.rs`）。
+
+诚实边界：快照只证明「键还在」，不证明语义对；枚举与字段检查要求文档保持表格/枚举行形态，改写成散文即失效；闭世界词表只证明「这个名字在代码里出现过」，抓不到「代码里有但已废弃」；`invariants.rs` 是文本扫描，注释里出现针脚也会触发（宁可误报）。
