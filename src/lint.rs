@@ -6,8 +6,8 @@
 //! malformed `updated`, an `updated` that did not move when the body changed,
 //! and a stale `index.md` — then re-runs `lint` and reports what is left.
 //!
-//! The rules are the contract from the spec (`docs/superpowers/specs/...` §5.4),
-//! one test per rule in `tests/lint.rs`:
+//! The list below is the contract: `tests/lint.rs` holds one test per rule, and
+//! `skills/wiki-audit/SKILL.md` is the operator-facing version of the same list:
 //!
 //! - `L1` error: a page is missing `id`, `title` or `status`.
 //! - `L2` error: a `[[wikilink]]` names no page.

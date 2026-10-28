@@ -415,7 +415,7 @@ impl Default for SyncCfg {
     }
 }
 
-/// `[memory]`: the session-memory water marks from §5.11.
+/// `[memory]`: the session-memory water marks.
 ///
 /// `session_soft_cap` counts the live session records that make the agent ask
 /// for a distillation; `idle_days` is how long a sealed summary may go without a

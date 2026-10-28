@@ -1,11 +1,10 @@
 //! The archive layer: sealed conversation summaries.
 //!
-//! Layering is described in §5.11 of the design: live session records are
-//! distilled into `wiki/archive/<period>.md`, the pages that used to cite the
-//! session records are re-hung onto the summary, and only then may the original
-//! records be cleared. That is a strictly ordered operation, because the moment
-//! a record disappears every page still citing it turns into a dangling
-//! `sources` entry and `lint` fails the whole repository.
+//! Layering is strictly ordered: live session records are distilled into
+//! `wiki/archive/<period>.md`, the pages that used to cite those records are
+//! re-hung onto the summary, and only then may the originals be cleared. The
+//! order is not optional: the moment a record disappears, every page still
+//! citing it holds a dangling `sources` entry and `lint` fails the repository.
 //!
 //! This module owns the whole archive layer: [`status`] reports the four
 //! numbers that tell a human whether the layering is keeping up, [`seal`]
