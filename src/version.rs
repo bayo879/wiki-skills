@@ -23,7 +23,7 @@
 //! location is part of the repository layout that `init` creates, matching how
 //! [`crate::staging`] locates its directory.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -231,6 +231,18 @@ struct Published {
     title: String,
     /// Raw keys the page cites, raw-relative.
     sources: BTreeSet<String>,
+    /// The `sources` entries verbatim, fragments included.
+    refs: Vec<String>,
+}
+
+/// A staged candidate, reduced to the facts the brakes compare.
+struct Staged {
+    /// Path relative to the wiki root, `/`-separated (`concept/alpha.md`).
+    rel: String,
+    /// Case-, space- and punctuation-insensitive title.
+    title: String,
+    /// The `sources` entries verbatim, fragments included.
+    sources: Vec<String>,
 }
 
 /// Case-, space- and punctuation-insensitive title key.
@@ -250,6 +262,70 @@ fn cited_sources(cfg: &Config, sources: &[String]) -> BTreeSet<String> {
     staging::source_keys(sources, &cfg.paths.raw)
         .into_iter()
         .collect()
+}
+
+/// One unit of source information: a chunk of a raw, or the whole raw.
+///
+/// Chunk `0` stands for the whole file. A page names a chunk with `#p=<n>`, so
+/// the budget follows the text rather than the file count: a long document is
+/// cut into more slices and earns proportionally more pages, a short one is a
+/// single slice.
+type Slice = (String, usize);
+
+/// Every slice a page's `sources` point at.
+fn page_slices(root: &Path, cfg: &Config, sources: &[String]) -> BTreeSet<Slice> {
+    let mut out = BTreeSet::new();
+    for source in sources {
+        let Some(key) = staging::source_key(source, &cfg.paths.raw) else {
+            continue;
+        };
+        // A file below the chunk threshold is one slice whatever fragment a
+        // page names: otherwise a fragment invented on a one-page note would
+        // mint slices that do not exist.
+        if !is_chunked(root, cfg, &key) {
+            out.insert((key, 0));
+            continue;
+        }
+        match source
+            .split_once('#')
+            .and_then(|(_, fragment)| fragment.trim().strip_prefix("p="))
+            .and_then(parse_chunk_range)
+        {
+            // A page claiming one absurd span is treated as citing the whole
+            // file, so nobody inflates their share with `#p=1-999999`.
+            Some((from, to)) if to.saturating_sub(from) <= MAX_SLICE_SPAN => {
+                for index in from..=to {
+                    out.insert((key.clone(), index));
+                }
+            }
+            _ => {
+                out.insert((key, 0));
+            }
+        }
+    }
+    out
+}
+
+/// Whether `key` is large enough that `parse` cuts it into chunks.
+///
+/// A raw that is missing or unreadable is not chunked, which counts every
+/// fragment as the whole file — the stricter reading.
+fn is_chunked(root: &Path, cfg: &Config, key: &str) -> bool {
+    let path = paths::join_key(&root.join(&cfg.paths.raw), key);
+    fs::metadata(&path)
+        .map(|meta| meta.len() > cfg.parse.chunk_threshold)
+        .unwrap_or(false)
+}
+
+/// Widest `#p=<a>-<b>` span still read as a chunk list rather than the whole file.
+const MAX_SLICE_SPAN: usize = 4096;
+
+/// `12-40` -> `(12, 40)`, `3` -> `(3, 3)`; one-based, `None` when malformed.
+fn parse_chunk_range(range: &str) -> Option<(usize, usize)> {
+    let (from, to) = range.split_once('-').unwrap_or((range, range));
+    let from: usize = from.trim().parse().ok()?;
+    let to: usize = to.trim().parse().ok()?;
+    (from >= 1 && to >= from).then_some((from, to))
 }
 
 /// The pages already in the wiki that the overlap rule compares against.
@@ -283,6 +359,7 @@ fn published(root: &Path, cfg: &Config) -> Vec<Published> {
             rel,
             title: title_key(&front.title),
             sources: cited_sources(cfg, &front.sources),
+            refs: front.sources.clone(),
         });
     }
     out
@@ -356,20 +433,62 @@ pub fn approve(
         // The two content brakes only run on the asking path: `--confirm` is
         // the human overruling them, not another question.
         let existing = published(root, cfg);
-        for candidate in &candidates {
-            let Ok(raw) = fs::read(&candidate.staging) else {
-                continue;
-            };
-            let Ok((front, _body)) = crate::page::parse(&raw) else {
-                continue;
-            };
-            let title = title_key(&front.title);
-            let sources = cited_sources(cfg, &front.sources);
-            if let Some(why) = overlap_reason(&candidate.rel, &title, &sources, &existing) {
+        let staged: Vec<Staged> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                let raw = fs::read(&candidate.staging).ok()?;
+                // A page that does not parse is `lint`'s problem, not a reason
+                // to refuse a merge.
+                let (front, _body) = crate::page::parse(&raw).ok()?;
+                Some(Staged {
+                    rel: candidate.rel.clone(),
+                    title: title_key(&front.title),
+                    sources: front.sources,
+                })
+            })
+            .collect();
+
+        for candidate in &staged {
+            let keys = cited_sources(cfg, &candidate.sources);
+            if let Some(why) = overlap_reason(&candidate.rel, &candidate.title, &keys, &existing) {
                 return Ok(ApproveOutcome::NeedsConfirmation {
                     reason: String::from("page_overlap"),
                     detail: format!(
                         "{why}；确认后可用 approve --confirm 合并，或改 id/title 后重新 ingest commit"
+                    ),
+                });
+            }
+        }
+
+        // Information-density brake: one slice of a source justifies a bounded
+        // number of pages, so a long document earns room in proportion to its
+        // length instead of its file count.
+        let limit = cfg.ingest.max_pages_per_slice;
+        if limit > 0 {
+            let mut counts: BTreeMap<Slice, Vec<String>> = BTreeMap::new();
+            for page in &existing {
+                for slice in page_slices(root, cfg, &page.refs) {
+                    counts.entry(slice).or_default().push(page.rel.clone());
+                }
+            }
+            for page in &staged {
+                for slice in page_slices(root, cfg, &page.sources) {
+                    counts.entry(slice).or_default().push(page.rel.clone());
+                }
+            }
+            if let Some(((key, index), who)) = counts.iter().find(|(_, who)| who.len() > limit) {
+                let subject = if *index == 0 {
+                    format!("整份 `{key}`")
+                } else {
+                    format!("`{key}` 的第 {index} 个切片")
+                };
+                return Ok(ApproveOutcome::NeedsConfirmation {
+                    reason: String::from("page_slice_budget"),
+                    detail: format!(
+                        "{subject} 已经养出 {} 页（{}），超过 ingest.max_pages_per_slice（{limit}）；\
+                         切片是 `#p=<n>`，一个切片该讲的事通常一页就够，确认后可用 approve --confirm 合并",
+                        who.len(),
+                        who.join("、")
                     ),
                 });
             }

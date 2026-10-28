@@ -126,7 +126,7 @@ fn init_template_loads_and_validates() {
     assert_eq!(cfg.parse.min_chars, 200);
     assert!(cfg.parse.external.is_none());
 
-    assert_eq!(cfg.ingest.max_pages_per_source, 12);
+    assert_eq!(cfg.ingest.max_pages_per_slice, 5);
     assert!(cfg.ingest.review_before_write);
     assert_eq!(cfg.audit.min_page_chars, 200);
     assert_eq!(cfg.versions.keep, 5);

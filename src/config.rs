@@ -379,7 +379,11 @@ impl Default for ExternalResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct IngestCfg {
-    pub max_pages_per_source: usize,
+    /// Pages one slice of a source may justify. A slice is one chunk of a large
+    /// source, or the whole of a small one, so the cap follows how much text a
+    /// page had to work with rather than how many files were scanned. `0`
+    /// disables the brake.
+    pub max_pages_per_slice: usize,
     /// New pages one merge may add before `approve` stops and asks.
     pub max_new_pages_per_run: usize,
     pub review_before_write: bool,
@@ -388,7 +392,7 @@ pub struct IngestCfg {
 impl Default for IngestCfg {
     fn default() -> Self {
         Self {
-            max_pages_per_source: 12,
+            max_pages_per_slice: 5,
             max_new_pages_per_run: 20,
             review_before_write: true,
         }

@@ -376,20 +376,10 @@ pub fn commit(
     staging::Manifest::save(root, &manifest)?;
     staging::clear_pending(root)?;
 
-    let mut warnings = Vec::new();
-    let limit = cfg.ingest.max_pages_per_source;
-    if limit > 0 && written.len() > limit {
-        warnings.push(format!(
-            "this round wrote {} pages, above ingest.max_pages_per_source ({limit}); \
-             check whether the sources really justify that many pages",
-            written.len()
-        ));
-    }
-
     Ok(CommitReport {
         pages_written: written,
         index_updated: true,
-        warnings,
+        warnings: Vec::new(),
     })
 }
 

@@ -216,7 +216,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | `0` | 成功；`query` 无命中、`doctor` 只有 Warn 也是 0 |
 | `1` | 命令执行失败（含部分源失败），或 `lint` 有 error / `--strict` 下有 warning，或 `recall` 无命中、`doctor` 有 Fail |
 | `2` | 用法、配置或环境错误 |
-| `3` | 需要人拍板：`approve` 未带 `--confirm`（含 `page_budget` 超预算、`page_overlap` 疑似重复页）、`archive purge` 未带 `--yes` |
+| `3` | 需要人拍板：`approve` 未带 `--confirm`（含 `page_budget` 超预算、`page_slice_budget` 单切片页数超限、`page_overlap` 疑似重复页）、`archive purge` 未带 `--yes` |
 | `4` | 引擎被另一个进程锁住（`lock` 真正被占用，不是过期残留） |
 
 ## 服务特殊说明
@@ -228,6 +228,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 - 常见错误码：`E_NO_PARSER`（无后端认领扩展名）、`E_BAD_SOURCE`（后端认领但解不开）、`E_NO_AUTH_ENV`、`E_EXTERNAL`、`E_BOTH_FAILED`（`auto` 下内置与外部都失败）、`E_BAD_CONFIG`（外部后端配置残缺）、`E_OVERSIZE`（超过 `max_source_bytes`）、`E_STAGING_CORRUPT` / `E_STAGING_DRIFT`（暂存区与清单不一致）、`E_NO_SUMMARY` / `E_ALREADY_SEALED`（封存前置条件不满足）、`E_LOCKED`（仓库被占用）。
 - 版本在 `.wiki/versions/vNNN/`：`manifest.json` 记路径与摘要，`.version.json` 记 `kind` / `label` / `pages`，字节按摘要存在 `.wiki/objects/`（同一内容只存一份）。只保留最近 `[versions].keep` 份（默认 5）；`log.md` 记录每次 `approve` / `checkpoint` / `seal` / `rollback`。索引不进版本，回退后自动重建。
 - 页面预算：`[ingest].max_new_pages_per_run`（默认 20）限制 `approve` 一轮新增的页数，超出时返回 `reason: page_budget` 并把候选留在 `.wiki/staging/`；`approve --confirm` 是人显式越过预算。
+- 切片预算：`[ingest].max_pages_per_slice`（默认 5）限制「同一个切片养出多少页」。切片是 `#p=<n>` 指向的那一段（大文件按 `parse.chunk_target` 切块），没带片段的页算整份文件一个切片。所以长文档按信息量拿页数，短文件不能靠拆 id 刷页；小于切块阈值的文件，页面上写的任何 `#p=` 都算整份文件那一个切片，编造不存在的切片换不到额度。超过返回 `reason: page_slice_budget`，`detail` 点名是哪份源的第几个切片。
 - 近义页判定：`approve` 还会拦两种「同一页写了两遍」——标题归一化后与已发布页相同（`Retry Policy` = `retry_policy`），或候选页引用的源全部是某张已发布页引用过的（没有新证据）。命中返回 `reason: page_overlap`，`detail` 点名对端页；判定只比 frontmatter，不读正文，所以不花钱、不误判语义。显式 `approve --confirm` 同样可越过。
 - 忽略列表 `.wiki/ignore` 用 `.gitignore` 语法，`scan` / `convert` 跳过、`archive purge` 不清；显式 `convert --key` 仍可读单个文件。`.wiki/` 不随 git 共享，所以忽略列表也是每台机器一份。
 - `.wiki/` 是这台机器的事实源，**不随仓库共享，CLI 也不提供同步**。要带到别的机器，用任意文件级手段（`rsync`、`unison`、私有 git 仓、网盘）整目录搬，遵守三条：搬时不能有 llm-wiki 在跑（SQLite 账本必须一致）；排除 `.wiki/lock` 与 `.wiki/cache/`；同一时刻只有一个写者——账本无法合并，两边各写再拼会得到互相矛盾的 `source_hash`。目录内只存仓库相对路径（键由 `paths::identity_key` 产出），换机器不用改配置。

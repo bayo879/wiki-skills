@@ -821,3 +821,103 @@ fn approve_confirm_overrules_the_overlap_gate() {
     }
     assert!(root.join(".wiki/pages/concept/retry-policy.md").is_file());
 }
+
+#[test]
+fn approve_asks_when_one_slice_feeds_too_many_pages() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    // Six pages all from the same chunk of one file: the file is not big
+    // enough to justify six pages, however many ids they get.
+    for index in 0..6 {
+        let id = format!("concept/c{index}");
+        let text = sourced_page(&id, &format!("标题 {index}"), &[".wiki/raw/a.md#p=1"]);
+        stage_text(root, &cfg, &mut store, &format!("{id}.md"), &text);
+    }
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::NeedsConfirmation { reason, detail } => {
+            assert_eq!(reason, "page_slice_budget");
+            assert!(detail.contains("a.md"), "{detail}");
+        }
+        other => panic!("expected page_slice_budget, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_fragment_on_a_small_file_still_counts_as_the_whole_file() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    write_file(root, ".wiki/raw/a.md", "short");
+    // A one-page note has no chunk 7; claiming one must not buy a new slice.
+    for index in 1..=6 {
+        let id = format!("concept/small{index}");
+        let text = sourced_page(
+            &id,
+            &format!("小文件 {index}"),
+            &[&format!(".wiki/raw/a.md#p={index}")],
+        );
+        stage_text(root, &cfg, &mut store, &format!("{id}.md"), &text);
+    }
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::NeedsConfirmation { reason, .. } => assert_eq!(reason, "page_slice_budget"),
+        other => panic!("expected page_slice_budget, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_whole_file_counts_as_one_slice() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    for index in 0..6 {
+        let id = format!("concept/w{index}");
+        let text = sourced_page(&id, &format!("整篇 {index}"), &[".wiki/raw/a.md"]);
+        stage_text(root, &cfg, &mut store, &format!("{id}.md"), &text);
+    }
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::NeedsConfirmation { reason, .. } => assert_eq!(reason, "page_slice_budget"),
+        other => panic!("expected page_slice_budget, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_long_source_earns_one_page_per_slice() {
+    let (dir, mut cfg, mut store) = boot();
+    let root = dir.path();
+    // A raw above the chunk threshold, so its fragments are real slices.
+    cfg.parse.chunk_threshold = 5;
+    write_file(root, ".wiki/raw/big.md", &"x".repeat(200));
+    // Six pages from six different slices: the source carries six slices'
+    // worth of text, so the budget has room for one page each.
+    for index in 1..=6 {
+        let id = format!("concept/s{index}");
+        let text = sourced_page(
+            &id,
+            &format!("切片 {index}"),
+            &[&format!(".wiki/raw/big.md#p={index}")],
+        );
+        stage_text(root, &cfg, &mut store, &format!("{id}.md"), &text);
+    }
+
+    match version::approve(root, &cfg, &mut store, false).unwrap() {
+        ApproveOutcome::NeedsConfirmation { reason, .. } => assert_eq!(reason, "merge_staging"),
+        other => panic!("expected merge_staging, got {other:?}"),
+    }
+}
+
+#[test]
+fn approve_confirm_overrules_the_slice_budget() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    for index in 0..6 {
+        let id = format!("concept/k{index}");
+        let text = sourced_page(&id, &format!("越权 {index}"), &[".wiki/raw/a.md#p=2"]);
+        stage_text(root, &cfg, &mut store, &format!("{id}.md"), &text);
+    }
+
+    match version::approve(root, &cfg, &mut store, true).unwrap() {
+        ApproveOutcome::Applied { .. } => {}
+        other => panic!("expected the merge to go through, got {other:?}"),
+    }
+}

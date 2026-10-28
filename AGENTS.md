@@ -77,9 +77,10 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 `approve` 不带 `--confirm` 时依次过两道，命中就停在 `.wiki/staging/` 不动：
 
 1. **近义页**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选页的 `sources` 是某张已发布页 `sources` 的子集（没引入新证据）。只比 frontmatter，不读正文、不调模型——语义级「近义」在这里是做不到的，别试图加。
-2. **页面预算**（`reason: page_budget`）：本轮新增页数超过 `[ingest].max_new_pages_per_run`（默认 20）；已存在的页算覆盖，不占预算。
+2. **切片预算**（`reason: page_slice_budget`）：一个切片养出的页数超过 `[ingest].max_pages_per_slice`（默认 5）。切片是 `#p=<n>` 指的那一块，没带片段算整份文件一块；按块而不是按文件计数，是因为「一个源」这一个源可能是一页笔记，也可能是两百页手册——按文件数计，要么卡死大文档，要么放过小文件被拆成十页。`#p=1-999999` 这种宽到离谱的区间按整份文件算，别让人用大区间刷页数；小于 `parse.chunk_threshold` 的文件，页面上写什么 `#p=` 都并到整份文件那一个切片——否则给一页速记编个 `#p=7` 就能凭空多出一个切片。
+3. **页面预算**（`reason: page_budget`）：本轮新增页数超过 `[ingest].max_new_pages_per_run`（默认 20）；已存在的页算覆盖，不占预算。
 
-`--confirm` 是显式越权，两道都不拦它；所以别为了省事把预算调大再一路 confirm。另有一条容易踩的：这两道都写在 `if !confirm` 里，曾经写在它外面，结果 `--confirm` 也被拦，人没法越权（tests/version.rs 的 `approve_confirm_overrules_*` 钉住）。
+`--confirm` 是显式越权，三道都不拦它；所以别为了省事把预算调大再一路 confirm。另有一条容易踩的：这三道都写在 `if !confirm` 里，曾经写在它外面，结果 `--confirm` 也被拦，人没法越权（tests/version.rs 的 `approve_confirm_overrules_*` 钉住）。
 
 ### 2.12 同步在 CLI 之外
 

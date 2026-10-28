@@ -148,7 +148,7 @@ min_chars        = 200      # below this a builtin result may fall back to the e
 # timeout_s = 120
 
 [ingest]
-max_pages_per_source = 12
+max_pages_per_slice = 5
 max_new_pages_per_run = 20
 review_before_write  = true
 

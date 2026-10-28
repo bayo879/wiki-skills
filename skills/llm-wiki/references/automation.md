@@ -39,6 +39,12 @@ llm-wiki sync --limit 5 --dry-run --json       # 只看这一轮会做什么
 
 真觉得预算太小就改 `.wiki/wiki.toml` 的 `[ingest].max_new_pages_per_run`，不要靠反复 `--confirm` 绕过。
 
+比「一轮多少页」更细的一道是**切片预算**（`reason: page_slice_budget`）：同一个切片最多养出 `[ingest].max_pages_per_slice`（默认 5）页。
+
+切片就是页面 `sources` 里 `#p=<n>` 指的那一段；没带片段就是整份文件算一个切片。大文件按 `parse.chunk_target` 切块，所以一份两百页的手册天然有几十个切片、可以产出几十页，而一页速记只有一个切片、最多五页——限额跟着信息量走，不跟着文件个数走。
+
+`detail` 会点名「哪份源的第几个切片、已经养出几页」。处置同前四选一；要保留这些页面就说明理由后 `--confirm`，否则把同一切片的页并成一页，或改引更精确的 `#p=`。
+
 预算之前还有一道更细的闸：**近义页**（`reason: page_overlap`）。候选页出现下面任一情况就停在暂存区：
 
 - 标题归一化后与已发布页相同（`Retry Policy`、`retry-policy`、`retry_policy` 算同一个）；
