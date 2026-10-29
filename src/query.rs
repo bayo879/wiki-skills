@@ -214,7 +214,7 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
     // through `approve`, `ingest submit` or `archive` records the digest
     // without touching the FTS table. The digest only counts when the index
     // also holds the page, or such a page would stay invisible until
-    // `query --reindex`.
+    // a full rebuild.
     let indexed: BTreeSet<String> = store.fts_page_ids()?.into_iter().collect();
 
     let mut upserts: Vec<(String, String, String)> = Vec::new();
@@ -270,7 +270,7 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
 ///
 /// Keeping the read path read-only is what lets the CLI decide when to pay for
 /// an index update, and lets tests tell a stale index from a broken one. The
-/// CLI refreshes before every search (`query --reindex` rebuilds instead).
+/// CLI refreshes before every search (a full rebuild is `doctor --fix`).
 pub fn search(root: &Path, cfg: &Config, store: &Store, query: &SearchQuery) -> Result<Vec<Hit>> {
     let expression = match_expr(&query.text).ok_or(QueryError::EmptyQuery)?;
     let wiki = cfg.paths.wiki.trim_end_matches('/');

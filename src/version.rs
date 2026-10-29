@@ -415,7 +415,7 @@ fn overlap_reason(
 /// written, is pruned.
 pub fn checkpoint(root: &Path, cfg: &Config, store: &mut Store, label: &str) -> Result<String> {
     let name = next_version_name(root)?;
-    snapshot(root, cfg, store, &name, label, "checkpoint")
+    snapshot(root, cfg, store, &name, label, label)
 }
 
 /// Publishes the staging candidates that fit the brakes into `wiki/`.
@@ -1075,6 +1075,14 @@ pub fn rollback(
 
     crate::query::reindex(root, cfg, store)?;
     journal::append(root, "rollback", Some(name), "")?;
+    // The candidates belong to the tree that was just replaced: keeping them
+    // would make the next `submit` publish pages written against deleted bytes.
+    let staging_dir = staging::dir(root);
+    if staging_dir.is_dir() {
+        fs::remove_dir_all(&staging_dir).map_err(|source| io(&staging_dir, source))?;
+    }
+    staging::ensure(root, cfg)?;
+    staging::clear_pending(root)?;
 
     let new_name = next_version_name(root)?;
     snapshot(

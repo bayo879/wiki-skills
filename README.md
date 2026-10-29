@@ -138,9 +138,12 @@ llm-wiki doctor                            # 体检 + 看这一轮有什么变�
 llm-wiki ingest --dry-run                  # 演练：只报告，不写盘
 llm-wiki ingest                            # 开轮：转换、登记、给出 write_to
 # ……agent 把候选页写进 ingest 给的 .wiki/staging/<type>/<id>.md……
-llm-wiki submit                            # 收口：发布、版本、索引
+llm-wiki submit                            # 收口：发布、索引
 llm-wiki query 熔断                        # FTS5 检索，命中数 0 也是 exit 0
 llm-wiki query --graph                     # 链接图：枢纽页、孤立页、断链
+llm-wiki version list                      # 每版一行：谁打的、几页
+llm-wiki version diff                      # 最新版与工作树的差异
+llm-wiki version restore v003 --confirm    # 回到 v003，并清空本轮候选
 ```
 
 人工点名摄入、只看解析、无人值守：

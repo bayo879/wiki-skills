@@ -61,10 +61,11 @@ fn submit_publishes_the_staged_candidates() {
 }
 
 #[test]
-fn submit_without_candidates_is_a_usage_error() {
+fn submit_without_candidates_succeeds_with_nothing_published() {
     let dir = repo_with_round();
     let (code, body) = run(&dir, &["submit"]);
-    assert_eq!(code, 2, "{body}");
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["data"]["published"].as_array().unwrap().len(), 0);
 }
 
 #[test]

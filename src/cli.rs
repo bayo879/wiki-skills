@@ -22,7 +22,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// The five subcommands. Everything else in the engine is internal.
+/// The six subcommands. Everything else in the engine is internal.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Check the repository's health; `--fix` repairs the unambiguous defects.
@@ -101,6 +101,39 @@ pub enum Command {
         /// Print the `[[wikilink]]` structure: degrees, edges, orphans, broken links.
         #[arg(long)]
         graph: bool,
+    },
+    /// Inspect the versions recorded automatically, and restore one.
+    ///
+    /// One snapshot is taken per `ingest` round and one per `submit`; no
+    /// command creates one by hand. `restore` is the only way back from a bad
+    /// publish, and it needs `--confirm` because it replaces the live tree.
+    Version {
+        #[command(subcommand)]
+        command: VersionCommand,
+    },
+}
+
+/// What a person does with versions: read the list, read one difference,
+/// restore one.
+#[derive(Debug, Subcommand)]
+pub enum VersionCommand {
+    /// Every snapshot, newest first.
+    List,
+    /// What a snapshot held, compared with the working tree now.
+    Diff {
+        /// Version name; the newest one when omitted.
+        tag: Option<String>,
+    },
+    /// Put `pages/` and `raw/` back to what `tag` held.
+    ///
+    /// A tag that does not exist is rejected without touching the tree, and
+    /// the restore is itself a version, so it can be undone the same way.
+    Restore {
+        /// Version name to restore.
+        tag: String,
+        /// Required: a restore replaces the live tree.
+        #[arg(long)]
+        confirm: bool,
     },
 }
 

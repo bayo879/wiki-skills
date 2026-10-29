@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use llm_wiki::chunk;
-use llm_wiki::cli::{Cli, Command, DoctorOnly};
+use llm_wiki::cli::{Cli, Command, DoctorOnly, VersionCommand};
 use llm_wiki::config::Config;
 use llm_wiki::doctor::{self, Check, Level};
 use llm_wiki::graph;
@@ -69,6 +69,7 @@ fn dispatch(cli: Cli) -> ! {
             no_archive,
             graph,
         } => run_query(text, limit, no_archive, graph),
+        Command::Version { command } => run_version(command),
     }
 }
 
@@ -532,6 +533,17 @@ fn run_submit(confirm: bool, auto: bool) -> ! {
                 Some(json!({ "held_back": held_back })),
             )
         }
+        // No candidate means the round had nothing to publish; that is a normal
+        // outcome of running `submit` again, not a usage error.
+        Err(version::VersionError::NothingToApprove) => report::emit(
+            cmd,
+            SubmitData {
+                version: String::new(),
+                published: Vec::new(),
+                held_back: Vec::new(),
+                warnings: refreshed.warnings,
+            },
+        ),
         Err(err) => fail_version(cmd, &err),
     }
 }
@@ -547,9 +559,9 @@ fn fail_version(cmd: &str, err: &version::VersionError) -> ! {
     report::fail(cmd, exit, err.code(), &err.to_string())
 }
 
-/// `query` is the only command that decides when to pay for an index update:
-/// `--reindex` rebuilds, a plain search catches up incrementally, and with no
-/// text only `--reindex` has something to do (report the page count).
+/// `query` is the only command that decides when to pay for an index update: a
+/// plain search catches up incrementally. A full rebuild is `doctor --fix`,
+/// which nobody asks for by accident.
 fn run_query(text: Option<String>, limit: usize, no_archive: bool, graph: bool) -> ! {
     let cmd = "query";
     let root = wiki_root(cmd);
@@ -627,6 +639,119 @@ fn human_graph(data: &graph::Graph) -> String {
 /// an empty result with exit 0.
 fn fail_query(cmd: &str, err: &query::QueryError) -> ! {
     report::fail(cmd, Exit::Usage, err.code(), &err.to_string())
+}
+
+/// `version list|diff|restore`: read the automatically recorded snapshots and
+/// put one back.
+///
+/// The version list is not a history of intent — `journal.jsonl` is — it is the
+/// set of trees the engine can restore to. `restore` is the only command that
+/// writes with it, and the only reason the subcommand exists: a bad publish has
+/// no other way back, because `.wiki/` is local and usually outside git.
+fn run_version(command: VersionCommand) -> ! {
+    let cmd = "version";
+    let root = wiki_root(cmd);
+    let cfg = match Config::load(&root) {
+        Ok(cfg) => cfg,
+        Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
+    };
+    match command {
+        VersionCommand::List => match version::history(&root) {
+            Ok(rows) => {
+                let data = VersionListData {
+                    count: rows.len(),
+                    versions: rows,
+                };
+                report::emit_with(cmd, data, Exit::Ok, human_version_list)
+            }
+            Err(err) => fail_version(cmd, &err),
+        },
+        VersionCommand::Diff { tag } => {
+            let tag = match tag {
+                Some(tag) => tag,
+                None => match version::history(&root) {
+                    Ok(rows) => match rows.first() {
+                        Some(row) => row.version.clone(),
+                        None => report::fail(
+                            cmd,
+                            Exit::Usage,
+                            "E_NO_VERSION",
+                            "no version yet; run `llm-wiki ingest` first",
+                        ),
+                    },
+                    Err(err) => fail_version(cmd, &err),
+                },
+            };
+            match version::diff(&root, &cfg, &tag) {
+                Ok(diff) => report::emit_with(cmd, diff, Exit::Ok, human_version_diff),
+                Err(err) => fail_version(cmd, &err),
+            }
+        }
+        VersionCommand::Restore { tag, confirm } => {
+            if !confirm {
+                report::fail(
+                    cmd,
+                    Exit::Usage,
+                    "E_CONFIRM_REQUIRED",
+                    "a restore replaces the live pages and raw tree; pass --confirm",
+                )
+            }
+            let mut store = open_store(cmd, &root, &cfg);
+            match version::rollback(&root, &cfg, &mut store, &tag) {
+                Ok(outcome) => report::emit_with(cmd, outcome, Exit::Ok, human_version_restore),
+                Err(err) => fail_version(cmd, &err),
+            }
+        }
+    }
+}
+
+/// Payload of `version list`.
+#[derive(Serialize)]
+struct VersionListData {
+    count: usize,
+    versions: Vec<version::VersionRow>,
+}
+
+fn human_version_list(data: &VersionListData) -> String {
+    if data.versions.is_empty() {
+        return String::from("no versions");
+    }
+    let mut out = String::new();
+    for row in &data.versions {
+        out.push_str(&format!(
+            "{}  {:<8} {}  {} pages  {}\n",
+            row.version, row.kind, row.created_at, row.pages, row.label
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+fn human_version_diff(diff: &version::VersionDiff) -> String {
+    if diff.added.is_empty() && diff.removed.is_empty() && diff.changed.is_empty() {
+        return String::from("no differences");
+    }
+    let mut out = Vec::new();
+    for (title, paths) in [
+        ("added", &diff.added),
+        ("changed", &diff.changed),
+        ("removed", &diff.removed),
+    ] {
+        if paths.is_empty() {
+            continue;
+        }
+        out.push(format!("{title} ({}):", paths.len()));
+        for path in paths {
+            out.push(format!("  {path}"));
+        }
+    }
+    out.join("\n")
+}
+
+fn human_version_restore(outcome: &version::RollbackOutcome) -> String {
+    format!(
+        "restored {} as {}; {} content files materialised",
+        outcome.restored, outcome.version, outcome.files
+    )
 }
 
 /// One block per hit: the heading, the snippet, then the three next-step clues

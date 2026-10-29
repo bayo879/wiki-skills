@@ -67,7 +67,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 `ingest` 与 `submit` 记账时不复制目录：它们把 `pages/` 与 `raw/` 每条路径的 blake3 写进 `manifest.json`，字节按摘要存进 `.wiki/objects/`。
 所以「改一页」不会让整版体积翻倍，但**任何直接改写内容文件的代码都必须走 `version::write_atomic`**——就地截断会同时改掉历史版本共享的那个对象。
-版本是每轮自动记的：`ingest` 一个锚点、`submit` 一个发布版本。目前没有回退命令，`version::restore` 只作为库函数存在；不做单页回退。
+版本是每轮自动记的：`ingest` 结束记一个锚点，`submit` 不再记版本（它发布的内容在 ingest 锚点之后，所以 `version diff` 会看到它们）。回退入口是 `version restore <TAG> --confirm`，它恢复后清空 staging 与 pending，并把这次恢复本身也记成一个 `rollback` 版本；不做单页回退。
 
 ### 2.10 忽略列表只有一个解释入口
 
@@ -93,11 +93,11 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.13 否决也是对源的表决
 
-`reject` 只丢页面是不够的：人看过这批变动、说了「不要」，变动的字节就已经被承认为已知状态。所以 `reject` 走 `Ledger::mark_reviewed`，把这一轮每个源的账本摘要换成磁盘上的当前摘要，并把它们在 manifest 里的 `baseline_hash` 推到 `current_hash`。
+`reject` 只丢页面是不够的：人看过这批变动、说了「不要」，变动的字节就已经被承认为已知状态。所以 `abort` 走 `Ledger::mark_reviewed`，把这一轮每个源的账本摘要换成磁盘上的当前摘要，并把它们在 manifest 里的 `baseline_hash` 推到 `current_hash`。
 不这么做，同一个文件会一轮轮以 `changed` 回来，直到有人把它加进忽略列表——而拒绝和忽略是两件事。
 摘要必须按 `scan` 的选法算（小文件全量、大文件采样，见 `accept_reviewed_sources`），否则下一次 `doctor` 的扫描立刻报假 `changed`；`tests/version.rs::reject_accepts_the_source_bytes_so_it_is_not_reported_again` 钉住。超大读不了的文件跳过，让它继续报 `oversize`。
 
-这道表决依赖 `ingest submit` 把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `reject`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`reject` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
+这道表决依赖开轮时把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `abort`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`abort` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
 
 ### 2.14 决策日志不是内容
 
@@ -105,7 +105,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.15 发布后要清 `page_meta`，否则搜索停在旧正文
 
-`submit` 把候选的摘要写进 `page_meta`，发布时用它对账「交稿后有没有人手改」。但发布只把字节移进 `wiki/`，不写 FTS；`query::refresh` 的跳过条件是「摘要相同且索引里已有这个 key」，于是改过的旧页会被永久跳过，直到 `query --reindex`。所以发布后要对每个已发布页 `delete_page_meta`，让下一次 refresh 重建索引；`tests/version.rs::publishing_a_page_drops_the_index_record_so_the_next_query_reindexes_it` 钉住。
+`ingest` 把候选的摘要写进 `page_meta`，发布时用它对账「交稿后有没有人手改」。但发布只把字节移进 `wiki/`，不写 FTS；`query::refresh` 的跳过条件是「摘要相同且索引里已有这个 key」，于是改过的旧页会被永久跳过，直到 `doctor --fix` 重建索引。所以发布后要对每个已发布页 `delete_page_meta`，让下一次 refresh 重建索引；`tests/version.rs::publishing_a_page_drops_the_index_record_so_the_next_query_reindexes_it` 钉住。
 
 
 ### 2.16 目录布局只有一张表
@@ -119,6 +119,12 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 `doctor --fix` 与它的两步后续（写项目指令、把 `ingest` 排成定时任务）只在新仓库第一次有收益；放进技能开场，每轮日常都要背一段用不上的指令，还会和 `init` 自己的输出抢同一份事实。所以技能没有「开场」一节：agent 正常跑命令，撞上 `E_NOT_INITIALISED` / `E_NO_CONFIG` 才回头建，并按 CLI 的 message 与 `doctor --fix` 输出末尾的两步走。
 细节只写在 `src/init.rs` 的 `NEXT_STEPS`（默认周期、先问用户），技能只留触发条件与去向——两处都在讲同一件事，改一处必须改另一处；`tests/init.rs::init_ends_with_the_fixed_follow_up_prompt` 钉住 CLI 这一侧。
+
+### 2.18 删命令前先和 spec 做一次差集
+
+命令面收窄那一轮（22 → 5）把 `version` 整条删了，但 spec 的 §3 一直写着 `version list/diff/restore`，于是文档承诺了一条不存在的退路。**`.wiki/` 是唯一的版本与内容所在，而且通常不进 git**（2.12），所以 `restore` 不是「人可能用不上的过程步骤」，而是坏发布的唯一出口；过程步骤能删，出口不能删。
+删任何一条命令或 flag 前，先 `grep` spec 的 §3 与 §4 去向表，差集里没处理干净的要么补实现、要么改 spec，不能只删代码。
+`tests/cli_version.rs` 钉住三条：`submit` 不建版本、`restore` 不带 `--confirm` 时不动树、`restore` 本身也记一个 `rollback` 版本；`src/version.rs::approve` 的 `NothingToApprove` 在 CLI 层是 exit 0（重复 `submit` 不是错误）。
 
 ## 3. 提交前自查
 
