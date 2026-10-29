@@ -63,7 +63,7 @@ llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"c
 ### Agent skills 安装
 
 1 个 skill 是给 Claude Code 用的薄指令层，所有簿记与判定逻辑都在 `llm-wiki` 里。
-`skills/llm-wiki/SKILL.md` 是入口（边界、开场、路由、最小序列、门禁、退出码）；
+`skills/llm-wiki/SKILL.md` 是入口（边界、路由、最小序列、门禁、退出码）；
 `content.md` 写「写什么」（建页判断、新源、切片、矛盾、去重），`ops.md` 写「坏了怎么看」
 （体检、判断层、同步、冲突与回退、忽略、叫人）。三份都短，agent 按需只读一份。
 字段名、候选路径、缺失字段、报错码含义由 CLI 现打，技能不复述。
@@ -118,7 +118,7 @@ git tag v0.1.1 && git push origin v0.1.1
 
 | 文件 | 管什么 |
 |---|---|
-| `skills/llm-wiki/SKILL.md` | 入口：边界、开场、路由、最小序列、门禁、`approve` 选项、退出码 |
+| `skills/llm-wiki/SKILL.md` | 入口：边界、路由、最小序列、门禁、`approve` 选项、退出码 |
 | `skills/llm-wiki/content.md` | 写什么：一页一事、新源怎么处理、切片、前后矛盾、重复 |
 | `skills/llm-wiki/ops.md` | 坏了怎么办：体检、判断层、同步、冲突与回退、忽略、叫人 |
 
@@ -133,6 +133,11 @@ git tag v0.1.1 && git push origin v0.1.1
 llm-wiki init          # 写 .wiki/wiki.toml / .wiki/SCHEMA.md，建目录；可重复跑，已有文件不覆盖
 llm-wiki doctor        # 在 init 前后都能跑，用来诊断
 ```
+
+`init` 的输出末尾带一段固定提示词（`--json` 下是 `data.next`），是给 agent 看的：
+把本仓库路径注入当前项目的 User 设定（之后优先用 `llm-wiki` 技能检索），再把
+`llm-wiki scan` 排成定时任务。周期先问用户，默认每天 01:00 跑一次。
+两件事都在引擎之外，CLI 只提示、不代劳。
 
 日常一轮，按顺序：
 
@@ -172,7 +177,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 |---|---|
 | `version` | 打印版本 |
 | `doctor` | 检查契约、schema、路径、账本、FTS5、旧布局、锁、暂存区、token、外部后端 |
-| `init [--force]` | 写契约文件、建引擎目录 |
+| `init [--force]` | 写契约文件、建引擎目录，并给出初始化后的两步指引 |
 | `scan [--apply-moves]` | 报告仓库根、`.wiki/raw/` 与账本的差异；`--apply-moves` 一并迁移改名 |
 | `convert [--key <KEY>] [--limit <N>]` | 转换待处理源（默认 10）；单个失败不中断 |
 | `parse --key <KEY> [--chunk <N>] [--range <A-B>] [--force-large]` | 只显示解析结果，不写文件；大文件按需分块；`--force-large` 越过尺寸上限只为看一眼 |

@@ -53,7 +53,7 @@
 
 ### 2.7 一个技能，三份文件
 
-`skills/llm-wiki/SKILL.md` 是唯一入口（边界、开场、路由、最小序列、门禁、`approve` 选项、退出码）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、同步、冲突与回退、忽略、叫人）。
+`skills/llm-wiki/SKILL.md` 是唯一入口（边界、路由、最小序列、门禁、`approve` 选项、退出码）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、同步、冲突与回退、忽略、叫人）。
 拆分只为了让 agent 按需只读一份，不是新的契约；`tests/skills_pack.rs` 断言只发一个技能、正文行数不超限。
 
 ### 2.8 技能的价值在流程纪律，不在用法说明
@@ -113,6 +113,11 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 `init` 遍历全表；`precondition::check` 只看 `authored`；`provision` 只补非 `authored`，并且跳过“父目录是缺失的 `authored` 目录”的子项——否则 `.wiki/pages/archive` 会顺带把 `.wiki/pages` 造出来，闸门就形同虚设。
 不要再加回 `DIRS` / `PROVISIONED` 这类第二份清单；加目录只改 `LAYOUT` 并标明是否 `authored`。
 `tests/precondition.rs::provision_never_creates_the_authored_tree_but_repairs_its_children_when_it_exists` 钉住补建不会复活产品目录；`src/layout.rs` 的单元测试钉住父先于子、只有 `.wiki/pages` 是 `authored`。
+
+### 2.17 初始化是被动路径，不是开场仪式
+
+`init` 与它的两步后续（写项目指令、把 `scan` 排成定时任务）只在新仓库第一次有收益；放进技能开场，每轮日常都要背一段用不上的指令，还会和 `init` 自己的输出抢同一份事实。所以技能没有「开场」一节：agent 正常跑命令，撞上 `E_NOT_INITIALISED` / `E_NO_CONFIG` 才回头建，并按 CLI 的 message 与 `init` 输出末尾的两步走。
+细节只写在 `src/init.rs` 的 `NEXT_STEPS`（默认周期、先问用户），技能只留触发条件与去向——两处都在讲同一件事，改一处必须改另一处；`tests/init.rs::init_ends_with_the_fixed_follow_up_prompt` 钉住 CLI 这一侧。
 
 ## 3. 提交前自查
 

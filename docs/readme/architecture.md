@@ -47,7 +47,7 @@
 | `src/cli.rs` | clap 定义，只描述参数，不含业务 |
 | `src/main.rs` | 命令分发、`--json` 与人类输出的分叉、退出码 |
 | `src/config.rs` | `.wiki/wiki.toml` 解析、默认值、`validate`；路径固定不可配 |
-| `src/init.rs` | 契约文件与引擎目录的初始内容 |
+| `src/init.rs` | 契约文件与引擎目录的初始内容，以及初始化后给 agent 的固定指引 |
 | `src/layout.rs` | 引擎目录布局的唯一一张表：路径 + `authored`，`init`、闸门、补建共用 |
 | `src/paths.rs` | 路径归一（`identity_key`）与安全拼接 |
 | `src/scan.rs` | 两层对账（仓库根、`.wiki/raw/` ↔ 账本）；唯一分类引擎与「账本认不认识这个 raw」的唯一答案 |
