@@ -324,6 +324,9 @@ fn approve_with_confirm_merges_into_wiki() {
     let current = hash::hash_file(&root.join(".wiki/raw/a.md"), true).unwrap();
     set_source(root, "a.md", None, Some(&current));
     let text = stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
+    // The round owns the version now: `ingest` opens it, `approve` only
+    // publishes bytes the round accounted for.
+    version::checkpoint(root, &cfg, &mut store, "ingest").unwrap();
 
     let outcome = version::approve(root, &cfg, &mut store, true).unwrap();
     match outcome {

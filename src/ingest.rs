@@ -32,6 +32,7 @@ use crate::render;
 use crate::scan::RawLedger;
 use crate::staging;
 use crate::store::{PageMetaRow, Store, StoreError};
+use crate::version;
 
 /// What `begin` was asked to do.
 #[derive(Debug, Clone, Default)]
@@ -165,6 +166,9 @@ pub enum IngestError {
     /// The `raws` ledger could not be read for the orphan check.
     #[error(transparent)]
     Scan(#[from] crate::scan::ScanError),
+    /// The round could not be snapshotted.
+    #[error(transparent)]
+    Version(#[from] version::VersionError),
     /// The wiki directory could not be walked.
     #[error("cannot walk {}: {source}", path.display())]
     Walk {
@@ -195,6 +199,7 @@ impl IngestError {
             IngestError::Db(_) => "E_DB",
             IngestError::Hash(_) => "E_IO",
             IngestError::Scan(_) => "E_IO",
+            IngestError::Version(err) => err.code(),
             IngestError::Walk { .. } => "E_IO",
         }
     }
@@ -335,6 +340,10 @@ pub fn begin(
             staging::ensure_type(root, &page.typ)?;
         }
         staging::write_pending(root, &pending)?;
+        // The round opens a version: what the pages were before the round is
+        // the baseline `submit` and `restore` compare against, so the snapshot
+        // has to exist before any candidate is written.
+        version::checkpoint(root, cfg, store, "ingest")?;
     }
 
     Ok(BeginReport {

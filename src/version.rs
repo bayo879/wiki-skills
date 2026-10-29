@@ -467,7 +467,12 @@ pub fn approve(
         return Ok(ApproveOutcome::NothingPublished { held_back });
     }
 
-    let name = next_version_name(root)?;
+    // Publishing does not take a snapshot: the round opened by `ingest` is the
+    // version, and `approve` only moves bytes the round already accounted for.
+    let name = history(root)?
+        .first()
+        .map(|row| row.version.clone())
+        .unwrap_or_default();
     for candidate in &candidates {
         if !published.iter().any(|rel| rel == &candidate.rel) {
             continue;
@@ -493,7 +498,6 @@ pub fn approve(
         format!("{} 页，{} 页留在暂存区", published.len(), held_back.len())
     };
     journal::append(root, "approve", Some(&name), &detail)?;
-    snapshot(root, cfg, store, &name, "approve", "approve")?;
 
     let mut manifest = Manifest::load(root)?;
     for entry in manifest.sources.values_mut() {

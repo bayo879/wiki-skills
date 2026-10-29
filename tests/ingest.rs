@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Local;
 use llm_wiki::store::{RawRow, SourceRow, Store};
+use llm_wiki::version::{self, ApproveOutcome};
 use llm_wiki::{config::Config, hash, ingest, init, page, staging};
 use tempfile::{tempdir, TempDir};
 use walkdir::WalkDir;
@@ -650,5 +651,52 @@ fn submit_names_the_missing_field_and_shows_a_skeleton() {
     assert!(
         text.contains("---"),
         "the example frontmatter is missing: {text}"
+    );
+}
+
+/// The version anchor moved from `approve` to `ingest`: an open round is what
+/// takes a snapshot, publishing is not a second version.
+#[test]
+fn ingest_creates_the_version_and_approve_does_not() {
+    let (d, cfg) = setup();
+    let before = version::history(d.path()).unwrap().len();
+    let mut store = open(d.path());
+    ingest::begin(
+        d.path(),
+        &cfg,
+        &mut store,
+        &ingest::BeginInput {
+            sources: vec![String::from(".wiki/raw/a.md")],
+            pages: Vec::new(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    let rows = version::history(d.path()).unwrap();
+    assert_eq!(rows.len(), before + 1, "ingest 应当建一个版本");
+    assert_eq!(rows[0].label, "ingest");
+
+    staging::write_page(
+        d.path(),
+        &cfg,
+        "concept/retry",
+        &page_inline("retry", "重试", &[".wiki/raw/a.md"]),
+    )
+    .unwrap();
+    let staged = staging::dir(d.path()).join("concept/retry.md");
+    store
+        .upsert_page_meta(&llm_wiki::store::PageMetaRow {
+            page_key: format!("{}/concept/retry.md", cfg.paths.wiki.trim_matches('/')),
+            hash: hash::hash_file(&staged, true).unwrap(),
+            updated: String::from("2026-01-01T00:00:00Z"),
+        })
+        .unwrap();
+    let out = version::approve(d.path(), &cfg, &mut store, true).unwrap();
+    assert!(matches!(out, ApproveOutcome::Applied { .. }));
+    assert_eq!(
+        version::history(d.path()).unwrap().len(),
+        before + 1,
+        "approve 不该再建版"
     );
 }
