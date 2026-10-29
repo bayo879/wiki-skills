@@ -12,7 +12,7 @@
 | 知识层 | `.wiki/pages/` | 否 | 页面、`index.md`、`audit/`、`archive/` |
 | 引擎状态 | `.wiki/` 其余 | 否 | 账本 `state.db`、`staging/`、`versions/`、`sessions/`、`cache/`、`lock` |
 
-`.wiki/.gitignore` 只有一行 `*`：整个引擎都不进 git。仓库里进 git 的只有源文件；工具不修改根 `.gitignore`。
+这些层都是本地状态，工具不生成也不检查任何 git 配置。用 git 的仓库把 `.wiki/` 加进仓库根的 `.gitignore`；没有 git 的环境不需要这一步。仓库里进 git 的只有源文件。
 写入边界是结构性的：`Config.paths` 不从配置反序列化（`#[serde(skip)]`），固定为 `source=""`、`raw=".wiki/raw"`、`wiki=".wiki/pages"`、`engine=".wiki"`，手写 `[paths]` 移不出去。
 扫描根是仓库根；点目录天然跳过，`[scan].ignore` 再加一层目录黑名单（默认 `node_modules`、`target`、`dist`、`build`、`vendor`、`.git`）。
 
@@ -68,7 +68,7 @@
 | `src/query.rs` | FTS5 索引与检索 |
 | `src/archive.rs` | 摘要封存、清理与召回 |
 | `src/graph.rs` | `[[wikilink]]` 结构：出入度、边、孤立页、断链 |
-| `src/doctor.rs` | 十一项健康检查 |
+| `src/doctor.rs` | 十项健康检查 |
 | `src/hash.rs` | blake3 内容哈希 |
 | `src/report.rs` | JSON / 人类输出信封与退出码 |
 

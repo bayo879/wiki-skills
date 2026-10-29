@@ -33,14 +33,6 @@ const CONTRACT_FILES: [(&str, &str); 2] = [
     (".wiki/SCHEMA.md", SCHEMA_MD),
 ];
 
-/// The engine's `.gitignore`.
-///
-/// A single `*` keeps the whole engine out of version control: the ledger, the
-/// page tree, the versions and the staging area are all derived state, rebuilt
-/// by running the tool. The repository's own `.gitignore` is never edited — it
-/// is outside the engine, and therefore a source file.
-const GITIGNORE: &str = "*\n";
-
 /// What one `init` run did, split by path so the caller can show both sides.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct InitOutcome {
@@ -95,19 +87,6 @@ pub fn run(root: &Path, force: bool) -> Result<InitOutcome> {
             source,
         })?;
         outcome.created.push(name.to_string());
-    }
-
-    // Not a contract file: it is written once and then belongs to the user, so
-    // `--force` does not rewrite it either.
-    let gitignore = root.join(".wiki").join(".gitignore");
-    if gitignore.exists() {
-        outcome.skipped.push(String::from(".wiki/.gitignore"));
-    } else {
-        std::fs::write(&gitignore, GITIGNORE).map_err(|source| InitError::Io {
-            path: gitignore.clone(),
-            source,
-        })?;
-        outcome.created.push(String::from(".wiki/.gitignore"));
     }
 
     Ok(outcome)

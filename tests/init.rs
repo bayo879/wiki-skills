@@ -347,36 +347,15 @@ fn memory_section_overrides_one_field_and_keeps_the_rest() {
 }
 
 #[test]
-fn init_writes_the_engine_gitignore() {
+fn init_leaves_git_configuration_to_the_repository() {
+    // `.wiki/` is local state, not a git-managed artifact: the tool must not
+    // create a `.gitignore` inside it. Repositories that use git put `.wiki/`
+    // in their own root ignore file; repositories without git do nothing.
     let d = tempdir().unwrap();
     let out = run(d.path(), &["init"]);
     assert_eq!(out.status.code(), Some(0));
-    let body = std::fs::read_to_string(d.path().join(".wiki/.gitignore")).unwrap();
-    assert_eq!(
-        body, "*\n",
-        "the whole engine is derived state and stays out of git"
-    );
-}
-
-#[test]
-fn init_does_not_overwrite_a_hand_edited_engine_gitignore() {
-    let d = tempdir().unwrap();
-    run(d.path(), &["init"]);
-    let path = d.path().join(".wiki/.gitignore");
-    // a hand-edited ignore list must survive a re-run of `init`.
-    std::fs::write(&path, "versions/\n").unwrap();
-
-    let out = run(d.path(), &["init"]);
-    assert_eq!(out.status.code(), Some(0));
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "versions/\n");
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(
-        v["data"]["skipped"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|path| path == ".wiki/.gitignore"),
-        "a kept file is reported as skipped: {}",
-        v["data"]
+        !d.path().join(".wiki/.gitignore").exists(),
+        "init must not write a git-related file under .wiki/"
     );
 }

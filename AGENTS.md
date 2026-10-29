@@ -48,7 +48,7 @@
 
 ### 2.6 写入边界靠结构，不靠自觉
 
-引擎（契约、raw、pages、账本、暂存、版本）全部在隐藏目录 `.wiki/` 里，`Config.paths` 用 `#[serde(skip)]` 固定成常量，手写 `[paths]` 移不出去；`.wiki/.gitignore` 只有一行 `*`，整个引擎不进 git。`.wiki/` 之外的一切都是源，只读。
+引擎（契约、raw、pages、账本、暂存、版本）全部在隐藏目录 `.wiki/` 里，`Config.paths` 用 `#[serde(skip)]` 固定成常量，手写 `[paths]` 移不出去；工具不生成也不检查任何 git 配置——用 git 的仓库自己把 `.wiki/` 加进根 `.gitignore`。`init` 不再生成 `.wiki/.gitignore`（引擎里不放任何 git 文件），旧库遗留的那份不删、也不再被检查；`tests/init.rs::init_leaves_git_configuration_to_the_repository` 钉住新库不生成。`.wiki/` 之外的一切都是源，只读。
 `tests/e2e.rs::init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall` 在完整链路前后逐字节比对引擎外的文件，任何命令往引擎外写文件都会红。清理类命令（`archive purge`）只删 `.wiki/raw/` 与页面，**永远不删源文件**。
 
 ### 2.7 一个技能，三份文件

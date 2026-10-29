@@ -13,13 +13,12 @@ use std::time::{Duration, SystemTime};
 use serde_json::Value;
 use tempfile::TempDir;
 
-const CHECKS: [&str; 11] = [
+const CHECKS: [&str; 10] = [
     "config",
     "schema",
     "paths",
     "db",
     "fts5",
-    "engine_ignore",
     "legacy_layout",
     "lock",
     "staging",
@@ -209,15 +208,6 @@ fn fts5_is_reported_ok_by_this_build() {
     assert_eq!(level(&json, "fts5"), "ok");
     // The FAIL branch needs a SQLite built without FTS5; that is unit-tested
     // inside `src/doctor.rs` against the manual probe.
-}
-
-#[test]
-fn an_engine_gitignore_without_a_wildcard_is_a_warning() {
-    let dir = repo();
-    fs::write(dir.path().join(".wiki/.gitignore"), "cache/\nstaging/\n").expect("writable");
-    let (code, json) = doctor(dir.path());
-    assert_eq!(code, 0);
-    assert_eq!(level(&json, "engine_ignore"), "warn");
 }
 
 #[test]

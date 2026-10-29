@@ -151,7 +151,6 @@ pub fn run(root: &Path, cfg: Option<&Config>) -> Vec<Check> {
         check_paths(root, effective),
         check_db(root, effective),
         check_fts5(),
-        check_engine_ignore(root, effective),
         check_legacy(root),
         check_lock(root, effective),
         check_staging(root),
@@ -334,47 +333,6 @@ fn fts5_check(available: store::Result<bool>) -> Check {
             "SQLite was built without FTS5; `query` and the index cannot work",
         ),
         Err(err) => Check::fail(NAME, format!("cannot inspect the SQLite build: {err}")),
-    }
-}
-
-/// `engine_ignore`: `.wiki/.gitignore` hides the whole engine from git.
-///
-/// Derived state is local by design: the page tree can be rebuilt from the
-/// sources, so keeping it out of version control is what makes the repositories
-/// that scanners see contain only the user's own files.
-fn check_engine_ignore(root: &Path, cfg: &Config) -> Check {
-    const NAME: &str = "engine_ignore";
-    let path = root.join(&cfg.paths.engine).join(".gitignore");
-    let display = path.strip_prefix(root).unwrap_or(&path);
-    match fs::read_to_string(&path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Check::warn(
-            NAME,
-            format!(
-                "{} is missing; new pages and ledger rows would have nowhere to land",
-                display.display()
-            ),
-        ),
-        Err(err) => Check::warn(NAME, format!("cannot read {}: {err}", display.display())),
-        Ok(text) => {
-            // Rules in `.wiki/.gitignore` are relative to `.wiki` itself, so a
-            // leading `*` hides every page and the ledger alike.
-            let hides_all =
-                is_ignored_by(&text, "pages/index.md") && is_ignored_by(&text, "state.db");
-            if hides_all {
-                Check::ok(
-                    NAME,
-                    format!("{} keeps the whole engine out of git", display.display()),
-                )
-            } else {
-                Check::warn(
-                    NAME,
-                    format!(
-                        "{} does not ignore the page tree and the ledger; add a `*` line",
-                        display.display()
-                    ),
-                )
-            }
-        }
     }
 }
 
@@ -622,72 +580,6 @@ fn authority(url: &str) -> Result<(String, u16), String> {
     }
 }
 
-/// Whether `path` is ignored by the gitignore rules in `rules`.
-///
-/// The matcher covers the patterns a repository root actually uses: comments,
-/// negations, directory-only rules, `*`, `?` and `**`. Anchored rules match a
-/// prefix of the path, because ignoring a directory ignores everything below
-/// it; unanchored rules match one component at any depth, as git does.
-fn is_ignored_by(rules: &str, path: &str) -> bool {
-    let mut ignored = false;
-    for line in rules.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (negated, pattern) = match line.strip_prefix('!') {
-            Some(rest) => (true, rest),
-            None => (false, line),
-        };
-        if pattern_matches(pattern, path) {
-            ignored = !negated;
-        }
-    }
-    ignored
-}
-
-/// Whether one gitignore pattern matches `path`.
-fn pattern_matches(pattern: &str, path: &str) -> bool {
-    let pattern = pattern.trim_start_matches('/').trim_end_matches('/');
-    if pattern.is_empty() {
-        return false;
-    }
-    if pattern.contains('/') {
-        let parts: Vec<&str> = path.split('/').collect();
-        (1..=parts.len()).any(|end| glob_match(pattern, &parts[..end].join("/")))
-    } else {
-        path.split('/').any(|part| glob_match(pattern, part))
-    }
-}
-
-/// A tiny glob matcher: `*` stops at `/`, `**` crosses it, `?` is one character.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let text: Vec<char> = text.chars().collect();
-    glob(&pattern, &text)
-}
-
-/// Recursive engine behind [`glob_match`].
-fn glob(pattern: &[char], text: &[char]) -> bool {
-    match pattern.first() {
-        None => text.is_empty(),
-        Some('*') if pattern.get(1) == Some(&'*') => {
-            let rest = if pattern.get(2) == Some(&'/') {
-                &pattern[3..]
-            } else {
-                &pattern[2..]
-            };
-            (0..=text.len()).any(|end| glob(rest, &text[end..]))
-        }
-        Some('*') => (0..=text.len())
-            .any(|end| text[..end].iter().all(|c| *c != '/') && glob(&pattern[1..], &text[end..])),
-        Some('?') => !text.is_empty() && text[0] != '/' && glob(&pattern[1..], &text[1..]),
-        Some(expected) => {
-            !text.is_empty() && text[0] == *expected && glob(&pattern[1..], &text[1..])
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,34 +659,6 @@ mod tests {
         );
         assert!(authority("ftp://example.com").is_err());
         assert!(authority("example.com").is_err());
-    }
-
-    #[test]
-    fn gitignore_patterns_match_like_git() {
-        let path = ".wiki/versions";
-        for rules in [
-            ".wiki/versions/",
-            ".wiki/",
-            ".wiki",
-            "versions/",
-            ".wiki/*",
-            ".wiki/**",
-            "*",
-        ] {
-            assert!(is_ignored_by(rules, path), "pattern {rules:?}");
-        }
-        for rules in [
-            "target/",
-            "/target",
-            "*.tmp",
-            "# .wiki/versions/",
-            ".wiki/other/",
-        ] {
-            assert!(!is_ignored_by(rules, path), "pattern {rules:?}");
-        }
-        assert!(!is_ignored_by("!versions/", path));
-        assert!(!is_ignored_by(".wiki/versions/\n!.wiki/versions/", path));
-        assert!(!is_ignored_by("versions/\n!versions/", path));
     }
 
     #[test]

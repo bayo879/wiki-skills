@@ -54,11 +54,11 @@ CARGO_HOME=$PWD/.cargo-home CARGO_NET_OFFLINE=true cargo clippy --all-targets --
 ```bash
 llm-wiki init              # 写 .wiki/wiki.toml、.wiki/SCHEMA.md，建 .wiki/ 下的目录
 llm-wiki init --force      # 覆盖重写这两份契约文件（不动源文件与页面）
-llm-wiki doctor            # 十一项健康检查，有 Fail 则退出码 1
+llm-wiki doctor            # 十项健康检查，有 Fail 则退出码 1
 llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"checks":[...]}}
 ```
 
-`init` 生成的 `.wiki/.gitignore` 只有一行 `*`：**整个引擎都不进 git**，包括契约、页面、账本与版本快照；仓库里进 git 的只有源文件。工具绝不修改仓库根的 `.gitignore`。CI 在 Ubuntu / macOS / Windows 三平台跑 `build`、`test`、`test --release`、`fmt --check`、`clippy -D warnings`，不安装 poppler/pandoc（PDF 测试用模板现造）。
+`.wiki/` 里是本地引擎（契约、页面、账本、版本），工具不生成也不修改任何 git 配置。用 git 的仓库请把 `.wiki/` 加进仓库根的 `.gitignore`；没有 git 的环境不需要这一步。CI 在 Ubuntu / macOS / Windows 三平台跑 `build`、`test`、`test --release`、`fmt --check`、`clippy -D warnings`，不安装 poppler/pandoc（PDF 测试用模板现造）。
 
 ### Agent skills 安装
 
@@ -88,7 +88,7 @@ cp -R skills/* ~/.claude/skills/
 | PATH 上的目录（如 `~/.local/bin/llm-wiki`） | `llm-wiki ...` | 一个人维护多个 wiki 仓库 |
 | 仓库根的 `.wiki/llm-wiki` | `.wiki/llm-wiki ...` | 单个仓库自带工具，随仓库走 |
 
-`.wiki/llm-wiki` 已在 `init` 生成的 `.wiki/.gitignore` 里，不会被提交。
+`.wiki/llm-wiki` 在 `.wiki/` 下；如果仓库用 git，记得把 `.wiki/` 加进根 `.gitignore`，否则它会被当成未跟踪文件。
 两种放法都要求在**仓库根目录**执行；CLI 不向上查找根。
 
 #### 把 skill 同步给别人
@@ -171,7 +171,7 @@ llm-wiki archive purge --dry-run           # 先看会删什么
 | 命令 | 作用 |
 |---|---|
 | `version` | 打印版本 |
-| `doctor` | 检查契约、目录、账本、FTS5、gitignore、锁、暂存区、token、外部后端 |
+| `doctor` | 检查契约、schema、路径、账本、FTS5、旧布局、锁、暂存区、token、外部后端 |
 | `init [--force]` | 写契约文件、建引擎目录 |
 | `scan [--apply-moves]` | 报告仓库根、`.wiki/raw/` 与账本的差异；`--apply-moves` 一并迁移改名 |
 | `convert [--key <KEY>] [--limit <N>]` | 转换待处理源（默认 10）；单个失败不中断 |
