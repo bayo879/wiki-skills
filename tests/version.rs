@@ -788,7 +788,7 @@ fn approve_asks_when_a_candidate_repeats_a_published_title() {
     );
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NothingPublished { held_back } => {
+        ApproveOutcome::NothingPublished { held_back, .. } => {
             assert_eq!(held_back.len(), 1);
             assert_eq!(held_back[0].reason, "page_overlap");
             assert!(held_back[0].detail.contains("concept/alpha.md"));
@@ -876,7 +876,7 @@ fn approve_asks_when_a_candidate_adds_no_new_source() {
     );
 
     match version::approve(root, &cfg, &mut store, false).unwrap() {
-        ApproveOutcome::NothingPublished { held_back } => {
+        ApproveOutcome::NothingPublished { held_back, .. } => {
             assert_eq!(held_back[0].reason, "page_overlap");
             assert!(held_back[0].detail.contains("没有新证据"));
         }

@@ -162,11 +162,16 @@ fn today() -> chrono::NaiveDate {
 }
 
 #[test]
-fn submit_without_pages_is_a_usage_error() {
+fn submit_with_no_pages_refreshes_every_staged_candidate() {
     let (d, cfg) = setup();
-    let mut store = open(d.path());
-    let err = ingest::submit(d.path(), &cfg, &mut store, &[]).unwrap_err();
-    assert_eq!(err.code(), "E_NO_PAGES", "{err}");
+    let root = d.path();
+    let mut store = open(root);
+    staging::write_page(root, &cfg, "concept/retry", &page_block("retry", "重试", &[".wiki/raw/a.md"]))
+        .unwrap();
+    staging::write_page(root, &cfg, "concept/refund", &page_block("refund", "退款", &[".wiki/raw/a.md"]))
+        .unwrap();
+    let report = ingest::submit(root, &cfg, &mut store, &[]).unwrap();
+    assert_eq!(report.pages_written.len(), 2);
 }
 
 #[test]
@@ -350,7 +355,7 @@ fn dry_run_writes_no_pending() {
 }
 
 #[test]
-fn submit_without_a_round_is_an_error() {
+fn submit_outside_a_round_still_refreshes_the_candidate() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
@@ -363,8 +368,8 @@ fn submit_without_a_round_is_an_error() {
     )
     .unwrap();
 
-    let err = ingest::submit(root, &cfg, &mut store, &args(&["retry"])).unwrap_err();
-    assert_eq!(err.code(), "E_NO_PENDING", "{err}");
+    let report = ingest::submit(root, &cfg, &mut store, &args(&["retry"])).unwrap();
+    assert_eq!(report.pages_written, vec![String::from("concept/retry")]);
 }
 
 #[test]

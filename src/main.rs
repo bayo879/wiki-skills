@@ -77,11 +77,10 @@ fn dispatch(cli: Cli) -> ! {
             range,
             force_large,
         } => run_ingest(keys, dry_run, key, chunk, range, force_large),
-        Command::Submit { pages } => run_submit(pages),
+        Command::Submit { confirm, auto } => run_submit(confirm, auto),
         Command::Abort => run_abort(),
         Command::Lint { strict, fix } => run_lint(strict, fix),
         Command::Checkpoint { label } => run_checkpoint(label),
-        Command::Approve { confirm } => run_approve(confirm),
         Command::Reject { reason } => run_reject(reason),
         Command::Instruct { text } => run_instruct(text),
         Command::Defer => run_defer(),
@@ -682,18 +681,6 @@ fn run_ingest(
     }
 }
 
-/// Closes the open round: refreshes the named candidates and the staging index.
-fn run_submit(pages: Vec<String>) -> ! {
-    let cmd = "submit";
-    let root = wiki_root(cmd);
-    let cfg = open_repo(cmd, &root);
-    let mut store = open_store(cmd, &root, &cfg);
-    match ingest::submit(&root, &cfg, &mut store, &pages) {
-        Ok(outcome) => report::emit(cmd, outcome),
-        Err(err) => fail_ingest(cmd, &err),
-    }
-}
-
 /// Drops the open round; the candidates nobody has reviewed stay in staging.
 fn run_abort() -> ! {
     let cmd = "abort";
@@ -728,38 +715,63 @@ fn run_checkpoint(label: String) -> ! {
     }
 }
 
-/// `approve` publishes the staged candidates that fit the brakes.
+/// `submit` closes the round: it refreshes the named candidates, then publishes
+/// the ones the brakes allow.
 ///
-/// Nothing is asked: the three brakes hold pages back instead of stopping the
-/// run, so an unattended chain still publishes what is safe. `--confirm`
-/// publishes everything and ignores the brakes. Exit 3 is reserved for the case
-/// where every candidate was held back and nothing could be published — that is
-/// the only outcome a human has to look at.
-fn run_approve(confirm: bool) -> ! {
-    let root = wiki_root("approve");
-    let cfg = open_repo("approve", &root);
-    let mut store = open_store("approve", &root, &cfg);
+/// `--confirm` publishes everything and ignores the brakes. `--auto` is the
+/// unattended form: a braked candidate is skipped with a warning and the run
+/// still exits 0. Exit 3 is reserved for the attended form when every candidate
+/// was held back — the only outcome a human has to look at.
+fn run_submit(confirm: bool, auto: bool) -> ! {
+    let cmd = "submit";
+    let root = wiki_root(cmd);
+    let cfg = open_repo(cmd, &root);
+    let mut store = open_store(cmd, &root, &cfg);
+    let refreshed = match ingest::submit(&root, &cfg, &mut store, &[]) {
+        Ok(report) => report,
+        Err(err) => fail_ingest(cmd, &err),
+    };
     match version::approve(&root, &cfg, &mut store, confirm) {
         Ok(ApproveOutcome::Applied {
             version,
             published,
             held_back,
         }) => report::emit(
-            "approve",
-            ApproveData {
+            cmd,
+            SubmitData {
                 version,
                 published,
                 held_back,
+                warnings: refreshed.warnings,
             },
         ),
-        Ok(ApproveOutcome::NothingPublished { held_back }) => report::fail_detail(
-            "approve",
-            Exit::NeedsConfirm,
-            "NEEDS_CONFIRMATION",
-            &format!("{} 页全部被刹车拦下，没有可发布的候选", held_back.len()),
-            Some(json!({ "held_back": held_back })),
-        ),
-        Err(err) => fail_version("approve", &err),
+        Ok(ApproveOutcome::NothingPublished { held_back }) => {
+            let mut warnings = refreshed.warnings;
+            for held in &held_back {
+                warnings.push(format!("{}: {} ({})", held.page, held.detail, held.reason));
+            }
+            if auto {
+                // Unattended runs must not stop for a braked candidate: report
+                // it and let the round end successfully.
+                report::emit(
+                    cmd,
+                    SubmitData {
+                        version: String::new(),
+                        published: Vec::new(),
+                        held_back,
+                        warnings,
+                    },
+                )
+            }
+            report::fail_detail(
+                cmd,
+                Exit::NeedsConfirm,
+                "NEEDS_CONFIRMATION",
+                &format!("{} 页全部被刹车拦下，没有可发布的候选", held_back.len()),
+                Some(json!({ "held_back": held_back })),
+            )
+        }
+        Err(err) => fail_version(cmd, &err),
     }
 }
 
@@ -1371,10 +1383,11 @@ struct CheckpointData {
 
 /// Payload of the `approve` success envelope.
 #[derive(Serialize)]
-struct ApproveData {
+struct SubmitData {
     version: String,
     published: Vec<String>,
     held_back: Vec<llm_wiki::version::HeldBack>,
+    warnings: Vec<String>,
 }
 
 /// Payload of the `reject` success envelope.

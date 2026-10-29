@@ -76,7 +76,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.11 三道刹车只扣住命中的候选
 
-`approve` 不带 `--confirm` 时依次过三道，**命中就扣住那一个候选**（留在 `.wiki/staging/`，下一轮还能再试），其余的照常发布：
+`submit` 不带 `--confirm` 时依次过三道，**命中就扣住那一个候选**（留在 `.wiki/staging/`，下一轮还能再试），其余的照常发布：
 
 1. **近义页**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选页的 `sources` 是某张已发布页 `sources` 的子集（没引入新证据）。只比 frontmatter，不读正文、不调模型——语义级「近义」在这里做不到，别试图加。候选自己的路径不算重叠：改同一页不触发（`src/version.rs::overlap_reason` 跳过相同路径）。
 2. **切片预算**（`reason: page_slice_budget`）：同一份源的第 N 个切片已经养出 `[ingest].max_pages_per_slice` 页（默认 5，0 不限）。切片是 `#p=<n>` 指的那一段；小于 `parse.chunk_threshold` 的文件，页面上写什么片段都算整份文件。
@@ -104,7 +104,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.15 发布后要清 `page_meta`，否则搜索停在旧正文
 
-`ingest submit` 把候选的摘要写进 `page_meta`，`approve` 用它对账「交稿后有没有人手改」。但 `approve` 只把字节移进 `wiki/`，不写 FTS；`query::refresh` 的跳过条件是「摘要相同且索引里已有这个 key」，于是改过的旧页会被永久跳过，直到 `query --reindex`。所以 `approve` 发布后要对每个已发布页 `delete_page_meta`，让下一次 refresh 重建索引；`tests/version.rs::publishing_a_page_drops_the_index_record_so_the_next_query_reindexes_it` 钉住。
+`submit` 把候选的摘要写进 `page_meta`，发布时用它对账「交稿后有没有人手改」。但发布只把字节移进 `wiki/`，不写 FTS；`query::refresh` 的跳过条件是「摘要相同且索引里已有这个 key」，于是改过的旧页会被永久跳过，直到 `query --reindex`。所以发布后要对每个已发布页 `delete_page_meta`，让下一次 refresh 重建索引；`tests/version.rs::publishing_a_page_drops_the_index_record_so_the_next_query_reindexes_it` 钉住。
 
 
 ### 2.16 目录布局只有一张表

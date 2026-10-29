@@ -104,12 +104,6 @@ pub enum IngestError {
         /// The key as the caller wrote it.
         key: String,
     },
-    /// `submit` was called without a page.
-    #[error("ingest submit needs at least one `--pages` id")]
-    NoPages,
-    /// `submit` found no open round.
-    #[error("no open ingest round; run `ingest begin` first")]
-    NoPending,
     /// A named page has no candidate under staging.
     #[error("page `{id}` has no candidate under .wiki/staging/")]
     NoStagedPage {
@@ -185,8 +179,6 @@ impl IngestError {
     pub fn code(&self) -> &'static str {
         match self {
             IngestError::NoSources | IngestError::NoSource { .. } => "E_NO_SOURCE",
-            IngestError::NoPages => "E_NO_PAGES",
-            IngestError::NoPending => "E_NO_PENDING",
             IngestError::NoStagedPage { .. } | IngestError::AmbiguousStagedPage { .. } => {
                 "E_NO_STAGED_PAGE"
             }
@@ -371,21 +363,23 @@ pub fn submit(
     store: &mut Store,
     pages: &[String],
 ) -> Result<SubmitReport> {
-    if pages.is_empty() {
-        return Err(IngestError::NoPages);
-    }
+    // No pending list is not an error: a candidate can be submitted outside a
+    // round, it just has no sources to merge. A round is what carries sources.
     let pending = staging::pending_hashes(root)?;
-    if pending.is_empty() {
-        return Err(IngestError::NoPending);
-    }
 
     let staging_dir = staging::dir(root);
     let staged = staged_pages(&staging_dir)?;
     let mut targets: Vec<(String, PathBuf)> = Vec::new();
-    for id in pages {
-        let target = find_staged(&staged, id)?;
-        if !targets.iter().any(|(rel, _path)| rel == &target.0) {
-            targets.push(target);
+    if pages.is_empty() {
+        // No id named means the whole staging tree: it is the round's output,
+        // and a candidate left behind is someone else's unfinished work.
+        targets = staged.clone();
+    } else {
+        for id in pages {
+            let target = find_staged(&staged, id)?;
+            if !targets.iter().any(|(rel, _path)| rel == &target.0) {
+                targets.push(target);
+            }
         }
     }
 

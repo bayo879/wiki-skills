@@ -76,10 +76,14 @@ pub enum Command {
         #[arg(long)]
         force_large: bool,
     },
-    /// Close the open round: refresh the candidates and the staging index.
+    /// Close the open round: refresh its candidates, then publish them.
     Submit {
-        /// Candidate page ids to publish into staging, in the order given.
-        pages: Vec<String>,
+        /// Publish even a candidate the brakes would hold.
+        #[arg(long, conflicts_with = "auto")]
+        confirm: bool,
+        /// Unattended: skip a braked candidate and report it instead of asking.
+        #[arg(long, conflicts_with = "confirm")]
+        auto: bool,
     },
     /// Drop the open round, keeping the candidates already written.
     Abort,
@@ -97,12 +101,6 @@ pub enum Command {
         /// Why the snapshot is taken; recorded in the version record.
         #[arg(long)]
         label: String,
-    },
-    /// Publish the staging candidates, or report that a human must confirm.
-    Approve {
-        /// Merge without asking; without it, a ready merge is only reported.
-        #[arg(long)]
-        confirm: bool,
     },
     /// Discard the staging candidates and record why.
     Reject {
