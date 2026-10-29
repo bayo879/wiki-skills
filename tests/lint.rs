@@ -8,7 +8,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use assert_cmd::Command;
 use chrono::Local;
 use llm_wiki::config::Config;
 use llm_wiki::ingest::{self, BeginInput};
@@ -531,131 +530,6 @@ fn fix_leaves_judgement_calls_alone() {
 }
 
 // -------------------------------------------------------------------- CLI
-
-fn cli_fixture(min_chars: usize) -> TempDir {
-    let dir = tempdir().unwrap();
-    init::run(dir.path(), false).unwrap();
-    let toml = dir.path().join(".wiki/wiki.toml");
-    let body = fs::read_to_string(&toml).unwrap().replace(
-        "min_page_chars = 200",
-        &format!("min_page_chars = {min_chars}"),
-    );
-    fs::write(&toml, body).unwrap();
-    dir
-}
-
-fn cli(dir: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("llm-wiki").unwrap();
-    cmd.current_dir(dir);
-    cmd
-}
-
-#[test]
-fn cli_lint_json_reports_findings_and_exit_codes() {
-    let dir = cli_fixture(12);
-    let root = dir.path();
-    fs::create_dir_all(root.join(".wiki/pages/concept")).unwrap();
-    fs::write(
-        root.join(".wiki/pages/concept/a.md"),
-        page_text("a", "concept", "订单超时后重试三次"),
-    )
-    .unwrap();
-
-    let out = cli(root).args(["--json", "lint"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(0), "a warning is not a failure");
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["cmd"], "lint");
-    assert_eq!(v["data"]["findings"][0]["rule"], "L8");
-
-    let out = cli(root)
-        .args(["--json", "lint", "--strict"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1), "--strict turns warnings into 1");
-
-    let broken = page_text("b", "concept", BODY).replace("status: stable", "status: broken");
-    fs::write(root.join(".wiki/pages/concept/b.md"), broken).unwrap();
-    let out = cli(root).args(["--json", "lint"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(1), "an error always fails");
-}
-
-#[test]
-fn cli_lint_info_does_not_fail_even_strict() {
-    let dir = cli_fixture(12);
-    let root = dir.path();
-    fs::create_dir_all(root.join(".wiki/pages/concept")).unwrap();
-    fs::write(
-        root.join(".wiki/pages/concept/a.md"),
-        page_text("a", "concept", BODY),
-    )
-    .unwrap();
-
-    let mut store = Store::open(&root.join(".wiki/state.db")).unwrap();
-    store.migrate().unwrap();
-    store
-        .upsert_raw(&RawRow {
-            key: String::from("pic.png"),
-            hash: String::from("blake3:x"),
-            source_key: String::from("pic.png"),
-            converted_at: String::from("2026-10-27T00:00:00Z"),
-        })
-        .unwrap();
-    drop(store);
-
-    let out = cli(root)
-        .args(["--json", "lint", "--strict"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(0));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["data"]["findings"][0]["rule"], "L11");
-}
-
-#[test]
-fn cli_lint_human_output_names_the_rule_and_page() {
-    let dir = cli_fixture(12);
-    let root = dir.path();
-    fs::create_dir_all(root.join(".wiki/pages/concept")).unwrap();
-    fs::write(
-        root.join(".wiki/pages/concept/a.md"),
-        page_text("a", "concept", "短"),
-    )
-    .unwrap();
-
-    let out = cli(root).args(["lint", "--strict"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("L8 .wiki/pages/concept/a.md"), "{text}");
-}
-
-#[test]
-fn cli_fix_repairs_l5_then_exits_zero() {
-    let dir = cli_fixture(12);
-    let root = dir.path();
-    fs::create_dir_all(root.join(".wiki/pages/concept")).unwrap();
-    let text =
-        page_text("a", "concept", BODY).replace("updated: 2026-10-20", "updated: 2026/10/20");
-    fs::write(root.join(".wiki/pages/concept/a.md"), text).unwrap();
-
-    let out = cli(root)
-        .args(["--json", "lint", "--fix"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["cmd"], "lint");
-    assert_eq!(v["data"]["fixed"], 2, "the page and the index");
-
-    let (front, _body) = page::read(&root.join(".wiki/pages/concept/a.md")).unwrap();
-    assert_eq!(front.updated, Local::now().date_naive());
-    let out = cli(root).args(["--json", "lint"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(0));
-}
 
 // --------------------------------------------------- ingest writes page_meta
 

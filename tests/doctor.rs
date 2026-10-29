@@ -43,10 +43,12 @@ fn stderr(output: &Output) -> String {
 }
 
 /// A fresh repository, made by the real `init`.
+///
+/// `init` is no longer a command — `doctor --fix` is the only way in — so the
+/// tests call the same function the repair path calls.
 fn repo() -> TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
-    let output = run(dir.path(), &["init"]);
-    assert!(output.status.success(), "init failed: {}", stderr(&output));
+    llm_wiki::init::run(dir.path(), false).expect("init");
     dir
 }
 
@@ -343,4 +345,47 @@ fn the_human_table_marks_each_level() {
         stdout.lines().any(|line| line.contains("config")),
         "the failing check is named: {stdout}"
     );
+}
+
+#[test]
+fn doctor_fix_bootstraps_a_fresh_repo() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let output = run(dir.path(), &["doctor", "--fix"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(dir.path().join(".wiki/wiki.toml").is_file());
+    assert!(dir.path().join(".wiki/pages").is_dir());
+}
+
+#[test]
+fn doctor_fix_is_idempotent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let first = run(dir.path(), &["doctor", "--fix"]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    let second = run(dir.path(), &["doctor", "--fix"]);
+    assert!(second.status.success(), "{}", stderr(&second));
+}
+
+#[test]
+fn doctor_only_session_reports_a_record_without_a_page() {
+    let dir = repo();
+    fs::create_dir_all(dir.path().join("sessions")).expect("sessions dir");
+    fs::write(dir.path().join("sessions/a.md"), "# 会话\n\n结论\n").expect("write");
+    let output = run(dir.path(), &["--json", "doctor", "--only", "session"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let json: Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(level(&json, "session"), "fail", "{json}");
+    assert!(
+        check_detail(&json, "session").contains("sessions/a.md"),
+        "{json}"
+    );
+}
+
+#[test]
+fn doctor_only_convert_reports_an_unparseable_source() {
+    let dir = repo();
+    fs::write(dir.path().join("bad.pdf"), b"not a pdf").expect("write");
+    let output = run(dir.path(), &["--json", "doctor", "--only", "convert"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let json: Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(level(&json, "convert"), "fail", "{json}");
 }

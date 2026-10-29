@@ -43,8 +43,7 @@ fn call(dir: &Path, args: &[&str]) -> (i32, Value) {
 /// An initialised repository with one planted source.
 fn repo() -> TempDir {
     let d = TempDir::new().unwrap();
-    let (code, _) = call(d.path(), &["init"]);
-    assert_eq!(code, 0, "init must succeed in a fresh directory");
+    llm_wiki::init::run(d.path(), false).expect("init in a fresh directory");
     fs::write(d.path().join("a.md"), "# A\n\nalpha body\n").unwrap();
     d
 }
@@ -106,16 +105,10 @@ fn a_missing_product_directory_is_refused_even_when_the_contract_exists() {
 }
 
 #[test]
-fn init_is_idempotent_so_the_advice_is_always_safe_to_follow() {
+fn doctor_fix_is_idempotent_so_the_advice_is_always_safe_to_follow() {
     let d = repo();
-    let (code, v) = call(d.path(), &["init"]);
-    assert_eq!(code, 0, "a second init must not fail: {v}");
-    // The second run creates nothing: every path already exists.
-    assert_eq!(
-        v["data"]["created"].as_array().map(Vec::len),
-        Some(0),
-        "a second init must create nothing: {v}"
-    );
+    let (code, v) = call(d.path(), &["doctor", "--fix"]);
+    assert_eq!(code, 0, "a second repair must not fail: {v}");
 }
 
 #[test]

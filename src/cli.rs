@@ -26,15 +26,21 @@ pub struct Cli {
 pub enum Command {
     /// Print the version of this binary.
     Version,
-    /// Check the repository's health without changing anything.
+    /// Check the repository's health; `--fix` repairs the unambiguous defects.
     ///
-    /// Every check runs; the exit code is 1 when one of them fails.
-    Doctor,
-    /// Write the contract files and create the engine directories.
-    Init {
-        /// Rewrite `wiki.toml` and `SCHEMA.md` even if they already exist.
+    /// Without `--fix` it only reads. The exit code is 1 when a check fails.
+    /// `--fix` bootstraps an uninitialised repository, then runs `lint --fix`
+    /// and rebuilds the search index before reporting.
+    Doctor {
+        /// Repair what has one obvious correction; never rewrites content.
         #[arg(long)]
-        force: bool,
+        fix: bool,
+        /// Run only one family of checks.
+        #[arg(long, value_enum)]
+        only: Option<DoctorOnly>,
+        /// Restrict the `convert` and `session` families to one source key.
+        #[arg(long)]
+        key: Option<String>,
     },
     /// Compare `source/` with the ledger and report what changed.
     ///
@@ -87,15 +93,6 @@ pub enum Command {
     },
     /// Drop the open round, keeping the candidates already written.
     Abort,
-    /// Audit the wiki against the lint rules.
-    Lint {
-        /// Fail on warnings as well as errors.
-        #[arg(long)]
-        strict: bool,
-        /// Repair the defects that need no judgement, in place.
-        #[arg(long)]
-        fix: bool,
-    },
     /// Snapshot the approved wiki as a new version.
     Checkpoint {
         /// Why the snapshot is taken; recorded in the version record.
@@ -202,6 +199,17 @@ pub enum IgnoreCommand {
         /// Path relative to the repository root.
         path: String,
     },
+}
+
+/// The one family of `doctor` checks `--only` may select.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DoctorOnly {
+    /// Paths, legacy layout, lock and staging.
+    Scan,
+    /// Whether each pending source parses.
+    Convert,
+    /// Whether each distilled session record became a page.
+    Session,
 }
 
 /// The half of the index `query` may return.

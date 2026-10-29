@@ -32,13 +32,7 @@ fn json(out: &std::process::Output) -> serde_json::Value {
 
 fn repo() -> TempDir {
     let dir = tempdir().unwrap();
-    let out = Command::cargo_bin("llm-wiki")
-        .unwrap()
-        .arg("init")
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "init failed");
+    llm_wiki::init::run(dir.path(), false).expect("init");
     dir
 }
 

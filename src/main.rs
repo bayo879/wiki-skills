@@ -12,7 +12,7 @@ use serde_json::json;
 
 use llm_wiki::archive;
 use llm_wiki::chunk;
-use llm_wiki::cli::{ArchiveCommand, Cli, Command, IgnoreCommand, ScopeArg};
+use llm_wiki::cli::{ArchiveCommand, Cli, Command, DoctorOnly, IgnoreCommand, ScopeArg};
 use llm_wiki::config::Config;
 use llm_wiki::convert;
 use llm_wiki::doctor::{self, Check, Level};
@@ -20,8 +20,6 @@ use llm_wiki::graph;
 use llm_wiki::hash;
 use llm_wiki::ignore;
 use llm_wiki::ingest;
-use llm_wiki::init;
-use llm_wiki::lint;
 use llm_wiki::moves;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
@@ -65,8 +63,7 @@ fn dispatch(cli: Cli) -> ! {
                 version: env!("CARGO_PKG_VERSION"),
             },
         ),
-        Command::Init { force } => run_init(force),
-        Command::Doctor => run_doctor(),
+        Command::Doctor { fix, only, key } => run_doctor(fix, only, key),
         Command::Scan { apply_moves } => run_scan(apply_moves),
         Command::Convert { key, limit } => run_convert(key, limit),
         Command::Ingest {
@@ -79,7 +76,6 @@ fn dispatch(cli: Cli) -> ! {
         } => run_ingest(keys, dry_run, key, chunk, range, force_large),
         Command::Submit { confirm, auto } => run_submit(confirm, auto),
         Command::Abort => run_abort(),
-        Command::Lint { strict, fix } => run_lint(strict, fix),
         Command::Checkpoint { label } => run_checkpoint(label),
         Command::Reject { reason } => run_reject(reason),
         Command::Instruct { text } => run_instruct(text),
@@ -188,40 +184,11 @@ fn open_store(cmd: &str, root: &Path, cfg: &Config) -> Store {
 /// two steps the CLI cannot take itself (a per-project instruction and a
 /// scheduler). The human form prints it verbatim instead of folding it onto one
 /// `next: …` line.
-fn run_init(force: bool) -> ! {
-    let root = wiki_root("init");
-    match init::run(&root, force) {
-        Ok(outcome) => report::emit_with("init", outcome, Exit::Ok, human_init),
-        Err(err) => report::fail("init", Exit::Usage, "E_IO", &err.to_string()),
-    }
-}
-
-/// Human rendering of `init`: the two path lists exactly as the generic
-/// renderer prints them, then the prompt on lines of its own.
-fn human_init(outcome: &init::InitOutcome) -> String {
-    format!(
-        "created: {}\nskipped: {}\n\n{}",
-        json_list(&outcome.created),
-        json_list(&outcome.skipped),
-        outcome.next
-    )
-}
-
-/// A compact JSON array, which is what the generic renderer prints for a list.
-fn json_list(items: &[String]) -> String {
-    serde_json::to_string(items).unwrap_or_else(|_| String::from("[]"))
-}
-
-/// `doctor` runs the pre-flight checks and reports all of them.
-///
-/// A contract that cannot be loaded is not an invocation error here: the
-/// contract is one of the things being checked, so `doctor` still runs and the
-/// `config` row carries the reason. Any `FAIL` exits 1; warnings and passes
-/// exit 0.
-fn run_doctor() -> ! {
+fn run_doctor(fix: bool, only: Option<DoctorOnly>, key: Option<String>) -> ! {
     let root = wiki_root("doctor");
     let cfg = Config::load(&root).ok();
-    let checks = doctor::run(&root, cfg.as_ref());
+    let opts = doctor::DoctorOptions { fix, only, key };
+    let checks = doctor::run(&root, cfg.as_ref(), &opts);
     let failed = checks.iter().any(|check| check.level == Level::Fail);
     let exit = if failed { Exit::Error } else { Exit::Ok };
     report::emit_with("doctor", DoctorData { checks }, exit, human_doctor)
@@ -244,77 +211,6 @@ fn human_doctor(data: &DoctorData) -> String {
         .join("\n")
 }
 
-/// `sync` runs one unattended round under the repository lock.
-///
-/// A round that converted some sources and failed others still ran: the
-/// failures are findings (exit 1), and the caller can read them off the report.
-/// A held lock is exit 4, so a scheduler can tell "someone else is working" from
-/// "this round found problems". Anything else is an environment error (exit 2).
-fn run_sync(limit: Option<usize>, dry_run: bool, force: bool, only: Vec<String>) -> ! {
-    let root = wiki_root("sync");
-    let cfg = open_repo("sync", &root);
-    let mut store = open_store("sync", &root, &cfg);
-    let args = sync::SyncArgs {
-        limit: limit.unwrap_or(cfg.sync.max_per_run),
-        dry_run,
-        force,
-        only,
-        open_round: false,
-    };
-    match sync::run(&root, &cfg, &mut store, &args) {
-        Ok(report) => {
-            let exit = if report.failures > 0 {
-                Exit::Error
-            } else {
-                Exit::Ok
-            };
-            report::emit_with("sync", report, exit, human_sync)
-        }
-        Err(err) => {
-            // The envelope carries the code, so the message is the hint alone:
-            // the library's `Display` prefixes the code for log lines.
-            let message = match &err {
-                sync::SyncError::Lock(lock_err) => lock_err.hint(),
-                _ => err.to_string(),
-            };
-            let exit = if err.code() == "E_LOCKED" {
-                Exit::Busy
-            } else {
-                Exit::Usage
-            };
-            report::fail("sync", exit, err.code(), &message)
-        }
-    }
-}
-
-/// Human rendering of a sync round: the counters first, then the warnings that
-/// explain them.
-fn human_sync(report: &sync::SyncReport) -> String {
-    let mut out = format!("run_id: {}\n", report.run_id);
-    out.push_str(&format!("converted: {}\n", report.converted));
-    out.push_str(&format!(
-        "ingested: {}\n",
-        if report.ingested.is_empty() {
-            String::from("(none)")
-        } else {
-            report.ingested.join(", ")
-        }
-    ));
-    out.push_str(&format!("queued: {}\n", report.queued));
-    out.push_str(&format!("failures: {}\n", report.failures));
-    for warning in &report.warnings {
-        out.push_str(&format!("warning: {warning}\n"));
-    }
-    out.trim_end().to_string()
-}
-
-/// `scan` compares both layers with the ledger and reports the classified
-/// changes.
-///
-/// The source layer says what `convert` should pick up; the raw layer says what
-/// was edited by hand after conversion. Reporting them together is what makes a
-/// second `scan` meaningful — a clean source layer does not mean the raw layer
-/// is clean.
 fn run_scan(apply_moves: bool) -> ! {
     let root = wiki_root("scan");
     let cfg = open_repo("scan", &root);
@@ -705,6 +601,62 @@ fn fail_ingest(cmd: &str, err: &ingest::IngestError) -> ! {
 }
 
 /// `checkpoint` snapshots the approved wiki as a new version.
+fn run_sync(limit: Option<usize>, dry_run: bool, force: bool, only: Vec<String>) -> ! {
+    let root = wiki_root("sync");
+    let cfg = open_repo("sync", &root);
+    let mut store = open_store("sync", &root, &cfg);
+    let args = sync::SyncArgs {
+        limit: limit.unwrap_or(cfg.sync.max_per_run),
+        dry_run,
+        force,
+        only,
+        open_round: false,
+    };
+    match sync::run(&root, &cfg, &mut store, &args) {
+        Ok(report) => {
+            let exit = if report.failures > 0 {
+                Exit::Error
+            } else {
+                Exit::Ok
+            };
+            report::emit_with("sync", report, exit, human_sync)
+        }
+        Err(err) => {
+            // The envelope carries the code, so the message is the hint alone:
+            // the library's `Display` prefixes the code for log lines.
+            let message = match &err {
+                sync::SyncError::Lock(lock_err) => lock_err.hint(),
+                _ => err.to_string(),
+            };
+            let exit = if err.code() == "E_LOCKED" {
+                Exit::Busy
+            } else {
+                Exit::Usage
+            };
+            report::fail("sync", exit, err.code(), &message)
+        }
+    }
+}
+
+fn human_sync(report: &sync::SyncReport) -> String {
+    let mut out = format!("run_id: {}\n", report.run_id);
+    out.push_str(&format!("converted: {}\n", report.converted));
+    out.push_str(&format!(
+        "ingested: {}\n",
+        if report.ingested.is_empty() {
+            String::from("(none)")
+        } else {
+            report.ingested.join(", ")
+        }
+    ));
+    out.push_str(&format!("queued: {}\n", report.queued));
+    out.push_str(&format!("failures: {}\n", report.failures));
+    for warning in &report.warnings {
+        out.push_str(&format!("warning: {warning}\n"));
+    }
+    out.trim_end().to_string()
+}
+
 fn run_checkpoint(label: String) -> ! {
     let root = wiki_root("checkpoint");
     let cfg = open_repo("checkpoint", &root);
@@ -1308,65 +1260,6 @@ fn human_graph(data: &graph::Graph) -> String {
         }
     }
     out
-}
-
-fn run_lint(strict: bool, fix: bool) -> ! {
-    let root = wiki_root("lint");
-    let cfg = open_repo("lint", &root);
-    let mut store = open_store("lint", &root, &cfg);
-
-    if fix {
-        match lint::fix(&root, &cfg, &mut store) {
-            Ok(outcome) => {
-                let exit = if lint::fails(&outcome.remaining, strict) {
-                    Exit::Error
-                } else {
-                    Exit::Ok
-                };
-                report::emit_with("lint", outcome, exit, human_fix)
-            }
-            Err(err) => report::fail("lint", Exit::Usage, err.code(), &err.to_string()),
-        }
-    } else {
-        match lint::lint(&root, &cfg, &store) {
-            Ok(findings) => {
-                let exit = if lint::fails(&findings, strict) {
-                    Exit::Error
-                } else {
-                    Exit::Ok
-                };
-                let payload = LintData { findings };
-                report::emit_with("lint", payload, exit, human_lint)
-            }
-            Err(err) => report::fail("lint", Exit::Usage, err.code(), &err.to_string()),
-        }
-    }
-}
-
-/// One finding per line, or a single `clean` line when there is nothing to
-/// report.
-fn human_lint(data: &LintData) -> String {
-    if data.findings.is_empty() {
-        return String::from("lint: clean");
-    }
-    data.findings
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// What `--fix` changed, then the findings it could not repair.
-fn human_fix(outcome: &lint::FixReport) -> String {
-    let mut lines = vec![format!("fixed: {}", outcome.fixed)];
-    lines.extend(outcome.remaining.iter().map(ToString::to_string));
-    lines.join("\n")
-}
-
-/// Payload of the `lint` success envelope.
-#[derive(Serialize)]
-struct LintData {
-    findings: Vec<lint::Finding>,
 }
 
 /// Payload of the `version` success envelope.

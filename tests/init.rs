@@ -1,17 +1,10 @@
 use std::path::Path;
 
-use assert_cmd::Command;
 use tempfile::tempdir;
 
-/// Runs `llm-wiki --json <args...>` with `dir` as the working directory.
-fn run(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::cargo_bin("llm-wiki")
-        .unwrap()
-        .args(["--json"])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap()
+/// Runs the initialiser the way `doctor --fix` does.
+fn init(dir: &Path) -> llm_wiki::init::InitOutcome {
+    llm_wiki::init::run(dir, false).expect("init succeeds")
 }
 
 /// Writes a `wiki.toml` fixture and loads it.
@@ -25,8 +18,7 @@ fn load_with(body: &str) -> llm_wiki::config::Config {
 #[test]
 fn init_creates_contracts_and_engine_dirs() {
     let d = tempdir().unwrap();
-    let out = run(d.path(), &["init"]);
-    assert_eq!(out.status.code(), Some(0));
+    init(d.path());
     for p in [
         ".wiki/wiki.toml",
         ".wiki/SCHEMA.md",
@@ -44,14 +36,13 @@ fn init_creates_contracts_and_engine_dirs() {
 #[test]
 fn init_is_idempotent_and_does_not_overwrite() {
     let d = tempdir().unwrap();
-    run(d.path(), &["init"]);
+    init(d.path());
     std::fs::write(
         d.path().join(".wiki/wiki.toml"),
         "[schema]\ntypes = [\"only\"]\n",
     )
     .unwrap();
-    let out = run(d.path(), &["init"]);
-    assert_eq!(out.status.code(), Some(0));
+    init(d.path());
     let body = std::fs::read_to_string(d.path().join(".wiki/wiki.toml")).unwrap();
     assert!(body.contains("types = [\"only\"]"));
 }
@@ -59,30 +50,22 @@ fn init_is_idempotent_and_does_not_overwrite() {
 #[test]
 fn init_reports_created_then_skipped() {
     let d = tempdir().unwrap();
-    let first = run(d.path(), &["init"]);
-    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
-    assert_eq!(first["cmd"], "init");
-    let created = first["data"]["created"].as_array().unwrap();
-    assert!(created.iter().any(|v| v == ".wiki/wiki.toml"));
-    assert!(created.iter().any(|v| v == ".wiki/staging"));
+    let first = init(d.path());
+    assert!(first.created.iter().any(|v| v == ".wiki/wiki.toml"));
+    assert!(first.created.iter().any(|v| v == ".wiki/staging"));
 
-    let second = run(d.path(), &["init"]);
-    let second: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
-    let skipped = second["data"]["skipped"].as_array().unwrap();
-    assert!(skipped.iter().any(|v| v == ".wiki/wiki.toml"));
-    assert!(skipped.iter().any(|v| v == ".wiki/pages"));
-    assert!(second["data"]["created"].as_array().unwrap().is_empty());
+    let second = init(d.path());
+    assert!(second.skipped.iter().any(|v| v == ".wiki/wiki.toml"));
+    assert!(second.skipped.iter().any(|v| v == ".wiki/pages"));
+    assert!(second.created.is_empty());
 }
 
 #[test]
 fn init_ends_with_the_fixed_follow_up_prompt() {
     let d = tempdir().unwrap();
-    let out = run(d.path(), &["init"]);
-    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let next = body["data"]["next"]
-        .as_str()
-        .expect("init must carry the follow-up prompt");
-    let root = d.path().canonicalize().unwrap();
+    let outcome = init(d.path());
+    let next = outcome.next.as_str();
+    let root = d.path();
     assert!(
         next.contains(&format!("`{}`", root.display())),
         "the prompt must name the repository it just initialised: {next}"
@@ -92,26 +75,12 @@ fn init_ends_with_the_fixed_follow_up_prompt() {
         next.contains("01:00"),
         "the default period must be stated: {next}"
     );
-
-    // The human form prints the same prompt on its own lines; folding it onto
-    // a single `next: ...` line would mangle the numbered list.
-    let human = Command::cargo_bin("llm-wiki")
-        .unwrap()
-        .arg("init")
-        .current_dir(d.path())
-        .output()
-        .unwrap();
-    let text = String::from_utf8(human.stdout).unwrap();
-    assert!(
-        text.contains(next),
-        "human output must carry the prompt verbatim: {text}"
-    );
 }
 
 #[test]
 fn init_force_rewrites_contracts_only() {
     let d = tempdir().unwrap();
-    run(d.path(), &["init"]);
+    init(d.path());
     std::fs::write(
         d.path().join(".wiki/wiki.toml"),
         "[schema]\ntypes = [\"only\"]\n",
@@ -121,8 +90,7 @@ fn init_force_rewrites_contracts_only() {
     std::fs::create_dir_all(d.path().join(".wiki/pages/my-type")).unwrap();
     std::fs::write(d.path().join("keep.md"), "keep me\n").unwrap();
 
-    let out = run(d.path(), &["init", "--force"]);
-    assert_eq!(out.status.code(), Some(0));
+    llm_wiki::init::run(d.path(), true).expect("init --force");
 
     let body = std::fs::read_to_string(d.path().join(".wiki/wiki.toml")).unwrap();
     assert!(
@@ -142,7 +110,7 @@ fn init_force_rewrites_contracts_only() {
 #[test]
 fn init_template_loads_and_validates() {
     let d = tempdir().unwrap();
-    run(d.path(), &["init"]);
+    init(d.path());
     let cfg = llm_wiki::config::Config::load(d.path()).unwrap();
     cfg.validate().unwrap();
 
@@ -177,7 +145,7 @@ fn init_template_loads_and_validates() {
 #[test]
 fn init_template_documents_min_chars() {
     let d = tempdir().unwrap();
-    run(d.path(), &["init"]);
+    init(d.path());
     let body = std::fs::read_to_string(d.path().join(".wiki/wiki.toml")).unwrap();
     assert!(
         body.contains("min_chars"),
@@ -350,34 +318,21 @@ fn validate_accepts_env_var_name_for_external() {
 }
 
 #[test]
-fn init_creates_archive_and_session_dirs() {
+fn init_defaults_the_session_dir_to_the_repository_root() {
     let d = tempdir().unwrap();
-    let out = run(d.path(), &["init"]);
-    assert_eq!(out.status.code(), Some(0));
-    // The archive holds sealed summaries (in git); the session directory is the
-    // scratch space the layering fills and clears, so both must exist up front.
-    for p in [".wiki/pages/archive", ".wiki/sessions"] {
-        assert!(d.path().join(p).is_dir(), "missing {p}");
-    }
+    init(d.path());
+    let cfg = llm_wiki::config::Config::load(d.path()).expect("contract");
+    assert_eq!(cfg.ingest.session_dir, "sessions");
 }
 
 #[test]
-fn generated_contract_carries_the_memory_defaults() {
+fn generated_contract_carries_the_ingest_defaults() {
     let d = tempdir().unwrap();
-    run(d.path(), &["init"]);
+    init(d.path());
     let cfg = llm_wiki::config::Config::load(d.path()).unwrap();
-    assert_eq!(cfg.memory.session_soft_cap, 50);
-    assert_eq!(cfg.memory.idle_days, 60);
-    assert_eq!(cfg.memory.purge_cap, 200);
-    assert_eq!(cfg.memory.purge_days, 180);
-}
-
-#[test]
-fn memory_section_overrides_one_field_and_keeps_the_rest() {
-    let cfg = load_with("[paths]\nsource = \"source\"\n\n[memory]\nidle_days = 7\n");
-    assert_eq!(cfg.memory.idle_days, 7);
-    assert_eq!(cfg.memory.session_soft_cap, 50);
-    assert_eq!(cfg.memory.purge_cap, 200);
+    assert_eq!(cfg.ingest.max_pages_per_slice, 5);
+    assert_eq!(cfg.ingest.max_new_pages_per_run, 20);
+    assert_eq!(cfg.ingest.session_dir, "sessions");
 }
 
 #[test]
@@ -386,8 +341,7 @@ fn init_leaves_git_configuration_to_the_repository() {
     // create a `.gitignore` inside it. Repositories that use git put `.wiki/`
     // in their own root ignore file; repositories without git do nothing.
     let d = tempdir().unwrap();
-    let out = run(d.path(), &["init"]);
-    assert_eq!(out.status.code(), Some(0));
+    init(d.path());
     assert!(
         !d.path().join(".wiki/.gitignore").exists(),
         "init must not write a git-related file under .wiki/"

@@ -384,8 +384,12 @@ pub struct IngestCfg {
     /// page had to work with rather than how many files were scanned. `0`
     /// disables the brake.
     pub max_pages_per_slice: usize,
-    /// New pages one merge may add before `approve` stops and asks.
+    /// New pages one merge may add before `submit` stops and asks.
     pub max_new_pages_per_run: usize,
+    /// Directory holding distilled session records, relative to the repository
+    /// root. Pages whose sources live here are what `query --no-archive` hides.
+    /// An empty string disables the marker.
+    pub session_dir: String,
 }
 
 impl Default for IngestCfg {
@@ -393,6 +397,7 @@ impl Default for IngestCfg {
         Self {
             max_pages_per_slice: 5,
             max_new_pages_per_run: 20,
+            session_dir: String::from("sessions"),
         }
     }
 }

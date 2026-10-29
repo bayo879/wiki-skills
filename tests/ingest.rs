@@ -166,10 +166,20 @@ fn submit_with_no_pages_refreshes_every_staged_candidate() {
     let (d, cfg) = setup();
     let root = d.path();
     let mut store = open(root);
-    staging::write_page(root, &cfg, "concept/retry", &page_block("retry", "重试", &[".wiki/raw/a.md"]))
-        .unwrap();
-    staging::write_page(root, &cfg, "concept/refund", &page_block("refund", "退款", &[".wiki/raw/a.md"]))
-        .unwrap();
+    staging::write_page(
+        root,
+        &cfg,
+        "concept/retry",
+        &page_block("retry", "重试", &[".wiki/raw/a.md"]),
+    )
+    .unwrap();
+    staging::write_page(
+        root,
+        &cfg,
+        "concept/refund",
+        &page_block("refund", "退款", &[".wiki/raw/a.md"]),
+    )
+    .unwrap();
     let report = ingest::submit(root, &cfg, &mut store, &[]).unwrap();
     assert_eq!(report.pages_written.len(), 2);
 }

@@ -40,13 +40,7 @@ fn run_text(dir: &Path, args: &[&str]) -> std::process::Output {
 /// A temp repository with the contract files and directories in place.
 fn repo() -> TempDir {
     let dir = tempdir().unwrap();
-    let out = Command::cargo_bin("llm-wiki")
-        .unwrap()
-        .arg("init")
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "init failed: {}", stderr(&out));
+    llm_wiki::init::run(dir.path(), false).expect("init");
     dir
 }
 

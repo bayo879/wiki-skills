@@ -9,9 +9,11 @@
 //!
 //! Two rules keep it honest:
 //!
-//! - it only reads. Nothing here creates, migrates or repairs anything, so the
-//!   report describes the repository as it arrived rather than as the check
-//!   left it;
+//! - by default it only reads. Nothing here creates, migrates or repairs
+//!   anything, so the report describes the repository as it arrived rather
+//!   than as the check left it. `--fix` is the one exception: it bootstraps an
+//!   uninitialised repository, runs the mechanical lint fixes and rebuilds the
+//!   search index, then reports what it did;
 //! - a check that cannot run is reported, not skipped. The unknown is a
 //!   finding.
 //!
@@ -36,8 +38,11 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::cli::DoctorOnly;
 use crate::config::{self, Config, Primary, CONFIG_FILE, SCHEMA_FILE};
 use crate::lock;
+use crate::paths;
+use crate::render;
 use crate::staging;
 use crate::store::{self, Store, StoreError};
 
@@ -131,13 +136,29 @@ impl Check {
     }
 }
 
+/// The knobs `doctor` accepts.
+#[derive(Debug, Default, Clone)]
+pub struct DoctorOptions {
+    /// Repair what has one obvious correction before reporting.
+    pub fix: bool,
+    /// Run only one family of checks.
+    pub only: Option<DoctorOnly>,
+    /// Restrict the `convert` and `session` families to one source key.
+    pub key: Option<String>,
+}
+
 /// Runs every check, in report order.
 ///
 /// `cfg` is the contract the caller already loaded, when it has one. The
 /// contract is still read from disk here: a caller that could not load it
 /// passes `None` and `doctor` reports the parse error itself instead of
 /// refusing to run.
-pub fn run(root: &Path, cfg: Option<&Config>) -> Vec<Check> {
+pub fn run(root: &Path, cfg: Option<&Config>, opts: &DoctorOptions) -> Vec<Check> {
+    let mut out = Vec::new();
+    if opts.fix {
+        out.extend(repair(root));
+    }
+
     let text = fs::read_to_string(root.join(CONFIG_FILE)).ok();
     let parsed = text
         .as_deref()
@@ -145,18 +166,243 @@ pub fn run(root: &Path, cfg: Option<&Config>) -> Vec<Check> {
     let fallback = Config::default();
     let effective = cfg.or(parsed.as_ref()).unwrap_or(&fallback);
 
-    vec![
-        check_config(root, text.as_deref()),
-        check_schema(root),
-        check_paths(root, effective),
-        check_db(root, effective),
-        check_fts5(),
-        check_legacy(root),
-        check_lock(root, effective),
-        check_staging(root),
-        check_token(text.as_deref()),
-        check_external_backend(effective),
-    ]
+    let mut checks = match opts.only {
+        // Only the families that describe the repository's shape.
+        Some(DoctorOnly::Scan) => vec![
+            check_paths(root, effective),
+            check_legacy(root),
+            check_lock(root, effective),
+            check_staging(root),
+        ],
+        Some(DoctorOnly::Convert) => check_convert(root, effective, opts.key.as_deref()),
+        Some(DoctorOnly::Session) => check_session(root, effective, opts.key.as_deref()),
+        None => vec![
+            check_config(root, text.as_deref()),
+            check_schema(root),
+            check_paths(root, effective),
+            check_db(root, effective),
+            check_fts5(),
+            check_legacy(root),
+            check_lock(root, effective),
+            check_staging(root),
+            check_token(text.as_deref()),
+            check_external_backend(effective),
+        ],
+    };
+    out.append(&mut checks);
+    out
+}
+
+/// Applies the repairs `--fix` is allowed to make, one check each.
+///
+/// Order matters: a fresh repository has to exist before lint or the index can
+/// run, and lint's rewrites have to land before the index is rebuilt from them.
+fn repair(root: &Path) -> Vec<Check> {
+    let mut out = Vec::new();
+    if !root.join(CONFIG_FILE).is_file() {
+        match crate::init::run(root, false) {
+            Ok(outcome) => out.push(Check::ok(
+                "init",
+                format!(
+                    "created {} paths, kept {}",
+                    outcome.created.len(),
+                    outcome.skipped.len()
+                ),
+            )),
+            Err(err) => {
+                out.push(Check::fail("init", format!("cannot initialise: {err}")));
+                return out;
+            }
+        }
+    }
+
+    let Ok(cfg) = Config::load(root) else {
+        out.push(Check::fail(
+            "config",
+            format!("{} does not parse; cannot repair", CONFIG_FILE),
+        ));
+        return out;
+    };
+    let db = root.join(&cfg.paths.engine).join(DB_FILE);
+    let mut store = match Store::open(&db) {
+        Ok(store) => store,
+        Err(err) => {
+            out.push(Check::fail("ledger", format!("{err}")));
+            return out;
+        }
+    };
+    if let Err(err) = store.migrate() {
+        out.push(Check::fail("ledger", format!("{err}")));
+        return out;
+    }
+
+    match crate::lint::fix(root, &cfg, &mut store) {
+        Ok(report) => out.push(Check {
+            name: "lint_fix",
+            level: if report.remaining.is_empty() {
+                Level::Ok
+            } else {
+                Level::Warn
+            },
+            detail: format!(
+                "fixed {} items, {} findings remain",
+                report.fixed,
+                report.remaining.len()
+            ),
+        }),
+        Err(err) => out.push(Check::fail("lint_fix", err.to_string())),
+    }
+
+    match crate::query::reindex(root, &cfg, &mut store) {
+        Ok(count) => out.push(Check::ok("index", format!("reindexed {count} keys"))),
+        Err(err) => out.push(Check::fail("index", err.to_string())),
+    }
+    out
+}
+
+/// `--only convert`: every pending source still parses.
+///
+/// Nothing is written: this is the answer `ingest` would give if it ran now,
+/// without taking the answer.
+fn check_convert(root: &Path, cfg: &Config, only_key: Option<&str>) -> Vec<Check> {
+    const NAME: &str = "convert";
+    let db = root.join(&cfg.paths.engine).join(DB_FILE);
+    let Ok(store) = Store::open(&db) else {
+        return vec![Check::fail(NAME, "cannot open the ledger")];
+    };
+    let report = match crate::scan::scan_source(root, cfg, &store) {
+        Ok(report) => report,
+        Err(err) => return vec![Check::fail(NAME, format!("cannot scan: {err}"))],
+    };
+
+    let mut pending = 0usize;
+    let mut unreadable = Vec::new();
+    for change in &report.changes {
+        let touches = matches!(
+            change.kind,
+            crate::scan::ChangeKind::New | crate::scan::ChangeKind::Changed
+        );
+        if !touches {
+            continue;
+        }
+        if let Some(want) = only_key {
+            if change.key != want {
+                continue;
+            }
+        }
+        pending += 1;
+        let path = root.join(&cfg.paths.source).join(&change.key);
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let source = crate::parse::Source::inline(&change.key, &bytes);
+        if let Err(err) = crate::parse::parse_with(cfg, &source) {
+            unreadable.push(format!("{}: {err}", change.key));
+        }
+    }
+
+    if unreadable.is_empty() {
+        vec![Check::ok(
+            NAME,
+            format!("{pending} pending sources all parse"),
+        )]
+    } else {
+        vec![Check::fail(
+            NAME,
+            format!(
+                "{} of {pending} pending sources do not parse: {}",
+                unreadable.len(),
+                unreadable.join("; ")
+            ),
+        )]
+    }
+}
+
+/// `--only session`: every distilled record under `[ingest].session_dir`
+/// reached a page.
+///
+/// This is the one check that sees the write path from the source side: a
+/// session transcript nobody distilled is a source the next `ingest` will
+/// convert and then nobody will cite.
+fn check_session(root: &Path, cfg: &Config, only_key: Option<&str>) -> Vec<Check> {
+    const NAME: &str = "session";
+    let dir = cfg.ingest.session_dir.trim();
+    if dir.is_empty() {
+        return vec![Check::ok(
+            NAME,
+            "session_dir is empty; no source is marked as a distilled record",
+        )];
+    }
+    let base = root.join(dir);
+    if !base.is_dir() {
+        return vec![Check::ok(NAME, format!("{dir}/ does not exist yet"))];
+    }
+
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(&base)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_file() {
+            files.push(entry.path().to_path_buf());
+        }
+    }
+    if files.is_empty() {
+        return vec![Check::ok(NAME, format!("{dir}/ is empty"))];
+    }
+
+    // Every raw key a published page cites, normalized to the raw path.
+    let mut cited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for path in render::page_files(&root.join(&cfg.paths.wiki)).unwrap_or_default() {
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok((front, _)) = crate::page::parse(&bytes) else {
+            continue;
+        };
+        for source in &front.sources {
+            let bare = source.split('#').next().unwrap_or(source);
+            cited.insert(bare.to_string());
+        }
+    }
+
+    let mut pending = Vec::new();
+    for path in files {
+        let Ok(rel) = paths::identity_key(root, &path) else {
+            continue;
+        };
+        if let Some(want) = only_key {
+            if !rel.contains(want) {
+                continue;
+            }
+        }
+        let raw = format!(
+            "{}/{rel}.md",
+            cfg.paths.raw.trim_end_matches('/').trim_start_matches('/')
+        );
+        let raw_path = root
+            .join(cfg.paths.raw.trim_start_matches('/'))
+            .join(format!("{rel}.md"));
+        if !raw_path.is_file() {
+            pending.push(format!("{rel}: not converted"));
+        } else if !cited.contains(&raw) {
+            pending.push(format!("{rel}: converted but no page cites it"));
+        }
+    }
+
+    if pending.is_empty() {
+        vec![Check::ok(
+            NAME,
+            format!("every record under {dir}/ reached a page"),
+        )]
+    } else {
+        vec![Check::fail(
+            NAME,
+            format!(
+                "{} records under {dir}/ have no page: {}",
+                pending.len(),
+                pending.join("; ")
+            ),
+        )]
+    }
 }
 
 /// `config`: the contract exists, parses, validates, and carries its sections.

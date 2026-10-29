@@ -133,12 +133,11 @@ fn init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall() 
     let root = dir.path();
 
     // ---------------------------------------------------------------- init
-    let init = ok_call(root, &["init"]);
+    let init = llm_wiki::init::run(root, false).expect("init");
     assert!(
-        init["created"]
-            .as_array()
-            .is_some_and(|created| !created.is_empty()),
-        "init reports what it made: {init}"
+        !init.created.is_empty(),
+        "init reports what it made: {:?}",
+        init.created
     );
     assert!(root.join(".wiki/wiki.toml").is_file());
     assert!(root.join(".wiki/SCHEMA.md").is_file());
