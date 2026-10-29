@@ -107,6 +107,13 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 `ingest submit` 把候选的摘要写进 `page_meta`，`approve` 用它对账「交稿后有没有人手改」。但 `approve` 只把字节移进 `wiki/`，不写 FTS；`query::refresh` 的跳过条件是「摘要相同且索引里已有这个 key」，于是改过的旧页会被永久跳过，直到 `query --reindex`。所以 `approve` 发布后要对每个已发布页 `delete_page_meta`，让下一次 refresh 重建索引；`tests/version.rs::publishing_a_page_drops_the_index_record_so_the_next_query_reindexes_it` 钉住。
 
 
+### 2.16 目录布局只有一张表
+
+`src/layout.rs::LAYOUT` 是引擎目录的唯一清单：每条只有 `path` 与 `authored`，父先于子。
+`init` 遍历全表；`precondition::check` 只看 `authored`；`provision` 只补非 `authored`，并且跳过“父目录是缺失的 `authored` 目录”的子项——否则 `.wiki/pages/archive` 会顺带把 `.wiki/pages` 造出来，闸门就形同虚设。
+不要再加回 `DIRS` / `PROVISIONED` 这类第二份清单；加目录只改 `LAYOUT` 并标明是否 `authored`。
+`tests/precondition.rs::provision_never_creates_the_authored_tree_but_repairs_its_children_when_it_exists` 钉住补建不会复活产品目录；`src/layout.rs` 的单元测试钉住父先于子、只有 `.wiki/pages` 是 `authored`。
+
 ## 3. 提交前自查
 
 ```bash

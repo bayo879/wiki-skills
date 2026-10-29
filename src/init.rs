@@ -13,19 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-/// Directories that must exist after `init`, parents before children.
-const DIRS: [&str; 10] = [
-    ".wiki",
-    ".wiki/cache",
-    ".wiki/objects",
-    ".wiki/pages",
-    ".wiki/pages/archive",
-    ".wiki/pages/audit",
-    ".wiki/raw",
-    ".wiki/sessions",
-    ".wiki/staging",
-    ".wiki/versions",
-];
+use crate::layout::LAYOUT;
 
 /// The two contract files and the content `init` gives them.
 const CONTRACT_FILES: [(&str, &str); 2] = [
@@ -63,7 +51,8 @@ pub type Result<T> = std::result::Result<T, InitError>;
 pub fn run(root: &Path, force: bool) -> Result<InitOutcome> {
     let mut outcome = InitOutcome::default();
 
-    for dir in DIRS {
+    for entry in LAYOUT {
+        let dir = entry.path;
         let path = root.join(dir);
         if path.is_dir() {
             outcome.skipped.push(dir.to_string());

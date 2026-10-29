@@ -139,6 +139,24 @@ fn an_engine_deleted_in_full_asks_for_init() {
 }
 
 #[test]
+fn provision_never_creates_the_authored_tree_but_repairs_its_children_when_it_exists() {
+    let d = TempDir::new().unwrap();
+    fs::create_dir_all(d.path().join(".wiki")).unwrap();
+    fs::write(d.path().join(".wiki/wiki.toml"), "").unwrap();
+
+    llm_wiki::precondition::provision(d.path()).unwrap();
+    assert!(!d.path().join(".wiki/pages").exists());
+    assert!(!d.path().join(".wiki/pages/archive").exists());
+    assert!(d.path().join(".wiki/raw").is_dir());
+
+    // Once the product exists, its derived children are repairable again.
+    fs::create_dir_all(d.path().join(".wiki/pages")).unwrap();
+    llm_wiki::precondition::provision(d.path()).unwrap();
+    assert!(d.path().join(".wiki/pages/archive").is_dir());
+    assert!(d.path().join(".wiki/pages/audit").is_dir());
+}
+
+#[test]
 fn doctor_still_works_before_init_so_the_problem_can_be_diagnosed() {
     let d = TempDir::new().unwrap();
     let (code, v) = call(d.path(), &["doctor"]);

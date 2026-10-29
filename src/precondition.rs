@@ -7,7 +7,8 @@
 //! cause, and an agent reading them cannot tell "run `init`" from "this repo is
 //! damaged".
 //!
-//! So the layout is split by who owns it:
+//! So the layout is one table, [`crate::layout::LAYOUT`], and each entry says
+//! who owns it:
 //!
 //! - **Authored and load-bearing**: `.wiki/wiki.toml` and `.wiki/pages/`. The
 //!   contract is the decision the user made, and the page tree is the product;
@@ -15,11 +16,15 @@
 //!   refuses with [`CODE`] and the hint in [`HINT`]; nothing is guessed or
 //!   repaired. (`.wiki/SCHEMA.md` is the third file `init` writes, but no code
 //!   reads it, so it is `doctor`'s business rather than a hard stop.)
-//! - **Provisioned**: `.wiki/raw/`, `.wiki/audit/`, `.wiki/archive/` and the
-//!   rest of the engine. These are inputs, outputs and derived state; `init`
-//!   creates them, but a fresh clone has no engine directory at all because it
-//!   is ignored. Refusing there would make "clone and run" impossible, so
-//!   [`provision`] creates them on demand.
+//! - **Provisioned**: everything else under `.wiki/`. These are inputs, outputs
+//!   and derived state; `init` creates them, but a fresh clone has no engine
+//!   directory at all because it is not committed. Refusing there would make
+//!   "clone and run" impossible, so [`provision`] creates them on demand.
+//!
+//! `provision` never creates a missing authored directory, not even through a
+//! child: `.wiki/pages/archive` must not resurrect `.wiki/pages`. The gate runs
+//! before provision, so that state usually never reaches this code; the rule
+//! keeps "not initialised" from silently becoming "empty wiki" if it ever does.
 //!
 //! Nothing outside `.wiki/` is ever created: the repository itself is the source
 //! tree, and the tool treats it as read-only.
@@ -29,6 +34,8 @@
 
 use std::path::Path;
 
+use crate::layout::LAYOUT;
+
 /// Error code for a repository that has not been initialised.
 pub const CODE: &str = "E_NOT_INITIALISED";
 
@@ -37,25 +44,6 @@ pub const HINT: &str = "run `llm-wiki init` in the repository root, then retry";
 
 /// The contract every command loads; `init` is the only thing that writes it.
 const REQUIRED_FILES: [&str; 1] = [".wiki/wiki.toml"];
-
-/// The directory that holds the product.
-const REQUIRED_DIRS: [&str; 1] = [".wiki/pages"];
-
-/// Directories that are inputs, outputs or derived state.
-///
-/// Parents come before children so a single `create_dir_all` per entry works
-/// even on a fresh checkout.
-const PROVISIONED: [&str; 9] = [
-    ".wiki",
-    ".wiki/cache",
-    ".wiki/objects",
-    ".wiki/pages/archive",
-    ".wiki/pages/audit",
-    ".wiki/raw",
-    ".wiki/sessions",
-    ".wiki/staging",
-    ".wiki/versions",
-];
 
 /// The first authored path that is missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,9 +82,9 @@ pub fn check(root: &Path) -> Result<(), Missing> {
             return Err(Missing::File(name));
         }
     }
-    for name in REQUIRED_DIRS {
-        if !root.join(name).is_dir() {
-            return Err(Missing::Dir(name));
+    for entry in LAYOUT.iter().filter(|entry| entry.authored) {
+        if !root.join(entry.path).is_dir() {
+            return Err(Missing::Dir(entry.path));
         }
     }
     Ok(())
@@ -104,14 +92,31 @@ pub fn check(root: &Path) -> Result<(), Missing> {
 
 /// Creates the provisioned directories that are absent.
 ///
-/// Existing directories are left alone, so this is safe on every call and does
-/// not touch the mtime of anything already there.
+/// A derived directory under a missing authored parent is skipped: creating
+/// `.wiki/pages/archive` would also create `.wiki/pages`, which is exactly the
+/// product the gate refuses to invent. Existing directories are left alone, so
+/// this is safe on every call and does not touch the mtime of anything already
+/// there.
 pub fn provision(root: &Path) -> std::io::Result<()> {
-    for name in PROVISIONED {
-        let path = root.join(name);
+    for entry in LAYOUT.iter().filter(|entry| !entry.authored) {
+        if missing_authored_ancestor(root, entry.path) {
+            continue;
+        }
+        let path = root.join(entry.path);
         if !path.is_dir() {
             std::fs::create_dir_all(&path)?;
         }
     }
     Ok(())
+}
+
+/// True when `path` sits under an authored directory that is absent.
+fn missing_authored_ancestor(root: &Path, path: &str) -> bool {
+    LAYOUT.iter().any(|entry| {
+        entry.authored
+            && path
+                .strip_prefix(entry.path)
+                .is_some_and(|rest| rest.starts_with('/'))
+            && !root.join(entry.path).is_dir()
+    })
 }
