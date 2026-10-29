@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use tempfile::tempdir;
@@ -354,7 +355,7 @@ fn validate_accepts_env_var_name_for_external() {
 }
 
 #[test]
-fn init_defaults_the_session_dir_to_the_repository_root() {
+fn init_defaults_the_session_dir_to_the_sessions_directory() {
     let d = tempdir().unwrap();
     init(d.path());
     let cfg = llm_wiki::config::Config::load(d.path()).expect("contract");
@@ -369,6 +370,48 @@ fn generated_contract_carries_the_ingest_defaults() {
     assert_eq!(cfg.ingest.max_pages_per_slice, 5);
     assert_eq!(cfg.ingest.max_new_pages_per_run, 20);
     assert_eq!(cfg.ingest.session_dir, "sessions");
+}
+
+/// Collects every leaf key path of a TOML value, `a.b.c` style.
+fn key_paths(value: &toml::Value, prefix: &str, out: &mut BTreeSet<String>) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, child) in table {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                key_paths(child, &path, out);
+            }
+        }
+        _ => {
+            out.insert(String::from(prefix));
+        }
+    }
+}
+
+#[test]
+fn the_generated_contract_names_exactly_the_keys_the_loader_accepts() {
+    // The template is the only discoverable list of configuration keys, so a
+    // key added to `Config` but not to the template is invisible to whoever
+    // reads `wiki.toml`. Comparing leaf paths both ways keeps the promise the
+    // header makes: every default is written out.
+    let d = tempdir().unwrap();
+    init(d.path());
+    let text = std::fs::read_to_string(d.path().join(".wiki/wiki.toml")).expect("generated");
+    let template: toml::Value = toml::from_str(&text).expect("the template is TOML");
+    let cfg = llm_wiki::config::Config::load(d.path()).expect("the template loads");
+    let serialised = toml::Value::try_from(&cfg).expect("Config serialises to TOML");
+
+    let mut in_template = BTreeSet::new();
+    key_paths(&template, "", &mut in_template);
+    let mut in_config = BTreeSet::new();
+    key_paths(&serialised, "", &mut in_config);
+    assert_eq!(
+        in_template, in_config,
+        "the generated contract and the Config type disagree; add the missing key to WIKI_TOML"
+    );
 }
 
 #[test]
