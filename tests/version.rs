@@ -374,8 +374,10 @@ fn approve_with_no_candidates_refuses() {
     }
 }
 
+/// A hand edit after `ingest submit` makes the candidate unsafe; on its own it
+/// leaves the round with nothing to publish, which is a result and not an error.
 #[test]
-fn approve_refuses_a_hand_edited_candidate() {
+fn approve_holds_a_hand_edited_candidate() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
     stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
@@ -386,48 +388,54 @@ fn approve_refuses_a_hand_edited_candidate() {
         &page_text("alpha", "Alpha").replace("正文", "手改"),
     );
 
-    let err = version::approve(root, &cfg, &mut store, true).unwrap_err();
-    assert_eq!(err.code(), "E_STAGING_DRIFT");
-    assert!(
-        err.to_string().contains("concept/alpha.md"),
-        "detail names the page: {err}"
-    );
+    let outcome = version::approve(root, &cfg, &mut store, true).unwrap();
+    let ApproveOutcome::NothingPublished { held_back } = outcome else {
+        panic!("expected NothingPublished, got {outcome:?}");
+    };
+    assert_eq!(held_back.len(), 1);
+    assert_eq!(held_back[0].reason, "page_drift");
+    assert_eq!(held_back[0].page, "concept/alpha.md");
     assert!(!root.join(".wiki/pages/concept/alpha.md").exists());
     assert!(version_dirs(root).is_empty());
 }
 
 #[test]
-fn approve_refuses_a_stale_source() {
+fn approve_holds_a_page_citing_a_stale_source() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
     write_file(root, ".wiki/raw/a.md", "one\n");
     let old = hash::hash_file(&root.join(".wiki/raw/a.md"), true).unwrap();
-    stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
+    let text = sourced_page("alpha", "Alpha", &[".wiki/raw/a.md"]);
+    stage_text(root, &cfg, &mut store, "concept/alpha.md", &text);
     set_source(root, "a.md", None, Some(&old));
     // The source changed after the round: merging would publish stale synthesis.
     write_file(root, ".wiki/raw/a.md", "two\n");
 
-    let err = version::approve(root, &cfg, &mut store, false).unwrap_err();
-    assert_eq!(err.code(), "E_STAGING_STALE");
-    assert!(
-        err.to_string().contains("a.md"),
-        "detail names the source: {err}"
-    );
+    let outcome = version::approve(root, &cfg, &mut store, false).unwrap();
+    let ApproveOutcome::NothingPublished { held_back } = outcome else {
+        panic!("expected NothingPublished, got {outcome:?}");
+    };
+    assert_eq!(held_back.len(), 1);
+    assert_eq!(held_back[0].reason, "source_stale");
     assert!(!root.join(".wiki/pages/concept/alpha.md").exists());
 }
 
 #[test]
-fn approve_refuses_a_vanished_source() {
+fn approve_holds_a_page_citing_a_vanished_source() {
     let (dir, cfg, mut store) = boot();
     let root = dir.path();
     write_file(root, ".wiki/raw/a.md", "one\n");
     let old = hash::hash_file(&root.join(".wiki/raw/a.md"), true).unwrap();
-    stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
+    let text = sourced_page("alpha", "Alpha", &[".wiki/raw/a.md"]);
+    stage_text(root, &cfg, &mut store, "concept/alpha.md", &text);
     set_source(root, "a.md", None, Some(&old));
     fs::remove_file(root.join(".wiki/raw/a.md")).unwrap();
 
-    let err = version::approve(root, &cfg, &mut store, true).unwrap_err();
-    assert_eq!(err.code(), "E_STAGING_STALE");
+    let outcome = version::approve(root, &cfg, &mut store, true).unwrap();
+    let ApproveOutcome::NothingPublished { held_back } = outcome else {
+        panic!("expected NothingPublished, got {outcome:?}");
+    };
+    assert_eq!(held_back[0].reason, "source_stale");
 }
 
 #[test]
@@ -1055,4 +1063,62 @@ fn approve_confirm_overrules_the_slice_budget() {
         ApproveOutcome::Applied { .. } => {}
         other => panic!("expected the merge to go through, got {other:?}"),
     }
+}
+
+/// An unattended run has nobody to retry, so one unsafe candidate must not sink
+/// the round: it stays in staging with a reason and the rest still land.
+#[test]
+fn a_hand_edited_candidate_is_held_while_the_rest_land() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    stage(root, &cfg, &mut store, "concept/alpha.md", "Alpha");
+    stage(root, &cfg, &mut store, "concept/beta.md", "Beta");
+    let beta = staging::dir(root).join("concept/beta.md");
+    fs::write(&beta, page_text("beta", "Beta 改过")).unwrap();
+
+    let outcome = version::approve(root, &cfg, &mut store, true).unwrap();
+    let ApproveOutcome::Applied {
+        published,
+        held_back,
+        ..
+    } = outcome
+    else {
+        panic!("expected Applied, got {outcome:?}");
+    };
+    assert_eq!(published, vec![String::from("concept/alpha.md")]);
+    assert_eq!(held_back.len(), 1);
+    assert_eq!(held_back[0].reason, "page_drift");
+    assert!(!root.join(&cfg.paths.wiki).join("concept/beta.md").exists());
+}
+
+/// A source that changed after the round read it only poisons the pages that
+/// cite it; the round still closes.
+#[test]
+fn a_stale_source_holds_only_the_pages_that_cite_it() {
+    let (dir, cfg, mut store) = boot();
+    let root = dir.path();
+    let old = hash::hash_bytes(b"\xe6\x97\xa7\n");
+    write_file(root, ".wiki/raw/a.md", "旧\n");
+    write_file(root, ".wiki/raw/b.md", "旧\n");
+    set_source(root, "a.md", None, Some(&old));
+    set_source(root, "b.md", None, Some(&old));
+    let alpha = sourced_page("alpha", "Alpha", &[".wiki/raw/a.md"]);
+    let beta = sourced_page("beta", "Beta", &[".wiki/raw/b.md"]);
+    stage_text(root, &cfg, &mut store, "concept/alpha.md", &alpha);
+    stage_text(root, &cfg, &mut store, "concept/beta.md", &beta);
+    write_file(root, ".wiki/raw/b.md", "新\n");
+
+    let outcome = version::approve(root, &cfg, &mut store, true).unwrap();
+    let ApproveOutcome::Applied {
+        published,
+        held_back,
+        ..
+    } = outcome
+    else {
+        panic!("expected Applied, got {outcome:?}");
+    };
+    assert_eq!(published, vec![String::from("concept/alpha.md")]);
+    assert_eq!(held_back.len(), 1);
+    assert_eq!(held_back[0].page, "concept/beta.md");
+    assert_eq!(held_back[0].reason, "source_stale");
 }

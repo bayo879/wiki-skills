@@ -594,15 +594,10 @@ fn run_submit(confirm: bool, auto: bool) -> ! {
     }
 }
 
-/// A drift or a stale source is a finding (exit 1); everything else — a missing
-/// candidate set, a bad reason, an unwritable path — is the caller's or the
-/// environment's mistake (exit 2).
+/// Everything `version` can fail with — a missing candidate set, a bad reason,
+/// an unwritable path — is the caller's or the environment's mistake (exit 2).
 fn fail_version(cmd: &str, err: &version::VersionError) -> ! {
-    let exit = match err {
-        version::VersionError::Drift { .. } | version::VersionError::Stale { .. } => Exit::Error,
-        _ => Exit::Usage,
-    };
-    report::fail(cmd, exit, err.code(), &err.to_string())
+    report::fail(cmd, Exit::Usage, err.code(), &err.to_string())
 }
 
 /// `query` is the only command that decides when to pay for an index update: a

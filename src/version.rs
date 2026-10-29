@@ -14,10 +14,12 @@
 //! The decision gate has four outcomes. `approve` publishes the staged
 //! candidates and advances the baseline, `reject` throws them away, records
 //! why, and settles the round's sources at the bytes on disk, `instruct` leaves free text for the next agent session, and `defer`
-//! keeps the queue for later. A merge is only allowed while every candidate
-//! still matches what `ingest submit` wrote and every pending source still
-//! matches the hash the round recorded: a hand edit or a changed source makes
-//! the merge unsafe, so it is refused instead of silently published.
+//! keeps the queue for later. A candidate is only published while it still
+//! matches what `ingest submit` wrote and every source it cites still matches
+//! the hash the round recorded: a hand edit or a changed source makes that one
+//! page unsafe, so it stays in staging with a reason while the rest land. An
+//! unattended round has nobody to retry, which is why the unsafe page is held
+//! instead of failing the whole merge.
 //!
 //! The snapshot directory is fixed at `.wiki/versions` because the engine
 //! location is part of the repository layout that `init` creates, matching how
@@ -65,7 +67,8 @@ const ENGINE: &str = ".wiki";
 pub struct HeldBack {
     /// Page id, relative to the wiki root (`concept/alpha.md`).
     pub page: String,
-    /// Stable reason code: `page_overlap`, `page_slice_budget`, `page_budget`.
+    /// Stable reason code: `page_overlap`, `page_slice_budget`, `page_budget`,
+    /// `page_drift`, `source_stale`.
     pub reason: String,
     /// Human-readable explanation.
     pub detail: String,
@@ -114,18 +117,6 @@ pub enum VersionError {
     /// A page path could not be turned into an identity key.
     #[error(transparent)]
     Path(#[from] paths::PathError),
-    /// A candidate no longer matches what ingest recorded for it.
-    #[error("staging page {page} changed after it was written; refusing to merge")]
-    Drift {
-        /// Page path relative to the wiki root.
-        page: String,
-    },
-    /// A source changed after the round that produced the candidates.
-    #[error("source {source_key} changed after it was processed; refusing to merge")]
-    Stale {
-        /// Source key relative to the raw directory.
-        source_key: String,
-    },
     /// Staging mirrors the wiki, so there is nothing to publish.
     #[error("there is nothing to approve: staging mirrors wiki/")]
     NothingToApprove,
@@ -193,8 +184,6 @@ impl VersionError {
             | VersionError::Path(_)
             | VersionError::Encode { .. }
             | VersionError::Hash(_) => "E_IO",
-            VersionError::Drift { .. } => "E_STAGING_DRIFT",
-            VersionError::Stale { .. } => "E_STAGING_STALE",
             VersionError::NothingToApprove => "E_NOTHING_TO_APPROVE",
             VersionError::NoReason => "E_NO_REASON",
             VersionError::NoText => "E_NO_TEXT",
@@ -443,28 +432,50 @@ pub fn approve(
         return Err(VersionError::NothingToApprove);
     }
     let prefix = cfg.paths.wiki.trim_end_matches('/');
-    for candidate in &candidates {
+    let raw_prefix = cfg.paths.raw.trim_end_matches('/');
+    // Two facts make one candidate unsafe, and neither is the round's fault: a
+    // candidate edited after `ingest submit` wrote it (the digest no longer
+    // matches), or a source that changed after the round read it (the page may
+    // synthesise bytes nobody will ever see). An unattended run has nobody to
+    // retry, so the page is held in staging with a reason while the rest still
+    // land; the round only fails when nothing can be published.
+    let stale = stale_sources(root, cfg)?;
+    let mut trusted: Vec<Candidate> = Vec::new();
+    let mut held_back: Vec<HeldBack> = Vec::new();
+    for candidate in candidates {
         let key = format!("{prefix}/{}", candidate.rel);
         let recorded = store.get_page_meta(&key)?;
         let current = hash::hash_file(&candidate.staging, true)?;
         if recorded.as_ref().map(|row| row.hash.as_str()) != Some(current.as_str()) {
-            return Err(VersionError::Drift {
+            held_back.push(HeldBack {
                 page: candidate.rel.clone(),
+                reason: String::from("page_drift"),
+                detail: String::from("交稿后有人手改了这个候选；重新 submit 再发布"),
             });
+            continue;
         }
+        if !stale.is_empty() && cites_stale(&candidate.staging, raw_prefix, &stale) {
+            held_back.push(HeldBack {
+                page: candidate.rel.clone(),
+                reason: String::from("source_stale"),
+                detail: String::from("引用的源在开轮后变了；重开一轮 ingest 再写"),
+            });
+            continue;
+        }
+        trusted.push(candidate);
     }
-    check_sources(root, cfg)?;
 
-    let (published, held_back) = if confirm {
+    let (published, mut brakes) = if confirm {
         (
-            candidates.iter().map(|c| c.rel.clone()).collect::<Vec<_>>(),
+            trusted.iter().map(|c| c.rel.clone()).collect::<Vec<_>>(),
             Vec::new(),
         )
     } else {
-        screen(root, cfg, &candidates)?
+        screen(root, cfg, &trusted)?
     };
+    brakes.splice(0..0, held_back);
     if published.is_empty() {
-        return Ok(ApproveOutcome::NothingPublished { held_back });
+        return Ok(ApproveOutcome::NothingPublished { held_back: brakes });
     }
 
     // Publishing does not take a snapshot: the round opened by `ingest` is the
@@ -473,7 +484,7 @@ pub fn approve(
         .first()
         .map(|row| row.version.clone())
         .unwrap_or_default();
-    for candidate in &candidates {
+    for candidate in &trusted {
         if !published.iter().any(|rel| rel == &candidate.rel) {
             continue;
         }
@@ -492,10 +503,10 @@ pub fn approve(
         store.delete_page_meta(&format!("{prefix}/{rel}"))?;
     }
     render::write_index(root, cfg)?;
-    let detail = if held_back.is_empty() {
+    let detail = if brakes.is_empty() {
         format!("{} 页", published.len())
     } else {
-        format!("{} 页，{} 页留在暂存区", published.len(), held_back.len())
+        format!("{} 页，{} 页留在暂存区", published.len(), brakes.len())
     };
     journal::append(root, "submit", Some(&name), &detail)?;
 
@@ -509,7 +520,7 @@ pub fn approve(
     Ok(ApproveOutcome::Applied {
         version: name,
         published,
-        held_back,
+        held_back: brakes,
     })
 }
 
@@ -1238,22 +1249,43 @@ fn candidates(root: &Path, cfg: &Config) -> Result<Vec<Candidate>> {
 }
 
 /// Refuses the merge when a pending source no longer matches its recorded hash.
-fn check_sources(root: &Path, cfg: &Config) -> Result<()> {
+/// The pending sources whose bytes no longer match what the round recorded.
+///
+/// An empty list is the safe case. A missing file counts as stale: the page
+/// cites bytes that are gone.
+fn stale_sources(root: &Path, cfg: &Config) -> Result<Vec<String>> {
     let raw_dir = root.join(&cfg.paths.raw);
+    let mut stale: Vec<String> = Vec::new();
     for (source_key, recorded) in staging::manifest_pending(root)? {
         let path = paths::join_key(&raw_dir, &source_key);
         match hash::hash_file(&path, true) {
             Ok(current) if current == recorded => {}
-            Ok(_) => return Err(VersionError::Stale { source_key }),
+            Ok(_) => stale.push(source_key),
             Err(hash::HashError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
-                return Err(VersionError::Stale { source_key })
+                stale.push(source_key);
             }
             Err(err) => return Err(err.into()),
         }
     }
-    Ok(())
+    Ok(stale)
+}
+
+/// Whether a candidate cites any source the round can no longer trust.
+///
+/// A candidate that cannot be read is treated as citing one: an unattended run
+/// must not publish bytes it could not inspect.
+fn cites_stale(path: &Path, raw_prefix: &str, stale: &[String]) -> bool {
+    let Ok(raw) = fs::read(path) else {
+        return true;
+    };
+    let Ok((front, _body)) = crate::page::parse(&raw) else {
+        return true;
+    };
+    staging::source_keys(&front.sources, raw_prefix)
+        .iter()
+        .any(|key| stale.iter().any(|seen| seen == key))
 }
 
 /// Builds an [`VersionError::Io`] for `path`.
