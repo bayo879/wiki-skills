@@ -91,17 +91,17 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 `.wiki/` 是这台机器唯一的事实源，**明确不考虑跨机器**：不要加任何推送/拉取子命令、不要读远端、不要假设网络、不要为多机场景改账本，也不要在文档里教人搬目录或合并账本——两边各写再拼会得到互相矛盾的 `source_hash`。
 目录内仍然只存仓库相对路径（键一律来自 `paths::identity_key`），这是「不写死绝对路径」的卫生要求，不是为搬移做准备。
 
-### 2.13 否决也是对源的表决
+### 2.13 回退不是表决，也不是忽略
 
-`reject` 只丢页面是不够的：人看过这批变动、说了「不要」，变动的字节就已经被承认为已知状态。所以 `abort` 走 `Ledger::mark_reviewed`，把这一轮每个源的账本摘要换成磁盘上的当前摘要，并把它们在 manifest 里的 `baseline_hash` 推到 `current_hash`。
-不这么做，同一个文件会一轮轮以 `changed` 回来，直到有人把它加进忽略列表——而拒绝和忽略是两件事。
-摘要必须按 `scan` 的选法算（小文件全量、大文件采样，见 `accept_reviewed_sources`），否则下一次 `doctor` 的扫描立刻报假 `changed`；`tests/version.rs::reject_accepts_the_source_bytes_so_it_is_not_reported_again` 钉住。超大读不了的文件跳过，让它继续报 `oversize`。
+`reject` 与 `abort` 只剩库函数（`src/version.rs::reject`、`src/ingest.rs::abort`，测试用），CLI 没有入口。**丢弃一轮用 `version restore <本轮 ingest 版本>`**：两棵树按 manifest 还原、staging 与 pending 清空，但不 `mark_reviewed`——下一轮 `ingest` 仍会把那批源报成 `changed`。
+所以「看过并说不要」只剩一条路：`ignore --add` 挡住源。两者语义不同，别指望 restore 代替 ignore——restore 改内容，ignore 改扫描范围。
+库里的表决路径没拆：`reject` 仍走 `Ledger::mark_reviewed` + `accept_reviewed_sources`（摘要按 `scan` 的选法算，小文件全量、大文件采样），否则下一轮立刻报假 `changed`；`tests/version.rs::reject_accepts_the_source_bytes_so_it_is_not_reported_again` 钉住。超大读不了的文件跳过，让它继续报 `oversize`。
 
-这道表决依赖开轮时把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `abort`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`abort` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
+这道表决依赖开轮时把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `reject`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`reject` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
 
 ### 2.14 决策日志不是内容
 
-每次 `submit` / `abort` 只往 `.wiki/journal.jsonl` 追加一行 JSON（`journal::append`），不再写 `pages/log.md`。三条后果要记住：日志不进版本（`collect_content` 只走 `pages/` 与 `raw/`），所以版本回退抹不掉它；它不参与 `query` 索引，所以搜不到；`detail` 里的换行被 JSON 转义，多行 `--reason` 不会破坏格式。想给它加读者就加，但别把它塞回页面树——那会让「回退会不会改历史」重新变成一个问题。
+每次 `submit` / `version restore` 只往 `.wiki/journal.jsonl` 追加一行 JSON（`journal::append`），不再写 `pages/log.md`。三条后果要记住：日志不进版本（`collect_content` 只走 `pages/` 与 `raw/`），所以版本回退抹不掉它；它不参与 `query` 索引，所以搜不到；`detail` 里的换行被 JSON 转义，多行 `--reason` 不会破坏格式。想给它加读者就加，但别把它塞回页面树——那会让「回退会不会改历史」重新变成一个问题。
 
 ### 2.15 发布后要清 `page_meta`，否则搜索停在旧正文
 
@@ -122,7 +122,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.18 删命令前先和 spec 做一次差集
 
-命令面收窄那一轮（22 → 5）把 `version` 整条删了，但 spec 的 §3 一直写着 `version list/diff/restore`，于是文档承诺了一条不存在的退路。**`.wiki/` 是唯一的版本与内容所在，而且通常不进 git**（2.12），所以 `restore` 不是「人可能用不上的过程步骤」，而是坏发布的唯一出口；过程步骤能删，出口不能删。
+命令面收窄那一轮（22 → 6）把 `version` 整条删了，但 spec 的 §3 一直写着 `version list/diff/restore`，于是文档承诺了一条不存在的退路。**`.wiki/` 是唯一的版本与内容所在，而且通常不进 git**（2.12），所以 `restore` 不是「人可能用不上的过程步骤」，而是坏发布的唯一出口；过程步骤能删，出口不能删。
 删任何一条命令或 flag 前，先 `grep` spec 的 §3 与 §4 去向表，差集里没处理干净的要么补实现、要么改 spec，不能只删代码。
 `tests/cli_version.rs` 钉住三条：`submit` 不建版本、`restore` 不带 `--confirm` 时不动树、`restore` 本身也记一个 `rollback` 版本；`src/version.rs::approve` 的 `NothingToApprove` 在 CLI 层是 exit 0（重复 `submit` 不是错误）。
 
