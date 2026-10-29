@@ -264,7 +264,10 @@ fn cli_small_source_stays_whole() {
     let d = tiny_repo();
     fs::write(d.path().join("small.md"), "hello").unwrap();
 
-    let out = run(d.path(), &["--json", "parse", "--key", "small.md"]);
+    let out = run(
+        d.path(),
+        &["--json", "ingest", "--dry-run", "--key", "small.md"],
+    );
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let value = json_of(&out);
     assert_eq!(value["data"]["mode"], "full");
@@ -287,7 +290,10 @@ fn cli_large_source_reports_chunked_mode_and_materializes() {
     let body = "0123456789abcdef\n".repeat(400);
     fs::write(d.path().join("big.md"), &body).unwrap();
 
-    let out = run(d.path(), &["--json", "parse", "--key", "big.md"]);
+    let out = run(
+        d.path(),
+        &["--json", "ingest", "--dry-run", "--key", "big.md"],
+    );
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let value = json_of(&out);
     assert_eq!(value["data"]["mode"], "chunked");
@@ -320,7 +326,15 @@ fn cli_chunk_flag_materializes_on_demand() {
 
     let out = run(
         d.path(),
-        &["--json", "parse", "--key", "demand.md", "--chunk", "2"],
+        &[
+            "--json",
+            "ingest",
+            "--dry-run",
+            "--key",
+            "demand.md",
+            "--chunk",
+            "2",
+        ],
     );
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let value = json_of(&out);
@@ -345,7 +359,15 @@ fn cli_range_flag_joins_cached_chunks() {
 
     let out = run(
         d.path(),
-        &["--json", "parse", "--key", "big.md", "--range", "1-2"],
+        &[
+            "--json",
+            "ingest",
+            "--dry-run",
+            "--key",
+            "big.md",
+            "--range",
+            "1-2",
+        ],
     );
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let value = json_of(&out);
@@ -372,11 +394,51 @@ fn cli_rejects_invalid_chunk_and_range_arguments() {
     fs::write(d.path().join("big.md"), "abcdefghij".repeat(300)).unwrap();
 
     for args in [
-        vec!["--json", "parse", "--key", "big.md", "--chunk", "0"],
-        vec!["--json", "parse", "--key", "big.md", "--chunk", "99"],
-        vec!["--json", "parse", "--key", "big.md", "--range", "3"],
-        vec!["--json", "parse", "--key", "big.md", "--range", "0-1"],
-        vec!["--json", "parse", "--key", "big.md", "--range", "2-1"],
+        vec![
+            "--json",
+            "ingest",
+            "--dry-run",
+            "--key",
+            "big.md",
+            "--chunk",
+            "0",
+        ],
+        vec![
+            "--json",
+            "ingest",
+            "--dry-run",
+            "--key",
+            "big.md",
+            "--chunk",
+            "99",
+        ],
+        vec![
+            "--json",
+            "ingest",
+            "--dry-run",
+            "--key",
+            "big.md",
+            "--range",
+            "3",
+        ],
+        vec![
+            "--json",
+            "ingest",
+            "--dry-run",
+            "--key",
+            "big.md",
+            "--range",
+            "0-1",
+        ],
+        vec![
+            "--json",
+            "ingest",
+            "--dry-run",
+            "--key",
+            "big.md",
+            "--range",
+            "2-1",
+        ],
     ] {
         let out = run(d.path(), &args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
@@ -391,7 +453,10 @@ fn cli_rejects_a_source_above_max_source_bytes() {
     let d = tiny_repo();
     fs::write(d.path().join("huge.md"), "x".repeat(11 * 1024)).unwrap();
 
-    let out = run(d.path(), &["--json", "parse", "--key", "huge.md"]);
+    let out = run(
+        d.path(),
+        &["--json", "ingest", "--dry-run", "--key", "huge.md"],
+    );
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     let value = json_of(&out);
     assert_eq!(value["ok"], false);
@@ -406,7 +471,15 @@ fn cli_rejects_chunk_and_range_together() {
     let out = run(
         d.path(),
         &[
-            "--json", "parse", "--key", "big.md", "--chunk", "1", "--range", "1-2",
+            "--json",
+            "ingest",
+            "--dry-run",
+            "--key",
+            "big.md",
+            "--chunk",
+            "1",
+            "--range",
+            "1-2",
         ],
     );
     assert_eq!(out.status.code(), Some(2), "{out:?}");

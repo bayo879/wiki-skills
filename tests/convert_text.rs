@@ -496,14 +496,14 @@ fn cli_parse_does_not_write_raw_or_ledger() {
 
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
-        .args(["--json", "parse", "--key", "a.md"])
+        .args(["--json", "ingest", "--dry-run", "--key", "a.md"])
         .current_dir(d.path())
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let value = json_of(&out);
     assert_eq!(value["ok"], true);
-    assert_eq!(value["cmd"], "parse");
+    assert_eq!(value["cmd"], "ingest");
     assert_eq!(value["data"]["backend"], "builtin-text");
     assert_eq!(value["data"]["chars"], 250);
     // `markdown_head` is the first 200 characters, so it is a prefix of the body.
@@ -535,7 +535,7 @@ fn cli_parse_truncates_the_head_to_200_chars() {
 
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
-        .args(["--json", "parse", "--key", "long.md"])
+        .args(["--json", "ingest", "--dry-run", "--key", "long.md"])
         .current_dir(d.path())
         .output()
         .unwrap();
@@ -693,7 +693,7 @@ fn cli_parse_of_a_missing_source_is_a_runtime_error() {
 
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
-        .args(["--json", "parse", "--key", "nope.md"])
+        .args(["--json", "ingest", "--dry-run", "--key", "nope.md"])
         .current_dir(d.path())
         .output()
         .unwrap();

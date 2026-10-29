@@ -93,6 +93,7 @@
   "init": [
     "cmd",
     "data.created[]",
+    "data.next",
     "data.skipped[]",
     "ok"
   ],

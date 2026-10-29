@@ -75,6 +75,40 @@ fn init_reports_created_then_skipped() {
 }
 
 #[test]
+fn init_ends_with_the_fixed_follow_up_prompt() {
+    let d = tempdir().unwrap();
+    let out = run(d.path(), &["init"]);
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let next = body["data"]["next"]
+        .as_str()
+        .expect("init must carry the follow-up prompt");
+    let root = d.path().canonicalize().unwrap();
+    assert!(
+        next.contains(&format!("`{}`", root.display())),
+        "the prompt must name the repository it just initialised: {next}"
+    );
+    assert!(next.contains("llm-wiki scan"), "{next}");
+    assert!(
+        next.contains("01:00"),
+        "the default period must be stated: {next}"
+    );
+
+    // The human form prints the same prompt on its own lines; folding it onto
+    // a single `next: ...` line would mangle the numbered list.
+    let human = Command::cargo_bin("llm-wiki")
+        .unwrap()
+        .arg("init")
+        .current_dir(d.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        text.contains(next),
+        "human output must carry the prompt verbatim: {text}"
+    );
+}
+
+#[test]
 fn init_force_rewrites_contracts_only() {
     let d = tempdir().unwrap();
     run(d.path(), &["init"]);

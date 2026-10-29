@@ -82,6 +82,31 @@ fn ingest_dry_run_writes_no_round() {
 }
 
 #[test]
+fn ingest_dry_run_key_prints_the_parse_preview() {
+    let dir = repo();
+    write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
+
+    let (code, body) = run(&dir, &["ingest", "--dry-run", "--key", "a.md"]);
+    assert_eq!(code, 0, "{body}");
+    assert!(body["data"]["backend"].is_string(), "{body}");
+    assert!(
+        body["data"]["markdown_head"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("订单超时后重试三次"),
+        "{body}"
+    );
+}
+
+#[test]
+fn ingest_key_without_dry_run_is_a_usage_error() {
+    let dir = repo();
+    write_source(&dir, "a.md", "# A\n\n正文\n");
+    let (code, body) = run(&dir, &["ingest", "--key", "a.md"]);
+    assert_eq!(code, 2, "{body}");
+}
+
+#[test]
 fn ingest_dry_run_tolerates_an_open_round() {
     let dir = repo();
     write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");

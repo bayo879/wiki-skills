@@ -69,13 +69,14 @@ fn dispatch(cli: Cli) -> ! {
         Command::Doctor => run_doctor(),
         Command::Scan { apply_moves } => run_scan(apply_moves),
         Command::Convert { key, limit } => run_convert(key, limit),
-        Command::Parse {
+        Command::Ingest {
+            keys,
+            dry_run,
             key,
             chunk,
             range,
             force_large,
-        } => run_parse(key, chunk, range, force_large),
-        Command::Ingest { keys, dry_run } => run_ingest(keys, dry_run),
+        } => run_ingest(keys, dry_run, key, chunk, range, force_large),
         Command::Submit { pages } => run_submit(pages),
         Command::Abort => run_abort(),
         Command::Lint { strict, fix } => run_lint(strict, fix),
@@ -491,7 +492,7 @@ fn conversion_targets(
     Ok(keys)
 }
 
-/// `parse` shows what one source parses to.
+/// `ingest --dry-run --key` shows what one source parses to.
 ///
 /// It is the safe counterpart of `convert`: the same backend and the same
 /// warnings, but nothing is written except the chunk cache of a large source.
@@ -499,38 +500,39 @@ fn conversion_targets(
 /// larger source is materialized as chunk files under `.wiki/cache/<hash>/` and
 /// reported by `chunks_dir`, so later reads can pick one chunk (`--chunk`) or a
 /// window of chunks (`--range`) instead of loading the whole text again.
-fn run_parse(
+fn parse_preview(
+    cmd: &str,
+    root: &Path,
+    cfg: &Config,
     key: String,
     chunk_wanted: Option<usize>,
     range: Option<String>,
     force_large: bool,
 ) -> ! {
-    let root = wiki_root("parse");
-    let cfg = open_repo("parse", &root);
     let source_path = paths::join_key(&root.join(&cfg.paths.source), &key);
     let bytes = match std::fs::read(&source_path) {
         Ok(bytes) => bytes,
         Err(err) => report::fail(
-            "parse",
+            cmd,
             Exit::Error,
             "E_IO",
             &format!("cannot read {}: {err}", source_path.display()),
         ),
     };
 
-    let delivery = match parse::delivery_with(&cfg, bytes.len() as u64, force_large) {
+    let delivery = match parse::delivery_with(cfg, bytes.len() as u64, force_large) {
         Ok(delivery) => delivery,
-        Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
+        Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
     };
 
-    let (extracted, backend) = match parse::parse_with(&cfg, &parse::Source::inline(&key, &bytes)) {
+    let (extracted, backend) = match parse::parse_with(cfg, &parse::Source::inline(&key, &bytes)) {
         Ok(result) => result,
-        Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
+        Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
     };
 
     if delivery == parse::Delivery::Whole && chunk_wanted.is_none() && range.is_none() {
         report::emit(
-            "parse",
+            cmd,
             ParseData::Full {
                 backend,
                 chars: extracted.markdown.chars().count(),
@@ -549,7 +551,7 @@ fn run_parse(
     let cache_root = root.join(&cfg.paths.engine).join("cache");
     let chunks = match chunk::materialize(&cache_root, hash, &extracted.markdown, target) {
         Ok(chunks) => chunks,
-        Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
+        Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
     };
     let count = chunks.len();
     let chunks_rel = paths::to_slash(&Path::new(&cfg.paths.engine).join("cache").join(hash));
@@ -557,10 +559,10 @@ fn run_parse(
     if let Some(number) = chunk_wanted {
         let text = match chunk::read_range(&cache_root, hash, number, number) {
             Ok(text) => text,
-            Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
+            Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
         };
         report::emit(
-            "parse",
+            cmd,
             ParseData::Chunk {
                 backend,
                 chars: text.chars().count(),
@@ -575,14 +577,14 @@ fn run_parse(
     if let Some(spec) = range {
         let (from, to) = match parse_chunk_range(&spec) {
             Ok(range) => range,
-            Err(message) => report::fail("parse", Exit::Usage, "E_BAD_ARGS", &message),
+            Err(message) => report::fail(cmd, Exit::Usage, "E_BAD_ARGS", &message),
         };
         let text = match chunk::read_range(&cache_root, hash, from, to) {
             Ok(text) => text,
-            Err(err) => report::fail("parse", Exit::Usage, err.code(), &err.to_string()),
+            Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
         };
         report::emit(
-            "parse",
+            cmd,
             ParseData::Range {
                 backend,
                 chars: text.chars().count(),
@@ -596,7 +598,7 @@ fn run_parse(
     }
 
     report::emit(
-        "parse",
+        cmd,
         ParseData::Chunked {
             backend,
             chars: extracted.markdown.chars().count(),
@@ -628,10 +630,22 @@ fn parse_chunk_range(spec: &str) -> std::result::Result<(usize, usize), String> 
 ///
 /// A round never publishes: `submit` refreshes the candidates under staging and
 /// regenerates the staging index, and approval is what moves pages into `wiki/`.
-fn run_ingest(keys: Vec<String>, dry_run: bool) -> ! {
+fn run_ingest(
+    keys: Vec<String>,
+    dry_run: bool,
+    key: Option<String>,
+    chunk: Option<usize>,
+    range: Option<String>,
+    force_large: bool,
+) -> ! {
     let cmd = "ingest";
     let root = wiki_root(cmd);
     let cfg = open_repo(cmd, &root);
+    // `--dry-run --key` is the parse preview that used to be its own command:
+    // same inputs, same output shape, one fewer verb.
+    if let Some(key) = key {
+        parse_preview(cmd, &root, &cfg, key, chunk, range, force_large);
+    }
     let mut store = open_store(cmd, &root, &cfg);
     // A named key is the only source read this round; no key means every new or
     // changed source. Either way the round runs now: `ingest` is the explicit

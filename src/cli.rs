@@ -56,22 +56,6 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
-    /// Show what a source parses to, without writing anything.
-    Parse {
-        /// Source key, relative to `source/`.
-        #[arg(long)]
-        key: String,
-        /// Return one chunk by number (1-based); materialized on demand.
-        #[arg(long, conflicts_with = "range")]
-        chunk: Option<usize>,
-        /// Return chunks `A-B` (1-based, inclusive), joined.
-        #[arg(long, conflicts_with = "chunk")]
-        range: Option<String>,
-        /// Extract a source above `parse.max_source_bytes` anyway, for diagnosis.
-        /// Nothing is written: an oversize source never enters the ledger.
-        #[arg(long)]
-        force_large: bool,
-    },
     /// One write-line round: scan, convert, and open it.
     Ingest {
         /// Sources to read; empty means every new or changed source.
@@ -79,6 +63,18 @@ pub enum Command {
         /// Report what the round would do and write nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Preview one source's parse output; requires --dry-run.
+        #[arg(long, requires = "dry_run")]
+        key: Option<String>,
+        /// Return chunk `N` (1-based, materialized on demand).
+        #[arg(long, conflicts_with = "range")]
+        chunk: Option<usize>,
+        /// Return chunks `A-B` (1-based, inclusive), joined.
+        #[arg(long, conflicts_with = "chunk")]
+        range: Option<String>,
+        /// Extract a source above `parse.max_source_bytes` anyway, for diagnosis.
+        #[arg(long)]
+        force_large: bool,
     },
     /// Close the open round: refresh the candidates and the staging index.
     Submit {
@@ -258,4 +254,3 @@ pub enum ArchiveCommand {
         yes: bool,
     },
 }
-

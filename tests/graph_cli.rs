@@ -103,11 +103,14 @@ fn parse_refuses_an_oversize_source_without_force_large() {
     fs::create_dir_all(root.join(".")).unwrap();
     fs::write(root.join("note.md"), "这是一份超过十六字节的笔记正文。\n").unwrap();
 
-    let refused = run_json(root, &["parse", "--key", "note.md"]);
+    let refused = run_json(root, &["ingest", "--dry-run", "--key", "note.md"]);
     assert_eq!(refused.status.code(), Some(2), "oversize is a usage error");
     assert_eq!(json(&refused)["error"]["code"], "E_OVERSIZE");
 
-    let forced = run_json(root, &["parse", "--key", "note.md", "--force-large"]);
+    let forced = run_json(
+        root,
+        &["ingest", "--dry-run", "--key", "note.md", "--force-large"],
+    );
     assert!(forced.status.success(), "force-large overrides the ceiling");
     let data = &json(&forced)["data"];
     assert_eq!(data["backend"], "builtin-text");
@@ -127,7 +130,10 @@ fn force_large_still_writes_nothing() {
     fs::create_dir_all(root.join(".")).unwrap();
     fs::write(root.join("note.md"), "这是一份超过十六字节的笔记正文。\n").unwrap();
 
-    let out = run_json(root, &["parse", "--key", "note.md", "--force-large"]);
+    let out = run_json(
+        root,
+        &["ingest", "--dry-run", "--key", "note.md", "--force-large"],
+    );
     assert!(out.status.success());
     assert!(
         !root.join(".wiki/raw/note.md").exists(),
