@@ -671,6 +671,27 @@ fn submit_names_the_missing_field_and_shows_a_skeleton() {
 
 /// The version anchor moved from `approve` to `ingest`: an open round is what
 /// takes a snapshot, publishing is not a second version.
+/// A timer runs `ingest` on a schedule; a round that finds nothing new must not
+/// add a version, or the history grows on the clock instead of on the work.
+#[test]
+fn a_repeated_ingest_round_records_no_second_version() {
+    let (d, cfg) = setup();
+    let mut store = open(d.path());
+    let input = || ingest::BeginInput {
+        sources: vec![String::from(".wiki/raw/a.md")],
+        pages: Vec::new(),
+        dry_run: false,
+    };
+    ingest::begin(d.path(), &cfg, &mut store, &input()).unwrap();
+    let opened = version::history(d.path()).unwrap().len();
+    ingest::begin(d.path(), &cfg, &mut store, &input()).unwrap();
+    assert_eq!(
+        version::history(d.path()).unwrap().len(),
+        opened,
+        "a round that repeats the open one must not record another version"
+    );
+}
+
 #[test]
 fn ingest_creates_the_version_and_approve_does_not() {
     let (d, cfg) = setup();

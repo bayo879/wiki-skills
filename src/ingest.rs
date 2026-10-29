@@ -324,18 +324,27 @@ pub fn begin(
     let body = staging::encode_pending(&pending)?;
     let pending_hash = hash::hash_bytes(&body);
     if !input.dry_run {
-        // The ledger comes before the pending list, and the first candidate
-        // only after `begin` returns: without this, that candidate would look
-        // like a staging directory whose ledger was lost.
-        staging::Manifest::ensure(root)?;
-        for page in affected.iter().filter(|page| page.path.is_empty()) {
-            staging::ensure_type(root, &page.typ)?;
+        // A timer runs `ingest` on a schedule, so a round that finds nothing
+        // new must not record a version per run: same pending list and no new
+        // source means this round repeats the one already open. Without this
+        // the history grows on the clock instead of on the work.
+        // `pending` is keyed by source with its digest, so an equal list means
+        // the same sources in the same state as the round already open.
+        let repeats = matches!(staging::pending_hashes(root), Ok(open) if open == pending);
+        if !repeats {
+            // The ledger comes before the pending list, and the first candidate
+            // only after `begin` returns: without this, that candidate would look
+            // like a staging directory whose ledger was lost.
+            staging::Manifest::ensure(root)?;
+            for page in affected.iter().filter(|page| page.path.is_empty()) {
+                staging::ensure_type(root, &page.typ)?;
+            }
+            staging::write_pending(root, &pending)?;
+            // The round opens a version: what the pages were before the round is
+            // the baseline `submit` and `restore` compare against, so the snapshot
+            // has to exist before any candidate is written.
+            version::checkpoint(root, cfg, store, "ingest")?;
         }
-        staging::write_pending(root, &pending)?;
-        // The round opens a version: what the pages were before the round is
-        // the baseline `submit` and `restore` compare against, so the snapshot
-        // has to exist before any candidate is written.
-        version::checkpoint(root, cfg, store, "ingest")?;
     }
 
     Ok(BeginReport {
