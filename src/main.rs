@@ -10,23 +10,18 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
-use llm_wiki::archive;
 use llm_wiki::chunk;
-use llm_wiki::cli::{ArchiveCommand, Cli, Command, DoctorOnly, IgnoreCommand, ScopeArg};
+use llm_wiki::cli::{Cli, Command, DoctorOnly};
 use llm_wiki::config::Config;
-use llm_wiki::convert;
 use llm_wiki::doctor::{self, Check, Level};
 use llm_wiki::graph;
 use llm_wiki::hash;
-use llm_wiki::ignore;
 use llm_wiki::ingest;
-use llm_wiki::moves;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
 use llm_wiki::precondition;
 use llm_wiki::query::{self, Scope as QueryScope};
 use llm_wiki::report::{self, Exit};
-use llm_wiki::scan::{self, ChangeKind};
 use llm_wiki::store::Store;
 use llm_wiki::sync;
 use llm_wiki::version::{self, ApproveOutcome};
@@ -57,15 +52,7 @@ fn flag_present(flag: &str) -> bool {
 
 fn dispatch(cli: Cli) -> ! {
     match cli.command {
-        Command::Version => report::emit(
-            "version",
-            VersionData {
-                version: env!("CARGO_PKG_VERSION"),
-            },
-        ),
         Command::Doctor { fix, only, key } => run_doctor(fix, only, key),
-        Command::Scan { apply_moves } => run_scan(apply_moves),
-        Command::Convert { key, limit } => run_convert(key, limit),
         Command::Ingest {
             keys,
             dry_run,
@@ -76,30 +63,12 @@ fn dispatch(cli: Cli) -> ! {
         } => run_ingest(keys, dry_run, key, chunk, range, force_large),
         Command::Submit { confirm, auto } => run_submit(confirm, auto),
         Command::Abort => run_abort(),
-        Command::Checkpoint { label } => run_checkpoint(label),
-        Command::Reject { reason } => run_reject(reason),
-        Command::Instruct { text } => run_instruct(text),
-        Command::Defer => run_defer(),
-        Command::Ignore { command } => run_ignore(command),
-        Command::Rollback { version } => run_rollback(version),
-        Command::History => run_history(),
-        Command::Diff { version } => run_diff(version),
-        Command::Archive { command } => run_archive(command),
-        Command::Recall { query, full } => run_recall(query, full),
         Command::Query {
             text,
             limit,
-            expand,
-            scope,
-            reindex,
-        } => run_query(text, limit, expand, scope, reindex),
-        Command::Graph => run_graph(),
-        Command::Sync {
-            limit,
-            dry_run,
-            force,
-            only,
-        } => run_sync(limit, dry_run, force, only),
+            no_archive,
+            graph,
+        } => run_query(text, limit, no_archive, graph),
     }
 }
 
@@ -211,182 +180,11 @@ fn human_doctor(data: &DoctorData) -> String {
         .join("\n")
 }
 
-fn run_scan(apply_moves: bool) -> ! {
-    let root = wiki_root("scan");
-    let cfg = open_repo("scan", &root);
-    let mut store = open_store("scan", &root, &cfg);
-    let outcome = match scan::scan_all(&root, &cfg, &store) {
-        Ok(outcome) => outcome,
-        Err(err) => report::fail("scan", Exit::Usage, "E_IO", &err.to_string()),
-    };
-    let changes = outcome.changes;
-    let ignored_count = outcome.ignored_count;
-
-    if !apply_moves {
-        report::emit(
-            "scan",
-            ScanData {
-                changes,
-                ignored_count,
-                moved: None,
-            },
-        );
-    }
-
-    // `--apply-moves` is the only part of `scan` that writes: the plain scan
-    // stays read-only. A collision is a finding, not an environment error, so
-    // the round reports `ok: true` and exits 1.
-    let moved = match moves::apply(&root, &cfg, &mut store, &changes) {
-        Ok(moved) => moved,
-        Err(err) => report::fail("scan", Exit::Error, err.code(), &err.to_string()),
-    };
-    let exit = if moved.is_clean() {
-        Exit::Ok
-    } else {
-        Exit::Error
-    };
-    report::emit_with(
-        "scan",
-        ScanData {
-            changes,
-            ignored_count,
-            moved: Some(moved),
-        },
-        exit,
-        human_scan,
-    )
-}
-
-/// Human rendering of an `--apply-moves` scan: the changes, then what the
-/// migration did with them.
-fn human_scan(data: &ScanData) -> String {
-    let mut out = format!("changes: {}\n", data.changes.len());
-    for change in &data.changes {
-        out.push_str(&format!("- {:?} {}\n", change.kind, change.key));
-    }
-    if let Some(moved) = &data.moved {
-        out.push_str(&format!("moved: {}\n", moved.applied.len()));
-        for applied in &moved.applied {
-            out.push_str(&format!(
-                "- {} -> {} ({} page(s))\n",
-                applied.from,
-                applied.to,
-                applied.pages.len()
-            ));
-        }
-        for collision in &moved.collisions {
-            out.push_str(&format!(
-                "- skipped {} -> {}: {} ({})\n",
-                collision.from, collision.to, collision.message, collision.code
-            ));
-        }
-    }
-    out.trim_end().to_string()
-}
-
-/// The `scan` payload. `moved` is only present when `--apply-moves` ran.
-#[derive(Serialize)]
-struct ScanData {
-    changes: Vec<scan::Change>,
-    ignored_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    moved: Option<moves::MoveReport>,
-}
-
-/// `convert` turns pending sources into the raw layer.
-///
-/// With `--key` the named source is converted whether or not the ledger has seen
-/// it; without it, a scan decides what is pending — sources classified as new or
-/// changed — and the first `--limit` of them, in key order, are converted.
-///
-/// A batch keeps going after a bad source: the failure is recorded under
-/// `data.failures` and the round still reports `ok: true` with exit 1, so one
-/// unparseable PDF cannot stop the other nineteen sources from being converted.
-/// `--key` is not a batch — there is nothing to continue with — so it keeps the
-/// immediate failure path (`ok: false`, exit 1).
-fn run_convert(key: Option<String>, limit: usize) -> ! {
-    let root = wiki_root("convert");
-    let cfg = open_repo("convert", &root);
-    let mut store = open_store("convert", &root, &cfg);
-    let named = key.is_some();
-
-    let keys = match conversion_targets(&root, &cfg, &store, key.as_deref(), limit) {
-        Ok(keys) => keys,
-        Err(err) => report::fail("convert", Exit::Usage, "E_IO", &err.to_string()),
-    };
-
-    let mut converted = Vec::with_capacity(keys.len());
-    let mut failures = Vec::new();
-    for key in keys {
-        match convert::convert_one(&root, &cfg, &mut store, &key) {
-            Ok(outcome) => converted.push(outcome),
-            Err(err) => {
-                if named {
-                    report::fail("convert", Exit::Error, err.code(), &err.to_string());
-                }
-                failures.push(ConvertFailure {
-                    key,
-                    code: String::from(err.code()),
-                    message: err.to_string(),
-                });
-            }
-        }
-    }
-    let exit = if failures.is_empty() {
-        Exit::Ok
-    } else {
-        Exit::Error
-    };
-    report::emit_with(
-        "convert",
-        ConvertData {
-            converted,
-            failures,
-        },
-        exit,
-        human_convert,
-    )
-}
-
-/// Human rendering of a batch: what converted, then which sources did not.
-fn human_convert(data: &ConvertData) -> String {
-    let mut out = format!("converted: {}\n", data.converted.len());
-    for failure in &data.failures {
-        out.push_str(&format!(
-            "failed: {} ({}): {}\n",
-            failure.key, failure.code, failure.message
-        ));
-    }
-    out.trim_end().to_string()
-}
-
 /// The source keys `convert` should hand to [`convert::convert_one`].
 ///
 /// `--key` names one source directly, so it works before the first scan. Without
 /// it the pending set comes from a scan: the ledger alone cannot answer the
 /// question, because a new source only gains a row once something converts it.
-fn conversion_targets(
-    root: &Path,
-    cfg: &Config,
-    store: &Store,
-    key: Option<&str>,
-    limit: usize,
-) -> std::result::Result<Vec<String>, scan::ScanError> {
-    if let Some(key) = key {
-        return Ok(vec![String::from(key)]);
-    }
-    let scan_report = scan::scan_source(root, cfg, store)?;
-    let mut keys: Vec<String> = scan_report
-        .changes
-        .into_iter()
-        .filter(|change| matches!(change.kind, ChangeKind::New | ChangeKind::Changed))
-        .map(|change| change.key)
-        .collect();
-    keys.sort();
-    keys.truncate(limit);
-    Ok(keys)
-}
-
 /// `ingest --dry-run --key` shows what one source parses to.
 ///
 /// It is the safe counterpart of `convert`: the same backend and the same
@@ -560,7 +358,10 @@ fn run_ingest(
             } else {
                 Exit::Ok
             };
-            report::emit_with(cmd, report, exit, human_sync)
+            // The round tells the caller where the candidates go: the agent
+            // must not guess a path, and `submit` publishes whatever is there.
+            let data = IngestData::from_report(report, &cfg);
+            report::emit_with(cmd, data, exit, human_ingest)
         }
         Err(err) => {
             let message = match &err {
@@ -577,7 +378,82 @@ fn run_ingest(
     }
 }
 
+/// What `ingest` reports: the round, then where the candidates belong.
+#[derive(Serialize)]
+struct IngestData {
+    run_id: String,
+    changes: Vec<llm_wiki::scan::Change>,
+    stale_pages: Vec<String>,
+    converted: usize,
+    ingested: Vec<String>,
+    queued: usize,
+    warnings: Vec<String>,
+    failures: usize,
+    /// Directory the candidates are written to.
+    write_to: String,
+    /// Page types this repository accepts.
+    types: Vec<String>,
+}
+
+impl IngestData {
+    fn from_report(report: sync::SyncReport, cfg: &Config) -> Self {
+        Self {
+            run_id: report.run_id,
+            changes: report.changes,
+            stale_pages: report.stale_pages,
+            converted: report.converted,
+            ingested: report.ingested,
+            queued: report.queued,
+            warnings: report.warnings,
+            failures: report.failures,
+            write_to: format!("{}/staging", cfg.paths.engine.trim_end_matches('/')),
+            types: cfg.schema.types.clone(),
+        }
+    }
+}
+
+/// Human rendering of an ingest round: what moved, then where to write.
+fn human_ingest(data: &IngestData) -> String {
+    let mut out = human_sync(&sync::SyncReport {
+        run_id: data.run_id.clone(),
+        changes: data.changes.clone(),
+        stale_pages: data.stale_pages.clone(),
+        converted: data.converted,
+        ingested: data.ingested.clone(),
+        queued: data.queued,
+        warnings: data.warnings.clone(),
+        failures: data.failures,
+    });
+    if !data.ingested.is_empty() {
+        out.push_str(&format!(
+            "\nwrite_to: {}\ntypes: {}",
+            data.write_to,
+            data.types.join(", ")
+        ));
+    }
+    out
+}
+
 /// Drops the open round; the candidates nobody has reviewed stay in staging.
+fn human_sync(report: &sync::SyncReport) -> String {
+    let mut out = format!("run_id: {}\n", report.run_id);
+    out.push_str(&format!("converted: {}\n", report.converted));
+    out.push_str(&format!(
+        "ingested: {}\n",
+        if report.ingested.is_empty() {
+            String::from("(none)")
+        } else {
+            report.ingested.join(", ")
+        }
+    ));
+    out.push_str(&format!("queued: {}\n", report.queued));
+    out.push_str(&format!("failures: {}\n", report.failures));
+    for warning in &report.warnings {
+        out.push_str(&format!("warning: {warning}\n"));
+    }
+    out.trim_end().to_string()
+}
+
 fn run_abort() -> ! {
     let cmd = "abort";
     let root = wiki_root(cmd);
@@ -598,73 +474,6 @@ fn fail_ingest(cmd: &str, err: &ingest::IngestError) -> ! {
         Exit::Error
     };
     report::fail(cmd, exit, err.code(), &err.to_string())
-}
-
-/// `checkpoint` snapshots the approved wiki as a new version.
-fn run_sync(limit: Option<usize>, dry_run: bool, force: bool, only: Vec<String>) -> ! {
-    let root = wiki_root("sync");
-    let cfg = open_repo("sync", &root);
-    let mut store = open_store("sync", &root, &cfg);
-    let args = sync::SyncArgs {
-        limit: limit.unwrap_or(cfg.sync.max_per_run),
-        dry_run,
-        force,
-        only,
-        open_round: false,
-    };
-    match sync::run(&root, &cfg, &mut store, &args) {
-        Ok(report) => {
-            let exit = if report.failures > 0 {
-                Exit::Error
-            } else {
-                Exit::Ok
-            };
-            report::emit_with("sync", report, exit, human_sync)
-        }
-        Err(err) => {
-            // The envelope carries the code, so the message is the hint alone:
-            // the library's `Display` prefixes the code for log lines.
-            let message = match &err {
-                sync::SyncError::Lock(lock_err) => lock_err.hint(),
-                _ => err.to_string(),
-            };
-            let exit = if err.code() == "E_LOCKED" {
-                Exit::Busy
-            } else {
-                Exit::Usage
-            };
-            report::fail("sync", exit, err.code(), &message)
-        }
-    }
-}
-
-fn human_sync(report: &sync::SyncReport) -> String {
-    let mut out = format!("run_id: {}\n", report.run_id);
-    out.push_str(&format!("converted: {}\n", report.converted));
-    out.push_str(&format!(
-        "ingested: {}\n",
-        if report.ingested.is_empty() {
-            String::from("(none)")
-        } else {
-            report.ingested.join(", ")
-        }
-    ));
-    out.push_str(&format!("queued: {}\n", report.queued));
-    out.push_str(&format!("failures: {}\n", report.failures));
-    for warning in &report.warnings {
-        out.push_str(&format!("warning: {warning}\n"));
-    }
-    out.trim_end().to_string()
-}
-
-fn run_checkpoint(label: String) -> ! {
-    let root = wiki_root("checkpoint");
-    let cfg = open_repo("checkpoint", &root);
-    let mut store = open_store("checkpoint", &root, &cfg);
-    match version::checkpoint(&root, &cfg, &mut store, &label) {
-        Ok(version) => report::emit("checkpoint", CheckpointData { version }),
-        Err(err) => fail_version("checkpoint", &err),
-    }
 }
 
 /// `submit` closes the round: it refreshes the named candidates, then publishes
@@ -727,174 +536,6 @@ fn run_submit(confirm: bool, auto: bool) -> ! {
     }
 }
 
-/// `reject` discards the candidates and keeps the reason in the log.
-fn run_reject(reason: String) -> ! {
-    let root = wiki_root("reject");
-    let cfg = open_repo("reject", &root);
-    let mut store = open_store("reject", &root, &cfg);
-    match version::reject(&root, &cfg, &mut store, &reason) {
-        Ok(()) => report::emit("reject", RejectData { reason }),
-        Err(err) => fail_version("reject", &err),
-    }
-}
-
-/// `instruct` writes guidance for the next agent session.
-fn run_instruct(text: String) -> ! {
-    let root = wiki_root("instruct");
-    let cfg = open_repo("instruct", &root);
-    let mut store = open_store("instruct", &root, &cfg);
-    match version::instruct(&root, &cfg, &mut store, &text) {
-        Ok(()) => report::emit("instruct", InstructData { text }),
-        Err(err) => fail_version("instruct", &err),
-    }
-}
-
-/// `defer` keeps the queue for later and changes nothing else.
-fn run_defer() -> ! {
-    let root = wiki_root("defer");
-    let cfg = open_repo("defer", &root);
-    let mut store = open_store("defer", &root, &cfg);
-    match version::defer(&root, &cfg, &mut store) {
-        Ok(()) => report::emit("defer", json!({})),
-        Err(err) => fail_version("defer", &err),
-    }
-}
-
-/// `ignore` reads and edits the project ignore list in `.wiki/ignore`.
-///
-/// The list is the user's answer to "this source keeps churning": `sync` and
-/// `convert` never see an ignored path, and `archive purge` leaves its derived
-/// copy alone, so the exclusion survives a cleanup.
-fn run_ignore(command: IgnoreCommand) -> ! {
-    let cmd = "ignore";
-    let root = wiki_root(cmd);
-    let _ = open_repo(cmd, &root);
-
-    match command {
-        IgnoreCommand::List => match ignore::IgnoreList::load(&root) {
-            Ok(list) => report::emit(
-                cmd,
-                json!({ "action": "list", "patterns": list.patterns() }),
-            ),
-            Err(err) => fail_ignore(cmd, &err),
-        },
-        IgnoreCommand::Add { patterns } => match ignore::add(&root, &patterns) {
-            Ok(added) => {
-                let all = match ignore::IgnoreList::load(&root) {
-                    Ok(list) => list.patterns(),
-                    Err(err) => fail_ignore(cmd, &err),
-                };
-                report::emit(
-                    cmd,
-                    json!({ "action": "add", "added": added, "patterns": all }),
-                )
-            }
-            Err(err) => fail_ignore(cmd, &err),
-        },
-        IgnoreCommand::Remove { patterns } => match ignore::remove(&root, &patterns) {
-            Ok(removed) => {
-                let all = match ignore::IgnoreList::load(&root) {
-                    Ok(list) => list.patterns(),
-                    Err(err) => fail_ignore(cmd, &err),
-                };
-                report::emit(
-                    cmd,
-                    json!({ "action": "remove", "removed": removed, "patterns": all }),
-                )
-            }
-            Err(err) => fail_ignore(cmd, &err),
-        },
-        IgnoreCommand::Check { path } => {
-            let key = path
-                .trim_end_matches('/')
-                .trim_start_matches("./")
-                .replace('\\', "/");
-            let is_dir = path.ends_with('/') || root.join(&key).is_dir();
-            match ignore::IgnoreList::load(&root) {
-                Ok(list) => {
-                    let rule = list.deciding_pattern(&key, is_dir);
-                    let ignored = list.is_ignored(&key, is_dir);
-                    report::emit(
-                        cmd,
-                        json!({
-                            "action": "check",
-                            "path": key,
-                            "ignored": ignored,
-                            "rule": rule,
-                        }),
-                    )
-                }
-                Err(err) => fail_ignore(cmd, &err),
-            }
-        }
-    }
-}
-
-/// `rollback` materialises a recorded version into the working tree.
-fn run_rollback(version: String) -> ! {
-    let cmd = "rollback";
-    let root = wiki_root(cmd);
-    let cfg = open_repo(cmd, &root);
-    let mut store = open_store(cmd, &root, &cfg);
-    match version::rollback(&root, &cfg, &mut store, &version) {
-        Ok(outcome) => report::emit_with(cmd, outcome, Exit::Ok, human_rollback),
-        Err(err) => fail_version(cmd, &err),
-    }
-}
-
-/// `history` lists the recorded versions, newest first.
-fn run_history() -> ! {
-    let cmd = "history";
-    let root = wiki_root(cmd);
-    let _ = open_repo(cmd, &root);
-    match version::history(&root) {
-        Ok(rows) => report::emit(cmd, json!({ "versions": rows })),
-        Err(err) => fail_version(cmd, &err),
-    }
-}
-
-/// `diff` compares one version with the working tree.
-fn run_diff(version: String) -> ! {
-    let cmd = "diff";
-    let root = wiki_root(cmd);
-    let cfg = open_repo(cmd, &root);
-    match version::diff(&root, &cfg, &version) {
-        Ok(outcome) => report::emit_with(cmd, outcome, Exit::Ok, human_diff),
-        Err(err) => fail_version(cmd, &err),
-    }
-}
-
-/// Human rendering of a rollback: what came back, and the version that records it.
-fn human_rollback(outcome: &version::RollbackOutcome) -> String {
-    format!(
-        "restored {} ({} files) into pages/ and raw/; recorded as {}\n",
-        outcome.restored, outcome.files, outcome.version
-    )
-}
-
-/// Human rendering of a diff, one line per path.
-fn human_diff(diff: &version::VersionDiff) -> String {
-    let mut out = String::new();
-    for path in &diff.added {
-        out.push_str(&format!("+ {path}\n"));
-    }
-    for path in &diff.removed {
-        out.push_str(&format!("- {path}\n"));
-    }
-    for path in &diff.changed {
-        out.push_str(&format!("~ {path}\n"));
-    }
-    if out.is_empty() {
-        out.push_str("no differences\n");
-    }
-    out
-}
-
-/// An unreadable ignore file is an environment problem, not a finding.
-fn fail_ignore(cmd: &str, err: &ignore::IgnoreError) -> ! {
-    report::fail(cmd, Exit::Error, err.code(), &err.to_string())
-}
-
 /// A drift or a stale source is a finding (exit 1); everything else — a missing
 /// candidate set, a bad reason, an unwritable path — is the caller's or the
 /// environment's mistake (exit 2).
@@ -906,165 +547,43 @@ fn fail_version(cmd: &str, err: &version::VersionError) -> ! {
     report::fail(cmd, exit, err.code(), &err.to_string())
 }
 
-/// `archive` inspects, seals or clears the conversation summaries.
-///
-/// The summary body is never written here: the agent writes
-/// `wiki/archive/<id>.md` first, and `seal` only records it and re-hangs the
-/// pages that cited the sealed sources.
-fn run_archive(command: ArchiveCommand) -> ! {
-    let cmd = "archive";
-    let root = wiki_root(cmd);
-    let cfg = open_repo(cmd, &root);
-    let mut store = open_store(cmd, &root, &cfg);
-
-    match command {
-        ArchiveCommand::Status => match archive::status(&root, &cfg, &store) {
-            Ok(outcome) => report::emit_with(
-                cmd,
-                ArchiveStatusData {
-                    action: "status",
-                    archives: outcome.archives,
-                    live_sessions: outcome.live_sessions,
-                    purge_candidates: outcome.purge_candidates,
-                    still_referenced: outcome.still_referenced,
-                    note: outcome.note,
-                },
-                Exit::Ok,
-                human_archive_status,
-            ),
-            Err(err) => fail_archive(cmd, &err),
-        },
-        ArchiveCommand::Seal {
-            sources,
-            id,
-            title,
-            period_start,
-            period_end,
-            by,
-        } => {
-            // `sealed_by` is a closed vocabulary; a third value would make the
-            // record unfalsifiable.
-            if by != "human" && by != "agent" {
-                report::fail(
-                    cmd,
-                    Exit::Usage,
-                    "E_USAGE",
-                    &format!("`--by` is `human` or `agent`, not `{by}`"),
-                );
-            }
-            let req = archive::SealRequest {
-                sources,
-                id,
-                title,
-                period_start,
-                period_end,
-                by,
-            };
-            match archive::seal(&root, &cfg, &mut store, &req) {
-                Ok(outcome) => report::emit_with(
-                    cmd,
-                    ArchiveSealData {
-                        action: "seal",
-                        key: outcome.key,
-                        sources: outcome.sources,
-                        pages: outcome.pages,
-                        updated_pages: outcome.updated_pages,
-                    },
-                    Exit::Ok,
-                    human_archive_seal,
-                ),
-                Err(err) => fail_archive(cmd, &err),
-            }
-        }
-        ArchiveCommand::Purge { dry_run, yes } => {
-            let req = archive::PurgeRequest { dry_run, yes };
-            match archive::purge(&root, &cfg, &mut store, &req) {
-                Ok(outcome) => report::emit_with(
-                    cmd,
-                    ArchivePurgeData {
-                        action: "purge",
-                        candidates: outcome.candidates,
-                        sources: outcome.sources,
-                        deleted: outcome.deleted,
-                        dry_run: outcome.dry_run,
-                    },
-                    Exit::Ok,
-                    human_archive_purge,
-                ),
-                Err(err) => fail_archive(cmd, &err),
-            }
-        }
-    }
-}
-
-/// `recall` searches the sealed summaries.
-///
-/// Configuration is loaded only to find the ledger: the search itself depends on
-/// nothing the config could change.
-fn run_recall(query: String, full: bool) -> ! {
-    let cmd = "recall";
-    let root = wiki_root(cmd);
-    let cfg = open_repo(cmd, &root);
-    let mut store = open_store(cmd, &root, &cfg);
-    let req = archive::RecallRequest { query, full };
-    match archive::recall(&root, &mut store, &req) {
-        Ok(outcome) => report::emit_with(
-            cmd,
-            RecallData {
-                hits: outcome.hits.into_iter().map(RecallHitData::from).collect(),
-                missing: outcome.missing,
-            },
-            Exit::Ok,
-            human_recall,
-        ),
-        Err(err) => fail_archive(cmd, &err),
-    }
-}
-
 /// `query` is the only command that decides when to pay for an index update:
 /// `--reindex` rebuilds, a plain search catches up incrementally, and with no
 /// text only `--reindex` has something to do (report the page count).
-fn run_query(
-    text: Option<String>,
-    limit: usize,
-    expand: usize,
-    scope: ScopeArg,
-    reindex: bool,
-) -> ! {
+fn run_query(text: Option<String>, limit: usize, no_archive: bool, graph: bool) -> ! {
     let cmd = "query";
     let root = wiki_root(cmd);
     let cfg = open_repo(cmd, &root);
+
+    if graph {
+        match graph::build(&root, &cfg) {
+            Ok(data) => report::emit_with(cmd, data, Exit::Ok, human_graph),
+            Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
+        }
+    }
+
     let mut store = open_store(cmd, &root, &cfg);
     let text = text.unwrap_or_default();
-    let empty = text.trim().is_empty();
-
-    if reindex {
-        match query::reindex(&root, &cfg, &mut store) {
-            Ok(indexed) if empty => report::emit(cmd, QueryReindexData { indexed }),
-            Ok(_) => {}
-            Err(err) => fail_query(cmd, &err),
-        }
-    } else if empty {
-        // Empty text without a rebuild is the caller's mistake, and it is
-        // caught before any write: `query` must not silently rebuild.
+    if text.trim().is_empty() {
         report::fail(
             cmd,
             Exit::Usage,
             "E_EMPTY_QUERY",
-            "no query text; pass a word to search for, or --reindex",
+            "no query text; pass a word to search for, or --graph",
         )
-    } else if let Err(err) = query::refresh(&root, &cfg, &mut store) {
+    }
+    if let Err(err) = query::refresh(&root, &cfg, &mut store) {
         fail_query(cmd, &err)
     }
 
     let search = query::SearchQuery {
         text,
         limit,
-        expand,
-        scope: match scope {
-            ScopeArg::All => QueryScope::All,
-            ScopeArg::Wiki => QueryScope::Wiki,
-            ScopeArg::Archive => QueryScope::Archive,
+        expand: 0,
+        scope: if no_archive {
+            QueryScope::Wiki
+        } else {
+            QueryScope::All
         },
     };
     match query::search(&root, &cfg, &store, &search) {
@@ -1077,6 +596,30 @@ fn run_query(
         }
         Err(err) => fail_query(cmd, &err),
     }
+}
+
+/// One line per page with its degrees, then the orphans and the broken links.
+fn human_graph(data: &graph::Graph) -> String {
+    let mut out = String::new();
+    for node in &data.nodes {
+        out.push_str(&format!(
+            "{:>3} {:>3}  {}\n",
+            node.in_degree, node.out_degree, node.page
+        ));
+    }
+    if !data.orphans.is_empty() {
+        out.push_str(&format!("\n孤立页 ({})\n", data.orphans.len()));
+        for page in &data.orphans {
+            out.push_str(&format!("  {page}\n"));
+        }
+    }
+    if !data.broken.is_empty() {
+        out.push_str(&format!("\n断链 ({})\n", data.broken.len()));
+        for target in &data.broken {
+            out.push_str(&format!("  [[{target}]]\n"));
+        }
+    }
+    out
 }
 
 /// A query that cannot run is the caller's mistake: empty text, a broken
@@ -1145,9 +688,6 @@ fn human_query(data: &QueryHitsData) -> String {
             sources,
             hit.backlinks
         );
-        if let Some(recall) = &hit.recall {
-            block.push_str(&format!(" | recall: {recall}"));
-        }
         for expanded in &hit.expanded {
             block.push_str(&format!(
                 "\n   ↳ {} ({}): {}",
@@ -1159,121 +699,6 @@ fn human_query(data: &QueryHitsData) -> String {
     blocks.join("\n\n")
 }
 
-/// A purge that needs a human is a third outcome (exit 3), a recall that matched
-/// nothing is a finding (exit 1), and every other refusal — an unledgered key, an
-/// already sealed one, a missing summary, a bad query, a broken ledger — is the
-/// caller's or the environment's mistake (exit 2).
-fn fail_archive(cmd: &str, err: &archive::ArchiveError) -> ! {
-    let exit = match err {
-        archive::ArchiveError::NeedsConfirmation => Exit::NeedsConfirm,
-        archive::ArchiveError::NoHit => Exit::Error,
-        _ => Exit::Usage,
-    };
-    report::fail(cmd, exit, err.code(), &err.to_string())
-}
-
-/// The four numbers, one per line, so a diff between two runs reads as a diff.
-fn human_archive_status(data: &ArchiveStatusData) -> String {
-    [
-        format!("summaries: {}", data.archives),
-        format!("live sessions: {}", data.live_sessions),
-        format!("purge candidates: {}", data.purge_candidates),
-        format!("still referenced: {}", data.still_referenced),
-    ]
-    .join("\n")
-}
-
-/// One line: what was sealed, and how many pages moved to cite it.
-fn human_archive_seal(data: &ArchiveSealData) -> String {
-    format!("sealed {} ({} pages re-hung)", data.key, data.updated_pages)
-}
-
-/// The candidates first, then the counts that explain them.
-fn human_archive_purge(data: &ArchivePurgeData) -> String {
-    let mut lines: Vec<String> = data
-        .candidates
-        .iter()
-        .map(|key| format!("candidate: {key}"))
-        .collect();
-    lines.push(format!("deleted: {}", data.deleted));
-    lines.push(format!("sources: {}", data.sources));
-    lines.push(format!("dry run: {}", data.dry_run));
-    lines.join("\n")
-}
-
-/// Each hit as `title [period] key` with its body indented beneath, so a human
-/// can tell the hit from the summary it quotes.
-fn human_recall(data: &RecallData) -> String {
-    let mut lines = Vec::new();
-    for hit in &data.hits {
-        lines.push(format!(
-            "{} [{}..{}] {}",
-            hit.title, hit.period_start, hit.period_end, hit.key
-        ));
-        for line in hit.body.lines() {
-            if line.is_empty() {
-                lines.push(String::new());
-            } else {
-                lines.push(format!("    {line}"));
-            }
-        }
-    }
-    if data.missing > 0 {
-        lines.push(format!("missing summaries: {}", data.missing));
-    }
-    lines.join("\n")
-}
-
-/// `lint` audits the wiki; with `--fix` it repairs the mechanical defects
-/// first, then reports what is left.
-///
-/// The exit code is decided by the findings, not by the command: an error (or
-/// any finding under `--strict`) is exit 1 even though the command succeeded.
-fn run_graph() -> ! {
-    let root = wiki_root("graph");
-    let cfg = open_repo("graph", &root);
-    match graph::build(&root, &cfg) {
-        Ok(report_data) => report::emit_with("graph", report_data, Exit::Ok, human_graph),
-        Err(err) => report::fail("graph", Exit::Usage, err.code(), &err.to_string()),
-    }
-}
-
-/// One line per page with its degrees, then the orphans and the broken links.
-fn human_graph(data: &graph::Graph) -> String {
-    let mut out = String::new();
-    for node in &data.nodes {
-        out.push_str(&format!(
-            "{:>3} {:>3}  {}\n",
-            node.in_degree, node.out_degree, node.page
-        ));
-    }
-    if !data.orphans.is_empty() {
-        out.push_str(&format!("\n孤立页 ({})\n", data.orphans.len()));
-        for page in &data.orphans {
-            out.push_str(&format!("  {page}\n"));
-        }
-    }
-    if !data.broken.is_empty() {
-        out.push_str(&format!("\n断链 ({})\n", data.broken.len()));
-        for target in &data.broken {
-            out.push_str(&format!("  [[{target}]]\n"));
-        }
-    }
-    out
-}
-
-/// Payload of the `version` success envelope.
-#[derive(Serialize)]
-struct VersionData {
-    version: &'static str,
-}
-
-/// Payload of the `checkpoint` success envelope.
-#[derive(Serialize)]
-struct CheckpointData {
-    version: String,
-}
-
 /// Payload of the `approve` success envelope.
 #[derive(Serialize)]
 struct SubmitData {
@@ -1281,36 +706,6 @@ struct SubmitData {
     published: Vec<String>,
     held_back: Vec<llm_wiki::version::HeldBack>,
     warnings: Vec<String>,
-}
-
-/// Payload of the `reject` success envelope.
-#[derive(Serialize)]
-struct RejectData {
-    reason: String,
-}
-
-/// Payload of the `instruct` success envelope.
-#[derive(Serialize)]
-struct InstructData {
-    text: String,
-}
-
-/// Payload of the `convert` envelope: what worked and what did not.
-///
-/// A batch reports both lists even when one is empty, so a caller can tell "the
-/// batch ran and nothing failed" from "the batch never ran".
-#[derive(Serialize)]
-struct ConvertData {
-    converted: Vec<convert::ConvertOutcome>,
-    failures: Vec<ConvertFailure>,
-}
-
-/// One source a batch could not convert.
-#[derive(Serialize)]
-struct ConvertFailure {
-    key: String,
-    code: String,
-    message: String,
 }
 
 /// Payload of the `parse` success envelope, tagged by delivery mode.
@@ -1353,77 +748,11 @@ enum ParseData {
     },
 }
 
-/// Payload of the `archive status` success envelope.
-#[derive(Serialize)]
-struct ArchiveStatusData {
-    action: &'static str,
-    archives: usize,
-    live_sessions: usize,
-    purge_candidates: usize,
-    still_referenced: usize,
-    note: String,
-}
-
-/// Payload of the `archive seal` success envelope.
-#[derive(Serialize)]
-struct ArchiveSealData {
-    action: &'static str,
-    key: String,
-    sources: Vec<String>,
-    pages: Vec<String>,
-    updated_pages: usize,
-}
-
-/// Payload of the `archive purge` success envelope.
-#[derive(Serialize)]
-struct ArchivePurgeData {
-    action: &'static str,
-    candidates: Vec<String>,
-    sources: usize,
-    deleted: usize,
-    dry_run: bool,
-}
-
-/// Payload of the `recall` success envelope.
-#[derive(Serialize)]
-struct RecallData {
-    hits: Vec<RecallHitData>,
-    missing: usize,
-}
-
-/// One hit: the summary's identity, its period and the text to read.
-#[derive(Serialize)]
-struct RecallHitData {
-    key: String,
-    title: String,
-    period_start: String,
-    period_end: String,
-    body: String,
-}
-
-impl From<archive::RecallHit> for RecallHitData {
-    fn from(hit: archive::RecallHit) -> Self {
-        Self {
-            key: hit.key,
-            title: hit.title,
-            period_start: hit.period_start,
-            period_end: hit.period_end,
-            body: hit.body,
-        }
-    }
-}
-
 /// Payload of the `query` success envelope.
 #[derive(Serialize)]
 struct QueryHitsData {
     count: usize,
     hits: Vec<query::Hit>,
-}
-
-/// Payload of `query --reindex` with no text: what a rebuild indexed.
-#[derive(Serialize)]
-struct QueryReindexData {
-    indexed: usize,
 }
 
 /// Payload of the `doctor` envelope: every check, in report order.

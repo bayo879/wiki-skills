@@ -60,6 +60,36 @@ fn init_reports_created_then_skipped() {
     assert!(second.created.is_empty());
 }
 
+/// Top-level table names of a TOML document, in the order they appear.
+fn sections(text: &str) -> std::collections::BTreeSet<String> {
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix('['))
+        .filter_map(|rest| rest.split(']').next())
+        .filter(|name| !name.contains('.'))
+        .map(|name| name.trim().to_string())
+        .collect()
+}
+
+#[test]
+fn the_template_names_every_config_section() {
+    // One source of truth: the template must document exactly the sections
+    // `Config` accepts. A new section needs both a field and a template line.
+    let d = tempdir().unwrap();
+    init(d.path());
+    let template = std::fs::read_to_string(d.path().join(".wiki/wiki.toml")).unwrap();
+    let defaults =
+        toml::to_string(&llm_wiki::config::Config::default()).expect("config serializes");
+    assert_eq!(
+        sections(&template),
+        sections(&defaults),
+        "the template and Config disagree on sections"
+    );
+    assert!(
+        template.contains("session_dir"),
+        "the template must spell out the session directory knob"
+    );
+}
+
 #[test]
 fn init_ends_with_the_fixed_follow_up_prompt() {
     let d = tempdir().unwrap();
@@ -70,7 +100,7 @@ fn init_ends_with_the_fixed_follow_up_prompt() {
         next.contains(&format!("`{}`", root.display())),
         "the prompt must name the repository it just initialised: {next}"
     );
-    assert!(next.contains("llm-wiki scan"), "{next}");
+    assert!(next.contains("llm-wiki ingest"), "{next}");
     assert!(
         next.contains("01:00"),
         "the default period must be stated: {next}"
@@ -166,7 +196,7 @@ fn config_load_reports_missing_file() {
     let d = tempdir().unwrap();
     let err = llm_wiki::config::Config::load(d.path()).unwrap_err();
     assert_eq!(err.code(), "E_NO_CONFIG");
-    assert!(err.to_string().contains("llm-wiki init"), "{err}");
+    assert!(err.to_string().contains("doctor --fix"), "{err}");
 }
 
 #[test]
@@ -181,14 +211,20 @@ fn partial_config_uses_documented_defaults() {
 }
 
 #[test]
-fn a_hand_edited_paths_section_cannot_move_the_engine() {
-    let cfg = load_with(
-        "[paths]\nsource = \"elsewhere\"\nraw = \"outside/raw\"\nwiki = \"outside/pages\"\nengine = \"visible\"\n",
-    );
-    assert_eq!(cfg.paths.source, "");
-    assert_eq!(cfg.paths.raw, ".wiki/raw");
-    assert_eq!(cfg.paths.wiki, ".wiki/pages");
-    assert_eq!(cfg.paths.engine, ".wiki");
+fn a_hand_edited_paths_section_is_rejected() {
+    // The layout is not configurable, so `[paths]` is an unknown section and
+    // `deny_unknown_fields` refuses the file outright instead of silently
+    // ignoring it. The engine directory therefore cannot be moved by hand.
+    let d = tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join(".wiki")).unwrap();
+    std::fs::write(
+        d.path().join(".wiki/wiki.toml"),
+        "[paths]\nsource = \"elsewhere\"\n",
+    )
+    .unwrap();
+    let err = llm_wiki::config::Config::load(d.path()).unwrap_err();
+    assert!(err.to_string().contains("unknown field `paths`"), "{err}");
+    assert_eq!(err.code(), "E_BAD_CONFIG");
 }
 
 #[test]

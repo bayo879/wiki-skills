@@ -90,10 +90,12 @@ fn real_subcommands() -> BTreeSet<String> {
 #[test]
 fn every_skill_has_valid_frontmatter() {
     let all = skills();
+    let mut dirs: Vec<&str> = all.iter().map(|(dir, _)| dir.as_str()).collect();
+    dirs.sort();
     assert_eq!(
-        all.len(),
-        1,
-        "the package ships one skill; the rest live in references/"
+        dirs,
+        ["llm-wiki", "llm-wiki-session"],
+        "the package ships two skills: the wiki itself, and session distillation"
     );
     for (dir, text) in all {
         let (fm, body) = parse_frontmatter(&text);

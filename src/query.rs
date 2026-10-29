@@ -57,9 +57,6 @@ pub struct Hit {
     pub backlinks: usize,
     /// Whether the page sits under `wiki/archive/`.
     pub archived: bool,
-    /// The command that opens an archived summary's full body.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recall: Option<String>,
     /// One-hop neighbour summaries, only filled when `--expand` is at least 1.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub expanded: Vec<ExpandedRef>,
@@ -451,8 +448,6 @@ struct PageIndex {
 
 /// The parts of a page a hit needs beyond the index.
 struct PageInfo {
-    /// Frontmatter `id`.
-    id: String,
     /// Frontmatter `title`.
     title: String,
     /// Frontmatter `summary`.
@@ -502,16 +497,10 @@ impl PageIndex {
                 aliases.insert(front.id.clone(), key.clone());
             }
             let archived = rel.starts_with(&format!("{}/", archive::DIR));
-            let id = if front.id.is_empty() {
-                String::from(stem)
-            } else {
-                front.id
-            };
             targets.push((key.clone(), wikilinks(&body)));
             pages.insert(
                 key,
                 PageInfo {
-                    id,
                     title: front.title,
                     summary: front.summary,
                     status: front.status.as_str().to_string(),
@@ -572,14 +561,12 @@ impl PageIndex {
         }
 
         let sources: &[String] = page.map(|page| page.sources.as_slice()).unwrap_or_default();
-        let (title, summary, status, archived, recall) = match page {
+        let (title, summary, status, archived) = match page {
             Some(page) => (
                 page.title.clone(),
                 page.summary.clone(),
                 page.status.clone(),
                 page.archived,
-                page.archived
-                    .then(|| format!("llm-wiki recall {}", page.id)),
             ),
             // The index row outlived its file: report what the index knows
             // rather than dropping a hit the user can still act on.
@@ -588,7 +575,6 @@ impl PageIndex {
                 String::new(),
                 String::from("draft"),
                 false,
-                None,
             ),
         };
 
@@ -603,7 +589,6 @@ impl PageIndex {
             sources: source_refs(root, sources),
             backlinks: self.backlinks.get(&row.page_id).copied().unwrap_or(0),
             archived,
-            recall,
             expanded,
         }
     }

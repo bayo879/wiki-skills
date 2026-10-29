@@ -69,7 +69,7 @@ fn run_json_allowing(dir: &Path, args: &[&str], ok: &[i32]) -> Value {
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path();
-    run_json(root, &["init"]);
+    let _ = run_json_allowing(root, &["doctor", "--fix"], &[0, 1]);
 
     fs::write(
         root.join("a.md"),
@@ -81,6 +81,19 @@ fn fixture() -> tempfile::TempDir {
 }
 
 /// Writes one well-formed page so the wiki is not empty.
+fn write_staged(root: &Path, name: &str, body: &str) {
+    let dir = root.join(".wiki/staging").join("concept");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(name),
+        format!(
+            "---\nid: {}\ntitle: {name}\ntype: concept\nsummary: about retries\nsources:\n  - .wiki/raw/a.md\nstatus: stable\nupdated: 2026-10-27\n---\n\n{body}\n",
+            name.trim_end_matches(".md")
+        ),
+    )
+    .unwrap();
+}
+
 fn write_page(root: &Path, name: &str, body: &str) {
     let dir = root.join(".wiki/pages").join("concept");
     fs::create_dir_all(&dir).unwrap();
@@ -141,12 +154,8 @@ fn shapes() -> BTreeMap<String, BTreeSet<String>> {
         out.insert(name.to_string(), set);
     };
 
-    capture(&mut out, "init", &["init"]);
-    capture(&mut out, "version", &["version"]);
     capture(&mut out, "doctor", &["doctor"]);
-    capture(&mut out, "scan", &["scan"]);
-    capture(&mut out, "parse", &["parse", "--key", "a.md"]);
-    capture(&mut out, "convert", &["convert"]);
+    capture(&mut out, "ingest-dry-run", &["ingest", "--dry-run"]);
 
     write_page(
         root,
@@ -159,34 +168,12 @@ fn shapes() -> BTreeMap<String, BTreeSet<String>> {
         "The timeout is five seconds; see [[retry]].",
     );
 
-    capture(&mut out, "query-reindex", &["query", "--reindex"]);
     capture(&mut out, "query", &["query", "retries"]);
-    let lint = run_json_allowing(root, &["lint"], &[0, 1]);
-    // Exit 1 with findings is the documented behaviour, so it is not a failure.
-    assert_eq!(lint["ok"], Value::Bool(true));
-    let mut set = BTreeSet::new();
-    paths(&lint, String::new(), &mut set);
-    out.insert(String::from("lint"), set);
-    capture(&mut out, "graph", &["graph"]);
-    capture(
-        &mut out,
-        "ingest-begin",
-        &["ingest", "begin", "--sources", "a.md", "--dry-run"],
-    );
-    capture(&mut out, "ignore-list", &["ignore", "list"]);
-    capture(&mut out, "ignore-add", &["ignore", "add", "drafts/"]);
-    capture(
-        &mut out,
-        "ignore-check",
-        &["ignore", "check", "drafts/a.md"],
-    );
-    capture(&mut out, "ignore-remove", &["ignore", "remove", "drafts/"]);
-
-    capture(&mut out, "checkpoint", &["checkpoint", "--label", "smoke"]);
-    capture(&mut out, "history", &["history"]);
-    capture(&mut out, "diff", &["diff", "v001"]);
-    // Last: a rollback rewrites the working tree the commands above describe.
-    capture(&mut out, "rollback", &["rollback", "v001"]);
+    capture(&mut out, "query-graph", &["query", "--graph"]);
+    capture(&mut out, "ingest", &["ingest"]);
+    write_staged(root, "retry.md", "Retries stop at three.");
+    capture(&mut out, "submit", &["submit"]);
+    capture(&mut out, "abort", &["abort"]);
     out
 }
 
@@ -408,7 +395,7 @@ fn vocabulary() -> BTreeSet<String> {
 
     // `wiki.toml` keys, from the file `init` writes.
     let dir = tempfile::tempdir().expect("temp dir");
-    run_json(dir.path(), &["init"]);
+    llm_wiki::init::run(dir.path(), false).expect("init");
     let toml =
         fs::read_to_string(dir.path().join(".wiki/wiki.toml")).expect("init wrote no wiki.toml");
     for line in toml.lines() {

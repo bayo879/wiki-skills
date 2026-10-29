@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The hidden engine directory. Everything `llm-wiki` writes lives under it.
 pub const ENGINE_DIR: &str = ".wiki";
@@ -29,7 +29,7 @@ pub const SCHEMA_FILE: &str = ".wiki/SCHEMA.md";
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     /// The wiki root has no `wiki.toml` yet.
-    #[error("no {CONFIG_FILE} in {}; run `llm-wiki init` to create it", root.display())]
+    #[error("no {CONFIG_FILE} in {}; run `llm-wiki doctor --fix` to create it", root.display())]
     NoConfig { root: PathBuf },
     /// The file exists but could not be read.
     #[error("cannot read {}: {source}", path.display())]
@@ -61,8 +61,8 @@ impl ConfigError {
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
 /// The whole `wiki.toml` contract, one field per same-named section.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Fixed at [`PathsCfg::default`]: the layout is not configurable, so a
     /// hand-edited `[paths]` section cannot move writes outside the engine
@@ -84,7 +84,7 @@ impl Config {
     /// Reads `root/wiki.toml`.
     ///
     /// A missing file is [`ConfigError::NoConfig`] rather than a plain IO error,
-    /// so callers can point the user at `llm-wiki init`.
+    /// so callers can point the user at `llm-wiki doctor --fix`.
     pub fn load(root: &Path) -> Result<Config> {
         let path = root.join(CONFIG_FILE);
         let text = match std::fs::read_to_string(&path) {
@@ -202,7 +202,8 @@ impl Config {
 /// `source` is the empty string: every non-hidden file in the repository is a
 /// source. `raw`, `wiki` and `engine` all sit under `.wiki`, which is also what
 /// makes "never write outside the engine" structural rather than a convention.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PathsCfg {
     pub source: String,
     pub raw: String,
@@ -222,8 +223,8 @@ impl Default for PathsCfg {
 }
 
 /// `[scan]`: which directories under the repository root are not sources.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ScanCfg {
     /// Directory names skipped anywhere in the tree, in addition to the
     /// dot-directories [`crate::paths::is_ignored`] already skips.
@@ -242,8 +243,8 @@ impl Default for ScanCfg {
 }
 
 /// `[formats]`: the source-file whitelist. Images are linked, never parsed.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct FormatsCfg {
     pub allow: Vec<String>,
 }
@@ -262,8 +263,8 @@ impl Default for FormatsCfg {
 }
 
 /// `[schema]`: the configurable half of the page frontmatter.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SchemaCfg {
     pub types: Vec<String>,
 }
@@ -280,8 +281,8 @@ impl Default for SchemaCfg {
 }
 
 /// `[parse]`: how sources are turned into markdown.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ParseCfg {
     pub primary: Primary,
     /// Sources larger than this are always chunked. Stored as bytes.
@@ -314,7 +315,7 @@ impl Default for ParseCfg {
 }
 
 /// `[parse].primary`: which parsing backend to use.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Primary {
     /// Built in first, external service as the fallback.
@@ -327,8 +328,8 @@ pub enum Primary {
 }
 
 /// `[parse.external]`: an optional HTTP service that returns markdown.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExternalCfg {
     /// Transport kind; only `http` exists today.
     #[serde(rename = "type")]
@@ -357,8 +358,8 @@ impl Default for ExternalCfg {
 }
 
 /// `[parse.external.response]`: where the markdown and the success code live.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExternalResponse {
     /// Dot-separated JSON path of the markdown text.
     pub text: String,
@@ -376,8 +377,8 @@ impl Default for ExternalResponse {
 }
 
 /// `[ingest]`: page-count caps.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct IngestCfg {
     /// Pages one slice of a source may justify. A slice is one chunk of a large
     /// source, or the whole of a small one, so the cap follows how much text a
@@ -403,8 +404,8 @@ impl Default for IngestCfg {
 }
 
 /// `[audit]`: thresholds used by `lint`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AuditCfg {
     pub min_page_chars: usize,
 }
@@ -418,8 +419,8 @@ impl Default for AuditCfg {
 }
 
 /// `[versions]`: how many history snapshots to keep.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct VersionsCfg {
     pub keep: usize,
 }
@@ -431,8 +432,8 @@ impl Default for VersionsCfg {
 }
 
 /// `[sync]`: unattended-mode knobs.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SyncCfg {
     pub auto_ingest: bool,
     pub max_per_run: usize,
@@ -466,8 +467,8 @@ impl Default for SyncCfg {
 /// `recall` before it becomes a purge candidate. `purge_cap` and `purge_days` are
 /// the second condition: a summary is only cleared when the archive is both over
 /// its capacity and past the deadline, so a quiet wiki never loses anything.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct MemoryCfg {
     pub session_soft_cap: usize,
     pub idle_days: u32,

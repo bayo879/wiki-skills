@@ -412,7 +412,7 @@ fn check_config(root: &Path, text: Option<&str>) -> Check {
     let Some(text) = text else {
         return Check::fail(
             NAME,
-            format!("{} is missing; run `llm-wiki init`", path.display()),
+            format!("{} is missing; run `llm-wiki doctor --fix`", path.display()),
         );
     };
 
@@ -458,7 +458,7 @@ fn check_schema(root: &Path) -> Check {
     } else {
         Check::fail(
             NAME,
-            format!("{SCHEMA_FILE} is missing; run `llm-wiki init`"),
+            format!("{SCHEMA_FILE} is missing; run `llm-wiki doctor --fix`"),
         )
     }
 }
@@ -500,7 +500,10 @@ fn check_paths(root: &Path, cfg: &Config) -> Check {
     } else {
         Check::fail(
             NAME,
-            format!("{} missing; run `llm-wiki init`", missing.join(", ")),
+            format!(
+                "{} missing; run `llm-wiki doctor --fix`",
+                missing.join(", ")
+            ),
         )
     }
 }
@@ -606,7 +609,7 @@ fn check_legacy(root: &Path) -> Check {
         Check::warn(
             NAME,
             format!(
-                "{} is from an older layout; this build reads {} and journals to .wiki/{} — delete it and run `llm-wiki init` to rebuild",
+                "{} is from an older layout; this build reads {} and journals to .wiki/{} — delete it and run `llm-wiki doctor --fix` to rebuild",
                 found.join(", "),
                 CONFIG_FILE,
                 crate::journal::JOURNAL_FILE

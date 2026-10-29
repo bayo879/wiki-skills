@@ -1,6 +1,6 @@
 # parse 配置
 
-`.wiki/wiki.toml` 只有一份，`llm-wiki init` 生成。本节只覆盖 `[parse]` 与 `[parse.external]`；解析行为见 [解析后端与 auto 回退](../parse/external.md)。
+`.wiki/wiki.toml` 只有一份，`llm-wiki doctor --fix` 生成。本节只覆盖 `[parse]` 与 `[parse.external]`；解析行为见 [解析后端与 auto 回退](../parse/external.md)。
 
 ## `[parse]`
 
@@ -66,7 +66,7 @@ timeout_s = 120
 
 ## 缺失与未知键
 
-`Config` 用 `#[serde(default)]`：缺失的节与键取内置默认值，所以只写两三行也能 `load`。未知键既不会报错也不会生效（没有 `deny_unknown_fields`），拼错键名时要靠 `llm-wiki init` 生成的模板或本页对照。
+`Config` 用 `#[serde(default)]`：缺失的节与键取内置默认值，所以只写两三行也能 `load`。未知键会报 `E_BAD_CONFIG`（`deny_unknown_fields`），拼错键名直接被拒；对照模板或本页即可。
 
 ## 错误码
 

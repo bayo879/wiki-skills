@@ -40,7 +40,7 @@ use crate::layout::LAYOUT;
 pub const CODE: &str = "E_NOT_INITIALISED";
 
 /// What the caller should do about it.
-pub const HINT: &str = "run `llm-wiki init` in the repository root, then retry";
+pub const HINT: &str = "run `llm-wiki doctor --fix` in the repository root, then retry";
 
 /// The contract every command loads; `init` is the only thing that writes it.
 const REQUIRED_FILES: [&str; 1] = [".wiki/wiki.toml"];

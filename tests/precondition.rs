@@ -54,17 +54,11 @@ fn every_repository_command_refuses_an_uninitialised_directory() {
     // One command per family: reading the layout, the ledger, the staging area,
     // the pages, the versions and the search index.
     for args in [
-        vec!["scan"],
-        vec!["convert"],
-        vec!["lint"],
-        vec!["graph"],
-        vec!["sync", "--dry-run"],
-        vec!["ingest", "begin", "--sources", ".wiki/raw/a.md"],
-        vec!["approve"],
-        vec!["checkpoint", "--label", "x"],
+        vec!["ingest"],
+        vec!["submit"],
+        vec!["ingest", "--dry-run"],
         vec!["query", "alpha"],
-        vec!["archive", "status"],
-        vec!["recall", "alpha"],
+        vec!["query", "--graph"],
     ] {
         let (code, v) = call(d.path(), &args);
         assert_eq!(code, 2, "`{}` must be a usage error: {v}", args.join(" "));
@@ -76,7 +70,7 @@ fn every_repository_command_refuses_an_uninitialised_directory() {
             v["error"]["detail"]["hint"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("llm-wiki init"),
+                .contains("llm-wiki doctor --fix"),
             "the hint must name the fix: {v}"
         );
     }
@@ -85,19 +79,19 @@ fn every_repository_command_refuses_an_uninitialised_directory() {
 #[test]
 fn the_message_names_the_missing_path_and_the_command_that_creates_it() {
     let d = TempDir::new().unwrap();
-    let out = run(d.path(), &["scan"]);
+    let out = run(d.path(), &["ingest"]);
     assert_eq!(out.status.code(), Some(2));
     let text = String::from_utf8_lossy(&out.stderr);
     assert!(text.contains(".wiki/wiki.toml"), "stderr: {text}");
     assert!(text.contains("not initialised"), "stderr: {text}");
-    assert!(text.contains("llm-wiki init"), "stderr: {text}");
+    assert!(text.contains("llm-wiki doctor --fix"), "stderr: {text}");
 }
 
 #[test]
 fn a_missing_product_directory_is_refused_even_when_the_contract_exists() {
     let d = repo();
     fs::remove_dir_all(d.path().join(".wiki/pages")).unwrap();
-    let (code, v) = call(d.path(), &["lint"]);
+    let (code, v) = call(d.path(), &["ingest"]);
     assert_eq!(code, 2, "{v}");
     assert_eq!(v["error"]["code"], "E_NOT_INITIALISED", "{v}");
     assert_eq!(v["error"]["detail"]["missing"], ".wiki/pages", "{v}");
@@ -112,21 +106,21 @@ fn doctor_fix_is_idempotent_so_the_advice_is_always_safe_to_follow() {
 }
 
 #[test]
-fn an_engine_deleted_in_full_asks_for_init() {
+fn an_engine_deleted_in_full_asks_for_repair() {
     // The contract lives inside the engine, and the whole engine is out of git.
     // A clone therefore starts with no wiki at all: the tool says how to make
     // one instead of silently creating a default engine in an arbitrary
     // directory.
     let d = repo();
     fs::remove_dir_all(d.path().join(".wiki")).unwrap();
-    let (code, v) = call(d.path(), &["scan"]);
-    assert_eq!(code, 2, "no contract, no scan: {v}");
+    let (code, v) = call(d.path(), &["ingest"]);
+    assert_eq!(code, 2, "no contract, no ingest: {v}");
     assert_eq!(v["error"]["code"], "E_NOT_INITIALISED", "{v}");
     assert!(
         v["error"]["detail"]["hint"]
             .as_str()
             .unwrap_or_default()
-            .contains("llm-wiki init"),
+            .contains("llm-wiki doctor --fix"),
         "the hint must name the fix: {v}"
     );
 }

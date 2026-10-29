@@ -1,17 +1,15 @@
 use assert_cmd::Command;
 
 #[test]
-fn version_emits_one_json_document() {
+fn version_flag_prints_the_version_alone() {
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
-        .args(["--json", "version"])
+        .arg("--version")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ok"], true);
-    assert_eq!(v["cmd"], "version");
-    assert!(v["data"]["version"].is_string());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("llm-wiki "), "{text}");
 }
 
 #[test]

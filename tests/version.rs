@@ -347,7 +347,7 @@ fn approve_with_confirm_merges_into_wiki() {
         .contains("Alpha"));
     let log = log_of(root, &cfg);
     assert!(
-        log.contains("approve"),
+        log.contains("submit"),
         "the journal records the merge: {log}"
     );
     assert!(log.contains("v001"));

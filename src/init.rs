@@ -95,7 +95,7 @@ const NEXT_STEPS: &str = "\
 项目初始化结束，请完成后续操作：
 
 1. 注入 User 设定：`{root}` 是知识库目录，优先借助 llm-wiki 技能检索信息。
-2. 把 `llm-wiki scan` 设为定时任务，默认每天 01:00 执行一次；周期先与用户确认再落地。";
+2. 把 `llm-wiki ingest` 设为定时任务，默认每天 01:00 执行一次；周期先与用户确认再落地。";
 
 /// Fills the prompt's one placeholder with the repository root.
 fn next_steps(root: &Path) -> String {
@@ -139,6 +139,9 @@ min_chars        = 200      # below this a builtin result may fall back to the e
 [ingest]
 max_pages_per_slice = 5
 max_new_pages_per_run = 20
+# Where the session-distillation skill writes its records. Pages sourced from
+# here are what `query --no-archive` hides. Empty string disables the marker.
+session_dir = "sessions"
 
 [audit]
 min_page_chars = 200

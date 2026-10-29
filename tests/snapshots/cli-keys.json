@@ -1,26 +1,7 @@
 {
-  "checkpoint": [
+  "abort": [
     "cmd",
-    "data.version",
-    "ok"
-  ],
-  "convert": [
-    "cmd",
-    "data.converted[].backend",
-    "data.converted[].chars",
-    "data.converted[].duration_ms",
-    "data.converted[].raw_path",
-    "data.converted[].skip_reason",
-    "data.converted[].skipped",
-    "data.converted[].warnings[]",
-    "data.failures[]",
-    "ok"
-  ],
-  "diff": [
-    "cmd",
-    "data.added[]",
-    "data.changed[]",
-    "data.removed[]",
+    "data.cleared",
     "ok"
   ],
   "doctor": [
@@ -30,88 +11,40 @@
     "data.checks[].name",
     "ok"
   ],
-  "graph": [
+  "ingest": [
     "cmd",
-    "data.broken[]",
-    "data.edges[].from",
-    "data.edges[].to",
-    "data.nodes[].in_degree",
-    "data.nodes[].out_degree",
-    "data.nodes[].page",
-    "data.orphans[]",
-    "ok"
-  ],
-  "history": [
-    "cmd",
-    "data.versions[].created_at",
-    "data.versions[].kind",
-    "data.versions[].label",
-    "data.versions[].pages",
-    "data.versions[].version",
-    "ok"
-  ],
-  "ignore-add": [
-    "cmd",
-    "data.action",
-    "data.added[]",
-    "data.patterns[]",
-    "ok"
-  ],
-  "ignore-check": [
-    "cmd",
-    "data.action",
-    "data.ignored",
-    "data.path",
-    "data.rule",
-    "ok"
-  ],
-  "ignore-list": [
-    "cmd",
-    "data.action",
-    "data.patterns[]",
-    "ok"
-  ],
-  "ignore-remove": [
-    "cmd",
-    "data.action",
-    "data.patterns[]",
-    "data.removed[]",
-    "ok"
-  ],
-  "ingest-begin": [
-    "cmd",
-    "data.affected[].id",
-    "data.affected[].path",
-    "data.affected[].type",
-    "data.affected[].write_to",
-    "data.new_pages",
-    "data.orphan_pages[]",
-    "data.pending_hash",
-    "data.source_keys[]",
-    "ok"
-  ],
-  "init": [
-    "cmd",
-    "data.created[]",
-    "data.next",
-    "data.skipped[]",
-    "ok"
-  ],
-  "lint": [
-    "cmd",
-    "data.findings[].level",
-    "data.findings[].msg",
-    "data.findings[].page",
-    "data.findings[].rule",
-    "ok"
-  ],
-  "parse": [
-    "cmd",
-    "data.backend",
-    "data.chars",
-    "data.markdown_head",
-    "data.mode",
+    "data.changes[].hash",
+    "data.changes[].key",
+    "data.changes[].kind",
+    "data.changes[].layer",
+    "data.changes[].moved_from",
+    "data.converted",
+    "data.failures",
+    "data.ingested[]",
+    "data.queued",
+    "data.run_id",
+    "data.stale_pages[]",
+    "data.types[]",
     "data.warnings[]",
+    "data.write_to",
+    "ok"
+  ],
+  "ingest-dry-run": [
+    "cmd",
+    "data.changes[].hash",
+    "data.changes[].key",
+    "data.changes[].kind",
+    "data.changes[].layer",
+    "data.changes[].moved_from",
+    "data.converted",
+    "data.failures",
+    "data.ingested[]",
+    "data.queued",
+    "data.run_id",
+    "data.stale_pages[]",
+    "data.types[]",
+    "data.warnings[]",
+    "data.write_to",
     "ok"
   ],
   "query": [
@@ -127,37 +60,28 @@
     "data.hits[].snippet",
     "data.hits[].sources[].raw",
     "data.hits[].sources[].raw_available",
-    "data.hits[].sources[].source",
     "data.hits[].status",
     "data.hits[].summary",
     "data.hits[].title",
     "ok"
   ],
-  "query-reindex": [
+  "query-graph": [
     "cmd",
-    "data.indexed",
+    "data.broken[]",
+    "data.edges[].from",
+    "data.edges[].to",
+    "data.nodes[].in_degree",
+    "data.nodes[].out_degree",
+    "data.nodes[].page",
+    "data.orphans[]",
     "ok"
   ],
-  "rollback": [
+  "submit": [
     "cmd",
-    "data.files",
-    "data.restored",
+    "data.held_back[]",
+    "data.published[]",
     "data.version",
-    "ok"
-  ],
-  "scan": [
-    "cmd",
-    "data.changes[].hash",
-    "data.changes[].key",
-    "data.changes[].kind",
-    "data.changes[].layer",
-    "data.changes[].moved_from",
-    "data.ignored_count",
-    "ok"
-  ],
-  "version": [
-    "cmd",
-    "data.version",
+    "data.warnings[]",
     "ok"
   ]
 }

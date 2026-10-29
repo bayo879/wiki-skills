@@ -405,7 +405,7 @@ fn backlinks_count_the_pages_that_point_here() {
 }
 
 #[test]
-fn archived_hits_carry_the_recall_command() {
+fn archived_hits_are_marked_as_archived() {
     let mut fx = Fixture::new();
     fx.page_with(
         "archive/2026-01/vip-retry.md",
@@ -417,12 +417,10 @@ fn archived_hits_carry_the_recall_command() {
 
     let hit = fx.only("订单");
     assert!(hit.archived);
-    assert_eq!(hit.recall.as_deref(), Some("llm-wiki recall vip-retry"));
     // A live page never claims to be archived.
     fx.page("concept/live.md", "live", "现行页", "现行", "订单同步。");
     fx.reindex();
     assert!(!fx.only("同步").archived);
-    assert_eq!(fx.only("同步").recall, None);
 }
 
 #[test]
@@ -504,20 +502,6 @@ fn empty_query_is_exit_2_with_a_code() {
     let out = run(fx.root(), &["query"]);
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(stdout_json(&out)["error"]["code"], "E_EMPTY_QUERY");
-}
-
-#[test]
-fn reindex_without_text_reports_the_page_count() {
-    let fx = Fixture::new();
-    fx.page("concept/a.md", "a", "甲", "甲", "订单。");
-    fx.page("concept/b.md", "b", "乙", "乙", "同步。");
-
-    let out = run(fx.root(), &["query", "--reindex"]);
-    assert_eq!(out.status.code(), Some(0));
-    let v = stdout_json(&out);
-    assert_eq!(v["ok"], true);
-    assert_eq!(v["cmd"], "query");
-    assert_eq!(v["data"]["indexed"], 2);
 }
 
 #[test]

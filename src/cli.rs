@@ -9,8 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "llm-wiki",
     about = "Maintain a Karpathy-style LLM wiki",
-    // `version` must be the only subcommand, so do not let clap add `help`.
-    disable_help_subcommand = true
+    version,
+    // `help` is clap's subcommand; the engine keeps no verb of its own for it.
+    disable_help_subcommand = false
 )]
 pub struct Cli {
     /// Write one JSON document to stdout instead of human-readable text.
@@ -21,11 +22,9 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// One variant per subcommand, in the order the plan adds them.
+/// The five subcommands. Everything else in the engine is internal.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Print the version of this binary.
-    Version,
     /// Check the repository's health; `--fix` repairs the unambiguous defects.
     ///
     /// Without `--fix` it only reads. The exit code is 1 when a check fails.
@@ -42,50 +41,42 @@ pub enum Command {
         #[arg(long)]
         key: Option<String>,
     },
-    /// Compare `source/` with the ledger and report what changed.
+    /// One write-line round: select sources, convert, open the round, write
+    /// candidates, publish them.
     ///
-    /// Both layers are scanned: `source/` says what `convert` should pick up,
-    /// and the raw layer says what was edited by hand after conversion. Each
-    /// change names its layer.
-    Scan {
-        /// Migrate the renames this scan reports: move the ledger rows and
-        /// rewrite every page that cites the old name. Nothing else changes.
-        #[arg(long)]
-        apply_moves: bool,
-    },
-    /// Convert unconverted sources into the raw layer.
-    Convert {
-        /// Convert exactly this source key, converted before or not.
-        #[arg(long)]
-        key: Option<String>,
-        /// Convert at most this many pending sources.
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
-    },
-    /// One write-line round: scan, convert, and open it.
+    /// With no `KEYS` it takes every pending change in `source/`. `--dry-run`
+    /// and `--key` preview one source. `--chunk N` and `--range N` pick one
+    /// slice of a large source. A candidate the brakes hold back stays in
+    /// `.wiki/staging/` and the run exits 3.
     Ingest {
-        /// Sources to read; empty means every new or changed source.
+        /// Repo-relative source keys; empty means every pending change.
         keys: Vec<String>,
-        /// Report what the round would do and write nothing.
+        /// Report what a round would do and write nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Preview one source's parse output; requires --dry-run.
-        #[arg(long, requires = "dry_run")]
+        /// Convert and ingest exactly this source, converted before or not.
+        #[arg(long)]
         key: Option<String>,
-        /// Return chunk `N` (1-based, materialized on demand).
+        /// Preview one chunk of the source named by `--key`.
         #[arg(long, conflicts_with = "range")]
         chunk: Option<usize>,
-        /// Return chunks `A-B` (1-based, inclusive), joined.
-        #[arg(long, conflicts_with = "chunk")]
+        /// Print one slice of the source named by `--key`: `0` the head, `N`
+        /// the N-th following chunk.
+        #[arg(long, value_name = "INDEX", conflicts_with = "chunk")]
         range: Option<String>,
-        /// Extract a source above `parse.max_source_bytes` anyway, for diagnosis.
+        /// Read a source above `parse.max_source_bytes` anyway.
         #[arg(long)]
         force_large: bool,
     },
     /// Close the open round: refresh its candidates, then publish them.
+    ///
+    /// `--confirm` publishes everything and ignores the brakes. `--auto` is the
+    /// unattended form: a braked candidate is skipped with a warning and the
+    /// run still exits 0. Exit 3 is reserved for the attended form when every
+    /// candidate was held back.
     Submit {
-        /// Publish even a candidate the brakes would hold.
-        #[arg(long, conflicts_with = "auto")]
+        /// Publish every candidate, including the ones the brakes hold back.
+        #[arg(long)]
         confirm: bool,
         /// Unattended: skip a braked candidate and report it instead of asking.
         #[arg(long, conflicts_with = "confirm")]
@@ -93,111 +84,23 @@ pub enum Command {
     },
     /// Drop the open round, keeping the candidates already written.
     Abort,
-    /// Snapshot the approved wiki as a new version.
-    Checkpoint {
-        /// Why the snapshot is taken; recorded in the version record.
-        #[arg(long)]
-        label: String,
-    },
-    /// Discard the staging candidates and record why.
-    Reject {
-        /// Why the candidates were rejected.
-        #[arg(long)]
-        reason: String,
-    },
-    /// Leave free-text guidance for the next agent session.
-    Instruct {
-        /// The instruction, written verbatim to `.wiki/next-instruction.md`.
-        #[arg(long)]
-        text: String,
-    },
-    /// Keep the queue for later without changing any state.
-    Defer,
-    /// List, add, remove or explain entries of `.wiki/ignore`.
-    Ignore {
-        #[command(subcommand)]
-        command: IgnoreCommand,
-    },
-    /// Restore the pages and raws of a recorded version into the working tree.
-    Rollback {
-        /// Version name such as `v003`.
-        version: String,
-    },
-    /// List the recorded versions, newest first.
-    History,
-    /// Show what one version adds, removes or changes against the working tree.
-    Diff {
-        /// Version name such as `v003`.
-        version: String,
-    },
-    /// Inspect, seal or clear the conversation summaries.
-    Archive {
-        #[command(subcommand)]
-        command: ArchiveCommand,
-    },
-    /// Search the sealed conversation summaries.
-    Recall {
-        /// Case-insensitive substring of the title, summary or body.
-        query: String,
-        /// Return each whole summary instead of its opening excerpt.
-        #[arg(long)]
-        full: bool,
-    },
-    /// Search the wiki with the full-text index.
+    /// Search the wiki.
+    ///
+    /// `--graph` prints the `[[wikilink]]` structure instead of searching;
+    /// `--no-archive` hides the sealed summaries. With no `TEXT`, `--graph` is
+    /// the only useful form.
     Query {
-        /// Words to search for; omit only together with `--reindex`.
+        /// Words to search for; omit together with `--graph`.
         text: Option<String>,
         /// Return at most this many hits.
         #[arg(long, default_value_t = 10)]
         limit: usize,
-        /// Inline the summary of each linked neighbour; one hop, five maximum.
-        #[arg(long, default_value_t = 0)]
-        expand: usize,
-        /// Search live pages, archived summaries, or both.
-        #[arg(long, value_enum, default_value = "all")]
-        scope: ScopeArg,
-        /// Rebuild the whole index from `wiki/` before searching.
+        /// Hide the sealed summaries; they are searchable by default.
         #[arg(long)]
-        reindex: bool,
-    },
-    /// Print the `[[wikilink]]` structure of `wiki/`: degrees, edges, orphans, broken links.
-    Graph,
-    /// Run one unattended round: scan, convert, gate and audit.
-    Sync {
-        /// Convert at most this many sources; defaults to `sync.max_per_run`.
+        no_archive: bool,
+        /// Print the `[[wikilink]]` structure: degrees, edges, orphans, broken links.
         #[arg(long)]
-        limit: Option<usize>,
-        /// Report what the round would do and write nothing.
-        #[arg(long)]
-        dry_run: bool,
-        /// Ignore the settle window and the stable-streak gate.
-        #[arg(long)]
-        force: bool,
-        /// Convert only these repo-relative sources; repeatable.
-        #[arg(long = "only", value_name = "PATH")]
-        only: Vec<String>,
-    },
-}
-
-/// The four verbs of the project ignore list.
-#[derive(Debug, Subcommand)]
-pub enum IgnoreCommand {
-    /// Print every pattern, in file order.
-    List,
-    /// Append patterns; a duplicate is not added twice.
-    Add {
-        /// `.gitignore`-style patterns.
-        patterns: Vec<String>,
-    },
-    /// Remove patterns by exact text.
-    Remove {
-        /// Patterns to drop.
-        patterns: Vec<String>,
-    },
-    /// Say whether one path is ignored, and which pattern decided it.
-    Check {
-        /// Path relative to the repository root.
-        path: String,
+        graph: bool,
     },
 }
 
@@ -210,53 +113,4 @@ pub enum DoctorOnly {
     Convert,
     /// Whether each distilled session record became a page.
     Session,
-}
-
-/// The half of the index `query` may return.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ScopeArg {
-    /// Live pages and archived summaries.
-    All,
-    /// Live pages only.
-    Wiki,
-    /// Archived summaries only.
-    Archive,
-}
-
-/// The three verbs of the archive layer.
-#[derive(Debug, Subcommand)]
-pub enum ArchiveCommand {
-    /// Report the four numbers that say whether the layering keeps up.
-    Status,
-    /// Record a summary the agent already wrote, and re-hang the pages that
-    /// cite the sealed sources.
-    Seal {
-        /// Ledger keys of the sources being sealed; repeatable.
-        #[arg(long)]
-        sources: Vec<String>,
-        /// Summary id; defaults to the `YYYY-MM` of `--period-end`.
-        #[arg(long)]
-        id: Option<String>,
-        /// Summary title, for the human rendering only.
-        #[arg(long)]
-        title: Option<String>,
-        /// First day the summary covers; defaults to the first of the month.
-        #[arg(long)]
-        period_start: Option<chrono::NaiveDate>,
-        /// Last day the summary covers; defaults to today.
-        #[arg(long)]
-        period_end: Option<chrono::NaiveDate>,
-        /// Who sealed it: `human` or `agent`.
-        #[arg(long, default_value = "agent")]
-        by: String,
-    },
-    /// Clear the summaries that are over capacity and past their deadline.
-    Purge {
-        /// Report the candidates and delete nothing.
-        #[arg(long)]
-        dry_run: bool,
-        /// The human said yes; without it a purge only reports what it needs.
-        #[arg(long)]
-        yes: bool,
-    },
 }

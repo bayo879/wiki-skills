@@ -287,11 +287,9 @@ fn a_literal_token_is_a_failure() {
     let (code, json) = doctor(dir.path());
     assert_eq!(code, 1);
     assert_eq!(level(&json, "token"), "fail");
-    assert_eq!(
-        level(&json, "config"),
-        "ok",
-        "the token check owns this finding; config still parses"
-    );
+    // `deny_unknown_fields` makes the same line a config error too: a bare
+    // `token` key is not part of the contract. Both checks point at one fix.
+    assert_eq!(level(&json, "config"), "fail");
 }
 
 #[test]

@@ -19,7 +19,7 @@
 
 ### 2.2 「账本认不认识这个 raw」只有一个答案
 
-`scan::RawLedger` 负责这个判断，`lint` 的 L7 与 `ingest begin` 的 `orphan_pages` 都必须调它，不许各自再写一遍 `raws` 表的 join——以前就是三处各写一遍，才出现「L7 提示的修法根本跑不通」。
+`scan::RawLedger` 负责这个判断，`doctor` 的 lint L7 与 `ingest` 的 `orphan_pages` 都必须调它，不许各自再写一遍 `raws` 表的 join——以前就是三处各写一遍，才出现「L7 提示的修法根本跑不通」。
 `tests/reconcile.rs` 钉住三处同答。
 
 ### 2.3 技能不复述 CLI 的输出形状
@@ -48,31 +48,32 @@
 
 ### 2.6 写入边界靠结构，不靠自觉
 
-引擎（契约、raw、pages、账本、暂存、版本）全部在隐藏目录 `.wiki/` 里，`Config.paths` 用 `#[serde(skip)]` 固定成常量，手写 `[paths]` 移不出去；工具不生成也不检查任何 git 配置——用 git 的仓库自己把 `.wiki/` 加进根 `.gitignore`。`init` 不再生成 `.wiki/.gitignore`（引擎里不放任何 git 文件），旧库遗留的那份不删、也不再被检查；`tests/init.rs::init_leaves_git_configuration_to_the_repository` 钉住新库不生成。`.wiki/` 之外的一切都是源，只读。
-`tests/e2e.rs::init_scan_convert_ingest_publish_lint_checkpoint_query_sync_archive_recall` 在完整链路前后逐字节比对引擎外的文件，任何命令往引擎外写文件都会红。清理类命令（`archive purge`）只删 `.wiki/raw/` 与页面，**永远不删源文件**。
+引擎（契约、raw、pages、账本、暂存、版本）全部在隐藏目录 `.wiki/` 里，`Config.paths` 用 `#[serde(skip)]` 固定成常量，手写 `[paths]` 移不出去；工具不生成也不检查任何 git 配置——用 git 的仓库自己把 `.wiki/` 加进根 `.gitignore`。`doctor --fix` 不再生成 `.wiki/.gitignore`（引擎里不放任何 git 文件），旧库遗留的那份不删、也不再被检查；`tests/init.rs::init_leaves_git_configuration_to_the_repository` 钉住新库不生成。`.wiki/` 之外的一切都是源，只读。
+`tests/e2e.rs::doctor_ingest_submit_query_round_trip` 在完整链路前后逐字节比对引擎外的文件，任何命令往引擎外写文件都会红。任何命令都**永远不删源文件**。
 
 ### 2.7 一个技能，三份文件
 
-`skills/llm-wiki/SKILL.md` 是唯一入口（边界、路由、最小序列、门禁、`approve` 选项、退出码）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、同步、冲突与回退、忽略、叫人）。
-拆分只为了让 agent 按需只读一份，不是新的契约；`tests/skills_pack.rs` 断言只发一个技能、正文行数不超限。
+`skills/llm-wiki/SKILL.md` 是 wiki 本身的入口（边界、路由、最小序列、门禁、`submit` 选项、退出码）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、冲突与回退、忽略、叫人）。
+`skills/llm-wiki-session/` 是第二个技能：会话蒸馏，写进 `[ingest].session_dir` 指向的源目录（默认 `sessions`），原始会话不存。一个会话一个文件，不按时间切。
+拆分只为了让 agent 按需只读一份，不是新的契约；`tests/skills_pack.rs` 断言只发这两个技能、正文行数不超限。
 
 ### 2.8 技能的价值在流程纪律，不在用法说明
 
-用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——先 `convert --key` 再 `ingest begin`、候选只能写到 `begin` 给的 `write_to`、`approve` 只有每个候选都被扣住才 exit 3；
+用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——`ingest` 一次给出 `write_to`、候选只能写到那里、`submit` 只有每个候选都被扣住才 exit 3；
 flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复，加长技能文本收益很低，反而会和 CLI 漂移。
 所以：技能里写「什么时候做什么、做错了怎么判」，不写「这个参数是什么意思」。
 
 ### 2.9 版本是 manifest + 对象，不是目录拷贝
 
-`checkpoint` 不复制目录：它把 `pages/` 与 `raw/` 每条路径的 blake3 写进 `manifest.json`，字节按摘要存进 `.wiki/objects/`。
+`ingest` 与 `submit` 记账时不复制目录：它们把 `pages/` 与 `raw/` 每条路径的 blake3 写进 `manifest.json`，字节按摘要存进 `.wiki/objects/`。
 所以「改一页」不会让整版体积翻倍，但**任何直接改写内容文件的代码都必须走 `version::write_atomic`**——就地截断会同时改掉历史版本共享的那个对象。
-回退按 manifest 还原两棵树并 `query::reindex`，回退本身也记一个 `kind: rollback` 版本；不做单页回退。
+版本是每轮自动记的：`ingest` 一个锚点、`submit` 一个发布版本。目前没有回退命令，`version::restore` 只作为库函数存在；不做单页回退。
 
 ### 2.10 忽略列表只有一个解释入口
 
-`src/ignore.rs::IgnoreList` 是唯一读 `.wiki/ignore` 的地方：`scan`/`convert` 用它跳过、`archive purge` 用它不清。
+`src/ignore.rs::IgnoreList` 是唯一读 `.wiki/ignore` 的地方：`ingest` 用它跳过。
 不要在调用点自己拼通配，也不要把它和 `[scan].ignore`（只按目录名粗过滤）混用——两者语义不同，混了就会出现「列表里明明写了却还被扫到」。
-显式 `convert --key` 绕开忽略是故意的：先看一眼再决定要不要永久挡住。
+显式 `ingest <KEY>` 绕开忽略是故意的：先看一眼再决定要不要永久挡住。
 
 ### 2.11 三道刹车只扣住命中的候选
 
@@ -87,20 +88,20 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.12 同步在 CLI 之外
 
-`.wiki/` 是这台机器唯一的事实源，**明确不考虑跨机器**：不要加 `sync --push/--pull`、不要读远端、不要假设网络、不要为多机场景改账本，也不要在文档里教人搬目录或合并账本——两边各写再拼会得到互相矛盾的 `source_hash`。
+`.wiki/` 是这台机器唯一的事实源，**明确不考虑跨机器**：不要加任何推送/拉取子命令、不要读远端、不要假设网络、不要为多机场景改账本，也不要在文档里教人搬目录或合并账本——两边各写再拼会得到互相矛盾的 `source_hash`。
 目录内仍然只存仓库相对路径（键一律来自 `paths::identity_key`），这是「不写死绝对路径」的卫生要求，不是为搬移做准备。
 
 ### 2.13 否决也是对源的表决
 
 `reject` 只丢页面是不够的：人看过这批变动、说了「不要」，变动的字节就已经被承认为已知状态。所以 `reject` 走 `Ledger::mark_reviewed`，把这一轮每个源的账本摘要换成磁盘上的当前摘要，并把它们在 manifest 里的 `baseline_hash` 推到 `current_hash`。
 不这么做，同一个文件会一轮轮以 `changed` 回来，直到有人把它加进忽略列表——而拒绝和忽略是两件事。
-摘要必须按 `scan` 的选法算（小文件全量、大文件采样，见 `accept_reviewed_sources`），否则下一次 `scan` 立刻报假 `changed`；`tests/version.rs::reject_accepts_the_source_bytes_so_it_is_not_reported_again` 钉住。超大读不了的文件跳过，让它继续报 `oversize`。
+摘要必须按 `scan` 的选法算（小文件全量、大文件采样，见 `accept_reviewed_sources`），否则下一次 `doctor` 的扫描立刻报假 `changed`；`tests/version.rs::reject_accepts_the_source_bytes_so_it_is_not_reported_again` 钉住。超大读不了的文件跳过，让它继续报 `oversize`。
 
 这道表决依赖 `ingest submit` 把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `reject`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`reject` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
 
 ### 2.14 决策日志不是内容
 
-每次 `approve` / `reject` / `instruct` / `defer` / `seal` / `rollback` 只往 `.wiki/journal.jsonl` 追加一行 JSON（`journal::append`），不再写 `pages/log.md`。三条后果要记住：日志不进版本（`collect_content` 只走 `pages/` 与 `raw/`），所以 `rollback` 抹不掉它；它不参与 `query` 索引，所以搜不到；`detail` 里的换行被 JSON 转义，多行 `--reason` 不会破坏格式。想给它加读者就加，但别把它塞回页面树——那会让「回退会不会改历史」重新变成一个问题。
+每次 `submit` / `abort` 只往 `.wiki/journal.jsonl` 追加一行 JSON（`journal::append`），不再写 `pages/log.md`。三条后果要记住：日志不进版本（`collect_content` 只走 `pages/` 与 `raw/`），所以版本回退抹不掉它；它不参与 `query` 索引，所以搜不到；`detail` 里的换行被 JSON 转义，多行 `--reason` 不会破坏格式。想给它加读者就加，但别把它塞回页面树——那会让「回退会不会改历史」重新变成一个问题。
 
 ### 2.15 发布后要清 `page_meta`，否则搜索停在旧正文
 
@@ -110,13 +111,13 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 ### 2.16 目录布局只有一张表
 
 `src/layout.rs::LAYOUT` 是引擎目录的唯一清单：每条只有 `path` 与 `authored`，父先于子。
-`init` 遍历全表；`precondition::check` 只看 `authored`；`provision` 只补非 `authored`，并且跳过“父目录是缺失的 `authored` 目录”的子项——否则 `.wiki/pages/archive` 会顺带把 `.wiki/pages` 造出来，闸门就形同虚设。
+`doctor --fix` 遍历全表；`precondition::check` 只看 `authored`；`provision` 只补非 `authored`，并且跳过“父目录是缺失的 `authored` 目录”的子项——否则 `.wiki/pages/archive` 会顺带把 `.wiki/pages` 造出来，闸门就形同虚设。
 不要再加回 `DIRS` / `PROVISIONED` 这类第二份清单；加目录只改 `LAYOUT` 并标明是否 `authored`。
 `tests/precondition.rs::provision_never_creates_the_authored_tree_but_repairs_its_children_when_it_exists` 钉住补建不会复活产品目录；`src/layout.rs` 的单元测试钉住父先于子、只有 `.wiki/pages` 是 `authored`。
 
 ### 2.17 初始化是被动路径，不是开场仪式
 
-`init` 与它的两步后续（写项目指令、把 `scan` 排成定时任务）只在新仓库第一次有收益；放进技能开场，每轮日常都要背一段用不上的指令，还会和 `init` 自己的输出抢同一份事实。所以技能没有「开场」一节：agent 正常跑命令，撞上 `E_NOT_INITIALISED` / `E_NO_CONFIG` 才回头建，并按 CLI 的 message 与 `init` 输出末尾的两步走。
+`doctor --fix` 与它的两步后续（写项目指令、把 `ingest` 排成定时任务）只在新仓库第一次有收益；放进技能开场，每轮日常都要背一段用不上的指令，还会和 `init` 自己的输出抢同一份事实。所以技能没有「开场」一节：agent 正常跑命令，撞上 `E_NOT_INITIALISED` / `E_NO_CONFIG` 才回头建，并按 CLI 的 message 与 `doctor --fix` 输出末尾的两步走。
 细节只写在 `src/init.rs` 的 `NEXT_STEPS`（默认周期、先问用户），技能只留触发条件与去向——两处都在讲同一件事，改一处必须改另一处；`tests/init.rs::init_ends_with_the_fixed_follow_up_prompt` 钉住 CLI 这一侧。
 
 ## 3. 提交前自查

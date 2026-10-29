@@ -497,7 +497,7 @@ pub fn approve(
     } else {
         format!("{} 页，{} 页留在暂存区", published.len(), held_back.len())
     };
-    journal::append(root, "approve", Some(&name), &detail)?;
+    journal::append(root, "submit", Some(&name), &detail)?;
 
     let mut manifest = Manifest::load(root)?;
     for entry in manifest.sources.values_mut() {
@@ -844,12 +844,12 @@ struct VersionManifest {
     entries: Vec<ManifestEntry>,
 }
 
-/// One row of `llm-wiki history`.
+/// One row of the version history.
 #[derive(Debug, Clone, Serialize)]
 pub struct VersionRow {
     /// `vNNN`.
     pub version: String,
-    /// `checkpoint`, `approve` or `rollback`.
+    /// Who took the snapshot: `ingest`, `submit` or `restore`.
     pub kind: String,
     /// Why the snapshot was taken.
     pub label: String,
