@@ -12,7 +12,7 @@ use serde_json::json;
 
 use llm_wiki::archive;
 use llm_wiki::chunk;
-use llm_wiki::cli::{ArchiveCommand, Cli, Command, IgnoreCommand, IngestCommand, ScopeArg};
+use llm_wiki::cli::{ArchiveCommand, Cli, Command, IgnoreCommand, ScopeArg};
 use llm_wiki::config::Config;
 use llm_wiki::convert;
 use llm_wiki::doctor::{self, Check, Level};
@@ -75,7 +75,9 @@ fn dispatch(cli: Cli) -> ! {
             range,
             force_large,
         } => run_parse(key, chunk, range, force_large),
-        Command::Ingest { command } => run_ingest(command),
+        Command::Ingest { keys, dry_run } => run_ingest(keys, dry_run),
+        Command::Submit { pages } => run_submit(pages),
+        Command::Abort => run_abort(),
         Command::Lint { strict, fix } => run_lint(strict, fix),
         Command::Checkpoint { label } => run_checkpoint(label),
         Command::Approve { confirm } => run_approve(confirm),
@@ -181,12 +183,33 @@ fn open_store(cmd: &str, root: &Path, cfg: &Config) -> Store {
 /// `init` writes the contract files and creates the engine directories. A
 /// failure to read the working directory, or to write the contract, is an
 /// environment error (exit 2) rather than a finding.
+///
+/// The payload ends with a fixed follow-up prompt aimed at the agent: it names
+/// two steps the CLI cannot take itself (a per-project instruction and a
+/// scheduler). The human form prints it verbatim instead of folding it onto one
+/// `next: …` line.
 fn run_init(force: bool) -> ! {
     let root = wiki_root("init");
     match init::run(&root, force) {
-        Ok(outcome) => report::emit("init", outcome),
+        Ok(outcome) => report::emit_with("init", outcome, Exit::Ok, human_init),
         Err(err) => report::fail("init", Exit::Usage, "E_IO", &err.to_string()),
     }
+}
+
+/// Human rendering of `init`: the two path lists exactly as the generic
+/// renderer prints them, then the prompt on lines of its own.
+fn human_init(outcome: &init::InitOutcome) -> String {
+    format!(
+        "created: {}\nskipped: {}\n\n{}",
+        json_list(&outcome.created),
+        json_list(&outcome.skipped),
+        outcome.next
+    )
+}
+
+/// A compact JSON array, which is what the generic renderer prints for a list.
+fn json_list(items: &[String]) -> String {
+    serde_json::to_string(items).unwrap_or_else(|_| String::from("[]"))
 }
 
 /// `doctor` runs the pre-flight checks and reports all of them.
@@ -236,6 +259,7 @@ fn run_sync(limit: Option<usize>, dry_run: bool, force: bool, only: Vec<String>)
         dry_run,
         force,
         only,
+        open_round: false,
     };
     match sync::run(&root, &cfg, &mut store, &args) {
         Ok(report) => {
@@ -604,40 +628,67 @@ fn parse_chunk_range(spec: &str) -> std::result::Result<(usize, usize), String> 
 ///
 /// A round never publishes: `submit` refreshes the candidates under staging and
 /// regenerates the staging index, and approval is what moves pages into `wiki/`.
-fn run_ingest(command: IngestCommand) -> ! {
-    let cmd = match &command {
-        IngestCommand::Begin { .. } => "ingest.begin",
-        IngestCommand::Submit { .. } => "ingest.submit",
-        IngestCommand::Abort => "ingest.abort",
-    };
+fn run_ingest(keys: Vec<String>, dry_run: bool) -> ! {
+    let cmd = "ingest";
     let root = wiki_root(cmd);
     let cfg = open_repo(cmd, &root);
     let mut store = open_store(cmd, &root, &cfg);
-
-    match command {
-        IngestCommand::Begin {
-            sources,
-            pages,
-            dry_run,
-        } => {
-            let input = ingest::BeginInput {
-                sources,
-                pages,
-                dry_run,
+    // A named key is the only source read this round; no key means every new or
+    // changed source. Either way the round runs now: `ingest` is the explicit
+    // request, so it does not wait for the settle window. That window belongs to
+    // the unattended path, which is what `open_round: false` still serves.
+    let args = sync::SyncArgs {
+        limit: cfg.sync.max_per_run,
+        dry_run,
+        force: true,
+        only: keys,
+        open_round: true,
+    };
+    match sync::run(&root, &cfg, &mut store, &args) {
+        Ok(report) => {
+            let exit = if report.failures > 0 {
+                Exit::Error
+            } else {
+                Exit::Ok
             };
-            match ingest::begin(&root, &cfg, &mut store, &input) {
-                Ok(outcome) => report::emit(cmd, outcome),
-                Err(err) => fail_ingest(cmd, &err),
-            }
+            report::emit_with(cmd, report, exit, human_sync)
         }
-        IngestCommand::Submit { pages } => match ingest::submit(&root, &cfg, &mut store, &pages) {
-            Ok(outcome) => report::emit(cmd, outcome),
-            Err(err) => fail_ingest(cmd, &err),
-        },
-        IngestCommand::Abort => match ingest::abort(&root, &cfg, &mut store) {
-            Ok(outcome) => report::emit(cmd, outcome),
-            Err(err) => fail_ingest(cmd, &err),
-        },
+        Err(err) => {
+            let message = match &err {
+                sync::SyncError::Lock(lock_err) => lock_err.hint(),
+                _ => err.to_string(),
+            };
+            let exit = if err.code() == "E_LOCKED" {
+                Exit::Busy
+            } else {
+                Exit::Usage
+            };
+            report::fail(cmd, exit, err.code(), &message)
+        }
+    }
+}
+
+/// Closes the open round: refreshes the named candidates and the staging index.
+fn run_submit(pages: Vec<String>) -> ! {
+    let cmd = "submit";
+    let root = wiki_root(cmd);
+    let cfg = open_repo(cmd, &root);
+    let mut store = open_store(cmd, &root, &cfg);
+    match ingest::submit(&root, &cfg, &mut store, &pages) {
+        Ok(outcome) => report::emit(cmd, outcome),
+        Err(err) => fail_ingest(cmd, &err),
+    }
+}
+
+/// Drops the open round; the candidates nobody has reviewed stay in staging.
+fn run_abort() -> ! {
+    let cmd = "abort";
+    let root = wiki_root(cmd);
+    let cfg = open_repo(cmd, &root);
+    let mut store = open_store(cmd, &root, &cfg);
+    match ingest::abort(&root, &cfg, &mut store) {
+        Ok(outcome) => report::emit(cmd, outcome),
+        Err(err) => fail_ingest(cmd, &err),
     }
 }
 

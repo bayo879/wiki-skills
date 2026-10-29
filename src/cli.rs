@@ -72,11 +72,21 @@ pub enum Command {
         #[arg(long)]
         force_large: bool,
     },
-    /// Drive one ingest round: open it, close it, or drop it.
+    /// One write-line round: scan, convert, and open it.
     Ingest {
-        #[command(subcommand)]
-        command: IngestCommand,
+        /// Sources to read; empty means every new or changed source.
+        keys: Vec<String>,
+        /// Report what the round would do and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
+    /// Close the open round: refresh the candidates and the staging index.
+    Submit {
+        /// Candidate page ids to publish into staging, in the order given.
+        pages: Vec<String>,
+    },
+    /// Drop the open round, keeping the candidates already written.
+    Abort,
     /// Audit the wiki against the lint rules.
     Lint {
         /// Fail on warnings as well as errors.
@@ -249,27 +259,3 @@ pub enum ArchiveCommand {
     },
 }
 
-/// The three verbs of an ingest round.
-#[derive(Debug, Subcommand)]
-pub enum IngestCommand {
-    /// Open a round for these sources and report the pages they affect.
-    Begin {
-        /// Source keys the round reads; each must be in the ledger.
-        #[arg(long)]
-        sources: Vec<String>,
-        /// Pages already known to be affected, merged into the scan.
-        #[arg(long)]
-        pages: Vec<String>,
-        /// Report the round without writing its pending list.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Submit the open round: refresh the candidates and the staging index.
-    Submit {
-        /// Candidate page ids to publish into staging, in the order given.
-        #[arg(long)]
-        pages: Vec<String>,
-    },
-    /// Drop the open round, keeping the candidates already written.
-    Abort,
-}

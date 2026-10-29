@@ -51,6 +51,11 @@ pub struct SyncArgs {
     pub force: bool,
     /// Convert only these repo-relative keys; empty means every pending source.
     pub only: Vec<String>,
+    /// Open the round regardless of `auto_ingest` and the stable streak.
+    ///
+    /// `ingest` is the human-triggered round: it always opens one, while
+    /// `sync` waits for the configuration and the streak to agree.
+    pub open_round: bool,
 }
 
 /// What one round did.
@@ -313,7 +318,9 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
             1
         };
         store.sync_state_set(&streak_key, &streak.to_string())?;
-        if auto_ingest && (args.force || streak >= cfg.sync.stable_streak) {
+        if (auto_ingest || args.open_round)
+            && (args.force || args.open_round || streak >= cfg.sync.stable_streak)
+        {
             stable.push(row.key.clone());
         }
     }

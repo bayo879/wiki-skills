@@ -28,6 +28,8 @@ pub struct InitOutcome {
     pub created: Vec<String>,
     /// Paths that already existed and were left alone.
     pub skipped: Vec<String>,
+    /// The fixed prompt that tells the agent what to do next.
+    pub next: String,
 }
 
 /// Failure while creating a directory or writing a contract file.
@@ -78,7 +80,26 @@ pub fn run(root: &Path, force: bool) -> Result<InitOutcome> {
         outcome.created.push(name.to_string());
     }
 
+    outcome.next = next_steps(root);
+
     Ok(outcome)
+}
+
+/// The fixed follow-up prompt, printed once the repository exists.
+///
+/// It is addressed to the agent that ran `init`, not to a human: both steps
+/// live outside the engine (a per-project instruction and a scheduler), so the
+/// CLI can only point at them, never perform them. `{root}` is the only part
+/// that varies, which keeps the wording stable enough to assert on.
+const NEXT_STEPS: &str = "\
+项目初始化结束，请完成后续操作：
+
+1. 注入 User 设定：`{root}` 是知识库目录，优先借助 llm-wiki 技能检索信息。
+2. 把 `llm-wiki scan` 设为定时任务，默认每天 01:00 执行一次；周期先与用户确认再落地。";
+
+/// Fills the prompt's one placeholder with the repository root.
+fn next_steps(root: &Path) -> String {
+    NEXT_STEPS.replace("{root}", &root.display().to_string())
 }
 
 /// Default `wiki.toml`: every section spelled out, every default made visible.
