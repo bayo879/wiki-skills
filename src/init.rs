@@ -159,15 +159,6 @@ read_retries        = 3
 lag_warn_rounds     = 3
 on_missing          = "mark_stale"
 
-[memory]
-# Live session records before the agent is asked to distil them.
-session_soft_cap = 50
-# Days a sealed summary may sit unread before it counts as idle.
-idle_days        = 60
-# A summary is only purged when the archive is BOTH over purge_cap and past
-# purge_days, so a quiet wiki never loses its history.
-purge_cap        = 200
-purge_days       = 180
 "#;
 
 /// Default `SCHEMA.md`: the conventions the CLI enforces, for humans and agents.

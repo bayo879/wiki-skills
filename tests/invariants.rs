@@ -138,19 +138,18 @@ fn only_store_writes_sql() {
 
 // --------------------------------------------------------------- 写入口封闭
 
-/// `architecture.md`: exactly three modules write the ledger — `convert`
-/// registers, `moves` rekeys, `archive purge` deletes.
+/// `architecture.md`: exactly one module writes the ledger — `ledger::Ledger`
+/// owns every intent (register a source, follow a rename, forget a raw).
 ///
 /// Fooled by: writing the rows with raw SQL instead of these methods, which the
 /// test above catches first.
 #[test]
 fn only_ledger_writes_the_ledger() {
-    const WRITERS: [&str; 5] = [
+    const WRITERS: [&str; 4] = [
         "upsert_source(",
         "upsert_raw(",
         "delete_source(",
         "delete_raw(",
-        "delete_archive(",
     ];
     let mut callers: BTreeSet<String> = BTreeSet::new();
     for (path, text) in non_store_sources() {
@@ -180,9 +179,7 @@ fn only_ledger_writes_the_ledger() {
 /// three answers ever disagree.
 #[test]
 fn only_scan_joins_the_raw_ledger() {
-    // `L7` asks the question, so its body must go through `RawLedger`. `L12`
-    // legitimately lists asset raws with `all_raws`, which is why this is scoped
-    // to one function instead of banning the call from the file.
+    // `L7` asks the question, so its body must go through `RawLedger`.
     let lint = fs::read_to_string("src/lint.rs").expect("src/lint.rs is missing");
     let body = function_body(&lint, "check_unledgered_raws")
         .expect("lint no longer has check_unledgered_raws; update this invariant");
@@ -330,7 +327,7 @@ fn migrate_steps_through_every_schema_version() {
 
 /// The twelve rules exist in two places that can drift apart: the doc comment
 /// in `src/lint.rs` (rule and severity) and `tests/lint.rs` (one `l{n}_` test
-/// per rule). This holds both against rule numbers 1..=12.
+/// per rule). This holds both against rule numbers 1..=11.
 #[test]
 fn every_lint_rule_has_a_test() {
     let lint = fs::read_to_string("src/lint.rs").expect("src/lint.rs is missing");
@@ -362,8 +359,8 @@ fn every_lint_rule_has_a_test() {
             .iter()
             .map(|(number, _)| *number)
             .collect::<Vec<_>>(),
-        (1..=12).collect::<Vec<u32>>(),
-        "src/lint.rs must declare L1..L12 once each, in order"
+        (1..=11).collect::<Vec<u32>>(),
+        "src/lint.rs must declare L1..L11 once each, in order"
     );
 
     let tests = fs::read_to_string("tests/lint.rs").expect("tests/lint.rs is missing");

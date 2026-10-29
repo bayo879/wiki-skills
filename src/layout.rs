@@ -3,7 +3,7 @@
 //! `init` creates every entry. Commands may repair the derived ones, but the
 //! authored product (`.wiki/pages`) is the user's decision: the gate refuses
 //! when it is missing, and `provision` must never create it, not even through a
-//! child directory such as `.wiki/pages/archive`.
+//! child directory such as `.wiki/pages/audit`.
 
 /// One directory the engine owns.
 #[derive(Debug, Clone, Copy)]
@@ -16,7 +16,7 @@ pub struct Entry {
 }
 
 /// Parents come before children so each `create_dir_all` sees its parent.
-pub const LAYOUT: [Entry; 10] = [
+pub const LAYOUT: [Entry; 9] = [
     Entry {
         path: ".wiki",
         authored: false,
@@ -32,10 +32,6 @@ pub const LAYOUT: [Entry; 10] = [
     Entry {
         path: ".wiki/pages",
         authored: true,
-    },
-    Entry {
-        path: ".wiki/pages/archive",
-        authored: false,
     },
     Entry {
         path: ".wiki/pages/audit",

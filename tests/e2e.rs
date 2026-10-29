@@ -2,7 +2,7 @@
 //!
 //! One repository goes from empty to mined: fixtures are dropped in, scanned,
 //! converted, distilled into a page, reviewed, published, checked, searched,
-//! synced (dry run), archived and finally recalled. Every step's exit code and
+//! synced (dry run), aborted and finally queried. Every step's exit code and
 //! the fields later steps depend on are asserted, so a regression anywhere in
 //! the chain shows up as a broken link rather than a green unit test.
 

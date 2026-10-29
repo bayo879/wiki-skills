@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::archive;
 use crate::config::Config;
 use crate::hash;
 use crate::page;
@@ -55,8 +54,6 @@ pub struct Hit {
     pub sources: Vec<SourceRef>,
     /// How many other pages link to this one.
     pub backlinks: usize,
-    /// Whether the page sits under `wiki/archive/`.
-    pub archived: bool,
     /// One-hop neighbour summaries, only filled when `--expand` is at least 1.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub expanded: Vec<ExpandedRef>,
@@ -110,16 +107,14 @@ pub struct SearchQuery {
     pub scope: Scope,
 }
 
-/// Which pages a search may return. The index always contains both halves;
+/// Which pages a search may return. The index always contains the whole wiki;
 /// the scope only filters the query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// Live pages and archived summaries.
+    /// Every indexed page.
     All,
-    /// Live pages only.
-    Wiki,
-    /// Archived summaries only.
-    Archive,
+    /// Every indexed page except the session-distilled directory.
+    ExcludingSessions,
 }
 
 /// Result of the query helpers.
@@ -279,11 +274,12 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
 pub fn search(root: &Path, cfg: &Config, store: &Store, query: &SearchQuery) -> Result<Vec<Hit>> {
     let expression = match_expr(&query.text).ok_or(QueryError::EmptyQuery)?;
     let wiki = cfg.paths.wiki.trim_end_matches('/');
-    let archive_glob = format!("{wiki}/{}/%", archive::DIR);
+    let session_dir = cfg.ingest.session_dir.trim().trim_matches('/');
+    let session_glob = format!("{wiki}/{session_dir}/%");
     let scope = match query.scope {
         Scope::All => FtsScope::All,
-        Scope::Wiki => FtsScope::NotLike(&archive_glob),
-        Scope::Archive => FtsScope::Like(&archive_glob),
+        Scope::ExcludingSessions if session_dir.is_empty() => FtsScope::All,
+        Scope::ExcludingSessions => FtsScope::NotLike(&session_glob),
     };
 
     let rows = store.fts_search(&expression, query.limit, scope)?;
@@ -456,8 +452,6 @@ struct PageInfo {
     status: String,
     /// Why the page is here, in case someone asks.
     sources: Vec<String>,
-    /// Whether the page lives under `wiki/archive/`.
-    archived: bool,
     /// Resolved outgoing links, deduplicated, in body order.
     links: Vec<String>,
 }
@@ -496,7 +490,6 @@ impl PageIndex {
             if !front.id.is_empty() {
                 aliases.insert(front.id.clone(), key.clone());
             }
-            let archived = rel.starts_with(&format!("{}/", archive::DIR));
             targets.push((key.clone(), wikilinks(&body)));
             pages.insert(
                 key,
@@ -505,7 +498,6 @@ impl PageIndex {
                     summary: front.summary,
                     status: front.status.as_str().to_string(),
                     sources: front.sources,
-                    archived,
                     links: Vec::new(),
                 },
             );
@@ -561,21 +553,15 @@ impl PageIndex {
         }
 
         let sources: &[String] = page.map(|page| page.sources.as_slice()).unwrap_or_default();
-        let (title, summary, status, archived) = match page {
+        let (title, summary, status) = match page {
             Some(page) => (
                 page.title.clone(),
                 page.summary.clone(),
                 page.status.clone(),
-                page.archived,
             ),
             // The index row outlived its file: report what the index knows
             // rather than dropping a hit the user can still act on.
-            None => (
-                row.title.clone(),
-                String::new(),
-                String::from("draft"),
-                false,
-            ),
+            None => (row.title.clone(), String::new(), String::from("draft")),
         };
 
         Hit {
@@ -588,7 +574,6 @@ impl PageIndex {
             links,
             sources: source_refs(root, sources),
             backlinks: self.backlinks.get(&row.page_id).copied().unwrap_or(0),
-            archived,
             expanded,
         }
     }

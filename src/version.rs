@@ -347,8 +347,8 @@ fn parse_chunk_range(range: &str) -> Option<(usize, usize)> {
 
 /// The pages already in the wiki that the overlap rule compares against.
 ///
-/// Bookkeeping files and the two summary trees are skipped: an audit report or
-/// an archived conversation is not a page competing for the same subject.
+/// Bookkeeping files are skipped: an audit report is not a page competing for
+/// the same subject.
 fn published(root: &Path, cfg: &Config) -> Vec<Published> {
     let dir = root.join(&cfg.paths.wiki);
     let mut out = Vec::new();
@@ -357,7 +357,7 @@ fn published(root: &Path, cfg: &Config) -> Vec<Published> {
             continue;
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
-        if rel == "index.md" || rel.starts_with("audit/") || rel.starts_with("archive/") {
+        if rel == "index.md" || rel.starts_with("audit/") {
             continue;
         }
         let Ok(raw) = fs::read(&path) else {

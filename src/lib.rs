@@ -4,7 +4,6 @@
 //! integration tests exercise the same code. `main.rs` keeps only the clap
 //! wiring and dispatch.
 
-pub mod archive;
 pub mod chunk;
 pub mod cli;
 pub mod config;

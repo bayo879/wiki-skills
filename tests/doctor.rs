@@ -106,7 +106,7 @@ fn edit_toml_line(dir: &Path, prefix: &str, replacement: &str) {
     fs::write(&path, out).expect("wiki.toml is writable");
 }
 
-/// Rewrites `wiki/audit` style summaries the way the archive expects them.
+/// Rewrites `wiki/audit` style reports the way `lint` expects them.
 fn write_page(dir: &Path, key: &str, front: &str, body: &str) {
     let path = dir.join(".wiki/staging").join(key);
     fs::create_dir_all(path.parent().unwrap()).expect("staging dir");
@@ -164,7 +164,7 @@ fn a_missing_config_section_is_only_a_warning() {
     let dir = repo();
     let path = dir.path().join(".wiki/wiki.toml");
     let text = fs::read_to_string(&path).expect("readable");
-    let cut = text.find("[memory]").expect("[memory] is in the contract");
+    let cut = text.find("[sync]").expect("[sync] is in the contract");
     fs::write(&path, &text[..cut]).expect("writable");
     let (code, json) = doctor(dir.path());
     assert_eq!(code, 0, "a defaulted section is a warning, not a failure");

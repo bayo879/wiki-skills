@@ -581,7 +581,7 @@ fn run_query(text: Option<String>, limit: usize, no_archive: bool, graph: bool) 
         limit,
         expand: 0,
         scope: if no_archive {
-            QueryScope::Wiki
+            QueryScope::ExcludingSessions
         } else {
             QueryScope::All
         },

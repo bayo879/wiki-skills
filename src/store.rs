@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// DDL for version 1, applied once per database.
 const MIGRATION_1: &str = r#"
@@ -82,14 +82,9 @@ CREATE TABLE page_meta(
 
 /// DDL for version 4: the sealed-session archive ledger.
 ///
-/// One row per distilled summary under `wiki/archive/`. The page body lives on
-/// disk like every other page; this table only records which raw sources the
-/// summary replaced, when it was sealed and when it was last recalled, which is
-/// what `archive status` and `archive purge` decide from.
-///
-/// `sources_json` is a JSON array of source keys, kept as text because the
-/// ledger never queries inside it: the reader that needs the list is `seal`,
-/// which already holds it in memory.
+/// Kept as history: version 6 drops the table again. A database that starts at
+/// v4 and one that starts fresh both pass through it, which is why the migration
+/// is never edited.
 const MIGRATION_4: &str = r#"
 CREATE TABLE archive(
     key TEXT PRIMARY KEY,
@@ -116,9 +111,14 @@ DROP TABLE IF EXISTS source_pages;
 /// Column order shared by the `sources` reader helpers.
 const SOURCE_COLUMNS: &str = "key, hash, size, mtime, raw_key, converted_at";
 
-/// Column order shared by the `archive` reader helpers.
-const ARCHIVE_COLUMNS: &str =
-    "key, period_start, period_end, sources_json, sealed_at, sealed_by, last_recalled_at, recall_count";
+/// DDL for version 6: the archive table is gone.
+///
+/// The archive family was removed from the CLI, so nothing writes this table any
+/// more. Dropping it keeps a fresh database and an upgraded one identical, and a
+/// reader of the schema is not invited to revive it.
+const MIGRATION_6: &str = r#"
+DROP TABLE IF EXISTS archive;
+"#;
 
 /// Column order shared by the `page_meta` reader helpers.
 const PAGE_META_COLUMNS: &str = "page_key, hash, updated";
@@ -223,53 +223,6 @@ impl RawRow {
             hash: row.get(1)?,
             source_key: row.get(2)?,
             converted_at: row.get(3)?,
-        })
-    }
-}
-
-/// One row of the `archive` ledger: a distilled summary that replaced a group of
-/// session sources.
-///
-/// `key` is the repository-relative page path (`wiki/archive/<id>.md`); the page
-/// body is on disk, so this record only answers "what did this summary replace,
-/// when was it sealed, and when was it last read".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveRow {
-    /// Repository-relative, `/`-separated path of the summary page.
-    pub key: String,
-    /// First day the sealed sources cover, `YYYY-MM-DD`.
-    pub period_start: String,
-    /// Last day the sealed sources cover, `YYYY-MM-DD`.
-    pub period_end: String,
-    /// Source keys whose raw files this summary stands in for.
-    pub sources: Vec<String>,
-    /// When the seal ran, RFC 3339.
-    pub sealed_at: String,
-    /// Who asked for the seal: `human` or `agent`.
-    pub sealed_by: String,
-    /// When `recall` last returned this summary, `YYYY-MM-DD`; `None` if never.
-    pub last_recalled_at: Option<String>,
-    /// How many times `recall` returned this summary.
-    pub recall_count: i64,
-}
-
-impl ArchiveRow {
-    /// Reads one `archive` row in [`ARCHIVE_COLUMNS`] order.
-    ///
-    /// A `sources_json` cell that no longer parses is treated as an empty list
-    /// rather than an error: the ledger is a cache of what was sealed, and one
-    /// damaged cell must not make the whole archive unreadable.
-    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArchiveRow> {
-        let sources: String = row.get(3)?;
-        Ok(ArchiveRow {
-            key: row.get(0)?,
-            period_start: row.get(1)?,
-            period_end: row.get(2)?,
-            sources: serde_json::from_str(&sources).unwrap_or_default(),
-            sealed_at: row.get(4)?,
-            sealed_by: row.get(5)?,
-            last_recalled_at: row.get(6)?,
-            recall_count: row.get(7)?,
         })
     }
 }
@@ -410,6 +363,10 @@ impl Store {
         }
         if version < 5 {
             self.apply_migration(MIGRATION_5, 5)?;
+            version = 5;
+        }
+        if version < 6 {
+            self.apply_migration(MIGRATION_6, 6)?;
         }
         Ok(())
     }
@@ -600,83 +557,10 @@ impl Store {
         Ok(())
     }
 
-    /// Every sealed-session record, ordered by page key.
-    pub fn all_archives(&self) -> Result<Vec<ArchiveRow>> {
-        let sql = format!("SELECT {ARCHIVE_COLUMNS} FROM archive ORDER BY key");
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([], ArchiveRow::from_row)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
-    }
-
-    /// The archive record for `key`, or `None` when nothing was sealed there.
-    pub fn get_archive(&self, key: &str) -> Result<Option<ArchiveRow>> {
-        let sql = format!("SELECT {ARCHIVE_COLUMNS} FROM archive WHERE key = ?1");
-        let row = self
-            .conn
-            .query_row(&sql, [key], ArchiveRow::from_row)
-            .optional()?;
-        Ok(row)
-    }
-
-    /// Inserts `row`, or replaces the record for the same page key.
-    pub fn upsert_archive(&mut self, row: &ArchiveRow) -> Result<()> {
-        let sources = serde_json::to_string(&row.sources).unwrap_or_else(|_| String::from("[]"));
-        self.conn.execute(
-            "INSERT INTO archive(key, period_start, period_end, sources_json, sealed_at, \
-             sealed_by, last_recalled_at, recall_count) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-             ON CONFLICT(key) DO UPDATE SET \
-                 period_start = excluded.period_start, \
-                 period_end = excluded.period_end, \
-                 sources_json = excluded.sources_json, \
-                 sealed_at = excluded.sealed_at, \
-                 sealed_by = excluded.sealed_by, \
-                 last_recalled_at = excluded.last_recalled_at, \
-                 recall_count = excluded.recall_count",
-            params![
-                row.key,
-                row.period_start,
-                row.period_end,
-                sources,
-                row.sealed_at,
-                row.sealed_by,
-                row.last_recalled_at,
-                row.recall_count
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Records one `recall` hit against `key`.
-    ///
-    /// The count accumulates while the timestamp is replaced, so the pair means
-    /// "last read at `at`, read `recall_count` times in total". An unknown key is
-    /// a no-op: a summary deleted between the scan and the hit must not fail the
-    /// command.
-    pub fn touch_archive_recall(&mut self, key: &str, at: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE archive SET last_recalled_at = ?2, recall_count = recall_count + 1 \
-             WHERE key = ?1",
-            params![key, at],
-        )?;
-        Ok(())
-    }
-
     /// Removes the raw row for `key`. Deleting an unknown key is a no-op.
     pub fn delete_raw(&mut self, key: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM raws WHERE key = ?1", [key])?;
-        Ok(())
-    }
-
-    /// Removes the archive record for `key`. Deleting an unknown key is a no-op.
-    pub fn delete_archive(&mut self, key: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM archive WHERE key = ?1", [key])?;
         Ok(())
     }
 
@@ -953,7 +837,7 @@ mod tests {
         let mut s = Store::open(&p).unwrap();
         s.migrate().unwrap();
         assert_eq!(user_version(&s), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 5);
+        assert_eq!(SCHEMA_VERSION, 6);
 
         let first = page_meta("wiki/concept/a.md", "blake3:aa", "2026-10-27");
         s.upsert_page_meta(&first).unwrap();

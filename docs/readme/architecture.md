@@ -9,7 +9,7 @@
 | 源 | 仓库根（`.wiki/` 之外） | 是 | 唯一输入；只读，工具从不在其下写文件 |
 | 契约 | `.wiki/wiki.toml`、`.wiki/SCHEMA.md` | 否 | 配置与页面类型枚举；人和 agent 都读 |
 | 中间层 | `.wiki/raw/` | 否 | 解析产物，可重建；frontmatter 记录来源、哈希、解析后端 |
-| 知识层 | `.wiki/pages/` | 否 | 页面、`index.md`、`audit/`、`archive/` |
+| 知识层 | `.wiki/pages/` | 否 | 页面、`index.md`、`audit/` |
 | 引擎状态 | `.wiki/` 其余 | 否 | 账本 `state.db`、`staging/`、`versions/`、`sessions/`、`cache/`、`lock` |
 
 这些层都是本地状态，工具不生成也不检查任何 git 配置。用 git 的仓库把 `.wiki/` 加进仓库根的 `.gitignore`；没有 git 的环境不需要这一步。仓库里进 git 的只有源文件。
@@ -26,7 +26,7 @@
                                                               ▼
         .wiki/pages/ ◀── submit ──▶ .wiki/versions/vNNN/ + .wiki/objects/
 
-        query：FTS5 索引（--no-archive 排除 .wiki/pages/archive/）
+        query：FTS5 索引（--no-archive 排除 .wiki/pages/<session_dir>/）
         query --graph：[[wikilink]] 链接图（只读派生，不落库）
 ```
 
@@ -36,7 +36,7 @@
 4. **submit** 收口：把整份暂存区与本轮清单对齐，发布候选、重建 `index.md`、清掉已发布页的 `page_meta`（下一次检索重建索引），并记一个 `kind: submit` 版本。三道刹车只扣住命中的候选，其余照常发布（`--confirm` 越过全部刹车，`--auto` 把扣下的跳过并 exit 0），所以无人值守链路不需要人。`abort` 丢弃候选但保留源：人看过并否决的字节被承认为已知状态，下一轮不再报同一变动。两种决策都只往 `.wiki/journal.jsonl` 追加一行 JSON。
 5. **无人值守**：定时跑 `ingest`，再用 `submit --auto` 收口；`ingest` 是显式请求，开轮即执行，不等任何窗口。
 6. **query** 是派生索引：FTS5 检索；`page_meta` 存每页哈希，每次搜索前增量刷新，所以刚 `submit` 的页也能立刻搜到。`--graph` 读 `[[wikilink]]` 给出出入度、边、孤立页与断链，是浏览而不是体检——断链与孤立由 doctor 的 lint 报告。
-7. **会话蒸馏**：写进 `[ingest].session_dir`（默认 `sessions`）的页面被标记成 `archived`（目录是标记，不新增 frontmatter 字段），`query --no-archive` 默认排除它们。
+7. **会话蒸馏**：写进 `[ingest].session_dir`（默认 `sessions`）的页面照常入库、默认也在检索结果里（目录是标记，不新增 frontmatter 字段），`query --no-archive` 按这个前缀排除它们。
 
 ## 模块
 

@@ -9,7 +9,7 @@
 //!   two-character query straddling a word boundary still matches).
 //! - **A hit is a usable next step.** Links resolve to real pages, dead links
 //!   disappear, source references are split into raw path plus chunk with
-//!   `raw_available` stat-ed for real, archived pages carry their `recall` line,
+//!   `raw_available` stat-ed for real, links and sources filled from disk,
 //!   and `--expand` inlines exactly one hop.
 //! - **The index is a cache.** `reindex` rebuilds from `wiki/`, `refresh` only
 //!   touches pages whose digest changed, and `search` itself is read-only — the
@@ -56,7 +56,7 @@ impl Fixture {
         self.page_with(rel, &meta, body);
     }
 
-    /// Writes a page with hand-written frontmatter (for `sources:` and archive
+    /// Writes a page with hand-written frontmatter (for `sources:` and session
     /// ids).
     fn page_with(&self, rel: &str, meta: &str, body: &str) {
         let path = self.path("wiki", rel);
@@ -290,24 +290,20 @@ fn limit_caps_the_number_of_hits() {
 }
 
 #[test]
-fn scope_separates_the_wiki_from_the_archive() {
+fn scope_hides_the_session_distilled_pages() {
     let mut fx = Fixture::new();
     fx.page("concept/live.md", "live", "现行页", "现行", "同步流程。");
     fx.page_with(
-        "archive/2026-01/old.md",
-        "id: old\ntitle: 归档摘要\ntype: archive\nsummary: 归档\n\
-         status: stable\nupdated: 2026-01-31",
+        "sessions/2026-10/a.md",
+        "id: sess-a\ntitle: 会话摘要\ntype: source\nsummary: 会话\n\
+         status: stable\nupdated: 2026-10-01",
         "同步的历史结论。",
     );
     fx.reindex();
 
-    let wiki = fx.search("同步", 10, 0, Scope::Wiki);
-    assert_eq!(wiki.len(), 1);
-    assert_eq!(wiki[0].page, ".wiki/pages/concept/live.md");
-
-    let archive = fx.search("同步", 10, 0, Scope::Archive);
-    assert_eq!(archive.len(), 1);
-    assert_eq!(archive[0].page, ".wiki/pages/archive/2026-01/old.md");
+    let hidden = fx.search("同步", 10, 0, Scope::ExcludingSessions);
+    assert_eq!(hidden.len(), 1);
+    assert_eq!(hidden[0].page, ".wiki/pages/concept/live.md");
 
     assert_eq!(fx.search("同步", 10, 0, Scope::All).len(), 2);
 }
@@ -402,25 +398,6 @@ fn backlinks_count_the_pages_that_point_here() {
     assert_eq!(fx.only("订单").backlinks, 2);
     // A page nobody links to has zero.
     assert_eq!(fx.only("同步").backlinks, 0);
-}
-
-#[test]
-fn archived_hits_are_marked_as_archived() {
-    let mut fx = Fixture::new();
-    fx.page_with(
-        "archive/2026-01/vip-retry.md",
-        "id: vip-retry\ntitle: VIP 重试策略\ntype: archive\nsummary: 归档\n\
-         status: stable\nupdated: 2026-01-31",
-        "订单重试最终结论：三次封顶。",
-    );
-    fx.reindex();
-
-    let hit = fx.only("订单");
-    assert!(hit.archived);
-    // A live page never claims to be archived.
-    fx.page("concept/live.md", "live", "现行页", "现行", "订单同步。");
-    fx.reindex();
-    assert!(!fx.only("同步").archived);
 }
 
 #[test]

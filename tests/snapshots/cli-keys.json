@@ -50,7 +50,6 @@
   "query": [
     "cmd",
     "data.count",
-    "data.hits[].archived",
     "data.hits[].backlinks",
     "data.hits[].links[]",
     "data.hits[].links[].title",

@@ -133,13 +133,11 @@ fn provision_never_creates_the_authored_tree_but_repairs_its_children_when_it_ex
 
     llm_wiki::precondition::provision(d.path()).unwrap();
     assert!(!d.path().join(".wiki/pages").exists());
-    assert!(!d.path().join(".wiki/pages/archive").exists());
     assert!(d.path().join(".wiki/raw").is_dir());
 
     // Once the product exists, its derived children are repairable again.
     fs::create_dir_all(d.path().join(".wiki/pages")).unwrap();
     llm_wiki::precondition::provision(d.path()).unwrap();
-    assert!(d.path().join(".wiki/pages/archive").is_dir());
     assert!(d.path().join(".wiki/pages/audit").is_dir());
 }
 

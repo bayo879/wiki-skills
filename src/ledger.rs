@@ -2,7 +2,7 @@
 //!
 //! [`Store`] can write the `sources` and `raws` tables, but only this module
 //! does. Four callers have a reason to change the ledger — `convert` registers
-//! what it wrote, `moves` follows a rename, `archive purge` forgets what it
+//! what it wrote, and `moves` follows a rename.
 //! deleted, `reject` accepts the bytes a human just reviewed — and each of them
 //! states its intent here instead of touching the tables itself.
 //! `tests/invariants.rs::only_ledger_writes_the_ledger` holds production code
@@ -82,10 +82,5 @@ impl<'a> Ledger<'a> {
     /// one this source last produced.
     pub fn mark_reviewed(&mut self, row: &SourceRow) -> Result<()> {
         self.store.upsert_source(row)
-    }
-
-    /// Forget a sealed archive summary.
-    pub fn forget_archive(&mut self, key: &str) -> Result<()> {
-        self.store.delete_archive(key)
     }
 }

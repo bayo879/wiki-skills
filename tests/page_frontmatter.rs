@@ -342,13 +342,13 @@ fn replace_sources_drops_and_appends_in_one_write() {
     let (removed, added) = page::replace_sources(
         &p,
         &[String::from("raw/queries/a.md")],
-        &[String::from("wiki/archive/2026-05.md")],
+        &[String::from("wiki/sessions/2026-05.md")],
     )
     .unwrap();
     assert_eq!((removed, added), (1, 1));
     assert_eq!(
         fs::read_to_string(&p).unwrap(),
-        "---\n# 注释也要保留\nid: sync\nsources:\n  - \"raw/queries/b.md\"\n  - \"wiki/archive/2026-05.md\"\nstatus: stable\nupdated: 2026-01-01\n---\n正文\n"
+        "---\n# 注释也要保留\nid: sync\nsources:\n  - \"raw/queries/b.md\"\n  - \"wiki/sessions/2026-05.md\"\nstatus: stable\nupdated: 2026-01-01\n---\n正文\n"
     );
 }
 
