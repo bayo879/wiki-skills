@@ -76,7 +76,6 @@ pub struct Config {
     pub ingest: IngestCfg,
     pub audit: AuditCfg,
     pub versions: VersionsCfg,
-    pub sync: SyncCfg,
 }
 
 impl Config {
@@ -119,7 +118,7 @@ impl Config {
     }
 
     fn validate_on_missing(&self) -> Result<()> {
-        match self.sync.on_missing.as_str() {
+        match self.ingest.on_missing.as_str() {
             "mark_stale" | "ignore" => Ok(()),
             other => Err(ConfigError::Bad {
                 message: format!(
@@ -390,6 +389,24 @@ pub struct IngestCfg {
     /// root. Pages whose sources live here are what `query --no-archive` hides.
     /// An empty string disables the marker.
     pub session_dir: String,
+    /// Whether a stable-looking source is ingested without being asked. The
+    /// unattended path needs `--auto`; the flag exists for a scheduler that has
+    /// already decided the gate is open.
+    pub auto_ingest: bool,
+    /// Most sources one round takes.
+    pub max_per_run: usize,
+    /// Pending sources above this many mean the queue is not keeping up.
+    pub max_pending_sources: usize,
+    /// Seconds a source must sit untouched before a round may take it.
+    pub settle_seconds: u64,
+    /// Rounds a source must have identical bytes before it counts as stable.
+    pub stable_streak: u32,
+    /// Read attempts before a source is reported as unreadable.
+    pub read_retries: u32,
+    /// Rounds a source may lag before the audit reports it.
+    pub lag_warn_rounds: u32,
+    /// What a round does with a source that disappeared from disk.
+    pub on_missing: String,
 }
 
 impl Default for IngestCfg {
@@ -398,6 +415,14 @@ impl Default for IngestCfg {
             max_pages_per_slice: 5,
             max_new_pages_per_run: 20,
             session_dir: String::from("sessions"),
+            auto_ingest: false,
+            max_per_run: 20,
+            max_pending_sources: 200,
+            settle_seconds: 10,
+            stable_streak: 3,
+            read_retries: 3,
+            lag_warn_rounds: 3,
+            on_missing: String::from("mark_stale"),
         }
     }
 }
@@ -427,35 +452,6 @@ pub struct VersionsCfg {
 impl Default for VersionsCfg {
     fn default() -> Self {
         Self { keep: 5 }
-    }
-}
-
-/// `[sync]`: unattended-mode knobs.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SyncCfg {
-    pub auto_ingest: bool,
-    pub max_per_run: usize,
-    pub max_pending_sources: usize,
-    pub settle_seconds: u64,
-    pub stable_streak: u32,
-    pub read_retries: u32,
-    pub lag_warn_rounds: u32,
-    pub on_missing: String,
-}
-
-impl Default for SyncCfg {
-    fn default() -> Self {
-        Self {
-            auto_ingest: false,
-            max_per_run: 20,
-            max_pending_sources: 200,
-            settle_seconds: 10,
-            stable_streak: 3,
-            read_retries: 3,
-            lag_warn_rounds: 3,
-            on_missing: String::from("mark_stale"),
-        }
     }
 }
 

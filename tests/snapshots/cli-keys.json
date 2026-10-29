@@ -1,14 +1,15 @@
 {
-  "abort": [
-    "cmd",
-    "data.cleared",
-    "ok"
-  ],
   "doctor": [
     "cmd",
     "data.checks[].detail",
     "data.checks[].level",
     "data.checks[].name",
+    "ok"
+  ],
+  "ignore": [
+    "cmd",
+    "data.count",
+    "data.patterns[]",
     "ok"
   ],
   "ingest": [

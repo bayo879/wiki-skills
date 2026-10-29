@@ -48,8 +48,8 @@ use crate::store::{self, Store, StoreError};
 
 /// The sections a complete contract carries. A missing one is not fatal — the
 /// loader defaults it — but it usually means the file was hand-trimmed.
-const SECTIONS: [&str; 8] = [
-    "scan", "formats", "schema", "parse", "ingest", "audit", "versions", "sync",
+const SECTIONS: [&str; 7] = [
+    "scan", "formats", "schema", "parse", "ingest", "audit", "versions",
 ];
 
 /// The ledger file inside the engine directory.

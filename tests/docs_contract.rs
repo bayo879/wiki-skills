@@ -173,7 +173,7 @@ fn shapes() -> BTreeMap<String, BTreeSet<String>> {
     capture(&mut out, "ingest", &["ingest"]);
     write_staged(root, "retry.md", "Retries stop at three.");
     capture(&mut out, "submit", &["submit"]);
-    capture(&mut out, "abort", &["abort"]);
+    capture(&mut out, "ignore", &["ignore"]);
     out
 }
 

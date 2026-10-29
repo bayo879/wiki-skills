@@ -275,11 +275,18 @@ pub fn search(root: &Path, cfg: &Config, store: &Store, query: &SearchQuery) -> 
     let expression = match_expr(&query.text).ok_or(QueryError::EmptyQuery)?;
     let wiki = cfg.paths.wiki.trim_end_matches('/');
     let session_dir = cfg.ingest.session_dir.trim().trim_matches('/');
-    let session_glob = format!("{wiki}/{session_dir}/%");
+    // A page distilled from a source under `session_dir` keeps that prefix in
+    // its id, so it lands at `<wiki>/<type>/<session_dir>/…`; a page an agent
+    // writes straight into the directory lands at `<wiki>/<session_dir>/…`.
+    // Both shapes have to be excluded, or `--no-archive` silently keeps
+    // returning the distilled pages.
+    let nested = format!("{wiki}/%/{session_dir}/%");
+    let flat = format!("{wiki}/{session_dir}/%");
+    let patterns = [flat.as_str(), nested.as_str()];
     let scope = match query.scope {
         Scope::All => FtsScope::All,
         Scope::ExcludingSessions if session_dir.is_empty() => FtsScope::All,
-        Scope::ExcludingSessions => FtsScope::NotLike(&session_glob),
+        Scope::ExcludingSessions => FtsScope::NotLike(&patterns),
     };
 
     let rows = store.fts_search(&expression, query.limit, scope)?;

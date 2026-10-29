@@ -34,7 +34,7 @@ fn repo(settle_seconds: u64) -> (TempDir, Config) {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
     let mut cfg = Config::load(d.path()).unwrap();
-    cfg.sync.settle_seconds = settle_seconds;
+    cfg.ingest.settle_seconds = settle_seconds;
     (d, cfg)
 }
 
@@ -144,8 +144,8 @@ fn fresh_files_are_skipped_by_settle_window() {
 #[test]
 fn stable_streak_gates_auto_ingest() {
     let (d, mut cfg) = repo(0);
-    cfg.sync.auto_ingest = true;
-    cfg.sync.stable_streak = 3;
+    cfg.ingest.auto_ingest = true;
+    cfg.ingest.stable_streak = 3;
     write(d.path(), "a.md", "# hi");
     let mut store = open(d.path());
 
@@ -271,8 +271,8 @@ fn one_failed_conversion_does_not_stop_the_round() {
 #[test]
 fn repeated_failures_disable_auto_ingest_without_touching_the_config() {
     let (d, mut cfg) = repo(0);
-    cfg.sync.auto_ingest = true;
-    cfg.sync.stable_streak = 1;
+    cfg.ingest.auto_ingest = true;
+    cfg.ingest.stable_streak = 1;
     write(d.path(), "bad.pdf", "this is not a pdf");
     write(d.path(), "good.md", "# good");
     let toml_before = fs::read(d.path().join(".wiki/wiki.toml")).unwrap();
@@ -465,7 +465,7 @@ fn a_missing_source_turns_its_stable_pages_stale_and_names_them_in_the_audit() {
 #[test]
 fn on_missing_ignore_leaves_the_pages_alone() {
     let (d, mut cfg) = repo(0);
-    cfg.sync.on_missing = String::from("ignore");
+    cfg.ingest.on_missing = String::from("ignore");
     write(d.path(), "a.md", "# A\n\nalpha body\n");
     let mut store = open(d.path());
     convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();

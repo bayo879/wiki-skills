@@ -30,6 +30,8 @@ pub enum Command {
     /// Without `--fix` it only reads. The exit code is 1 when a check fails.
     /// `--fix` bootstraps an uninitialised repository, then runs `lint --fix`
     /// and rebuilds the search index before reporting.
+    ///
+    /// Examples: `llm-wiki doctor`, `llm-wiki doctor --fix`.
     Doctor {
         /// Repair what has one obvious correction; never rewrites content.
         #[arg(long)]
@@ -46,8 +48,9 @@ pub enum Command {
     ///
     /// With no `KEYS` it takes every pending change in `source/`. `--dry-run`
     /// and `--key` preview one source. `--chunk N` and `--range N` pick one
-    /// slice of a large source. A candidate the brakes hold back stays in
-    /// `.wiki/staging/` and the run exits 3.
+    /// slice of a large source. Every round is recorded as a version before
+    /// the candidates are written. Examples: `llm-wiki ingest --dry-run`,
+    /// `llm-wiki ingest`, `llm-wiki ingest notes/a.md`.
     Ingest {
         /// Repo-relative source keys; empty means every pending change.
         keys: Vec<String>,
@@ -73,7 +76,8 @@ pub enum Command {
     /// `--confirm` publishes everything and ignores the brakes. `--auto` is the
     /// unattended form: a braked candidate is skipped with a warning and the
     /// run still exits 0. Exit 3 is reserved for the attended form when every
-    /// candidate was held back.
+    /// candidate was held back. Examples: `llm-wiki submit`,
+    /// `llm-wiki submit --confirm`, `llm-wiki submit --auto`.
     Submit {
         /// Publish every candidate, including the ones the brakes hold back.
         #[arg(long)]
@@ -82,20 +86,37 @@ pub enum Command {
         #[arg(long, conflicts_with = "confirm")]
         auto: bool,
     },
-    /// Drop the open round, keeping the candidates already written.
-    Abort,
+    /// Manage the ignore list that keeps sources out of the wiki.
+    ///
+    /// With no action it lists the patterns. `--add`/`--remove` rewrite the
+    /// file; `--check` explains one source key without changing anything.
+    /// Examples: `llm-wiki ignore`, `llm-wiki ignore --add drafts/**`,
+    /// `llm-wiki ignore --check drafts/a.md`.
+    Ignore {
+        /// Add these glob patterns.
+        #[arg(long, value_name = "PATTERN", num_args = 1.., conflicts_with_all = ["remove", "check"])]
+        add: Vec<String>,
+        /// Remove these glob patterns.
+        #[arg(long, value_name = "PATTERN", num_args = 1.., conflicts_with = "check")]
+        remove: Vec<String>,
+        /// Explain whether one source key is ignored, and by which pattern.
+        #[arg(long, value_name = "KEY")]
+        check: Option<String>,
+    },
     /// Search the wiki.
     ///
     /// `--graph` prints the `[[wikilink]]` structure instead of searching;
-    /// `--no-archive` hides the sealed summaries. With no `TEXT`, `--graph` is
-    /// the only useful form.
+    /// `--no-archive` hides pages distilled from sources under
+    /// `[ingest] session_dir`. With no `TEXT`, `--graph` is the only useful
+    /// form. Examples: `llm-wiki query 订单超时`,
+    /// `llm-wiki query 订单超时 --no-archive`, `llm-wiki query --graph`.
     Query {
         /// Words to search for; omit together with `--graph`.
         text: Option<String>,
         /// Return at most this many hits.
         #[arg(long, default_value_t = 10)]
         limit: usize,
-        /// Hide the sealed summaries; they are searchable by default.
+        /// Hide pages distilled from sources under `[ingest] session_dir`.
         #[arg(long)]
         no_archive: bool,
         /// Print the `[[wikilink]]` structure: degrees, edges, orphans, broken links.
@@ -107,6 +128,8 @@ pub enum Command {
     /// One snapshot is taken per `ingest` round and one per `submit`; no
     /// command creates one by hand. `restore` is the only way back from a bad
     /// publish, and it needs `--confirm` because it replaces the live tree.
+    /// Examples: `llm-wiki version list`, `llm-wiki version diff`,
+    /// `llm-wiki version restore v003 --confirm`.
     Version {
         #[command(subcommand)]
         command: VersionCommand,

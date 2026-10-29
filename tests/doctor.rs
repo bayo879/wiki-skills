@@ -164,7 +164,7 @@ fn a_missing_config_section_is_only_a_warning() {
     let dir = repo();
     let path = dir.path().join(".wiki/wiki.toml");
     let text = fs::read_to_string(&path).expect("readable");
-    let cut = text.find("[sync]").expect("[sync] is in the contract");
+    let cut = text.find("[ingest]").expect("[ingest] is in the contract");
     fs::write(&path, &text[..cut]).expect("writable");
     let (code, json) = doctor(dir.path());
     assert_eq!(code, 0, "a defaulted section is a warning, not a failure");

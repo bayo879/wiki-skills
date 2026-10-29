@@ -159,7 +159,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
              clear that key to re-enable it"
         ));
     }
-    let auto_ingest = cfg.sync.auto_ingest && !gate_closed;
+    let auto_ingest = cfg.ingest.auto_ingest && !gate_closed;
 
     // 2. What changed on disk.
     let changes = scan::scan_source(root, cfg, store)?.changes;
@@ -187,16 +187,16 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         if explicit && !args.only.iter().any(|key| key == &change.key) {
             continue;
         }
-        if args.force || explicit || cfg.sync.settle_seconds == 0 {
+        if args.force || explicit || cfg.ingest.settle_seconds == 0 {
             pending.push(change);
             continue;
         }
         let path = paths::join_key(&root.join(&cfg.paths.source), &change.key);
         match quiet_seconds(&path) {
-            Some(age) if age < cfg.sync.settle_seconds => warnings.push(format!(
+            Some(age) if age < cfg.ingest.settle_seconds => warnings.push(format!(
                 "settle: '{}' was modified {age}s ago; waiting another {}s",
                 change.key,
-                cfg.sync.settle_seconds - age
+                cfg.ingest.settle_seconds - age
             )),
             _ => pending.push(change),
         }
@@ -319,7 +319,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         };
         store.sync_state_set(&streak_key, &streak.to_string())?;
         if (auto_ingest || args.open_round)
-            && (args.force || args.open_round || streak >= cfg.sync.stable_streak)
+            && (args.force || args.open_round || streak >= cfg.ingest.stable_streak)
         {
             stable.push(row.key.clone());
         }
@@ -405,7 +405,7 @@ fn stale_pages_for_missing(
     store: &mut Store,
     changes: &[scan::Change],
 ) -> Result<Vec<String>> {
-    if cfg.sync.on_missing != "mark_stale" {
+    if cfg.ingest.on_missing != "mark_stale" {
         return Ok(Vec::new());
     }
     let mut vanished: Vec<String> = Vec::new();

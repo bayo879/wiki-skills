@@ -173,8 +173,12 @@ pub enum FtsScope<'a> {
     All,
     /// Only pages whose path matches the pattern.
     Like(&'a str),
-    /// Only pages whose path does not match the pattern.
-    NotLike(&'a str),
+    /// Only pages that match none of the patterns.
+    ///
+    /// One pattern is not enough to exclude a directory: a page under it lands
+    /// at either `<wiki>/<type>/<dir>/` or `<wiki>/<dir>/`, and the caller must
+    /// pass both.
+    NotLike(&'a [&'a str]),
 }
 
 /// One row of the `sources` ledger: a file that exists under `source/`.
@@ -647,18 +651,31 @@ impl Store {
         match scope {
             FtsScope::All => {}
             FtsScope::Like(_) => sql.push_str(" AND page_id LIKE ?3"),
-            FtsScope::NotLike(_) => sql.push_str(" AND page_id NOT LIKE ?3"),
+            FtsScope::NotLike(patterns) => {
+                for index in 0..patterns.len() {
+                    sql.push_str(&format!(" AND page_id NOT LIKE ?{}", index + 3));
+                }
+            }
         }
         sql.push_str(" ORDER BY bm25(fts), page_id LIMIT ?2");
 
+        let limit = limit as i64;
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = match scope {
             FtsScope::All => stmt
-                .query_map(params![expression, limit as i64], fts_hit_from_row)?
+                .query_map(params![expression, limit], fts_hit_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
-            FtsScope::Like(pattern) | FtsScope::NotLike(pattern) => stmt
-                .query_map(params![expression, limit as i64, pattern], fts_hit_from_row)?
+            FtsScope::Like(pattern) => stmt
+                .query_map(params![expression, limit, pattern], fts_hit_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
+            FtsScope::NotLike(patterns) => {
+                let mut args: Vec<&dyn rusqlite::ToSql> = vec![&expression, &limit];
+                for pattern in patterns {
+                    args.push(pattern);
+                }
+                stmt.query_map(rusqlite::params_from_iter(args), fts_hit_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
         };
         Ok(rows)
     }

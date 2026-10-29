@@ -16,6 +16,7 @@ use llm_wiki::config::Config;
 use llm_wiki::doctor::{self, Check, Level};
 use llm_wiki::graph;
 use llm_wiki::hash;
+use llm_wiki::ignore;
 use llm_wiki::ingest;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
@@ -62,7 +63,7 @@ fn dispatch(cli: Cli) -> ! {
             force_large,
         } => run_ingest(keys, dry_run, key, chunk, range, force_large),
         Command::Submit { confirm, auto } => run_submit(confirm, auto),
-        Command::Abort => run_abort(),
+        Command::Ignore { add, remove, check } => run_ignore(&add, &remove, check.as_deref()),
         Command::Query {
             text,
             limit,
@@ -346,7 +347,7 @@ fn run_ingest(
     // request, so it does not wait for the settle window. That window belongs to
     // the unattended path, which is what `open_round: false` still serves.
     let args = sync::SyncArgs {
-        limit: cfg.sync.max_per_run,
+        limit: cfg.ingest.max_per_run,
         dry_run,
         force: true,
         only: keys,
@@ -455,15 +456,60 @@ fn human_sync(report: &sync::SyncReport) -> String {
     out.trim_end().to_string()
 }
 
-fn run_abort() -> ! {
-    let cmd = "abort";
+fn run_ignore(add: &[String], remove: &[String], check: Option<&str>) -> ! {
+    let cmd = "ignore";
     let root = wiki_root(cmd);
-    let cfg = open_repo(cmd, &root);
-    let mut store = open_store(cmd, &root, &cfg);
-    match ingest::abort(&root, &cfg, &mut store) {
-        Ok(outcome) => report::emit(cmd, outcome),
-        Err(err) => fail_ingest(cmd, &err),
+    open_repo(cmd, &root);
+    if let Some(key) = check {
+        let list = match ignore::IgnoreList::load(&root) {
+            Ok(list) => list,
+            Err(err) => fail_ignore(cmd, &err),
+        };
+        let key = key.trim_start_matches("./");
+        let data = IgnoreCheckData {
+            key: key.to_string(),
+            ignored: list.is_ignored(key, false),
+            pattern: list.deciding_pattern(key, false),
+        };
+        report::emit_with(cmd, data, Exit::Ok, human_ignore_check);
     }
+    if !add.is_empty() || !remove.is_empty() {
+        let (added, removed) = if !add.is_empty() {
+            match ignore::add(&root, add) {
+                Ok(added) => (added, Vec::new()),
+                Err(err) => fail_ignore(cmd, &err),
+            }
+        } else {
+            match ignore::remove(&root, remove) {
+                Ok(removed) => (Vec::new(), removed),
+                Err(err) => fail_ignore(cmd, &err),
+            }
+        };
+        let patterns = match ignore::IgnoreList::load(&root) {
+            Ok(list) => list.patterns(),
+            Err(err) => fail_ignore(cmd, &err),
+        };
+        let data = IgnoreChangeData {
+            added,
+            removed,
+            count: patterns.len(),
+            patterns,
+        };
+        report::emit_with(cmd, data, Exit::Ok, human_ignore_change);
+    }
+    let patterns = match ignore::IgnoreList::load(&root) {
+        Ok(list) => list.patterns(),
+        Err(err) => fail_ignore(cmd, &err),
+    };
+    let data = IgnoreListData {
+        count: patterns.len(),
+        patterns,
+    };
+    report::emit_with(cmd, data, Exit::Ok, human_ignore_list)
+}
+
+fn fail_ignore(cmd: &str, err: &ignore::IgnoreError) -> ! {
+    report::fail(cmd, Exit::Error, err.code(), &err.to_string())
 }
 
 /// A named-but-missing source, page or round is the caller's mistake (exit 2);
@@ -702,6 +748,56 @@ fn run_version(command: VersionCommand) -> ! {
                 Err(err) => fail_version(cmd, &err),
             }
         }
+    }
+}
+
+/// Payload of `ignore` with no action.
+#[derive(Serialize)]
+struct IgnoreListData {
+    count: usize,
+    patterns: Vec<String>,
+}
+
+fn human_ignore_list(data: &IgnoreListData) -> String {
+    if data.patterns.is_empty() {
+        return String::from("no patterns");
+    }
+    data.patterns.join("\n")
+}
+
+/// Payload of `ignore --add` / `ignore --remove`.
+#[derive(Serialize)]
+struct IgnoreChangeData {
+    added: Vec<String>,
+    removed: Vec<String>,
+    count: usize,
+    patterns: Vec<String>,
+}
+
+fn human_ignore_change(data: &IgnoreChangeData) -> String {
+    let mut out = String::new();
+    for pattern in &data.added {
+        out.push_str(&format!("added   {pattern}\n"));
+    }
+    for pattern in &data.removed {
+        out.push_str(&format!("removed {pattern}\n"));
+    }
+    out.push_str(&format!("{} pattern(s) now", data.count));
+    out
+}
+
+/// Payload of `ignore --check`.
+#[derive(Serialize)]
+struct IgnoreCheckData {
+    key: String,
+    ignored: bool,
+    pattern: Option<String>,
+}
+
+fn human_ignore_check(data: &IgnoreCheckData) -> String {
+    match &data.pattern {
+        Some(pattern) => format!("{} is ignored by `{pattern}`", data.key),
+        None => format!("{} is not ignored", data.key),
     }
 }
 

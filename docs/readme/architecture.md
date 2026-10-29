@@ -33,7 +33,7 @@
 1. **doctor** 体检十项（契约、schema、路径、账本、FTS5、布局、锁、暂存区、token、外部后端），`--fix` 只修不花钱的：补建缺失目录、重写契约文件、重建索引；`--only scan|convert|session` 只跑一项，`--key` 把转换失败的原因打出来。
 2. **ingest** 是唯一的写入口，一次调用完成「开轮 + 转换 + 登记 + 版本锚点」：`scan` 对比仓库根与账本表 `sources` 得出新增 / 修改 / 删除 / 改名，`convert` 把源交给解析后端（`src/parse/`）写 `.wiki/raw/<key>.md` 并登记 `sources` 与 `raws` 两行（反查由这两列互指完成，v5 迁移已删除独立的 `source_pages` 表），涉及的源与预判页面写进 `pending` 表，最后记一个 `kind: ingest` 版本锚点。`--dry-run` 只报告不写盘。
 3. **写页**：agent 读 `.wiki/raw/`，把候选页写进 `ingest` 给出的 `write_to`（`.wiki/staging/<type>/<id>.md`）。
-4. **submit** 收口：把整份暂存区与本轮清单对齐，发布候选、重建 `index.md`、清掉已发布页的 `page_meta`（下一次检索重建索引），并记一个 `kind: submit` 版本。三道刹车只扣住命中的候选，其余照常发布（`--confirm` 越过全部刹车，`--auto` 把扣下的跳过并 exit 0），所以无人值守链路不需要人。`abort` 丢弃候选但保留源：人看过并否决的字节被承认为已知状态，下一轮不再报同一变动。两种决策都只往 `.wiki/journal.jsonl` 追加一行 JSON。
+4. **submit** 收口：把整份暂存区与本轮清单对齐，发布候选、重建 `index.md`、清掉已发布页的 `page_meta`（下一次检索重建索引），并记一个 `kind: submit` 版本。三道刹车只扣住命中的候选，其余照常发布（`--confirm` 越过全部刹车，`--auto` 把扣下的跳过并 exit 0），所以无人值守链路不需要人。不想要这一轮则 `version restore <TAG>`：两棵树按 manifest 还原、暂存区清空、索引重建，回退自身也记一个 `kind: rollback` 版本。两种决策都只往 `.wiki/journal.jsonl` 追加一行 JSON。
 5. **无人值守**：定时跑 `ingest`，再用 `submit --auto` 收口；`ingest` 是显式请求，开轮即执行，不等任何窗口。
 6. **query** 是派生索引：FTS5 检索；`page_meta` 存每页哈希，每次搜索前增量刷新，所以刚 `submit` 的页也能立刻搜到。`--graph` 读 `[[wikilink]]` 给出出入度、边、孤立页与断链，是浏览而不是体检——断链与孤立由 doctor 的 lint 报告。
 7. **会话蒸馏**：写进 `[ingest].session_dir`（默认 `sessions`）的页面照常入库、默认也在检索结果里（目录是标记，不新增 frontmatter 字段），`query --no-archive` 按这个前缀排除它们。

@@ -293,9 +293,11 @@ fn limit_caps_the_number_of_hits() {
 fn scope_hides_the_session_distilled_pages() {
     let mut fx = Fixture::new();
     fx.page("concept/live.md", "live", "现行页", "现行", "同步流程。");
+    // A distilled page keeps the source prefix in its id, so it lands one level
+    // below the type directory. This is the shape the writing tools produce.
     fx.page_with(
-        "sessions/2026-10/a.md",
-        "id: sess-a\ntitle: 会话摘要\ntype: source\nsummary: 会话\n\
+        "concept/sessions/2026-10/a.md",
+        "id: sessions/2026-10/a\ntitle: 会话摘要\ntype: source\nsummary: 会话\n\
          status: stable\nupdated: 2026-10-01",
         "同步的历史结论。",
     );
@@ -305,6 +307,23 @@ fn scope_hides_the_session_distilled_pages() {
     assert_eq!(hidden.len(), 1);
     assert_eq!(hidden[0].page, ".wiki/pages/concept/live.md");
 
+    assert_eq!(fx.search("同步", 10, 0, Scope::All).len(), 2);
+}
+
+#[test]
+fn scope_hides_session_pages_written_straight_under_the_directory() {
+    let mut fx = Fixture::new();
+    fx.page("concept/live.md", "live", "现行页", "现行", "同步流程。");
+    fx.page_with(
+        "sessions/2026-10/b.md",
+        "id: sess-b\ntitle: 另一份会话\ntype: source\nsummary: 会话\n\
+         status: stable\nupdated: 2026-10-01",
+        "同步的历史结论。",
+    );
+    fx.reindex();
+
+    let hidden = fx.search("同步", 10, 0, Scope::ExcludingSessions);
+    assert_eq!(hidden.len(), 1, "the flat layout must be excluded too");
     assert_eq!(fx.search("同步", 10, 0, Scope::All).len(), 2);
 }
 

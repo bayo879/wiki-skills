@@ -16,14 +16,14 @@
 
 写入边界是结构性的：契约、页面、账本全在 `.wiki/` 里，手写 `[paths]` 也移不出去。
 
-对外只有五条命令（外加 `--version`）：`doctor`、`ingest`、`submit`、`abort`、`query`。转换、开轮、登记、版本锚点、索引、改名、settle 都在命令内部完成——人只需要决定「读什么」和「接受还是丢」。
+对外只有六条命令（外加 `--version`）：`doctor`、`ingest`、`submit`、`query`、`version`、`ignore`。转换、开轮、登记、版本锚点、索引、改名、settle 都在命令内部完成——人只需要决定「读什么」和「接受还是丢」。
 
 一条源文件的完整生命周期：
 
 1. **看**：`doctor` 体检十项，`doctor --fix` 修掉不花钱的机械缺陷；`ingest --dry-run` 报告这一轮会碰哪些源、会转多少页。
 2. **摄入**：`ingest` 扫仓库把新增 / 修改 / 删除 / 改名交给解析后端，写 `.wiki/raw/` 并登记账本，开一轮并把候选页的落点 `write_to` 给出来；顺手记一个版本锚点。
 3. **写页**：agent 读 `.wiki/raw/`，把候选页写进 `ingest` 给的 `.wiki/staging/<type>/<id>.md`。
-4. **收口**：`submit` 把整份暂存区发布进 `.wiki/pages/`、重建 `index.md`、重建索引、记一个发布版本——不等人，三道刹车只扣住命中的候选，其余的照常发布；`--confirm` 是显式越权，`--auto` 把扣下的跳过。`abort` 丢弃候选但把这一轮的源按当前字节记为已复核（否决即是对源的表决）。两种决策都只追加一行 `.wiki/journal.jsonl`。
+4. **收口**：`submit` 把整份暂存区发布进 `.wiki/pages/`、重建 `index.md`、重建索引、记一个发布版本——不等人，三道刹车只扣住命中的候选，其余的照常发布；`--confirm` 是显式越权，`--auto` 把扣下的跳过。不想要这一轮，用 `version restore <本轮 ingest 版本>`：页面与源回到摄入前，暂存区一并清空；如果同一批源不该再被扫到，用 `ignore --add` 挡住。两种决策都只追加一行 `.wiki/journal.jsonl`。
 5. **检索与续命**：`query` 用 FTS5 检索全库，`query --graph` 看链接结构；写进 `[ingest].session_dir` 的会话蒸馏产物默认也在结果里，`query --no-archive` 才把它们藏起来。
 
 解析层是可替换的后端集合：文本、HTML、图片、PDF 各有一个内置后端，另有一个可选的 `external-http` 后端把扫描件之类「内置读不出字」的文档交给外部 HTTP 服务。分层、数据流、模块表与不变量见 [架构与模块](docs/readme/architecture.md)，后端选择与回退规则见 [解析后端与 auto 回退](docs/readme/parse/external.md)。
@@ -162,7 +162,7 @@ llm-wiki ingest --key docs/a.pdf --chunk 2000 --range 0-4000   # 大文件按需
 llm-wiki submit --confirm      # 越过全部三道刹车
 llm-wiki submit --auto         # 扣下的跳过、其余发布，exit 0
 llm-wiki submit --json         # 看 data.held_back / data.skipped 与 stats
-llm-wiki abort                 # 丢弃候选，并把源记为已复核
+llm-wiki version restore v003 --confirm   # 回到某次 ingest 之前，清空暂存区
 ```
 
 其余的小工具：
@@ -182,7 +182,7 @@ llm-wiki --version                         # 打印版本
 | `doctor [--fix] [--only scan\|convert\|session] [--key <KEY>]` | 体检十项；`--fix` 补建目录/契约/索引，`--only` 只跑一项，`--key` 让转换只处理一个源并打出失败原因 |
 | `ingest [<KEY>...] [--dry-run] [--key <KEY>] [--chunk <N>] [--range <A-B>] [--force-large]` | 唯一的写入口：扫描 + 转换 + 登记 + 开轮 + 版本锚点；给位置参数只处理点名的源；`--key` 只看解析 |
 | `submit [--confirm] [--auto]` | 收口：发布整份暂存区、重建索引、记版本；三道刹车只扣住命中的；`--confirm` 越过全部刹车，`--auto` 扣下的跳过并 exit 0，全部被扣下才 exit 3 |
-| `abort` | 丢弃候选，并把这一轮的源按当前字节记为已复核（下一轮不再报同一变动） |
+| `version restore <TAG> --confirm` | 页面与源回到某个版本，暂存区清空；不想要的源用 `ignore --add` 挡住 |
 | `query [TEXT] [--no-archive] [--graph] [--limit <N>]` | FTS5 检索；`--no-archive` 排除 `[ingest].session_dir` 下的页，`--graph` 看链接图，无命中 exit 0 |
 | `--version` | 打印版本 |
 
@@ -205,13 +205,13 @@ llm-wiki --version                         # 打印版本
 
 ## 服务特殊说明
 
-- 配置只有 `.wiki/wiki.toml`（另有人类可读的 `.wiki/SCHEMA.md`）。`doctor --fix` 生成的模板把每个键与默认值都写出来，改哪一项就取消注释哪一行。`[parse]` 与 `[parse.external]` 的每个键、默认值与校验规则见 [parse 配置](docs/readme/config/parse.md)；`[scan]`、`[formats]`、`[schema]`、`[ingest]`、`[audit]`、`[versions]`、`[sync]` 的行为分别由对应模块读取。`[paths]` 已固定为 `.wiki/` 内，写进配置也会被忽略。
+- 配置只有 `.wiki/wiki.toml`（另有人类可读的 `.wiki/SCHEMA.md`）。`doctor --fix` 生成的模板把每个键与默认值都写出来，改哪一项就取消注释哪一行。`[parse]` 与 `[parse.external]` 的每个键、默认值与校验规则见 [parse 配置](docs/readme/config/parse.md)；`[scan]`、`[formats]`、`[schema]`、`[ingest]`、`[audit]`、`[versions]` 的行为分别由对应模块读取。无人值守的节奏（`settle_seconds`、`stable_streak`、`auto_ingest` 等）在 `[ingest]` 里。`[paths]` 已固定为 `.wiki/` 内，写进配置也会被忽略。
 - 会话蒸馏：`[ingest].session_dir`（默认 `sessions`，写空串关闭）下的页面和其他源一样入库、默认也在检索结果里；`query --no-archive` 按这个目录前缀把它们排除。目录本身就是标记，不新增 frontmatter 字段；页面 id 保留源目录前缀，可以随时挪位置。
 - 解析外部服务的 token **只从环境变量读**：`[parse.external].auth_env` 存的是变量名，不是 token 字面量。把 `Bearer xxx`、`sk-...` 这类值写进 `auth_env` 会被 `Config::validate` 以 `E_TOKEN_IN_CONFIG` 拒绝，`doctor` 的 `token` 检查也会报 Fail。
 - `parse.primary` 取 `external` 却没写 `[parse.external]` 时，`doctor` 的 `external_backend` 直接报 Fail（每个解析都会以 `E_NO_EXTERNAL` 失败）；服务不可达只报 Warn，因为服务可能在别处恢复。
 - 内置解析后端的 id 会写进 `.wiki/raw/` frontmatter：`builtin-text`、`builtin-html`、`builtin-asset`、`builtin-pdf`、`external-http`。升级解析器后可以据此筛出需要重转的源。
 - 常见错误码：`E_NO_WIKI`（仓库根没有页面目录或配置）、`E_NOT_INITIALISED`（没跑过 `doctor --fix`）、`E_LOCKED`（仓库被占用）、`E_NO_PARSER`（无后端认领扩展名）、`E_BAD_SOURCE`（后端认领但解不开）、`E_NO_AUTH_ENV`、`E_EXTERNAL`、`E_BOTH_FAILED`（`auto` 下内置与外部都失败）、`E_BAD_CONFIG`、`E_OVERSIZE`（超过 `max_source_bytes`）、`E_STAGING_CORRUPT` / `E_STAGING_DRIFT`（暂存区与清单不一致）。
-- 版本在 `.wiki/versions/vNNN/`：`manifest.json` 记路径与摘要，`.version.json` 记 `kind` / `label` / `pages`，字节按摘要存在 `.wiki/objects/`（同一内容只存一份）。每轮 `ingest` 记一个 `kind: ingest` 锚点，每轮 `submit` 记一个发布版本；只保留最近 `[versions].keep` 份（默认 5）。`.wiki/journal.jsonl` 记录每次 `submit` / `abort`（一行一个 JSON，不进版本、不被回退抹掉）。
+- 版本在 `.wiki/versions/vNNN/`：`manifest.json` 记路径与摘要，`.version.json` 记 `kind` / `label` / `pages`，字节按摘要存在 `.wiki/objects/`（同一内容只存一份）。每轮 `ingest` 记一个 `kind: ingest` 锚点，每轮 `submit` 记一个发布版本；只保留最近 `[versions].keep` 份（默认 5）。`.wiki/journal.jsonl` 记录每次 `submit` / `version restore`（一行一个 JSON，不进版本、不被回退抹掉）。
 - 三道刹车都在 `submit` 不带 `--confirm` 时生效，命中的候选留在 `.wiki/staging/`、其余照常发布，所以无人值守链路也能跑完：近义（`page_overlap`）、切片预算（`page_slice_budget`）、页面预算（`page_budget`，默认 20，0 表示不限）。只有全部候选都被扣下时才 exit 3，此时确实需要人看一眼；`--confirm` 是显式越过全部三道，`--auto` 是无人值守地跳过它们。
 - 切片预算：`[ingest].max_pages_per_slice`（默认 5，0 表示不限）限制「同一个切片养出多少页」。切片是 `#p=<n>` 指向的那一段（大文件按 `parse.chunk_target` 切块），没带片段的页算整份文件一个切片。所以长文档按信息量拿页数，短文件不能靠拆 id 刷页；小于切块阈值的文件，页面上写的任何 `#p=` 都算整份文件那一个切片，编造不存在的切片换不到额度。超出时这一页被扣下（`reason: page_slice_budget`），已在库里的页继续算数，所以要腾额度得先删旧页。
 - 近义页判定：`submit` 会扣下两种「同一页写了两遍」——标题归一化后与已发布页相同（`Retry Policy` = `retry_policy`），或候选页引用的源全部是某张已发布页引用过的（没有新证据）。命中的候选不发布（`reason: page_overlap`），`detail` 点名对端页；判定只比 frontmatter，不读正文，所以不花钱、不误判语义。

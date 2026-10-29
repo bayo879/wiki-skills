@@ -163,14 +163,14 @@ fn init_template_loads_and_validates() {
     assert_eq!(cfg.audit.min_page_chars, 200);
     assert_eq!(cfg.versions.keep, 5);
 
-    assert!(!cfg.sync.auto_ingest);
-    assert_eq!(cfg.sync.max_per_run, 20);
-    assert_eq!(cfg.sync.max_pending_sources, 200);
-    assert_eq!(cfg.sync.settle_seconds, 10);
-    assert_eq!(cfg.sync.stable_streak, 3);
-    assert_eq!(cfg.sync.read_retries, 3);
-    assert_eq!(cfg.sync.lag_warn_rounds, 3);
-    assert_eq!(cfg.sync.on_missing, "mark_stale");
+    assert!(!cfg.ingest.auto_ingest);
+    assert_eq!(cfg.ingest.max_per_run, 20);
+    assert_eq!(cfg.ingest.max_pending_sources, 200);
+    assert_eq!(cfg.ingest.settle_seconds, 10);
+    assert_eq!(cfg.ingest.stable_streak, 3);
+    assert_eq!(cfg.ingest.read_retries, 3);
+    assert_eq!(cfg.ingest.lag_warn_rounds, 3);
+    assert_eq!(cfg.ingest.on_missing, "mark_stale");
 }
 
 #[test]
