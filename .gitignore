@@ -9,3 +9,6 @@ superpowers/
 /target
 /.cargo-home
 
+
+# mac
+.DS_Store
