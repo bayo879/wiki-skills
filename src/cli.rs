@@ -70,6 +70,9 @@ pub enum Command {
         /// Read a source above `parse.max_source_bytes` anyway.
         #[arg(long)]
         force_large: bool,
+        /// Convert now, even if a source was modified within `[ingest].settle_seconds`.
+        #[arg(long)]
+        force: bool,
     },
     /// Close the open round: refresh its candidates, then publish them.
     ///

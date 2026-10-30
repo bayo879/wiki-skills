@@ -126,6 +126,15 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 删任何一条命令或 flag 前，先 `grep` spec 的 §3 与 §4 去向表，差集里没处理干净的要么补实现、要么改 spec，不能只删代码。
 `tests/cli_version.rs` 钉住三条：`submit` 不建版本、`restore` 不带 `--confirm` 时不动树、`restore` 本身也记一个 `rollback` 版本；`src/version.rs::approve` 的 `NothingToApprove` 在 CLI 层是 exit 0（重复 `submit` 不是错误）。
 
+### 2.19 防抖只认 mtime，不记轮次
+
+一轮要不要转换某个源，只看两件事：mtime 距今超过 `[ingest].settle_seconds`（默认 300 秒），并且重新哈希仍等于 `scan` 那次读到的摘要。
+没有 `sync_state`、没有连续轮数、没有失败熔断：跨轮状态只把「等多久」变复杂，并不比 mtime 更准确，还要求每一轮都记账。
+`--force` 与 `settle_seconds = 0` 是仅有的两个越权口；点名一个 key 不越权，因为等待属于文件，不属于谁在问。
+旧配置里的 `auto_ingest` / `stable_streak` 已删除。`IngestCfg` 带 `deny_unknown_fields`，带这两个键的 `wiki.toml` 会加载失败（`doctor --fix` 修不了配置），删掉那两行即可。
+交接给 `ingest` 的清单 = 上一轮 `pending.json` 里的源 ∪ 本轮真正转换的源；两者都空时不开轮——`ingest begin` 拒空列表，而安静的一轮不是错误。
+`tests/sync.rs` 钉住：窗口内的文件等下一轮、mtime 够久就转换、`--force` 越权、安静一轮保留上一轮的开轮；`src/sync.rs` 的单元测试钉住「摘要变了就不算同一份内容」。
+
 ## 3. 提交前自查
 
 ```bash

@@ -4,12 +4,12 @@
 //! The suite pins the contract a scheduler depends on. A lock makes a second
 //! round exit 4 instead of racing the first (and a crashed lock is reclaimed
 //! after its TTL, not left to block forever). The settle window keeps a file
-//! somebody is still writing from being converted half-done. The stable-streak
-//! gate makes `auto_ingest` wait for a source to stop moving. `--dry-run` writes
-//! nothing at all (the whole tree is hashed before and after), and a failure is
-//! a per-source finding — it neither aborts the round nor hides the sources that
-//! did convert. Repeated failures close `auto_ingest` through `sync_state` only:
-//! the CLI never rewrites `wiki.toml`.
+//! somebody is still writing from being converted half-done: it is one rule,
+//! mtime older than `[ingest].settle_seconds` plus the digest `scan` read, and
+//! nothing is remembered between rounds. `--force` is the only way past it.
+//! `--dry-run` writes nothing at all (the whole tree is hashed before and
+//! after), and a failure is a per-source finding — it neither aborts the round
+//! nor hides the sources that did convert.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -44,7 +44,6 @@ fn args(limit: usize) -> sync::SyncArgs {
         dry_run: false,
         force: false,
         only: Vec::new(),
-        open_round: false,
     }
 }
 
@@ -141,27 +140,85 @@ fn fresh_files_are_skipped_by_settle_window() {
     assert!(store.get_source("a.md").unwrap().is_none());
 }
 
+/// Ages a file past the settle window without touching its content.
+fn age_past_the_window(path: &Path, seconds: u64) {
+    let file = fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(SystemTime::now() - Duration::from_secs(seconds))
+        .unwrap();
+}
+
 #[test]
-fn stable_streak_gates_auto_ingest() {
-    let (d, mut cfg) = repo(0);
-    cfg.ingest.auto_ingest = true;
-    cfg.ingest.stable_streak = 3;
+fn a_settled_source_is_converted_and_handed_to_the_round() {
+    let (d, cfg) = repo(300);
+    write(d.path(), "a.md", "# hi");
+    age_past_the_window(&d.path().join("a.md"), 600);
+    let mut store = open(d.path());
+
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(report.converted, 1, "six quiet minutes is enough");
+    assert_eq!(
+        report.ingested,
+        vec![String::from("a.md")],
+        "the converted source opens the round"
+    );
+}
+
+#[test]
+fn a_source_that_settles_between_rounds_is_taken_by_the_next_one() {
+    let (d, cfg) = repo(300);
     write(d.path(), "a.md", "# hi");
     let mut store = open(d.path());
 
-    let mut ingested_at = None;
-    for round in 0..3 {
-        let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-        if !report.ingested.is_empty() {
-            ingested_at = Some(round);
-            break;
-        }
-    }
+    let first = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(first.converted, 0, "a fresh file waits");
+    assert!(first.ingested.is_empty(), "nothing to open a round with");
+
+    age_past_the_window(&d.path().join("a.md"), 600);
+    let second = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(second.converted, 1, "the window has passed");
+}
+
+#[test]
+fn force_converts_before_the_window_closes() {
+    let (d, cfg) = repo(3600);
+    write(d.path(), "a.md", "# hi");
+    let mut store = open(d.path());
+    let mut forced = args(10);
+    forced.force = true;
+
+    let report = sync::run(d.path(), &cfg, &mut store, &forced).unwrap();
+    assert_eq!(report.converted, 1, "--force is the explicit override");
+}
+
+#[test]
+fn a_quiet_round_keeps_the_previous_hand_off() {
+    let (d, cfg) = repo(0);
+    write(d.path(), "a.md", "# hi");
+    let mut store = open(d.path());
+
+    let first = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(first.ingested, vec![String::from("a.md")]);
+
+    // Nothing changed, but the round the agent has not submitted yet is still
+    // its round: reopening it with the same source is a no-op, not a new one.
+    let second = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(second.converted, 0);
     assert_eq!(
-        ingested_at,
-        Some(2),
-        "only the third unchanged round may ingest"
+        second.ingested,
+        vec![String::from("a.md")],
+        "the open round survives a quiet round"
     );
+}
+
+#[test]
+fn an_empty_repository_is_a_quiet_round_not_an_error() {
+    let (d, cfg) = repo(0);
+    let mut store = open(d.path());
+
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(report.converted, 0);
+    assert!(report.ingested.is_empty());
+    assert_eq!(report.failures, 0);
 }
 
 #[test]
@@ -207,7 +264,6 @@ fn dry_run_writes_nothing() {
             dry_run: true,
             force: false,
             only: Vec::new(),
-            open_round: false,
         },
     )
     .unwrap();
@@ -220,10 +276,6 @@ fn dry_run_writes_nothing() {
             .any(|w| w.contains("would be converted")),
         "the would-be work is reported: {:?}",
         report.warnings
-    );
-    assert!(
-        store.sync_state_entries().unwrap().is_empty(),
-        "no streak or failure state is recorded"
     );
     drop(store);
 
@@ -261,77 +313,6 @@ fn one_failed_conversion_does_not_stop_the_round() {
     assert_eq!(report.failures, 1, "the bad source is a finding");
     assert_eq!(report.converted, 1, "the good source still converts");
     assert!(d.path().join(".wiki/raw/good.md").is_file());
-    assert_eq!(
-        store.sync_state_get("fail:bad.pdf").unwrap().as_deref(),
-        Some("1"),
-        "the streak of failures starts at one"
-    );
-}
-
-#[test]
-fn repeated_failures_disable_auto_ingest_without_touching_the_config() {
-    let (d, mut cfg) = repo(0);
-    cfg.ingest.auto_ingest = true;
-    cfg.ingest.stable_streak = 1;
-    write(d.path(), "bad.pdf", "this is not a pdf");
-    write(d.path(), "good.md", "# good");
-    let toml_before = fs::read(d.path().join(".wiki/wiki.toml")).unwrap();
-    let mut store = open(d.path());
-
-    for _ in 0..3 {
-        let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-        assert_eq!(report.failures, 1);
-    }
-    assert_eq!(
-        store
-            .sync_state_get(sync::AUTO_INGEST_DISABLED)
-            .unwrap()
-            .as_deref(),
-        Some("1"),
-        "three failed rounds close the gate"
-    );
-
-    // `good.md` has a long enough streak by now; the disabled flag wins.
-    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-    assert!(report.ingested.is_empty(), "the gate stays closed");
-    assert!(
-        report.warnings.iter().any(|w| w.contains("auto_ingest")),
-        "the closed gate is explained: {:?}",
-        report.warnings
-    );
-    assert_eq!(
-        toml_before,
-        fs::read(d.path().join(".wiki/wiki.toml")).unwrap(),
-        "sync never rewrites wiki.toml"
-    );
-}
-
-#[test]
-fn changing_a_source_resets_its_streak() {
-    let (d, cfg) = repo(0);
-    write(d.path(), "a.md", "version one");
-    let mut store = open(d.path());
-
-    sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-    assert_eq!(
-        store.sync_state_get("streak:a.md").unwrap().as_deref(),
-        Some("1")
-    );
-    sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-    assert_eq!(
-        store.sync_state_get("streak:a.md").unwrap().as_deref(),
-        Some("2"),
-        "an unchanged source keeps counting"
-    );
-
-    write(d.path(), "a.md", "version two");
-    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-    assert_eq!(report.converted, 1);
-    assert_eq!(
-        store.sync_state_get("streak:a.md").unwrap().as_deref(),
-        Some("1"),
-        "a changed raw resets the streak"
-    );
 }
 
 #[test]

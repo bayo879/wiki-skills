@@ -1,24 +1,22 @@
 //! `sync`: one unattended round over the repository.
 //!
-//! The round is a fixed pipeline: take the lock, scan, drop what is still being
-//! written, convert within the budget, observe how long each raw file has been
-//! stable, hand the stable ones to an ingest round, render the index and write
-//! the audit entry. Every step is allowed to be uninteresting; only a failure to
-//! take the lock or to write the derived state ends the round.
+//! The round is a fixed pipeline: take the lock, scan, convert what has settled,
+//! hand the converted sources (plus whatever the last round left waiting for its
+//! candidates) to an ingest round, render the index and write the audit entry.
+//! Every step is allowed to be uninteresting; only a failure to take the lock or
+//! to write the derived state ends the round.
 //!
-//! Three cross-round observations live in the `sync_state` table, never in
-//! `wiki.toml`:
-//!
-//! - `hash:<source>` and `streak:<source>` — the raw digest seen last round and
-//!   how many consecutive rounds it has been identical. `auto_ingest` only fires
-//!   at `stable_streak`.
-//! - `fail:<source>` — consecutive failed conversions. Three of them close the
-//!   gate (`auto_ingest_disabled=1`) until a human clears the key; a scheduled
-//!   round that keeps failing should stop handing half-converted trees to review.
+//! Debouncing is one rule, applied per source and remembered nowhere: a source is
+//! converted only when its mtime is at least `[ingest].settle_seconds` old (five
+//! minutes by default) **and** its bytes still hash to what `scan` read. A file
+//! written moments ago waits for the next round; a file that changed while the
+//! round was running waits too, because converting it now would hand review a
+//! tree that no longer matches the one on disk. `--force` and
+//! `[ingest].settle_seconds = 0` skip the wait; naming a key does not, because
+//! the wait is about the file, not about who asked.
 //!
 //! `--dry-run` walks the same path up to the conversion budget and reports what
-//! it *would* do. It writes no file (the lock is taken and removed again) and
-//! never touches `sync_state`.
+//! it *would* do. It writes no file (the lock is taken and removed again).
 
 use std::fs;
 use std::io::Write as _;
@@ -34,12 +32,6 @@ use crate::scan::{self, ChangeKind, Layer};
 use crate::store::{PageMetaRow, Store};
 use crate::{convert, hash, ingest, lock, moves, paths, render, staging};
 
-/// `sync_state` key that closes the auto-ingest gate until a human clears it.
-pub const AUTO_INGEST_DISABLED: &str = "auto_ingest_disabled";
-
-/// How many consecutive failed conversions close the auto-ingest gate.
-const FAILURE_LIMIT: u32 = 3;
-
 /// Knobs for one round, all of them from the command line.
 #[derive(Debug, Clone)]
 pub struct SyncArgs {
@@ -47,15 +39,10 @@ pub struct SyncArgs {
     pub limit: usize,
     /// Report what would happen and write nothing.
     pub dry_run: bool,
-    /// Ignore the settle window and the stable-streak gate.
+    /// Convert regardless of how recently the source was modified.
     pub force: bool,
     /// Convert only these repo-relative keys; empty means every pending source.
     pub only: Vec<String>,
-    /// Open the round regardless of `auto_ingest` and the stable streak.
-    ///
-    /// `ingest` is the human-triggered round: it always opens one, while
-    /// `sync` waits for the configuration and the streak to agree.
-    pub open_round: bool,
 }
 
 /// What one round did.
@@ -97,6 +84,9 @@ pub enum SyncError {
     /// `wiki/index.md` could not be rendered.
     #[error(transparent)]
     Render(#[from] crate::render::RenderError),
+    /// The page staging manifest could not be read.
+    #[error(transparent)]
+    Staging(#[from] crate::staging::StagingError),
     /// A page could not be read or rewritten.
     #[error(transparent)]
     Page(#[from] crate::page::PageError),
@@ -126,6 +116,7 @@ impl SyncError {
                 "E_IO"
             }
             SyncError::Store(_) => "E_DB",
+            SyncError::Staging(err) => err.code(),
             SyncError::Move(err) => err.code(),
             SyncError::Path(_) => "E_IO",
             SyncError::Io { .. } => "E_IO",
@@ -150,25 +141,13 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         ));
     }
 
-    // The gate is read once: a run that closes it must not use it in the same
-    // round, which is what "the next run sees the flag" means in practice.
-    let gate_closed = store.sync_state_get(AUTO_INGEST_DISABLED)?.as_deref() == Some("1");
-    if gate_closed {
-        warnings.push(format!(
-            "auto_ingest is off because `{AUTO_INGEST_DISABLED}` is set in the ledger; \
-             clear that key to re-enable it"
-        ));
-    }
-    let auto_ingest = cfg.ingest.auto_ingest && !gate_closed;
-
     // 2. What changed on disk.
     let changes = scan::scan_source(root, cfg, store)?.changes;
 
-    // 3. The settle window: a file written moments ago may still be growing, so
-    //    it waits for the next round. `--force` is the human override.
-    // A key named on the command line is an explicit request: it skips the
-    // settle window, which exists to guess whether a file is still being
-    // written. Nothing else is converted in such a round.
+    // 3. The settle gate, in one pass and with no memory between rounds: a
+    //    source is taken when its mtime is old enough and its bytes are still
+    //    the ones `scan` read. `--force` and a zero window are the two ways to
+    //    skip the wait; they are explicit, so they are also explainable.
     let explicit = !args.only.is_empty();
     if explicit {
         for key in &args.only {
@@ -187,7 +166,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         if explicit && !args.only.iter().any(|key| key == &change.key) {
             continue;
         }
-        if args.force || explicit || cfg.ingest.settle_seconds == 0 {
+        if args.force || cfg.ingest.settle_seconds == 0 {
             pending.push(change);
             continue;
         }
@@ -198,7 +177,26 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
                 change.key,
                 cfg.ingest.settle_seconds - age
             )),
-            _ => pending.push(change),
+            Some(_) => {
+                // The mtime says "nobody wrote it for a while"; the digest says
+                // "and it is still the file `scan` classified". A source that
+                // fails the second check is not converted on a stale verdict.
+                if still_the_same_bytes(&path, change.hash.as_deref()) {
+                    pending.push(change);
+                } else {
+                    warnings.push(format!(
+                        "settle: '{}' changed during the round; taking it next round",
+                        change.key
+                    ));
+                }
+            }
+            // No usable mtime (missing metadata, clock skew): fall back to the
+            // digest-only check rather than blocking a source forever.
+            None if still_the_same_bytes(&path, change.hash.as_deref()) => pending.push(change),
+            None => warnings.push(format!(
+                "settle: '{}' changed during the round; taking it next round",
+                change.key
+            )),
         }
     }
 
@@ -257,13 +255,11 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     let stale_pages = stale_pages_for_missing(root, cfg, store, &changes)?;
 
     let mut converted = 0;
+    let mut converted_keys: Vec<String> = Vec::new();
     for change in pending.iter().take(budget) {
         let key = change.key.as_str();
         match convert::convert_one(root, cfg, store, key) {
             Ok(outcome) => {
-                // A success ends a failure streak; the reminder of the previous
-                // failures is not allowed to outlive the fix.
-                store.sync_state_set(&format!("fail:{key}"), "0")?;
                 if outcome.skipped {
                     warnings.push(format!(
                         "{key}: skipped ({})",
@@ -271,6 +267,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
                     ));
                 } else {
                     converted += 1;
+                    converted_keys.push(change.key.clone());
                 }
                 for warning in &outcome.warnings {
                     warnings.push(format!("{key}: {}: {}", warning.code, warning.message));
@@ -279,70 +276,30 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
             Err(err) => {
                 // One bad source is a finding, not the end of the round.
                 failures += 1;
-                let fail_key = format!("fail:{key}");
-                let count = store
-                    .sync_state_get(&fail_key)?
-                    .and_then(|value| value.parse::<u32>().ok())
-                    .unwrap_or(0)
-                    + 1;
-                store.sync_state_set(&fail_key, &count.to_string())?;
                 warnings.push(format!("{key}: conversion failed ({}) {err}", err.code()));
             }
         }
     }
 
-    // 5. How long each raw file has been stable. The comparison is against the
-    //    last digest this engine saw, so an untouched source keeps counting even
-    //    in rounds that converted nothing.
-    let mut stable: Vec<String> = Vec::new();
-    for row in store.all_sources()? {
-        let Some(raw_key) = row.raw_key.as_deref() else {
-            continue;
-        };
-        let raw_path = paths::join_key(root, raw_key);
-        if !raw_path.is_file() {
-            continue;
-        }
-        let digest = hash::hash_file(&raw_path, true)?;
-        let hash_key = format!("hash:{}", row.key);
-        let streak_key = format!("streak:{}", row.key);
-        let previous = store.sync_state_get(&hash_key)?;
-        let streak = if previous.as_deref() == Some(digest.as_str()) {
-            store
-                .sync_state_get(&streak_key)?
-                .and_then(|value| value.parse::<u32>().ok())
-                .unwrap_or(0)
-                + 1
-        } else {
-            store.sync_state_set(&hash_key, &digest)?;
-            1
-        };
-        store.sync_state_set(&streak_key, &streak.to_string())?;
-        if (auto_ingest || args.open_round)
-            && (args.force || args.open_round || streak >= cfg.ingest.stable_streak)
-        {
-            stable.push(row.key.clone());
-        }
-    }
-    stable.sort();
-
-    // 6. Hand the stable sources to one ingest round. A failure here is a
-    //    warning: the raw layer is intact and the next round retries.
-    let ingested = if stable.is_empty() {
+    // 5. Hand the round its sources: what this round converted, plus what the
+    //    previous round left waiting for its candidates. The pending list is the
+    //    engine's own record of what it expects to be written up, so an agent
+    //    that wrote nothing keeps its place instead of losing the work. An empty
+    //    list is a quiet round, not an error — `ingest begin` would refuse it.
+    let mut wanted: Vec<String> = staging::pending_hashes(root)?.into_keys().collect();
+    wanted.extend(converted_keys);
+    wanted.sort();
+    wanted.dedup();
+    let ingested = if wanted.is_empty() {
         Vec::new()
     } else {
         let input = ingest::BeginInput {
-            sources: stable.clone(),
+            sources: wanted.clone(),
             pages: Vec::new(),
             dry_run: false,
         };
         match ingest::begin(root, cfg, store, &input) {
-            Ok(_) => {
-                for key in &stable {
-                    store.sync_state_set(&format!("streak:{key}"), "0")?;
-                }
-                stable
-            }
+            Ok(_) => wanted,
             Err(err) => {
                 warnings.push(format!("ingest begin failed: {err}"));
                 Vec::new()
@@ -350,26 +307,8 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         }
     };
 
-    // 7. The index always reflects the raw layer, even on a quiet round.
+    // 6. The index always reflects the raw layer, even on a quiet round.
     render::write_index(root, cfg)?;
-
-    // 8. Failure backoff. Written before the audit so the entry explains the
-    //    closing of the gate in the same round it happens.
-    if !gate_closed {
-        for (key, value) in store.sync_state_entries()? {
-            let Some(source) = key.strip_prefix("fail:") else {
-                continue;
-            };
-            if value.parse::<u32>().unwrap_or(0) >= FAILURE_LIMIT {
-                store.sync_state_set(AUTO_INGEST_DISABLED, "1")?;
-                warnings.push(format!(
-                    "{source} failed {value} rounds in a row; auto_ingest disabled until \
-                     `{AUTO_INGEST_DISABLED}` is cleared from the ledger"
-                ));
-                break;
-            }
-        }
-    }
 
     let report = SyncReport {
         run_id,
@@ -382,7 +321,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         failures,
     };
 
-    // 9. The audit entry: what changed, what was converted, what was handed to
+    // 7. The audit entry: what changed, what was converted, what was handed to
     //    ingest, and what this round could not do.
     write_audit(root, cfg, &report)?;
 
@@ -457,6 +396,19 @@ fn stale_pages_for_missing(
     stale.sort();
     stale.dedup();
     Ok(stale)
+}
+
+/// Whether `path` still hashes to the digest `scan` classified.
+///
+/// `None` means `scan` recorded no digest, so there is nothing to compare and the
+/// source is taken. A file that vanished or cannot be read hashes to nothing:
+/// that is not the digest `scan` saw, so the source waits for the next round
+/// instead of ending this one.
+fn still_the_same_bytes(path: &Path, expected: Option<&str>) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    hash::hash_file(path, true).is_ok_and(|digest| digest == expected)
 }
 
 /// Seconds since the file was last modified, when it exists and the platform
@@ -540,4 +492,33 @@ fn render_audit(report: &SyncReport) -> String {
         out.push_str(&format!("- {warning}\n"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::still_the_same_bytes;
+    use crate::hash;
+    use std::fs;
+
+    #[test]
+    fn the_digest_from_a_different_body_is_not_the_same_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        fs::write(&path, "one").unwrap();
+        let digest = hash::hash_file(&path, true).unwrap();
+        assert!(still_the_same_bytes(&path, Some(&digest)));
+
+        fs::write(&path, "two").unwrap();
+        assert!(
+            !still_the_same_bytes(&path, Some(&digest)),
+            "a file that changed while the round ran waits for the next one"
+        );
+    }
+
+    #[test]
+    fn a_change_without_a_digest_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        assert!(still_the_same_bytes(&path, None));
+    }
 }

@@ -77,6 +77,16 @@ fn fixture() -> tempfile::TempDir {
     )
     .unwrap();
     fs::write(root.join("b.md"), "# B\n\nThe timeout is five seconds.\n").unwrap();
+    // The shape capture expects a round that converts: backdate the sources past
+    // `[ingest].settle_seconds` rather than turn the window off.
+    for name in ["a.md", "b.md"] {
+        let file = fs::File::options()
+            .write(true)
+            .open(root.join(name))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+            .unwrap();
+    }
     dir
 }
 

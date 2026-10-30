@@ -61,7 +61,8 @@ fn dispatch(cli: Cli) -> ! {
             chunk,
             range,
             force_large,
-        } => run_ingest(keys, dry_run, key, chunk, range, force_large),
+            force,
+        } => run_ingest(keys, dry_run, key, chunk, range, force_large, force),
         Command::Submit { confirm, auto } => run_submit(confirm, auto),
         Command::Ignore { add, remove, check } => run_ignore(&add, &remove, check.as_deref()),
         Command::Query {
@@ -332,6 +333,7 @@ fn run_ingest(
     chunk: Option<usize>,
     range: Option<String>,
     force_large: bool,
+    force: bool,
 ) -> ! {
     let cmd = "ingest";
     let root = wiki_root(cmd);
@@ -342,16 +344,15 @@ fn run_ingest(
         parse_preview(cmd, &root, &cfg, key, chunk, range, force_large);
     }
     let mut store = open_store(cmd, &root, &cfg);
-    // A named key is the only source read this round; no key means every new or
-    // changed source. Either way the round runs now: `ingest` is the explicit
-    // request, so it does not wait for the settle window. That window belongs to
-    // the unattended path, which is what `open_round: false` still serves.
+    // A named key limits the round to that source; no key means every new or
+    // changed source. Whether a source is ready is decided by the file itself:
+    // it must have been quiet for `[ingest].settle_seconds`. `--force` is the
+    // explicit override for the moment a human knows better.
     let args = sync::SyncArgs {
         limit: cfg.ingest.max_per_run,
         dry_run,
-        force: true,
+        force,
         only: keys,
-        open_round: true,
     };
     match sync::run(&root, &cfg, &mut store, &args) {
         Ok(report) => {

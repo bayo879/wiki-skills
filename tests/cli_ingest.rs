@@ -35,11 +35,24 @@ fn write_source(dir: &TempDir, name: &str, body: &str) {
     fs::write(dir.path().join(name), body).unwrap();
 }
 
+/// Backdates a source past `[ingest].settle_seconds` (five minutes by default),
+/// so the round sees a file that has stopped moving.
+fn settle(dir: &TempDir, name: &str) {
+    let file = fs::File::options()
+        .write(true)
+        .open(dir.path().join(name))
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+        .unwrap();
+}
+
 #[test]
 fn ingest_without_arguments_converts_and_opens_a_round() {
     let dir = repo();
     write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
     write_source(&dir, "b.md", "# B\n\n退款走人工审核。\n");
+    settle(&dir, "a.md");
+    settle(&dir, "b.md");
 
     let (code, body) = run(&dir, &["ingest"]);
     assert_eq!(code, 0, "{body}");
@@ -53,6 +66,8 @@ fn ingest_with_keys_reads_only_named_sources() {
     let dir = repo();
     write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
     write_source(&dir, "b.md", "# B\n\n退款走人工审核。\n");
+    settle(&dir, "a.md");
+    settle(&dir, "b.md");
 
     let (code, body) = run(&dir, &["ingest", "a.md"]);
     assert_eq!(code, 0, "{body}");
@@ -102,10 +117,40 @@ fn ingest_dry_run_key_prints_the_parse_preview() {
 fn ingest_dry_run_tolerates_an_open_round() {
     let dir = repo();
     write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
+    settle(&dir, "a.md");
     let (code, _) = run(&dir, &["ingest"]);
     assert_eq!(code, 0);
     assert!(dir.path().join(".wiki/staging/pending.json").is_file());
 
     let (code, body) = run(&dir, &["ingest", "--dry-run"]);
     assert_eq!(code, 0, "{body}");
+}
+
+#[test]
+fn ingest_waits_for_the_settle_window() {
+    let dir = repo();
+    write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
+
+    let (code, body) = run(&dir, &["ingest"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["data"]["converted"], 0, "a fresh file waits");
+    assert!(
+        body["data"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("settle")),
+        "{body}"
+    );
+    assert!(!dir.path().join(".wiki/staging/pending.json").exists());
+}
+
+#[test]
+fn ingest_force_converts_a_fresh_source() {
+    let dir = repo();
+    write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
+
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["data"]["converted"], 1);
 }

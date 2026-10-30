@@ -21,7 +21,7 @@
 一条源文件的完整生命周期：
 
 1. **看**：`doctor` 体检十项，`doctor --fix` 修掉不花钱的机械缺陷；`ingest --dry-run` 报告这一轮会碰哪些源、会转多少页。
-2. **摄入**：`ingest` 扫仓库把新增 / 修改 / 删除 / 改名交给解析后端，写 `.wiki/raw/` 并登记账本，开一轮并把候选页的落点 `write_to` 给出来；顺手记一个版本锚点。
+2. **摄入**：`ingest` 扫仓库把新增 / 修改 / 删除 / 改名交给解析后端，写 `.wiki/raw/` 并登记账本，开一轮并把候选页的落点 `write_to` 给出来；顺手记一个版本锚点。刚改过的文件默认留在下一轮（`[ingest].settle_seconds`，5 分钟；`--force` 跳过）。
 3. **写页**：agent 读 `.wiki/raw/`，把候选页写进 `ingest` 给的 `.wiki/staging/<type>/<id>.md`。
 4. **收口**：`submit` 把整份暂存区发布进 `.wiki/pages/`、重建 `index.md`、重建索引、记一个发布版本——不等人，三道刹车只扣住命中的候选，其余的照常发布；`--confirm` 是显式越权，`--auto` 把扣下的跳过。不想要这一轮，用 `version restore <本轮 ingest 版本>`：页面与源回到摄入前，暂存区一并清空；如果同一批源不该再被扫到，用 `ignore --add` 挡住。两种决策都只追加一行 `.wiki/journal.jsonl`。
 5. **检索与续命**：`query` 用 FTS5 检索全库，`query --graph` 看链接结构；写进 `[ingest].session_dir` 的会话蒸馏产物默认也在结果里，`query --no-archive` 才把它们藏起来。
@@ -180,7 +180,7 @@ llm-wiki --version                         # 打印版本
 | 命令 | 作用 |
 |---|---|
 | `doctor [--fix] [--only scan\|convert\|session] [--key <KEY>]` | 体检十项；`--fix` 补建目录/契约/索引，`--only` 只跑一项，`--key` 让转换只处理一个源并打出失败原因 |
-| `ingest [<KEY>...] [--dry-run] [--key <KEY>] [--chunk <N>] [--range <A-B>] [--force-large]` | 唯一的写入口：扫描 + 转换 + 登记 + 开轮 + 版本锚点；给位置参数只处理点名的源；`--key` 只看解析 |
+| `ingest [<KEY>...] [--dry-run] [--key <KEY>] [--chunk <N>] [--range <A-B>] [--force-large] [--force]` | 唯一的写入口：扫描 + 转换 + 登记 + 开轮 + 版本锚点；给位置参数只处理点名的源；`--key` 只看解析；`--force` 不等 settle 窗口 |
 | `submit [--confirm] [--auto]` | 收口：发布整份暂存区、重建索引、记版本；三道刹车只扣住命中的；`--confirm` 越过全部刹车，`--auto` 扣下的跳过并 exit 0，全部被扣下才 exit 3 |
 | `version restore <TAG> --confirm` | 页面与源回到某个版本，暂存区清空；不想要的源用 `ignore --add` 挡住 |
 | `query [TEXT] [--no-archive] [--graph] [--limit <N>]` | FTS5 检索；`--no-archive` 排除 `[ingest].session_dir` 下的页，`--graph` 看链接图，无命中 exit 0 |
@@ -205,7 +205,7 @@ llm-wiki --version                         # 打印版本
 
 ## 服务特殊说明
 
-- 配置只有 `.wiki/wiki.toml`（另有人类可读的 `.wiki/SCHEMA.md`）。`doctor --fix` 生成的模板把每个键与默认值都写出来，改哪一项就取消注释哪一行。`[parse]` 与 `[parse.external]` 的每个键、默认值与校验规则见 [parse 配置](docs/readme/config/parse.md)；`[scan]`、`[formats]`、`[schema]`、`[ingest]`、`[audit]`、`[versions]` 的行为分别由对应模块读取。无人值守的节奏（`settle_seconds`、`stable_streak`、`auto_ingest` 等）在 `[ingest]` 里。`[paths]` 已固定为 `.wiki/` 内，写进配置也会被忽略。
+- 配置只有 `.wiki/wiki.toml`（另有人类可读的 `.wiki/SCHEMA.md`）。`doctor --fix` 生成的模板把每个键与默认值都写出来，改哪一项就取消注释哪一行。`[parse]` 与 `[parse.external]` 的每个键、默认值与校验规则见 [parse 配置](docs/readme/config/parse.md)；`[scan]`、`[formats]`、`[schema]`、`[ingest]`、`[audit]`、`[versions]` 的行为分别由对应模块读取。防抖只由 `settle_seconds` 决定：mtime 超过它、且内容仍与扫描时一致的文件才转换，轮次之间不记任何状态。`[paths]` 已固定为 `.wiki/` 内，写进配置也会被忽略。
 - 会话蒸馏：`[ingest].session_dir`（默认 `sessions`，写空串关闭）下的页面和其他源一样入库、默认也在检索结果里；`query --no-archive` 按这个目录前缀把它们排除。目录本身就是标记，不新增 frontmatter 字段；页面 id 保留源目录前缀，可以随时挪位置。
 - 解析外部服务的 token **只从环境变量读**：`[parse.external].auth_env` 存的是变量名，不是 token 字面量。把 `Bearer xxx`、`sk-...` 这类值写进 `auth_env` 会被 `Config::validate` 以 `E_TOKEN_IN_CONFIG` 拒绝，`doctor` 的 `token` 检查也会报 Fail。
 - `parse.primary` 取 `external` 却没写 `[parse.external]` 时，`doctor` 的 `external_backend` 直接报 Fail（每个解析都会以 `E_NO_EXTERNAL` 失败）；服务不可达只报 Warn，因为服务可能在别处恢复。

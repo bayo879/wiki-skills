@@ -142,14 +142,11 @@ max_new_pages_per_run = 20
 # Where the session-distillation skill writes its records. Pages sourced from
 # here are what `query --no-archive` hides. Empty string disables the marker.
 session_dir = "sessions"
-# Whether a stable source is ingested without being asked (unattended path).
-auto_ingest         = false
 max_per_run         = 20
 max_pending_sources = 200
-# Seconds a source must sit untouched before a round may take it.
-settle_seconds      = 10
-# Rounds a source must have identical bytes before it counts as stable.
-stable_streak       = 3
+# Seconds a source must sit untouched, with its bytes still matching what the
+# scan read, before a round converts it. 0 converts everything immediately.
+settle_seconds      = 300
 read_retries        = 3
 lag_warn_rounds     = 3
 on_missing          = "mark_stale"

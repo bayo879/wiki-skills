@@ -389,18 +389,14 @@ pub struct IngestCfg {
     /// root. Pages whose sources live here are what `query --no-archive` hides.
     /// An empty string disables the marker.
     pub session_dir: String,
-    /// Whether a stable-looking source is ingested without being asked. The
-    /// unattended path needs `--auto`; the flag exists for a scheduler that has
-    /// already decided the gate is open.
-    pub auto_ingest: bool,
     /// Most sources one round takes.
     pub max_per_run: usize,
     /// Pending sources above this many mean the queue is not keeping up.
     pub max_pending_sources: usize,
-    /// Seconds a source must sit untouched before a round may take it.
+    /// Seconds a source must sit untouched before a round may take it. The
+    /// round then re-hashes the file: it converts only when the bytes are still
+    /// the ones `scan` read. `0` takes every source immediately.
     pub settle_seconds: u64,
-    /// Rounds a source must have identical bytes before it counts as stable.
-    pub stable_streak: u32,
     /// Read attempts before a source is reported as unreadable.
     pub read_retries: u32,
     /// Rounds a source may lag before the audit reports it.
@@ -415,11 +411,9 @@ impl Default for IngestCfg {
             max_pages_per_slice: 5,
             max_new_pages_per_run: 20,
             session_dir: String::from("sessions"),
-            auto_ingest: false,
             max_per_run: 20,
             max_pending_sources: 200,
-            settle_seconds: 10,
-            stable_streak: 3,
+            settle_seconds: 300,
             read_retries: 3,
             lag_warn_rounds: 3,
             on_missing: String::from("mark_stale"),

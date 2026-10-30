@@ -60,6 +60,17 @@ fn write(dir: &Path, rel: &str, body: impl AsRef<[u8]>) {
     fs::write(&path, body).expect("fixture is writable");
 }
 
+/// Backdates a fixture source past `[ingest].settle_seconds` (five minutes by
+/// default), so the round below sees a file that has stopped moving.
+fn settle(dir: &Path, rel: &str) {
+    let file = fs::File::options()
+        .write(true)
+        .open(dir.join(rel))
+        .unwrap_or_else(|error| panic!("{rel} is readable: {error}"));
+    file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+        .expect("set mtime");
+}
+
 fn read(dir: &Path, rel: &str) -> String {
     fs::read_to_string(dir.join(rel)).unwrap_or_else(|_| panic!("{rel} exists"))
 }
@@ -150,6 +161,8 @@ fn doctor_ingest_submit_query_round_trip() {
         "<html><body><h1>Retry</h1><p>Backoff and circuit breaking.</p></body></html>",
     );
     write(root, "img/diagram.png", PNG);
+    settle(root, "notes/retry.md");
+    settle(root, "notes/page.html");
 
     // The sources are the user's files: the whole pipeline below must leave
     // every byte outside `.wiki/` untouched.

@@ -15,6 +15,17 @@ fn repo() -> TempDir {
     dir
 }
 
+/// Backdates a source past `[ingest].settle_seconds`: these tests are about
+/// versions, not about when a file stops moving.
+fn settle(dir: &TempDir, name: &str) {
+    let file = fs::File::options()
+        .write(true)
+        .open(dir.path().join(name))
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+        .unwrap();
+}
+
 fn run(dir: &TempDir, args: &[&str]) -> (i32, serde_json::Value) {
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
@@ -32,6 +43,7 @@ fn run(dir: &TempDir, args: &[&str]) -> (i32, serde_json::Value) {
 fn repo_with_published_page() -> TempDir {
     let dir = repo();
     fs::write(dir.path().join("a.md"), "# A\n\n订单超时后重试三次。\n").unwrap();
+    settle(&dir, "a.md");
     let (code, body) = run(&dir, &["ingest"]);
     assert_eq!(code, 0, "{body}");
 
@@ -48,6 +60,7 @@ fn repo_with_published_page() -> TempDir {
 fn version_list_has_one_row_per_ingest_and_none_per_submit() {
     let dir = repo();
     fs::write(dir.path().join("a.md"), "# A\n\n订单超时后重试三次。\n").unwrap();
+    settle(&dir, "a.md");
     let (code, body) = run(&dir, &["ingest"]);
     assert_eq!(code, 0, "{body}");
     let (code, body) = run(&dir, &["version", "list"]);
