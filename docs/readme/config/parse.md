@@ -7,9 +7,9 @@
 | 键 | 类型 | 默认 | 含义 |
 |---|---|---|---|
 | `primary` | `"auto"` \| `"builtin"` \| `"external"` | `"auto"` | 后端选择模式 |
-| `chunk_threshold` | 尺寸 | `2MB` | 计算源指纹时的分界：不超过它全量哈希，超过它采样哈希（见 `src/convert.rs:432`） |
-| `max_source_bytes` | 尺寸 | `100MB` | 超过它的源不进入转换流水线（`scan` 报 `oversize`）；只有 `parse --force-large` 能强行抽一份看，但不会进账本 |
-| `chunk_target` | 尺寸 | `64KB` | 单个文本块的目标大小；`parse --chunk N` 按它切分，分块视图只落 `.wiki/cache/`，`.wiki/raw/` 仍是一份完整 markdown（决策 43） |
+| `chunk_threshold` | 尺寸 | `2MB` | 文本分块的阈值，不再用于切换抽样哈希；源摘要统一全文 |
+| `max_source_bytes` | 尺寸 | `100MB` | 源读取的硬上限（`scan` 报 `oversize`）；摄入及预览都受限，`--force` 与 `--force-large` 不能越过 |
+| `chunk_target` | 尺寸 | `64KB` | 单个文本块的目标大小；`ingest --key <KEY> --chunk N` 按它切分，分块视图只落 `.wiki/cache/`，`.wiki/raw/` 仍是一份完整 markdown（决策 43） |
 | `min_chars` | 整数 | `200` | 内置结果字符数低于它时，`auto` 才可能回退外部 |
 | `[parse.external]` | 表 | 无 | 可选的外部解析服务；不写就是没有 |
 
@@ -75,3 +75,7 @@ timeout_s = 120
 | `E_NO_CONFIG` | `.wiki/wiki.toml` 读不出来（缺失会在更早的入口检查里变成 `E_NOT_INITIALISED`） |
 | `E_BAD_CONFIG` | 非法 TOML、类型/单位错误、数值不变量不满足 |
 | `E_TOKEN_IN_CONFIG` | `auth_env` 里写的是 token 字面量 |
+
+## 全文摘要与缓存边界
+
+先检查体积，再有界读取固定字节并用于全文哈希和解析；读取中增长或检测到变化时拒绝交付。扫描可复用大小与修改时间相同的摘要，因此元数据保持的改动可能漏检，`ingest --force` 可强制复核但不能越体积上限。稳定窗口不因全文哈希而取消。

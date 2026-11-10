@@ -1,6 +1,6 @@
 # 解析后端与 auto 回退
 
-`convert` 与 `parse` 共用同一套解析层：按扩展名选后端，把源字节变成 markdown。本页写实际行为，配置键见 [parse 配置](../config/parse.md)。
+`ingest` 的转换与预览共用同一套解析层：按扩展名选后端，把源字节变成 markdown。本页写实际行为，配置键见 [parse 配置](../config/parse.md)。
 
 ## 后端一览
 

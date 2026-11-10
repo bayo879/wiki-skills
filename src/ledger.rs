@@ -38,8 +38,23 @@ impl<'a> Ledger<'a> {
     /// which `scan` reports as a `new` raw and `lint` as `L7` — visible, and
     /// repaired by `convert --key`.
     pub fn record_conversion(&mut self, source: &SourceRow, raw: &RawRow) -> Result<()> {
-        self.store.upsert_source(source)?;
-        self.store.upsert_raw(raw)
+        self.store.register_conversion(source, raw, None)
+    }
+
+    /// Conversion plus precise observations commit as one unit.
+    pub fn record_conversion_input(
+        &mut self,
+        source: &SourceRow,
+        raw: &RawRow,
+        mtime_ns: Option<i64>,
+    ) -> Result<()> {
+        self.store.register_conversion(source, raw, mtime_ns)
+    }
+
+    /// Record precise metadata only after successful conversion registration.
+    pub fn record_source_facts(&mut self, source: &SourceRow, mtime_ns: i64) -> Result<()> {
+        self.store
+            .record_source_facts(&source.key, &source.hash, source.size, mtime_ns)
     }
 
     /// Follow a source rename: raw rows first, the `sources` row last, so a
@@ -52,17 +67,23 @@ impl<'a> Ledger<'a> {
         raw: RawRelocation,
     ) -> Result<()> {
         match raw {
-            RawRelocation::InPlace(row) => self.store.upsert_raw(&row)?,
-            RawRelocation::Moved { from: old, row } => {
-                self.store.delete_raw(&old)?;
-                if let Some(row) = row {
-                    self.store.upsert_raw(&row)?;
-                }
+            RawRelocation::InPlace(row) => {
+                self.store.relocate_source_work(from, to, None, Some(&row))
             }
-            RawRelocation::Absent => {}
+            RawRelocation::Moved { from: old, row } => {
+                self.store
+                    .relocate_source_work(from, to, Some(&old), row.as_ref())
+            }
+            RawRelocation::Absent => self.store.relocate_source_work(from, to, None, None),
         }
-        self.store.delete_source(from)?;
-        self.store.upsert_source(to)
+    }
+
+    pub fn import_work_item(&mut self, item: &crate::store::WorkItem) -> Result<()> {
+        self.store.import_work_item(item)
+    }
+
+    pub fn complete_work_item(&mut self, key: &str, raw_key: &str, raw_hash: &str) -> Result<bool> {
+        self.store.complete_work_item(key, raw_key, raw_hash)
     }
 
     /// Forget a source and, when it had one, its raw row.

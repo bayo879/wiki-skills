@@ -27,10 +27,11 @@ fn init_creates_contracts_and_engine_dirs() {
         ".wiki/pages",
         ".wiki/pages/audit",
         ".wiki/cache",
-        ".wiki/staging",
-        ".wiki/versions",
     ] {
         assert!(d.path().join(p).exists(), "missing {p}");
+    }
+    for legacy in [".wiki/staging", ".wiki/objects", ".wiki/versions"] {
+        assert!(!d.path().join(legacy).exists(), "must not create {legacy}");
     }
 }
 
@@ -53,7 +54,7 @@ fn init_reports_created_then_skipped() {
     let d = tempdir().unwrap();
     let first = init(d.path());
     assert!(first.created.iter().any(|v| v == ".wiki/wiki.toml"));
-    assert!(first.created.iter().any(|v| v == ".wiki/staging"));
+    assert!(first.created.iter().any(|v| v == ".wiki/pages"));
 
     let second = init(d.path());
     assert!(second.skipped.iter().any(|v| v == ".wiki/wiki.toml"));

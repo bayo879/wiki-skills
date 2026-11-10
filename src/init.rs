@@ -122,7 +122,7 @@ types = ["concept", "entity", "source", "comparison", "synthesis"]
 [parse]
 primary          = "auto"   # auto | builtin | external
 chunk_threshold  = "2MB"    # above this a source is always chunked
-max_source_bytes = "100MB"  # above this a source is rejected, needs --force-large
+max_source_bytes = "100MB"  # hard limit for scanning, preview and conversion
 chunk_target     = "64KB"   # target size of one text chunk
 min_chars        = 200      # below this a builtin result may fall back to the external service
 
@@ -137,13 +137,10 @@ min_chars        = 200      # below this a builtin result may fall back to the e
 # timeout_s = 120
 
 [ingest]
-max_pages_per_slice = 5
-max_new_pages_per_run = 20
 # Where the session-distillation skill writes its records. Pages sourced from
 # here are what `query --no-archive` hides. Empty string disables the marker.
 session_dir = "sessions"
 max_per_run         = 20
-max_pending_sources = 200
 # Seconds a source must sit untouched, with its bytes still matching what the
 # scan read, before a round converts it. 0 converts everything immediately.
 settle_seconds      = 300
@@ -154,8 +151,6 @@ on_missing          = "mark_stale"
 [audit]
 min_page_chars = 200
 
-[versions]
-keep = 5
 
 "#;
 
@@ -180,10 +175,11 @@ const SCHEMA_MD: &str = r#"# Page schema
 | `tags` | 否 | 自由标签列表 |
 | `sources` | 是 | 本页依据的 `.wiki/raw/*.md` 路径；没有它就是「无源声称」 |
 | `status` | 是 | `draft` / `stable` / `stale` |
-| `updated` | 是 | ISO 日期，只由 CLI 行级替换写入，禁止手写 |
+| `updated` | 是 | 作者填写的 ISO 日期，内容修改时同步更新 |
 
 必填字段与字段类型是固定的；CLI 的校验器不会为了省事而放松。
-`updated` 由 CLI 写入时保留注释、键序、引号风格和未知字段。
+作者直接写入正式页面，正确填写 `sources` 与 `updated`；CLI 不自动补挂证据。
+写页后用读取时的 raw 摘要执行 `done <来源键> --hash <摘要>`，只确认该来源待办，不发布、不回退正文。
 
 ## type 枚举
 
@@ -209,10 +205,10 @@ const SCHEMA_MD: &str = r#"# Page schema
 
 ## status 三态
 
-- `draft`：草稿。已写但未经人工确认，`ingest submit` 之前的状态，不当作结论引用。
-- `stable`：已批准。当前可信版本，`checkpoint` 会把它登记进 `.wiki/versions/`。
+- `draft`：内容尚不成熟，不当作结论引用；直接写入后也会被检索到。
+- `stable`：作者判断当前可信的结论，不代表经过发布审批或版本备份。
 - `stale`：已过期。源发生变更、源缺失或结论被新源推翻，等待重新审阅；
   保留页面和源引用，不自动改写结论，也不自动删除。
 
-三个状态都由 CLI 依据账本与审计结果设置，人可以在认可后手工改回 `stable`。
+状态由作者维护；CLI 仅在已配置的来源缺失处理时标记 `stale`，不替作者判断结论是否可信。
 "#;

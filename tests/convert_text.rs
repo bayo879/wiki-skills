@@ -21,6 +21,29 @@ fn setup() -> (tempfile::TempDir, Store, Config) {
     (d, s, cfg)
 }
 
+#[test]
+fn reconversion_replaces_the_previous_content_baseline() {
+    let (d, mut store, cfg) = setup();
+    let path = d.path().join("change.txt");
+    fs::write(&path, "old").unwrap();
+    convert::convert_one(d.path(), &cfg, &mut store, "change.txt").unwrap();
+    fs::write(&path, "newer bytes").unwrap();
+    convert::convert_one(d.path(), &cfg, &mut store, "change.txt").unwrap();
+    let row = store.get_source("change.txt").unwrap().unwrap();
+    assert_eq!(row.hash, llm_wiki::hash::hash_bytes(b"newer bytes"));
+    assert_eq!(row.size, 11);
+}
+
+#[test]
+fn direct_conversion_refuses_source_over_the_size_limit() {
+    let (d, mut store, mut cfg) = setup();
+    cfg.parse.max_source_bytes = 3;
+    fs::write(d.path().join("large.txt"), "four").unwrap();
+    assert!(convert::convert_one(d.path(), &cfg, &mut store, "large.txt").is_err());
+    assert!(store.get_source("large.txt").unwrap().is_none());
+    assert!(!d.path().join(".wiki/raw/large.md").exists());
+}
+
 /// A ledger row with an explicit content digest.
 fn ledger_row(key: &str, hash: &str, size: i64) -> SourceRow {
     SourceRow {
@@ -385,7 +408,7 @@ fn source_name_with_colon_space_and_quote_is_escaped() {
 }
 
 #[test]
-fn conversion_records_raw_key_without_touching_other_ledger_fields() {
+fn conversion_refreshes_the_content_baseline_and_records_raw_key() {
     let (d, mut s, cfg) = setup();
     fs::write(d.path().join("a.md"), "alpha").unwrap();
     let row = ledger_row(
@@ -398,12 +421,9 @@ fn conversion_records_raw_key_without_touching_other_ledger_fields() {
     convert::convert_one(d.path(), &cfg, &mut s, "a.md").unwrap();
     let got = s.get_source("a.md").unwrap().unwrap();
     assert_eq!(got.key, row.key);
-    assert_eq!(
-        got.hash, row.hash,
-        "the content digest must stay as recorded"
-    );
+    assert_eq!(got.hash, llm_wiki::hash::hash_bytes(b"alpha"));
     assert_eq!(got.size, row.size);
-    assert_eq!(got.mtime, row.mtime);
+    assert!(got.mtime > row.mtime);
     assert_eq!(got.raw_key.as_deref(), Some(".wiki/raw/a.md"));
     assert!(got.converted_at.is_some());
 }

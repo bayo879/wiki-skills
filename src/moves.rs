@@ -344,7 +344,7 @@ fn key_of(line: &str) -> &str {
     }
 }
 
-/// Rewrites every page and staging candidate that cites `old_raw`.
+/// Rewrites every formal page that cites `old_raw`.
 ///
 /// Returns the page keys that changed, so a caller can report them. A page's
 /// `page_meta` record is refreshed at the same time, with its old `updated`
@@ -389,20 +389,18 @@ fn rewrite_pages(
     Ok(rewritten)
 }
 
-/// Every markdown page: published pages under `wiki/`, candidates in staging.
+/// Every markdown page under the formal page tree.
 pub(crate) fn page_files(root: &Path, cfg: &Config) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for dir in [root.join(&cfg.paths.wiki), crate::staging::dir(root)] {
-        for entry in WalkDir::new(&dir)
-            .into_iter()
-            .filter_map(std::result::Result::ok)
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            if entry.path().extension().and_then(|ext| ext.to_str()) == Some("md") {
-                files.push(entry.path().to_path_buf());
-            }
+    for entry in WalkDir::new(root.join(&cfg.paths.wiki))
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.path().extension().and_then(|ext| ext.to_str()) == Some("md") {
+            files.push(entry.path().to_path_buf());
         }
     }
     files.sort();

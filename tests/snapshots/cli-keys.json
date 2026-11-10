@@ -6,6 +6,13 @@
     "data.checks[].name",
     "ok"
   ],
+  "done": [
+    "cmd",
+    "data.completed",
+    "data.hash",
+    "data.key",
+    "ok"
+  ],
   "ignore": [
     "cmd",
     "data.count",
@@ -14,6 +21,7 @@
   ],
   "ingest": [
     "cmd",
+    "data.affected_pages[]",
     "data.changes[].hash",
     "data.changes[].key",
     "data.changes[].kind",
@@ -22,8 +30,13 @@
     "data.converted",
     "data.failures",
     "data.ingested[]",
+    "data.instructions",
+    "data.pending[].raw_hash",
+    "data.pending[].raw_key",
+    "data.pending[].source_key",
     "data.queued",
     "data.run_id",
+    "data.schema",
     "data.stale_pages[]",
     "data.types[]",
     "data.warnings[]",
@@ -32,6 +45,7 @@
   ],
   "ingest-dry-run": [
     "cmd",
+    "data.affected_pages[]",
     "data.changes[].hash",
     "data.changes[].key",
     "data.changes[].kind",
@@ -40,8 +54,11 @@
     "data.converted",
     "data.failures",
     "data.ingested[]",
+    "data.instructions",
+    "data.pending[]",
     "data.queued",
     "data.run_id",
+    "data.schema",
     "data.stale_pages[]",
     "data.types[]",
     "data.warnings[]",
@@ -74,14 +91,6 @@
     "data.nodes[].out_degree",
     "data.nodes[].page",
     "data.orphans[]",
-    "ok"
-  ],
-  "submit": [
-    "cmd",
-    "data.held_back[]",
-    "data.published[]",
-    "data.version",
-    "data.warnings[]",
     "ok"
   ]
 }

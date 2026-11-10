@@ -219,12 +219,19 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
 
     let mut upserts: Vec<(String, String, String)> = Vec::new();
     let mut metas: Vec<PageMetaRow> = Vec::new();
+    let mut deletes: BTreeSet<String> = BTreeSet::new();
     for (key, path) in &pages {
         let digest = hash::hash_file(path, true)?;
         if known.get(key).is_some_and(|row| row.hash == digest) && indexed.contains(key) {
             continue;
         }
         let Ok((front, body)) = page::read(path) else {
+            // A malformed page is no longer searchable, even if an older valid
+            // version still has cached text. Leave no digest so a repaired page
+            // is indexed again on the next refresh.
+            if known.contains_key(key) || indexed.contains(key) {
+                deletes.insert(key.clone());
+            }
             continue;
         };
         upserts.push((
@@ -241,11 +248,7 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
 
     // Anything the index knows but the disk does not is a page that was deleted
     // (or renamed, which is the same thing to a path-keyed index).
-    let mut deletes: BTreeSet<String> = known
-        .keys()
-        .filter(|key| !current.contains(*key))
-        .cloned()
-        .collect();
+    deletes.extend(known.keys().filter(|key| !current.contains(*key)).cloned());
     for page_id in &indexed {
         if !current.contains(page_id) {
             deletes.insert(page_id.clone());

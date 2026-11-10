@@ -2,8 +2,8 @@
 //! hold by themselves.
 //!
 //! The suite pins the contract a scheduler depends on. A lock makes a second
-//! round exit 4 instead of racing the first (and a crashed lock is reclaimed
-//! after its TTL, not left to block forever). The settle window keeps a file
+//! round exit 4 instead of racing the first, and a leftover lock file from a
+//! finished run is reused in place rather than displaced by age. The settle window keeps a file
 //! somebody is still writing from being converted half-done: it is one rule,
 //! mtime older than `[ingest].settle_seconds` plus the digest `scan` read, and
 //! nothing is remembered between rounds. `--force` is the only way past it.
@@ -76,7 +76,7 @@ fn write(root: &Path, key: &str, body: &str) {
 }
 
 /// A lock file nobody holds, aged past `ttl` seconds.
-fn plant_stale_lock(root: &Path, ttl: u64) {
+fn plant_leftover_lock(root: &Path) {
     let path = root.join(".wiki/lock");
     fs::write(
         &path,
@@ -84,7 +84,7 @@ fn plant_stale_lock(root: &Path, ttl: u64) {
     )
     .unwrap();
     let file = fs::File::options().write(true).open(&path).unwrap();
-    file.set_modified(SystemTime::now() - Duration::from_secs(ttl + 60))
+    file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
         .unwrap();
 }
 
@@ -113,6 +113,23 @@ fn second_lock_is_exit_4() {
 }
 
 #[test]
+fn an_old_but_live_lock_cannot_be_reclaimed() {
+    let d = tempdir().unwrap();
+    init::run(d.path(), false).unwrap();
+    let _held = lock::acquire(d.path()).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(d.path().join(".wiki/lock"))
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+        .unwrap();
+    assert!(
+        lock::acquire(d.path()).is_err(),
+        "age never displaces a live holder"
+    );
+}
+
+#[test]
 fn dropping_the_lock_releases_the_file() {
     let d = tempdir().unwrap();
     init::run(d.path(), false).unwrap();
@@ -121,7 +138,88 @@ fn dropping_the_lock_releases_the_file() {
         let _h = lock::acquire(d.path()).unwrap();
         assert!(path.exists(), "the lock file exists while it is held");
     }
-    assert!(!path.exists(), "the lock file is removed on drop");
+    assert!(
+        path.exists(),
+        "keep the stable inode after releasing the OS lock"
+    );
+    assert!(lock::acquire(d.path()).is_ok());
+}
+
+#[test]
+fn settled_large_source_uses_the_same_full_digest_for_scan_and_conversion() {
+    let (d, mut cfg) = repo(300);
+    cfg.parse.chunk_threshold = 2 * 1024 * 1024;
+    let bytes: Vec<u8> = (0..4 * 1024 * 1024)
+        .map(|i| b'a' + ((i / 7919 + i % 23) % 26) as u8)
+        .collect();
+    fs::write(d.path().join("large.txt"), &bytes).unwrap();
+    age_past_the_window(&d.path().join("large.txt"), 600);
+    let mut store = open(d.path());
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(report.converted, 1, "{:?}", report.warnings);
+    assert_eq!(
+        store.get_source("large.txt").unwrap().unwrap().hash,
+        hash::hash_bytes(&bytes)
+    );
+}
+
+#[test]
+fn force_rechecks_content_even_when_size_and_mtime_are_preserved() {
+    let (d, cfg) = repo(0);
+    let path = d.path().join("same.txt");
+    fs::write(&path, "alpha").unwrap();
+    let mut store = open(d.path());
+    sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, "bravo").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let ordinary = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(
+        ordinary.converted, 0,
+        "metadata cache is an explicitly accepted fast path"
+    );
+    let mut forced = args(10);
+    forced.force = true;
+    let checked = sync::run(d.path(), &cfg, &mut store, &forced).unwrap();
+    assert_eq!(checked.converted, 1);
+    assert_eq!(
+        store.get_source("same.txt").unwrap().unwrap().hash,
+        hash::hash_bytes(b"bravo")
+    );
+}
+
+#[test]
+fn same_second_equal_length_edit_is_not_hidden_by_metadata_cache() {
+    let (d, cfg) = repo(0);
+    let path = d.path().join("nano.txt");
+    fs::write(&path, "alpha").unwrap();
+    let second = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(second + Duration::from_nanos(100))
+        .unwrap();
+    let mut store = open(d.path());
+    sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    fs::write(&path, "bravo").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(second + Duration::from_nanos(900_000_000))
+        .unwrap();
+    assert_eq!(
+        sync::run(d.path(), &cfg, &mut store, &args(10))
+            .unwrap()
+            .converted,
+        1
+    );
 }
 
 #[test]
@@ -222,25 +320,24 @@ fn an_empty_repository_is_a_quiet_round_not_an_error() {
 }
 
 #[test]
-fn stale_lock_is_reclaimed_and_reported() {
+fn a_leftover_lock_file_is_reused_without_a_warning() {
     let (d, cfg) = repo(0);
-    plant_stale_lock(d.path(), 1);
-    assert!(lock::is_stale(d.path(), 1), "an hour-old lock is stale");
+    plant_leftover_lock(d.path());
+    assert!(
+        !lock::is_held(d.path()),
+        "a body alone does not hold the lock"
+    );
 
-    let held = lock::acquire_with_ttl(d.path(), 1).unwrap();
-    assert!(held.reclaimed(), "the leftover is reported as reclaimed");
+    let held = lock::acquire(d.path()).unwrap();
+    assert_ne!(held.run_id(), "old", "the run rewrites the leftover body");
     drop(held);
-    assert!(!d.path().join(".wiki/lock").exists());
 
-    // Through a full round the reclamation is a warning, not a silent event.
-    plant_stale_lock(d.path(), lock::LOCK_TTL_SECS);
+    // A full round sees no reclamation: the file staying behind is normal, so
+    // warning about it every round would be noise.
     let mut store = open(d.path());
     let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
     assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.contains("stale lock") && w.contains("reclaimed")),
+        !report.warnings.iter().any(|w| w.contains("lock")),
         "warnings: {:?}",
         report.warnings
     );

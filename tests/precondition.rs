@@ -51,11 +51,11 @@ fn repo() -> TempDir {
 #[test]
 fn every_repository_command_refuses_an_uninitialised_directory() {
     let d = TempDir::new().unwrap();
-    // One command per family: reading the layout, the ledger, the staging area,
-    // the pages, the versions and the search index.
+    // One command per family: the layout, the ledger, the work queue, the
+    // pages and the search index.
     for args in [
         vec!["ingest"],
-        vec!["submit"],
+        vec!["done", "a.md", "--hash", "blake3:0"],
         vec!["ingest", "--dry-run"],
         vec!["query", "alpha"],
         vec!["query", "--graph"],

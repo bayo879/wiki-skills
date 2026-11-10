@@ -8,16 +8,15 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use serde::Serialize;
-use serde_json::json;
 
 use llm_wiki::chunk;
-use llm_wiki::cli::{Cli, Command, DoctorOnly, VersionCommand};
+use llm_wiki::cli::{Cli, Command, DoctorOnly};
 use llm_wiki::config::Config;
 use llm_wiki::doctor::{self, Check, Level};
 use llm_wiki::graph;
 use llm_wiki::hash;
 use llm_wiki::ignore;
-use llm_wiki::ingest;
+use llm_wiki::lock;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
 use llm_wiki::precondition;
@@ -25,7 +24,7 @@ use llm_wiki::query::{self, Scope as QueryScope};
 use llm_wiki::report::{self, Exit};
 use llm_wiki::store::Store;
 use llm_wiki::sync;
-use llm_wiki::version::{self, ApproveOutcome};
+use llm_wiki::worklist::{self, WorkError};
 
 /// Characters of parsed markdown echoed by `parse`.
 const HEAD_CHARS: usize = 200;
@@ -63,7 +62,7 @@ fn dispatch(cli: Cli) -> ! {
             force_large,
             force,
         } => run_ingest(keys, dry_run, key, chunk, range, force_large, force),
-        Command::Submit { confirm, auto } => run_submit(confirm, auto),
+        Command::Done { key, hash } => run_done(key, hash),
         Command::Ignore { add, remove, check } => run_ignore(&add, &remove, check.as_deref()),
         Command::Query {
             text,
@@ -71,7 +70,6 @@ fn dispatch(cli: Cli) -> ! {
             no_archive,
             graph,
         } => run_query(text, limit, no_archive, graph),
-        Command::Version { command } => run_version(command),
     }
 }
 
@@ -206,17 +204,26 @@ fn parse_preview(
     force_large: bool,
 ) -> ! {
     let source_path = paths::join_key(&root.join(&cfg.paths.source), &key);
-    let bytes = match std::fs::read(&source_path) {
-        Ok(bytes) => bytes,
-        Err(err) => report::fail(
-            cmd,
-            Exit::Error,
-            "E_IO",
-            &format!("cannot read {}: {err}", source_path.display()),
-        ),
+    let input = match hash::read_source(&source_path, cfg.parse.max_source_bytes) {
+        Ok(input) => input,
+        Err(err) => {
+            let code = match &err {
+                hash::HashError::Oversize { .. } => "E_OVERSIZE",
+                hash::HashError::Unstable { .. } => "E_SOURCE_DRIFT",
+                hash::HashError::Io { .. } => "E_IO",
+            };
+            let exit = if matches!(err, hash::HashError::Oversize { .. }) {
+                Exit::Usage
+            } else {
+                Exit::Error
+            };
+            report::fail(cmd, exit, code, &err.to_string())
+        }
     };
-
-    let delivery = match parse::delivery_with(cfg, bytes.len() as u64, force_large) {
+    let bytes = input.bytes;
+    // Kept for argument compatibility, never used to exceed the input budget.
+    let _ = force_large;
+    let delivery = match parse::delivery_with(cfg, bytes.len() as u64, false) {
         Ok(delivery) => delivery,
         Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
     };
@@ -322,10 +329,7 @@ fn parse_chunk_range(spec: &str) -> std::result::Result<(usize, usize), String> 
     Ok((from, to))
 }
 
-/// `ingest` drives one round: `begin` opens it, `submit`/`abort` close it.
-///
-/// A round never publishes: `submit` refreshes the candidates under staging and
-/// regenerates the staging index, and approval is what moves pages into `wiki/`.
+/// Convert sources and hand unfinished work to the author of live pages.
 fn run_ingest(
     keys: Vec<String>,
     dry_run: bool,
@@ -361,8 +365,7 @@ fn run_ingest(
             } else {
                 Exit::Ok
             };
-            // The round tells the caller where the candidates go: the agent
-            // must not guess a path, and `submit` publishes whatever is there.
+            // The author writes live pages directly and owns every source citation.
             let data = IngestData::from_report(report, &cfg);
             report::emit_with(cmd, data, exit, human_ingest)
         }
@@ -381,7 +384,7 @@ fn run_ingest(
     }
 }
 
-/// What `ingest` reports: the round, then where the candidates belong.
+/// Source conversion results and the direct-page authoring contract.
 #[derive(Serialize)]
 struct IngestData {
     run_id: String,
@@ -392,10 +395,12 @@ struct IngestData {
     queued: usize,
     warnings: Vec<String>,
     failures: usize,
-    /// Directory the candidates are written to.
+    pending: Vec<llm_wiki::store::WorkItem>,
+    affected_pages: Vec<String>,
     write_to: String,
-    /// Page types this repository accepts.
     types: Vec<String>,
+    schema: String,
+    instructions: String,
 }
 
 impl IngestData {
@@ -409,52 +414,31 @@ impl IngestData {
             queued: report.queued,
             warnings: report.warnings,
             failures: report.failures,
-            write_to: format!("{}/staging", cfg.paths.engine.trim_end_matches('/')),
+            pending: report.work_items,
+            affected_pages: report.affected_pages,
+            write_to: cfg.paths.wiki.clone(),
             types: cfg.schema.types.clone(),
+            schema: format!("{}/SCHEMA.md", cfg.paths.engine.trim_end_matches('/')),
+            instructions: String::from("Write or update live pages directly in write_to, following schema and types. The author must explicitly fill truthful sources and updated; the tool never adds sources. Writes take effect immediately. After checking pages, acknowledge each source with done using the raw hash actually read; done does not publish, validate prose, or roll back pages."),
         }
     }
 }
 
-/// Human rendering of an ingest round: what moved, then where to write.
 fn human_ingest(data: &IngestData) -> String {
-    let mut out = human_sync(&sync::SyncReport {
-        run_id: data.run_id.clone(),
-        changes: data.changes.clone(),
-        stale_pages: data.stale_pages.clone(),
-        converted: data.converted,
-        ingested: data.ingested.clone(),
-        queued: data.queued,
-        warnings: data.warnings.clone(),
-        failures: data.failures,
-    });
-    if !data.ingested.is_empty() {
+    let mut out = format!("run_id: {}\nconverted: {}\nqueued: {}\nfailures: {}\nwrite_to: {}\ntypes: {}\nschema: {}\n{}", data.run_id, data.converted, data.queued, data.failures, data.write_to, data.types.join(", "), data.schema, data.instructions);
+    for item in &data.pending {
         out.push_str(&format!(
-            "\nwrite_to: {}\ntypes: {}",
-            data.write_to,
-            data.types.join(", ")
+            "\npending: {} -> {} ({})",
+            item.source_key, item.raw_key, item.raw_hash
         ));
     }
-    out
-}
-
-/// Drops the open round; the candidates nobody has reviewed stay in staging.
-fn human_sync(report: &sync::SyncReport) -> String {
-    let mut out = format!("run_id: {}\n", report.run_id);
-    out.push_str(&format!("converted: {}\n", report.converted));
-    out.push_str(&format!(
-        "ingested: {}\n",
-        if report.ingested.is_empty() {
-            String::from("(none)")
-        } else {
-            report.ingested.join(", ")
-        }
-    ));
-    out.push_str(&format!("queued: {}\n", report.queued));
-    out.push_str(&format!("failures: {}\n", report.failures));
-    for warning in &report.warnings {
-        out.push_str(&format!("warning: {warning}\n"));
+    for page in &data.affected_pages {
+        out.push_str(&format!("\naffected_page: {page}"));
     }
-    out.trim_end().to_string()
+    for warning in &data.warnings {
+        out.push_str(&format!("\nwarning: {warning}"));
+    }
+    out
 }
 
 fn run_ignore(add: &[String], remove: &[String], check: Option<&str>) -> ! {
@@ -513,92 +497,68 @@ fn fail_ignore(cmd: &str, err: &ignore::IgnoreError) -> ! {
     report::fail(cmd, Exit::Error, err.code(), &err.to_string())
 }
 
-/// A named-but-missing source, page or round is the caller's mistake (exit 2);
-/// a damaged staging directory or ledger is a finding (exit 1).
-fn fail_ingest(cmd: &str, err: &ingest::IngestError) -> ! {
-    let exit = if err.code().starts_with("E_NO_") {
-        Exit::Usage
-    } else {
-        Exit::Error
-    };
-    report::fail(cmd, exit, err.code(), &err.to_string())
-}
-
-/// `submit` closes the round: it refreshes the named candidates, then publishes
-/// the ones the brakes allow.
-///
-/// `--confirm` publishes everything and ignores the brakes. `--auto` is the
-/// unattended form: a braked candidate is skipped with a warning and the run
-/// still exits 0. Exit 3 is reserved for the attended form when every candidate
-/// was held back — the only outcome a human has to look at.
-fn run_submit(confirm: bool, auto: bool) -> ! {
-    let cmd = "submit";
+/// Completion checks and clears work while holding the same lock as ingest.
+fn run_done(key: String, hash: String) -> ! {
+    let cmd = "done";
     let root = wiki_root(cmd);
     let cfg = open_repo(cmd, &root);
-    let mut store = open_store(cmd, &root, &cfg);
-    let refreshed = match ingest::submit(&root, &cfg, &mut store, &[]) {
-        Ok(report) => report,
-        Err(err) => fail_ingest(cmd, &err),
+    let guard = match lock::acquire(&root) {
+        Ok(guard) => guard,
+        Err(err) => report::fail(
+            cmd,
+            if err.code() == "E_LOCKED" {
+                Exit::Busy
+            } else {
+                Exit::Usage
+            },
+            err.code(),
+            &err.hint(),
+        ),
     };
-    match version::approve(&root, &cfg, &mut store, confirm) {
-        Ok(ApproveOutcome::Applied {
-            version,
-            published,
-            held_back,
-        }) => report::emit(
+    let mut store = open_store(cmd, &root, &cfg);
+    let result = worklist::complete(&root, &cfg, &mut store, &key, &hash);
+    drop(guard);
+    match result {
+        Ok(completed) => report::emit_with(
             cmd,
-            SubmitData {
-                version,
-                published,
-                held_back,
-                warnings: refreshed.warnings,
+            DoneData {
+                key,
+                hash,
+                completed,
             },
+            Exit::Ok,
+            human_done,
         ),
-        Ok(ApproveOutcome::NothingPublished { held_back }) => {
-            let mut warnings = refreshed.warnings;
-            for held in &held_back {
-                warnings.push(format!("{}: {} ({})", held.page, held.detail, held.reason));
-            }
-            if auto {
-                // Unattended runs must not stop for a braked candidate: report
-                // it and let the round end successfully.
-                report::emit(
-                    cmd,
-                    SubmitData {
-                        version: String::new(),
-                        published: Vec::new(),
-                        held_back,
-                        warnings,
-                    },
-                )
-            }
-            report::fail_detail(
-                cmd,
-                Exit::NeedsConfirm,
-                "NEEDS_CONFIRMATION",
-                &format!("{} 页全部被刹车拦下，没有可发布的候选", held_back.len()),
-                Some(json!({ "held_back": held_back })),
-            )
+        Err(err) => {
+            let code = match &err {
+                WorkError::Drift(_) => "E_SOURCE_DRIFT",
+                WorkError::UnknownSource(_) => "E_NO_SOURCE",
+                WorkError::MissingRaw(_) => "E_NO_RAW",
+                WorkError::Store(_) => "E_DB",
+                WorkError::Hash(_) => "E_IO",
+            };
+            report::fail(cmd, Exit::Error, code, &err.to_string())
         }
-        // No candidate means the round had nothing to publish; that is a normal
-        // outcome of running `submit` again, not a usage error.
-        Err(version::VersionError::NothingToApprove) => report::emit(
-            cmd,
-            SubmitData {
-                version: String::new(),
-                published: Vec::new(),
-                held_back: Vec::new(),
-                warnings: refreshed.warnings,
-            },
-        ),
-        Err(err) => fail_version(cmd, &err),
     }
 }
 
-/// Everything `version` can fail with — a missing candidate set, a bad reason,
-/// an unwritable path — is the caller's or the environment's mistake (exit 2).
-fn fail_version(cmd: &str, err: &version::VersionError) -> ! {
-    report::fail(cmd, Exit::Usage, err.code(), &err.to_string())
+#[derive(Serialize)]
+struct DoneData {
+    key: String,
+    hash: String,
+    completed: bool,
+}
+
+fn human_done(data: &DoneData) -> String {
+    format!(
+        "{}: {}",
+        data.key,
+        if data.completed {
+            "completed"
+        } else {
+            "already complete"
+        }
+    )
 }
 
 /// `query` is the only command that decides when to pay for an index update: a
@@ -683,70 +643,6 @@ fn fail_query(cmd: &str, err: &query::QueryError) -> ! {
     report::fail(cmd, Exit::Usage, err.code(), &err.to_string())
 }
 
-/// `version list|diff|restore`: read the automatically recorded snapshots and
-/// put one back.
-///
-/// The version list is not a history of intent — `journal.jsonl` is — it is the
-/// set of trees the engine can restore to. `restore` is the only command that
-/// writes with it, and the only reason the subcommand exists: a bad publish has
-/// no other way back, because `.wiki/` is local and usually outside git.
-fn run_version(command: VersionCommand) -> ! {
-    let cmd = "version";
-    let root = wiki_root(cmd);
-    let cfg = match Config::load(&root) {
-        Ok(cfg) => cfg,
-        Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
-    };
-    match command {
-        VersionCommand::List => match version::history(&root) {
-            Ok(rows) => {
-                let data = VersionListData {
-                    count: rows.len(),
-                    versions: rows,
-                };
-                report::emit_with(cmd, data, Exit::Ok, human_version_list)
-            }
-            Err(err) => fail_version(cmd, &err),
-        },
-        VersionCommand::Diff { tag } => {
-            let tag = match tag {
-                Some(tag) => tag,
-                None => match version::history(&root) {
-                    Ok(rows) => match rows.first() {
-                        Some(row) => row.version.clone(),
-                        None => report::fail(
-                            cmd,
-                            Exit::Usage,
-                            "E_NO_VERSION",
-                            "no version yet; run `llm-wiki ingest` first",
-                        ),
-                    },
-                    Err(err) => fail_version(cmd, &err),
-                },
-            };
-            match version::diff(&root, &cfg, &tag) {
-                Ok(diff) => report::emit_with(cmd, diff, Exit::Ok, human_version_diff),
-                Err(err) => fail_version(cmd, &err),
-            }
-        }
-        VersionCommand::Restore { tag, confirm } => {
-            if !confirm {
-                report::fail(
-                    cmd,
-                    Exit::Usage,
-                    "E_CONFIRM_REQUIRED",
-                    "a restore replaces the live pages and raw tree; pass --confirm",
-                )
-            }
-            let mut store = open_store(cmd, &root, &cfg);
-            match version::rollback(&root, &cfg, &mut store, &tag) {
-                Ok(outcome) => report::emit_with(cmd, outcome, Exit::Ok, human_version_restore),
-                Err(err) => fail_version(cmd, &err),
-            }
-        }
-    }
-}
-
 /// Payload of `ignore` with no action.
 #[derive(Serialize)]
 struct IgnoreListData {
@@ -795,55 +691,6 @@ fn human_ignore_check(data: &IgnoreCheckData) -> String {
         Some(pattern) => format!("{} is ignored by `{pattern}`", data.key),
         None => format!("{} is not ignored", data.key),
     }
-}
-
-/// Payload of `version list`.
-#[derive(Serialize)]
-struct VersionListData {
-    count: usize,
-    versions: Vec<version::VersionRow>,
-}
-
-fn human_version_list(data: &VersionListData) -> String {
-    if data.versions.is_empty() {
-        return String::from("no versions");
-    }
-    let mut out = String::new();
-    for row in &data.versions {
-        out.push_str(&format!(
-            "{}  {:<8} {}  {} pages  {}\n",
-            row.version, row.kind, row.created_at, row.pages, row.label
-        ));
-    }
-    out.trim_end().to_string()
-}
-
-fn human_version_diff(diff: &version::VersionDiff) -> String {
-    if diff.added.is_empty() && diff.removed.is_empty() && diff.changed.is_empty() {
-        return String::from("no differences");
-    }
-    let mut out = Vec::new();
-    for (title, paths) in [
-        ("added", &diff.added),
-        ("changed", &diff.changed),
-        ("removed", &diff.removed),
-    ] {
-        if paths.is_empty() {
-            continue;
-        }
-        out.push(format!("{title} ({}):", paths.len()));
-        for path in paths {
-            out.push(format!("  {path}"));
-        }
-    }
-    out.join("\n")
-}
-
-fn human_version_restore(outcome: &version::RollbackOutcome) -> String {
-    format!(
-        "restored {} as {}; {} content files materialised",
-        outcome.restored, outcome.version, outcome.files
-    )
 }
 
 /// One block per hit: the heading, the snippet, then the three next-step clues
@@ -914,15 +761,6 @@ fn human_query(data: &QueryHitsData) -> String {
         blocks.push(block);
     }
     blocks.join("\n\n")
-}
-
-/// Payload of the `approve` success envelope.
-#[derive(Serialize)]
-struct SubmitData {
-    version: String,
-    published: Vec<String>,
-    held_back: Vec<llm_wiki::version::HeldBack>,
-    warnings: Vec<String>,
 }
 
 /// Payload of the `parse` success envelope, tagged by delivery mode.

@@ -5,7 +5,11 @@
 
 ## 1. 开发方向
 
-（由用户填写。agent 不擅自增删本节，改动前先问。）
+（本节由用户决策；agent 不擅自增删。）
+
+- 移除候选暂存、`submit` 发布与工具内版本管理（含历史回退）；agent 整理后直接更新 `.wiki/pages/` 正式知识页，不再经过发布步骤。旧库遗留数据的处理方式另行确认，不自动删除。
+- 保留尚未整理成知识页的来源待办，供中断后继续。agent 直接写页后按来源确认完成；确认只核对读取时的 raw 哈希并清除对应待办，资料变化则保留待办，不发布页面、不生成版本、不自动追加来源。
+- [Wiki 待办](docs/readme/todo.md) 是整个项目的长期问题收集清单，后续优化以此为准，不限于摄入流程。发现问题时补充证据及已有方案，解决后更新状态与验证结果；未确认方案不得视为定案。
 
 ## 2. 特有问题与解决方案
 
@@ -24,7 +28,7 @@
 
 ### 2.3 技能不复述 CLI 的输出形状
 
-`skills/llm-wiki/` 只写流程与判断；JSON 字段路径、必填字段、候选路径、报错码含义都由 CLI 现打（`ingest begin` 给 `write_to`/`type`，`submit` 点名缺哪个字段），技能里不再有枚举表、字段表、错误码表和 `data.*` 路径。
+`skills/llm-wiki/` 只写流程与判断；JSON 字段路径、必填字段、正式页位置、报错码含义都由 CLI 现打（`ingest` 给 `write_to` 与 `types`，`done` 点名哈希不符），技能里不再有枚举表、字段表、错误码表和 `data.*` 路径。
 `tests/docs_contract.rs::the_skill_states_no_json_field_paths` 禁止技能文件出现 `data.*`（只放过 `error.code`/`error.message`/`error.detail`）；`tests/snapshots/cli-keys.json` 仍锁每条命令的输出形状（`LLM_WIKI_UPDATE_SNAPSHOTS=1` 重生成）。改输出形状时改快照即可，不需要同步技能。
 
 ### 2.4 schema 迁移必须与全新库同构
@@ -48,26 +52,26 @@
 
 ### 2.6 写入边界靠结构，不靠自觉
 
-引擎（契约、raw、pages、账本、暂存、版本）全部在隐藏目录 `.wiki/` 里，`Config.paths` 用 `#[serde(skip)]` 固定成常量，手写 `[paths]` 移不出去；工具不生成也不检查任何 git 配置——用 git 的仓库自己把 `.wiki/` 加进根 `.gitignore`。`doctor --fix` 不再生成 `.wiki/.gitignore`（引擎里不放任何 git 文件），旧库遗留的那份不删、也不再被检查；`tests/init.rs::init_leaves_git_configuration_to_the_repository` 钉住新库不生成。`.wiki/` 之外的一切都是源，只读。
-`tests/e2e.rs::doctor_ingest_submit_query_round_trip` 在完整链路前后逐字节比对引擎外的文件，任何命令往引擎外写文件都会红。任何命令都**永远不删源文件**。
+引擎（契约、raw、pages、账本、来源待办、索引）全部在隐藏目录 `.wiki/` 里，`Config.paths` 用 `#[serde(skip)]` 固定成常量，手写 `[paths]` 移不出去；工具不生成也不检查任何 git 配置——用 git 的仓库自己把 `.wiki/` 加进根 `.gitignore`。`doctor --fix` 不再生成 `.wiki/.gitignore`（引擎里不放任何 git 文件），旧库遗留的那份不删、也不再被检查；`tests/init.rs::init_leaves_git_configuration_to_the_repository` 钉住新库不生成。`.wiki/` 之外的一切都是源，只读。
+`tests/e2e.rs::doctor_ingest_direct_page_query_round_trip` 在完整链路前后逐字节比对引擎外的文件，任何命令往引擎外写文件都会红。任何命令都**永远不删源文件**。
 
 ### 2.7 一个技能，三份文件
 
-`skills/llm-wiki/SKILL.md` 是 wiki 本身的入口（边界、路由、最小序列、门禁、`submit` 选项、退出码）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、冲突与回退、忽略、叫人）。
+`skills/llm-wiki/SKILL.md` 是 wiki 本身的入口（边界、路由、最小序列、来源确认、退出码）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、冲突与覆盖风险、忽略、叫人）。
 `skills/llm-wiki-session/` 是第二个技能：会话蒸馏，写进 `[ingest].session_dir` 指向的源目录（默认 `sessions`），原始会话不存。一个会话一个文件，不按时间切。
 拆分只为了让 agent 按需只读一份，不是新的契约；`tests/skills_pack.rs` 断言只发这两个技能、正文行数不超限。
 
 ### 2.8 技能的价值在流程纪律，不在用法说明
 
-用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——`ingest` 一次给出 `write_to`、候选只能写到那里、`submit` 只有每个候选都被扣住才 exit 3；
+用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——`ingest` 一次给出 `write_to`、待办 raw 哈希与受影响页，`done` 只认实际读过的 raw 哈希、漂移就不清待办；
 flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复，加长技能文本收益很低，反而会和 CLI 漂移。
 所以：技能里写「什么时候做什么、做错了怎么判」，不写「这个参数是什么意思」。
 
-### 2.9 版本是 manifest + 对象，不是目录拷贝
+### 2.9 直接写页：没有候选、没有发布、没有工具内历史
 
-`ingest` 与 `submit` 记账时不复制目录：它们把 `pages/` 与 `raw/` 每条路径的 blake3 写进 `manifest.json`，字节按摘要存进 `.wiki/objects/`。
-所以「改一页」不会让整版体积翻倍，但**任何直接改写内容文件的代码都必须走 `version::write_atomic`**——就地截断会同时改掉历史版本共享的那个对象。
-版本是每轮自动记的：`ingest` 结束记一个锚点，`submit` 不再记版本（它发布的内容在 ingest 锚点之后，所以 `version diff` 会看到它们）。回退入口是 `version restore <TAG> --confirm`，它恢复后清空 staging 与 pending，并把这次恢复本身也记成一个 `rollback` 版本；不做单页回退。
+`.wiki/pages/` 就是页面的唯一副本。写入立即生效，没有暂存区、没有 `submit`、没有 manifest/objects 版本，也没有 `restore` 回退；工具不自动备份，恢复只能靠仓库外的独立备份（通常是 git，但 `.wiki/` 未必进 git）。
+代价必须说清：工具侧没有撤销入口，同一页被两个人同时写会互相覆盖——CLI 锁只约束工具命令，不约束作者手工写文件。
+工具自己写回内容文件时一律原子替换（`src/render.rs::write_atomic`、`src/convert.rs::write_atomic`：同目录临时文件再 rename），不得就地截断：作者可能正在读，而并发覆盖已经是既有限制，别再把它扩大到半个文件。
 
 ### 2.10 忽略列表只有一个解释入口
 
@@ -75,37 +79,39 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 不要在调用点自己拼通配，也不要把它和 `[scan].ignore`（只按目录名粗过滤）混用——两者语义不同，混了就会出现「列表里明明写了却还被扫到」。
 显式 `ingest <KEY>` 绕开忽略是故意的：先看一眼再决定要不要永久挡住。
 
-### 2.11 三道刹车只扣住命中的候选
+### 2.11 来源待办只由 `done` 清除
 
-`submit` 不带 `--confirm` 时依次过三道，**命中就扣住那一个候选**（留在 `.wiki/staging/`，下一轮还能再试），其余的照常发布：
+一个来源一条待办，转换与入队写在同一个事务里（`Store::register_conversion` 同时写 `sources`、`raws`、`work_items`、`source_facts`）。半路失败时整笔回滚，不会出现「转换成功、待办丢了」的漂移状态；`tests/worklist.rs::failed_enqueue_rolls_back_conversion_baseline_and_can_retry` 用触发器注入失败钉住。
 
-1. **近义页**（`reason: page_overlap`）：标题归一化后与已发布页相同，或候选页的 `sources` 是某张已发布页 `sources` 的子集（没引入新证据）。只比 frontmatter，不读正文、不调模型——语义级「近义」在这里做不到，别试图加。候选自己的路径不算重叠：改同一页不触发（`src/version.rs::overlap_reason` 跳过相同路径）。
-2. **切片预算**（`reason: page_slice_budget`）：同一份源的第 N 个切片已经养出 `[ingest].max_pages_per_slice` 页（默认 5，0 不限）。切片是 `#p=<n>` 指的那一段；小于 `parse.chunk_threshold` 的文件，页面上写什么片段都算整份文件。
-3. **页面预算**（`reason: page_budget`）：本轮新增页数超过 `[ingest].max_new_pages_per_run`（默认 20，0 不限）；已存在的页算覆盖，不占预算。
+`done <KEY> --hash <RAW_HASH>` 持仓库锁，三个条件全部成立才删那一条：源文件当前摘要 == 账本记录的源摘要，raw 文件当前摘要 == 待办记录的 raw 摘要 == 命令行给的哈希。三个都过才执行条件 `DELETE`（`source_key` + `raw_key` + `raw_hash`），任何一项不符都是 `E_SOURCE_DRIFT` exit 1，待办保留。
 
-只有**每个**候选都被扣下时才 exit 3（`NEEDS_CONFIRMATION`，`data.held_back` 列出原因）——那才是真要人看一眼的时刻。`--confirm` 是显式越过全部三道。
-另有一条容易踩的：这几道都必须写在 `if !confirm` 里，曾经写在外面，结果 `--confirm` 也被拦（`tests/version.rs` 的 `approve_confirm_overrules_*` 钉住）。
+幂等是刻意的：同一条再确认一次返回 exit 0、`completed: false`，不是错误；历史上「重复 submit 报错」的坑不要重演。
+
+`done` 不读页面、不验正文、不回滚已写内容。写页期间源又变了，它只能保住待办不误清；正文质量与并发覆盖仍由作者负责。`tests/worklist.rs::done_rejects_old_hash_and_only_clears_the_matching_source` 与 `tests/cli_done.rs::done_drift_is_exit_one_and_keeps_pending` 钉住。
 
 ### 2.12 同步在 CLI 之外
 
 `.wiki/` 是这台机器唯一的事实源，**明确不考虑跨机器**：不要加任何推送/拉取子命令、不要读远端、不要假设网络、不要为多机场景改账本，也不要在文档里教人搬目录或合并账本——两边各写再拼会得到互相矛盾的 `source_hash`。
 目录内仍然只存仓库相对路径（键一律来自 `paths::identity_key`），这是「不写死绝对路径」的卫生要求，不是为搬移做准备。
 
-### 2.13 回退不是表决，也不是忽略
+### 2.13 旧库数据只读保留，只导入来源线索
 
-`reject` 与 `abort` 只剩库函数（`src/version.rs::reject`、`src/ingest.rs::abort`，测试用），CLI 没有入口。**丢弃一轮用 `version restore <本轮 ingest 版本>`**：两棵树按 manifest 还原、staging 与 pending 清空，但不 `mark_reviewed`——下一轮 `ingest` 仍会把那批源报成 `changed`。
-所以「看过并说不要」只剩一条路：`ignore --add` 挡住源。两者语义不同，别指望 restore 代替 ignore——restore 改内容，ignore 改扫描范围。
-库里的表决路径没拆：`reject` 仍走 `Ledger::mark_reviewed` + `accept_reviewed_sources`（摘要按 `scan` 的选法算，小文件全量、大文件采样），否则下一轮立刻报假 `changed`；`tests/version.rs::reject_accepts_the_source_bytes_so_it_is_not_reported_again` 钉住。超大读不了的文件跳过，让它继续报 `oversize`。
+旧 `.wiki/staging/`、`versions/`、`objects/`、`journal.jsonl`、`pending.json` 不自动删除、不重新发布、不转成新版本。它们只是历史字节，命令不得再往里写。
+旧 `pending.json` 里能自证的键会导入成来源待办（`src/worklist.rs::import_legacy`）：逐条校验 `raws.source_key` 与 `sources.raw_key` 双向映射、raw 文件摘要 == 账本摘要，成功才 `import_work_item` 并记进 `legacy_work_imports`，所以只导入一次、不会重灌已完成的待办。坏 JSON、缺 raw、断映射、raw 漂移一律降级为 warning 继续跑，原文件原样保留，下次还会再报——「能导的导、坏的可见」是这里的全部承诺。
+旧表 `versions` / `pending` / `sync_state` 留在库里不 `DROP`：迁移只增不改，删数据要用户单独决定。`tests/worklist.rs::legacy_queue_imports_valid_entries_once_and_keeps_broken_entries_visible` 钉住。
 
-这道表决依赖开轮时把这一轮的 raw 摘要写进 `manifest.json` 的 `current_hash`：`check_sources`（漂移闸门）和 `reject`（认领本轮源）都靠它定位。它一度没人写，于是漂移闸门静默失效、`reject` 找不到本轮源——改这两处时先确认 `current_hash` 有值。`current_hash` 存的是 **raw** 的摘要，`pending.json` 里存的是源的摘要，两者不是一回事。
+### 2.14 没有工具侧决策日志，旧 `journal.jsonl` 只读
 
-### 2.14 决策日志不是内容
+现行命令不再往 `.wiki/journal.jsonl` 追加（`journal::append` 只剩旧版本代码路径，CLI 没有入口）。它不进页面树、不进 `query` 索引，只是历史字节：不要为了让谁读到它而把它塞回 `pages/`，那会让「日志算不算知识内容」重新变成一个需要回答的问题。
+若将来要加审计，写独立文件并在 `LAYOUT` 里登记，不要混进页面目录。
 
-每次 `submit` / `version restore` 只往 `.wiki/journal.jsonl` 追加一行 JSON（`journal::append`），不再写 `pages/log.md`。三条后果要记住：日志不进版本（`collect_content` 只走 `pages/` 与 `raw/`），所以版本回退抹不掉它；它不参与 `query` 索引，所以搜不到；`detail` 里的换行被 JSON 转义，多行 `--reason` 不会破坏格式。想给它加读者就加，但别把它塞回页面树——那会让「回退会不会改历史」重新变成一个问题。
+### 2.15 `page_meta` 是索引的变更检测，不是发布凭据
 
-### 2.15 发布后要清 `page_meta`，否则搜索停在旧正文
+`query::refresh` 把「上次建索引时页面的摘要」存在 `page_meta`：摘要相同且 FTS 里已有这个 key 才跳过。写 FTS 与写 `page_meta` 是同一步，两者不能分开维护。
 
-`ingest` 把候选的摘要写进 `page_meta`，发布时用它对账「交稿后有没有人手改」。但发布只把字节移进 `wiki/`，不写 FTS；`query::refresh` 的跳过条件是「摘要相同且索引里已有这个 key」，于是改过的旧页会被永久跳过，直到 `doctor --fix` 重建索引。所以发布后要对每个已发布页 `delete_page_meta`，让下一次 refresh 重建索引；`tests/version.rs::publishing_a_page_drops_the_index_record_so_the_next_query_reindexes_it` 钉住。
+页面被读坏（frontmatter 解析失败）时，`refresh` 必须把该 key 的旧 FTS 记录连同 `page_meta` 一起删掉，否则搜索会一直返回已经不存在的旧正文；稍后页面修好，再靠摘要变化重建。`tests/query.rs` 里「变坏后清除」「修好后重新可搜」两条钉住。
+
+`sync::mark_stale` 改完状态也要刷新 `page_meta` 摘要，否则下一轮 `refresh` 会把刚标成 stale 的页面当成「未变化」继续用旧索引。`doctor --fix` 仍可整体重建索引，是最后的兜底。
 
 
 ### 2.16 目录布局只有一张表
@@ -122,18 +128,21 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.18 删命令前先和 spec 做一次差集
 
-命令面收窄那一轮（22 → 6）把 `version` 整条删了，但 spec 的 §3 一直写着 `version list/diff/restore`，于是文档承诺了一条不存在的退路。**`.wiki/` 是唯一的版本与内容所在，而且通常不进 git**（2.12），所以 `restore` 不是「人可能用不上的过程步骤」，而是坏发布的唯一出口；过程步骤能删，出口不能删。
-删任何一条命令或 flag 前，先 `grep` spec 的 §3 与 §4 去向表，差集里没处理干净的要么补实现、要么改 spec，不能只删代码。
-`tests/cli_version.rs` 钉住三条：`submit` 不建版本、`restore` 不带 `--confirm` 时不动树、`restore` 本身也记一个 `rollback` 版本；`src/version.rs::approve` 的 `NothingToApprove` 在 CLI 层是 exit 0（重复 `submit` 不是错误）。
+命令面收窄过两轮：22 → 6 删了 `version`，直接写页这一轮又删了 `submit` 与整套版本管理。两次都出现过文档还在教旧入口的情况（`README.md` 曾写着「submit 建版本」，而代码明确不建）。
+删之前先回答「删掉以后坏了怎么办」：`.wiki/` 是唯一内容所在，而且通常不进 git（2.12），所以没有回退就等于没有出口——现在答案只能是仓库外的独立备份，文档必须这么写，不能假装还有内置退路。
+删任何一条命令或 flag 前，`grep` 一遍 `README.md`、`docs/readme/`、`skills/`、`src/init.rs`（`SCHEMA.md` 与 `NEXT_STEPS`）和 `docs/readme/todo.md`，差集里没处理干净的要么补实现、要么改文档。旧命令现在由 clap 返回 `E_USAGE` exit 2，`tests/cli_submit.rs::submit_is_rejected_without_touching_legacy_candidates` 与 `tests/cli_version.rs::version_subcommands_are_rejected_and_preserve_legacy_bytes` 钉住「拒绝且不动旧字节」。
 
 ### 2.19 防抖只认 mtime，不记轮次
 
-一轮要不要转换某个源，只看两件事：mtime 距今超过 `[ingest].settle_seconds`（默认 300 秒），并且重新哈希仍等于 `scan` 那次读到的摘要。
-没有 `sync_state`、没有连续轮数、没有失败熔断：跨轮状态只把「等多久」变复杂，并不比 mtime 更准确，还要求每一轮都记账。
+一轮要不要转换某个源，只看两件事：mtime 距今超过 `[ingest].settle_seconds`（默认 300 秒），并且读到的内容与账本记录不同。没有 `sync_state`、没有连续轮数、没有失败熔断：跨轮状态只会把「等多久」变复杂，还要每一轮都记账。
 `--force` 与 `settle_seconds = 0` 是仅有的两个越权口；点名一个 key 不越权，因为等待属于文件，不属于谁在问。
+
+**元数据缓存只用于省读，不用于证明内容没变。** `source_facts` 记上次全文读取的 hash + size + mtime_ns；只有三者全等且该源已经转换过，`scan` 才复用账本摘要，否则全文重读。代价是：大小和 mtime 都不变的改动会被漏掉，只能 `--force` 复核——文档不得写成「每轮全量校验」。
+读文件只有一条路径 `hash::read_source`：先按 `parse.max_source_bytes` 预检，再有界读取并前后校验长度与 mtime，超限或不稳定都是错误而不是半份摘要。扫描、预览、转换必须对同一份固定字节做哈希与解析，不允许各读一遍（历史上大文件曾出现「扫描抽样、转换全文」的摘要分裂，`tests/sync.rs::settled_large_source_uses_the_same_full_digest_for_scan_and_conversion` 钉住）。
+
+安静的一轮不是错误：没有新源时 `ingest` 照常跑完收尾（重建索引、写审计），不因为没有待办而拒绝执行。
 旧配置里的 `auto_ingest` / `stable_streak` 已删除。`IngestCfg` 带 `deny_unknown_fields`，带这两个键的 `wiki.toml` 会加载失败（`doctor --fix` 修不了配置），删掉那两行即可。
-交接给 `ingest` 的清单 = 上一轮 `pending.json` 里的源 ∪ 本轮真正转换的源；两者都空时不开轮——`ingest begin` 拒空列表，而安静的一轮不是错误。
-`tests/sync.rs` 钉住：窗口内的文件等下一轮、mtime 够久就转换、`--force` 越权、安静一轮保留上一轮的开轮；`src/sync.rs` 的单元测试钉住「摘要变了就不算同一份内容」。
+`tests/sync.rs` 钉住：窗口内的文件等下一轮、mtime 够久就转换、`--force` 越权、大小与 mtime 不变的改动不被缓存掩盖、旧但存活的锁不可回收、掉电留下的锁文件原地复用。
 
 ## 3. 提交前自查
 

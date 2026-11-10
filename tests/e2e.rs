@@ -1,10 +1,10 @@
 //! The end-to-end story, driven through the real binary.
 //!
 //! One repository goes from empty to mined: fixtures are dropped in, scanned,
-//! converted, distilled into a page, reviewed, published, checked, searched,
-//! synced (dry run), aborted and finally queried. Every step's exit code and
-//! the fields later steps depend on are asserted, so a regression anywhere in
-//! the chain shows up as a broken link rather than a green unit test.
+//! converted, written directly as a live page, searched, acknowledged with the
+//! raw hash, checked, and queried again. Every step's exit code and the fields
+//! later steps depend on are asserted, so a regression anywhere in the chain
+//! shows up as a broken link rather than a green unit test.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -139,7 +139,7 @@ fn snapshot(root: &Path) -> BTreeMap<String, String> {
 }
 
 #[test]
-fn doctor_ingest_submit_query_round_trip() {
+fn doctor_ingest_direct_page_query_round_trip() {
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path();
 
@@ -169,14 +169,14 @@ fn doctor_ingest_submit_query_round_trip() {
     let expected_outside = outside_engine(root);
 
     // ---------------------------------------------------------- ingest
-    // One round: select, convert, open, and say where candidates belong.
+    // One round: select, convert, and report the durable source work queue.
     let ingest = ok_call(root, &["ingest"]);
     let ingested = ingest["ingested"].as_array().expect("ingested array");
     assert!(
         ingested.iter().any(|key| key == "notes/retry.md"),
         "the round ingests the new source: {ingest}"
     );
-    assert_eq!(ingest["write_to"], ".wiki/staging");
+    assert_eq!(ingest["write_to"], ".wiki/pages");
     assert!(
         ingest["types"]
             .as_array()
@@ -187,42 +187,53 @@ fn doctor_ingest_submit_query_round_trip() {
         root.join(".wiki/raw/notes/retry.md").is_file(),
         "conversion happened"
     );
-    assert!(
-        root.join(".wiki/staging/pending.json").is_file(),
-        "a round is open"
-    );
+    let pending = ingest["pending"].as_array().expect("pending array");
+    let retry = pending
+        .iter()
+        .find(|item| item["source_key"] == "notes/retry.md")
+        .unwrap_or_else(|| panic!("the source is queued: {ingest}"));
+    let raw_hash = retry["raw_hash"].as_str().expect("raw hash").to_string();
 
-    // The agent writes the candidate where the round said to.
+    // The agent writes the live page where the round said to. There is no
+    // candidate stage and no publish step: the bytes are live immediately.
     write(
         root,
-        ".wiki/staging/concept/alpha.md",
+        ".wiki/pages/concept/alpha.md",
         format!("{PAGE_FRONT}\n\n{}\n", page_body()),
     );
-
-    // ---------------------------------------------------------- submit
-    let submit = ok_call(root, &["submit"]);
-    assert_eq!(submit["published"], serde_json::json!(["concept/alpha.md"]));
-    assert_eq!(submit["version"], "v001");
     assert!(
         root.join(".wiki/pages/concept/alpha.md").is_file(),
-        "submit publishes"
-    );
-    let index = read(root, ".wiki/pages/index.md");
-    assert!(
-        index.contains("concept/alpha.md") && index.contains("重试与熔断"),
-        "the index lists the page: {index}"
-    );
-    let log = read(root, ".wiki/journal.jsonl");
-    assert!(
-        log.contains("submit") && log.contains("v001"),
-        "publishing is journalled: {log}"
+        "the author writes the live tree directly"
     );
 
     // ----------------------------------------------------------- query
     let query = ok_call(root, &["query", "熔断"]);
     assert!(
         query["count"].as_u64().is_some_and(|count| count >= 1),
-        "the published page is searchable at once: {query}"
+        "a directly written page is searchable without a publish step: {query}"
+    );
+    // ------------------------------------------------------------ done
+    let done = ok_call(root, &["done", "notes/retry.md", "--hash", &raw_hash]);
+    assert_eq!(done["completed"], serde_json::json!(true));
+    let again = ok_call(root, &["ingest"]);
+    let still_pending = again["pending"].as_array().expect("pending array");
+    assert!(
+        !still_pending
+            .iter()
+            .any(|item| item["source_key"] == "notes/retry.md"),
+        "acknowledging one source clears only its queue entry: {again}"
+    );
+    // The index is rendered by a round, not by a write: the next round sees
+    // the page the author left behind.
+    let index = read(root, ".wiki/pages/index.md");
+    assert!(
+        index.contains("concept/alpha.md") && index.contains("重试与熔断"),
+        "the next round lists the directly written page: {index}"
+    );
+    assert_eq!(
+        outside_engine(root),
+        expected_outside,
+        "done never rewrites the author's page"
     );
 
     // ---------------------------------------------------------- doctor

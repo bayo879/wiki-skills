@@ -30,7 +30,7 @@ use crate::config::Config;
 use crate::page;
 use crate::scan::{self, ChangeKind, Layer};
 use crate::store::{PageMetaRow, Store};
-use crate::{convert, hash, ingest, lock, moves, paths, render, staging};
+use crate::{convert, hash, lock, moves, paths, render, source_refs};
 
 /// Knobs for one round, all of them from the command line.
 #[derive(Debug, Clone)]
@@ -58,6 +58,8 @@ pub struct SyncReport {
     pub converted: usize,
     /// Sources handed to an ingest round.
     pub ingested: Vec<String>,
+    pub work_items: Vec<crate::store::WorkItem>,
+    pub affected_pages: Vec<String>,
     /// Sources left for the next round by `limit`.
     pub queued: usize,
     /// Everything worth telling a human about this round.
@@ -84,9 +86,9 @@ pub enum SyncError {
     /// `wiki/index.md` could not be rendered.
     #[error(transparent)]
     Render(#[from] crate::render::RenderError),
-    /// The page staging manifest could not be read.
+    /// Source work queue could not be read or migrated.
     #[error(transparent)]
-    Staging(#[from] crate::staging::StagingError),
+    Work(#[from] crate::worklist::WorkError),
     /// A page could not be read or rewritten.
     #[error(transparent)]
     Page(#[from] crate::page::PageError),
@@ -116,7 +118,7 @@ impl SyncError {
                 "E_IO"
             }
             SyncError::Store(_) => "E_DB",
-            SyncError::Staging(err) => err.code(),
+            SyncError::Work(_) => "E_DB",
             SyncError::Move(err) => err.code(),
             SyncError::Path(_) => "E_IO",
             SyncError::Io { .. } => "E_IO",
@@ -131,18 +133,19 @@ pub type Result<T> = std::result::Result<T, SyncError>;
 pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Result<SyncReport> {
     // 1. The lock, before anything is read or written: two rounds must never
     //    interleave, and the lock names the run the audit entry will carry.
-    let lock = lock::acquire(root)?;
-    let run_id = lock.run_id().to_string();
+    let lock = if args.dry_run {
+        None
+    } else {
+        Some(lock::acquire(root)?)
+    };
+    let run_id = lock
+        .as_ref()
+        .map(|held| held.run_id().to_string())
+        .unwrap_or_else(|| "dry-run".into());
     let mut warnings = Vec::new();
-    if lock.reclaimed() {
-        warnings.push(format!(
-            "stale lock {} reclaimed",
-            root.join(".wiki/lock").display()
-        ));
-    }
 
     // 2. What changed on disk.
-    let changes = scan::scan_source(root, cfg, store)?.changes;
+    let changes = scan::scan_source_with_force(root, cfg, store, args.force)?.changes;
 
     // 3. The settle gate, in one pass and with no memory between rounds: a
     //    source is taken when its mtime is old enough and its bytes are still
@@ -220,6 +223,8 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
             stale_pages: Vec::new(),
             converted: 0,
             ingested: Vec::new(),
+            work_items: store.work_items()?,
+            affected_pages: Vec::new(),
             queued,
             warnings,
             failures: 0,
@@ -255,7 +260,6 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     let stale_pages = stale_pages_for_missing(root, cfg, store, &changes)?;
 
     let mut converted = 0;
-    let mut converted_keys: Vec<String> = Vec::new();
     for change in pending.iter().take(budget) {
         let key = change.key.as_str();
         match convert::convert_one(root, cfg, store, key) {
@@ -267,7 +271,6 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
                     ));
                 } else {
                     converted += 1;
-                    converted_keys.push(change.key.clone());
                 }
                 for warning in &outcome.warnings {
                     warnings.push(format!("{key}: {}: {}", warning.code, warning.message));
@@ -281,31 +284,36 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         }
     }
 
-    // 5. Hand the round its sources: what this round converted, plus what the
-    //    previous round left waiting for its candidates. The pending list is the
-    //    engine's own record of what it expects to be written up, so an agent
-    //    that wrote nothing keeps its place instead of losing the work. An empty
-    //    list is a quiet round, not an error — `ingest begin` would refuse it.
-    let mut wanted: Vec<String> = staging::pending_hashes(root)?.into_keys().collect();
-    wanted.extend(converted_keys);
-    wanted.sort();
-    wanted.dedup();
-    let ingested = if wanted.is_empty() {
-        Vec::new()
-    } else {
-        let input = ingest::BeginInput {
-            sources: wanted.clone(),
-            pages: Vec::new(),
-            dry_run: false,
-        };
-        match ingest::begin(root, cfg, store, &input) {
-            Ok(_) => wanted,
-            Err(err) => {
-                warnings.push(format!("ingest begin failed: {err}"));
-                Vec::new()
-            }
+    // The durable queue, not a staging round, is the handoff to the agent.
+    if !args.dry_run {
+        warnings.extend(crate::worklist::import_legacy(root, cfg, store)?);
+    }
+    let work_items = store.work_items()?;
+    let ingested = work_items
+        .iter()
+        .map(|item| item.source_key.clone())
+        .collect();
+    let wanted: std::collections::BTreeSet<_> = work_items
+        .iter()
+        .map(|item| item.raw_key.as_str())
+        .collect();
+    let mut affected_pages = Vec::new();
+    for entry in walkdir::WalkDir::new(root.join(&cfg.paths.wiki)).follow_links(false) {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
+            continue;
         }
-    };
+        let Ok((front, _)) = page::read(entry.path()) else {
+            continue;
+        };
+        if source_refs::source_keys(&front.sources, &cfg.paths.raw)
+            .iter()
+            .any(|key| wanted.contains(key.as_str()))
+        {
+            affected_pages.push(paths::identity_key(root, entry.path())?);
+        }
+    }
+    affected_pages.sort();
 
     // 6. The index always reflects the raw layer, even on a quiet round.
     render::write_index(root, cfg)?;
@@ -316,6 +324,8 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         stale_pages,
         converted,
         ingested,
+        work_items,
+        affected_pages,
         queued,
         warnings,
         failures,
@@ -376,7 +386,7 @@ fn stale_pages_for_missing(
         if front.status != page::Status::Stable {
             continue;
         }
-        let cited = staging::source_keys(&front.sources, &cfg.paths.raw);
+        let cited = source_refs::source_keys(&front.sources, &cfg.paths.raw);
         if !cited.iter().any(|key| vanished.contains(key)) {
             continue;
         }

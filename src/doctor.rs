@@ -3,7 +3,7 @@
 //! Every other command assumes the repository is sound and reports one error
 //! when it is not. `doctor` exists because "not sound" has a dozen causes that
 //! look alike from the failing command: a contract that never parsed, a schema
-//! file deleted, staging half-torn, a database left behind by a newer build.
+//! file deleted, a raw left untracked, a database left behind by a newer build.
 //! It runs all the checks it can, in one pass, and never stops at the first
 //! problem.
 //!
@@ -43,14 +43,11 @@ use crate::config::{self, Config, Primary, CONFIG_FILE, SCHEMA_FILE};
 use crate::lock;
 use crate::paths;
 use crate::render;
-use crate::staging;
 use crate::store::{self, Store, StoreError};
 
 /// The sections a complete contract carries. A missing one is not fatal — the
 /// loader defaults it — but it usually means the file was hand-trimmed.
-const SECTIONS: [&str; 7] = [
-    "scan", "formats", "schema", "parse", "ingest", "audit", "versions",
-];
+const SECTIONS: [&str; 6] = ["scan", "formats", "schema", "parse", "ingest", "audit"];
 
 /// The ledger file inside the engine directory.
 const DB_FILE: &str = "state.db";
@@ -172,7 +169,6 @@ pub fn run(root: &Path, cfg: Option<&Config>, opts: &DoctorOptions) -> Vec<Check
             check_paths(root, effective),
             check_legacy(root),
             check_lock(root, effective),
-            check_staging(root),
         ],
         Some(DoctorOnly::Convert) => check_convert(root, effective, opts.key.as_deref()),
         Some(DoctorOnly::Session) => check_session(root, effective, opts.key.as_deref()),
@@ -184,7 +180,6 @@ pub fn run(root: &Path, cfg: Option<&Config>, opts: &DoctorOptions) -> Vec<Check
             check_fts5(),
             check_legacy(root),
             check_lock(root, effective),
-            check_staging(root),
             check_token(text.as_deref()),
             check_external_backend(effective),
         ],
@@ -618,48 +613,27 @@ fn check_legacy(root: &Path) -> Check {
     }
 }
 
-/// `lock`: no live lock is left behind.
+/// `lock`: no live command holds the lock.
+///
+/// The file itself proves nothing: it is created once and kept, and every
+/// holder rewrites its body. Only the OS lock distinguishes a running command
+/// from a leftover file, so the age of the file is never consulted.
 fn check_lock(root: &Path, _cfg: &Config) -> Check {
     const NAME: &str = "lock";
     let path = root.join(".wiki").join(LOCK_FILE);
     if !path.is_file() {
         return Check::ok(NAME, "no lock file is present");
     }
-    if lock::is_stale(root, lock::LOCK_TTL_SECS) {
-        Check::ok(
-            NAME,
-            "the lock file is older than its TTL; the next command reclaims it",
-        )
-    } else {
+    if lock::is_held(root) {
         Check::warn(
             NAME,
-            "a fresh lock file is present; another command may be running, or a run crashed inside the TTL",
+            "another command holds the lock right now; wait for it to finish",
         )
-    }
-}
-
-/// `staging`: the review queue and its ledger agree.
-///
-/// Candidates without a manifest are the torn state that makes the next round
-/// refuse with `E_STAGING_CORRUPT`. A manifest without candidates is the normal
-/// state after an approval moved the last candidates into `wiki/`, so it passes
-/// with a note rather than crying wolf.
-fn check_staging(root: &Path) -> Check {
-    const NAME: &str = "staging";
-    let candidates = staging::candidates_present(root);
-    let manifest = staging::manifest_present(root);
-    match candidates {
-        Err(err) => Check::fail(NAME, format!("cannot inspect staging: {err}")),
-        Ok(true) if manifest => Check::ok(NAME, "staged candidates have their manifest"),
-        Ok(true) => Check::warn(
+    } else {
+        Check::ok(
             NAME,
-            "staging holds candidates but manifest.json is gone; the next round reports E_STAGING_CORRUPT",
-        ),
-        Ok(false) if manifest => Check::ok(
-            NAME,
-            "the manifest is present and no candidates are waiting (normal after approve)",
-        ),
-        Ok(false) => Check::ok(NAME, "staging is empty"),
+            "the lock file is present but no command holds it (left over from an earlier run)",
+        )
     }
 }
 

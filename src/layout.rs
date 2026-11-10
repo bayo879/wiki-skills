@@ -16,17 +16,13 @@ pub struct Entry {
 }
 
 /// Parents come before children so each `create_dir_all` sees its parent.
-pub const LAYOUT: [Entry; 9] = [
+pub const LAYOUT: [Entry; 6] = [
     Entry {
         path: ".wiki",
         authored: false,
     },
     Entry {
         path: ".wiki/cache",
-        authored: false,
-    },
-    Entry {
-        path: ".wiki/objects",
         authored: false,
     },
     Entry {
@@ -43,14 +39,6 @@ pub const LAYOUT: [Entry; 9] = [
     },
     Entry {
         path: ".wiki/sessions",
-        authored: false,
-    },
-    Entry {
-        path: ".wiki/staging",
-        authored: false,
-    },
-    Entry {
-        path: ".wiki/versions",
         authored: false,
     },
 ];

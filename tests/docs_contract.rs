@@ -90,20 +90,6 @@ fn fixture() -> tempfile::TempDir {
     dir
 }
 
-/// Writes one well-formed page so the wiki is not empty.
-fn write_staged(root: &Path, name: &str, body: &str) {
-    let dir = root.join(".wiki/staging").join("concept");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join(name),
-        format!(
-            "---\nid: {}\ntitle: {name}\ntype: concept\nsummary: about retries\nsources:\n  - .wiki/raw/a.md\nstatus: stable\nupdated: 2026-10-27\n---\n\n{body}\n",
-            name.trim_end_matches(".md")
-        ),
-    )
-    .unwrap();
-}
-
 fn write_page(root: &Path, name: &str, body: &str) {
     let dir = root.join(".wiki/pages").join("concept");
     fs::create_dir_all(&dir).unwrap();
@@ -181,8 +167,16 @@ fn shapes() -> BTreeMap<String, BTreeSet<String>> {
     capture(&mut out, "query", &["query", "retries"]);
     capture(&mut out, "query-graph", &["query", "--graph"]);
     capture(&mut out, "ingest", &["ingest"]);
-    write_staged(root, "retry.md", "Retries stop at three.");
-    capture(&mut out, "submit", &["submit"]);
+    let ingest = run_json(root, &["ingest"]);
+    let digest = ingest["data"]["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["source_key"] == "a.md")
+        .unwrap()["raw_hash"]
+        .as_str()
+        .unwrap();
+    capture(&mut out, "done", &["done", "a.md", "--hash", digest]);
     capture(&mut out, "ignore", &["ignore"]);
     out
 }
@@ -192,6 +186,40 @@ fn snapshot_path() -> PathBuf {
         .join("tests")
         .join("snapshots")
         .join("cli-keys.json")
+}
+
+/// The shipped workflow must not send authors back to the retired publish API.
+#[test]
+fn direct_page_workflow_is_the_only_shipped_workflow() {
+    let root = workspace();
+    for relative in [
+        "README.md",
+        "skills/llm-wiki/SKILL.md",
+        "skills/llm-wiki/content.md",
+        "skills/llm-wiki/ops.md",
+        "skills/llm-wiki-session/SKILL.md",
+    ] {
+        let text = fs::read_to_string(root.join(relative)).unwrap();
+        for retired in [
+            "llm-wiki submit",
+            "llm-wiki version ",
+            "`submit`",
+            "`version restore",
+            ".wiki/staging/<type>",
+        ] {
+            assert!(
+                !text.contains(retired),
+                "{relative}: retired workflow {retired}"
+            );
+        }
+    }
+    let skill = fs::read_to_string(root.join("skills/llm-wiki/SKILL.md")).unwrap();
+    for required in ["done", "实际读取", "raw", "直接", "并发", "备份"] {
+        assert!(
+            skill.contains(required),
+            "skill is missing the direct-page boundary: {required}"
+        );
+    }
 }
 
 #[test]
@@ -224,8 +252,8 @@ fn the_json_shape_of_each_command_matches_the_snapshot() {
 /// The skill must not restate a JSON field path.
 ///
 /// The contract the reposition rests on: whatever the agent needs to know about
-/// a command's output is printed by the command — `ingest begin` says where the
-/// candidate goes, `submit` names the field that is missing. Only the envelope
+/// a command's output is printed by the command — `ingest` says where the
+/// author writes live pages and which schema applies. Only the envelope
 /// keys survive in prose, because they are how a failure is read at all.
 #[test]
 fn the_skill_states_no_json_field_paths() {

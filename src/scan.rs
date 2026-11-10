@@ -155,9 +155,19 @@ struct DiskFile {
 ///
 /// `store` is only read; the function never writes to it.
 pub fn scan_source(root: &Path, cfg: &Config, store: &Store) -> Result<ScanReport> {
+    scan_source_with_force(root, cfg, store, false)
+}
+
+/// Force bypasses the size/mtime shortcut, not the input size budget.
+pub fn scan_source_with_force(
+    root: &Path,
+    cfg: &Config,
+    store: &Store,
+    force: bool,
+) -> Result<ScanReport> {
     let source_root = root.join(&cfg.paths.source);
     let ignores = crate::ignore::IgnoreList::load(root)?;
-    let walked = walk_source(&source_root, cfg, &ignores)?;
+    let walked = walk_source(&source_root, cfg, &ignores, store, force)?;
     let ledger = store.all_sources()?;
     let changes = classify(&walked.disk, &walked.present, &ledger);
     Ok(ScanReport {
@@ -398,6 +408,8 @@ fn walk_source(
     source_root: &Path,
     cfg: &Config,
     ignores: &crate::ignore::IgnoreList,
+    store: &Store,
+    force: bool,
 ) -> Result<Walked> {
     let mut disk = Vec::new();
     let mut present = BTreeSet::new();
@@ -419,13 +431,29 @@ fn walk_source(
                 ignored_count += 1;
                 continue;
             }
-            let size = entry.metadata()?.len();
+            let meta = entry.metadata()?;
+            let size = meta.len();
+            let cached = if !force {
+                match (store.get_source(&key)?, hash::metadata_mtime_ns(&meta)) {
+                    (Some(row), Some(ns))
+                        if row.converted_at.is_some()
+                            && store.source_facts_match(&key, &row.hash, size as i64, ns)? =>
+                    {
+                        Some(row.hash)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let digest = if size > cfg.parse.max_source_bytes {
                 DiskDigest::Oversize
-            } else if size <= cfg.parse.chunk_threshold {
-                DiskDigest::Digest(hash::hash_file(entry.path(), true)?)
+            } else if let Some(digest) = cached {
+                DiskDigest::Digest(digest)
             } else {
-                DiskDigest::Digest(hash::fingerprint(entry.path())?.sample)
+                DiskDigest::Digest(
+                    hash::read_source(entry.path(), cfg.parse.max_source_bytes)?.hash,
+                )
             };
             disk.push(DiskFile { key, digest });
         }

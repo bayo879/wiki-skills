@@ -16,7 +16,31 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
+
+/// High precision observations only certify bytes that were successfully converted.
+const MIGRATION_7: &str = r#"
+CREATE TABLE source_facts(
+    key TEXT PRIMARY KEY,
+    hash TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL
+);
+CREATE TABLE work_items(
+    source_key TEXT PRIMARY KEY,
+    raw_key TEXT NOT NULL,
+    raw_hash TEXT NOT NULL
+);
+CREATE TABLE legacy_work_imports(raw_key TEXT PRIMARY KEY);
+"#;
+
+/// One source still awaiting knowledge curation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkItem {
+    pub source_key: String,
+    pub raw_key: String,
+    pub raw_hash: String,
+}
 
 /// DDL for version 1, applied once per database.
 const MIGRATION_1: &str = r#"
@@ -372,6 +396,33 @@ impl Store {
         if version < 6 {
             self.apply_migration(MIGRATION_6, 6)?;
         }
+        if version < 7 {
+            self.apply_migration(MIGRATION_7, 7)?;
+        }
+        Ok(())
+    }
+
+    /// Whether precise file facts certify this converted digest.
+    pub fn source_facts_match(
+        &self,
+        key: &str,
+        hash: &str,
+        size: i64,
+        mtime_ns: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM source_facts WHERE key=?1 AND hash=?2 AND size=?3 AND mtime_ns=?4)",
+            params![key, hash, size, mtime_ns], |row| row.get(0))?)
+    }
+
+    pub(crate) fn record_source_facts(
+        &mut self,
+        key: &str,
+        hash: &str,
+        size: i64,
+        mtime_ns: i64,
+    ) -> Result<()> {
+        self.conn.execute("INSERT INTO source_facts(key,hash,size,mtime_ns) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,size=excluded.size,mtime_ns=excluded.mtime_ns", params![key,hash,size,mtime_ns])?;
         Ok(())
     }
 
@@ -418,6 +469,109 @@ impl Store {
             .query_row(&sql, [key], SourceRow::from_row)
             .optional()?;
         Ok(row)
+    }
+
+    pub(crate) fn relocate_source_work(
+        &mut self,
+        from: &str,
+        to: &SourceRow,
+        old_raw: Option<&str>,
+        raw: Option<&RawRow>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        if let Some(raw) = raw {
+            tx.execute(
+                "UPDATE work_items SET source_key=?1,raw_key=?2,raw_hash=?3 WHERE source_key=?4",
+                params![to.key, raw.key, raw.hash, from],
+            )?;
+            if let Some(old) = old_raw {
+                tx.execute("DELETE FROM raws WHERE key=?1", [old])?;
+            }
+            tx.execute("INSERT INTO raws(key,hash,source_key,converted_at) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,source_key=excluded.source_key,converted_at=excluded.converted_at", params![raw.key,raw.hash,raw.source_key,raw.converted_at])?;
+        } else {
+            tx.execute("DELETE FROM work_items WHERE source_key=?1", [from])?;
+            if let Some(old) = old_raw {
+                tx.execute("DELETE FROM raws WHERE key=?1", [old])?;
+            }
+        }
+        tx.execute("DELETE FROM source_facts WHERE key=?1", [from])?;
+        tx.execute("DELETE FROM sources WHERE key=?1", [from])?;
+        tx.execute("INSERT INTO sources(key,hash,size,mtime,raw_key,converted_at) VALUES(?1,?2,?3,?4,?5,?6)", params![to.key,to.hash,to.size,to.mtime,to.raw_key,to.converted_at])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn legacy_work_imported(&self, raw_key: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM legacy_work_imports WHERE raw_key=?1)",
+            [raw_key],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn import_work_item(&mut self, item: &WorkItem) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("INSERT INTO work_items(source_key,raw_key,raw_hash) VALUES(?1,?2,?3) ON CONFLICT(source_key) DO NOTHING", params![item.source_key,item.raw_key,item.raw_hash])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO legacy_work_imports(raw_key) VALUES(?1)",
+            [&item.raw_key],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn complete_work_item(
+        &mut self,
+        key: &str,
+        raw_key: &str,
+        raw_hash: &str,
+    ) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let removed = tx.execute(
+            "DELETE FROM work_items WHERE source_key=?1 AND raw_key=?2 AND raw_hash=?3",
+            params![key, raw_key, raw_hash],
+        )?;
+        tx.commit()?;
+        Ok(removed != 0)
+    }
+
+    /// All unfinished sources in stable key order.
+    pub fn work_items(&self) -> Result<Vec<WorkItem>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT source_key,raw_key,raw_hash FROM work_items ORDER BY source_key")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(WorkItem {
+                source_key: row.get(0)?,
+                raw_key: row.get(1)?,
+                raw_hash: row.get(2)?,
+            })
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    /// Atomically register the exact parsed source and rendered raw, and enqueue it.
+    pub(crate) fn register_conversion(
+        &mut self,
+        source: &SourceRow,
+        raw: &RawRow,
+        mtime_ns: Option<i64>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("INSERT INTO sources(key,hash,size,mtime,raw_key,converted_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,size=excluded.size,mtime=excluded.mtime,raw_key=excluded.raw_key,converted_at=excluded.converted_at", params![source.key,source.hash,source.size,source.mtime,source.raw_key,source.converted_at])?;
+        tx.execute("INSERT INTO raws(key,hash,source_key,converted_at) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,source_key=excluded.source_key,converted_at=excluded.converted_at", params![raw.key,raw.hash,raw.source_key,raw.converted_at])?;
+        tx.execute("INSERT INTO work_items(source_key,raw_key,raw_hash) VALUES(?1,?2,?3) ON CONFLICT(source_key) DO UPDATE SET raw_key=excluded.raw_key,raw_hash=excluded.raw_hash", params![source.key,raw.key,raw.hash])?;
+        if let Some(ns) = mtime_ns {
+            tx.execute("INSERT INTO source_facts(key,hash,size,mtime_ns) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,size=excluded.size,mtime_ns=excluded.mtime_ns", params![source.key,source.hash,source.size,ns])?;
+        } else {
+            tx.execute("DELETE FROM source_facts WHERE key=?1", [&source.key])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Inserts `row`, or replaces the existing row with the same key.
@@ -854,7 +1008,6 @@ mod tests {
         let mut s = Store::open(&p).unwrap();
         s.migrate().unwrap();
         assert_eq!(user_version(&s), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 6);
 
         let first = page_meta("wiki/concept/a.md", "blake3:aa", "2026-10-27");
         s.upsert_page_meta(&first).unwrap();

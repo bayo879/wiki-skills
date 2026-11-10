@@ -22,7 +22,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// The six subcommands. Everything else in the engine is internal.
+/// The public commands. Everything else in the engine is internal.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Check the repository's health; `--fix` repairs the unambiguous defects.
@@ -43,14 +43,9 @@ pub enum Command {
         #[arg(long)]
         key: Option<String>,
     },
-    /// One write-line round: select sources, convert, open the round, write
-    /// candidates, publish them.
+    /// Convert sources and return unfinished work for direct writing to live pages.
     ///
-    /// With no `KEYS` it takes every pending change in `source/`. `--dry-run`
-    /// and `--key` preview one source. `--chunk N` and `--range N` pick one
-    /// slice of a large source. Every round is recorded as a version before
-    /// the candidates are written. Examples: `llm-wiki ingest --dry-run`,
-    /// `llm-wiki ingest`, `llm-wiki ingest notes/a.md`.
+    /// `--dry-run` previews changes; `--key` previews parsed source content.
     Ingest {
         /// Repo-relative source keys; empty means every pending change.
         keys: Vec<String>,
@@ -67,27 +62,22 @@ pub enum Command {
         /// the N-th following chunk.
         #[arg(long, value_name = "INDEX", conflicts_with = "chunk")]
         range: Option<String>,
-        /// Read a source above `parse.max_source_bytes` anyway.
+        /// Legacy preview flag; never bypasses `parse.max_source_bytes`.
         #[arg(long)]
         force_large: bool,
         /// Convert now, even if a source was modified within `[ingest].settle_seconds`.
         #[arg(long)]
         force: bool,
     },
-    /// Close the open round: refresh its candidates, then publish them.
+    /// Acknowledge one source after reading its raw and updating live pages.
     ///
-    /// `--confirm` publishes everything and ignores the brakes. `--auto` is the
-    /// unattended form: a braked candidate is skipped with a warning and the
-    /// run still exits 0. Exit 3 is reserved for the attended form when every
-    /// candidate was held back. Examples: `llm-wiki submit`,
-    /// `llm-wiki submit --confirm`, `llm-wiki submit --auto`.
-    Submit {
-        /// Publish every candidate, including the ones the brakes hold back.
+    /// This only clears matching work; it never publishes or edits a page.
+    Done {
+        /// Repository-relative source key returned by ingest.
+        key: String,
+        /// Full raw hash actually read by the author.
         #[arg(long)]
-        confirm: bool,
-        /// Unattended: skip a braked candidate and report it instead of asking.
-        #[arg(long, conflicts_with = "confirm")]
-        auto: bool,
+        hash: String,
     },
     /// Manage the ignore list that keeps sources out of the wiki.
     ///
@@ -125,41 +115,6 @@ pub enum Command {
         /// Print the `[[wikilink]]` structure: degrees, edges, orphans, broken links.
         #[arg(long)]
         graph: bool,
-    },
-    /// Inspect the versions recorded automatically, and restore one.
-    ///
-    /// One snapshot is taken per `ingest` round and one per `submit`; no
-    /// command creates one by hand. `restore` is the only way back from a bad
-    /// publish, and it needs `--confirm` because it replaces the live tree.
-    /// Examples: `llm-wiki version list`, `llm-wiki version diff`,
-    /// `llm-wiki version restore v003 --confirm`.
-    Version {
-        #[command(subcommand)]
-        command: VersionCommand,
-    },
-}
-
-/// What a person does with versions: read the list, read one difference,
-/// restore one.
-#[derive(Debug, Subcommand)]
-pub enum VersionCommand {
-    /// Every snapshot, newest first.
-    List,
-    /// What a snapshot held, compared with the working tree now.
-    Diff {
-        /// Version name; the newest one when omitted.
-        tag: Option<String>,
-    },
-    /// Put `pages/` and `raw/` back to what `tag` held.
-    ///
-    /// A tag that does not exist is rejected without touching the tree, and
-    /// the restore is itself a version, so it can be undone the same way.
-    Restore {
-        /// Version name to restore.
-        tag: String,
-        /// Required: a restore replaces the live tree.
-        #[arg(long)]
-        confirm: bool,
     },
 }
 

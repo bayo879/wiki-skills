@@ -480,6 +480,65 @@ fn refresh_touches_only_the_pages_whose_hash_changed() {
     assert!(fx.hits("同步").is_empty());
 }
 
+#[test]
+fn refresh_removes_stale_hits_when_an_indexed_page_becomes_malformed() {
+    let mut fx = Fixture::new();
+    fx.page("concept/broken.md", "broken", "旧页", "旧摘要", "旧正文。");
+    fx.page(
+        "concept/healthy.md",
+        "healthy",
+        "正常页",
+        "摘要",
+        "正常正文。",
+    );
+    assert_eq!(fx.reindex(), 2);
+    assert_eq!(fx.hits("旧正文").len(), 1);
+
+    fx.page_with("concept/broken.md", "title: 坏页", "损坏后的正文。");
+    fx.refresh();
+    assert!(fx.hits("旧正文").is_empty(), "坏页不能继续命中旧正文");
+    assert_eq!(fx.hits("正常正文").len(), 1);
+    assert!(!fx
+        .store
+        .fts_page_ids()
+        .unwrap()
+        .contains(&String::from(".wiki/pages/concept/broken.md")));
+    assert!(!fx
+        .store
+        .all_page_metas()
+        .unwrap()
+        .iter()
+        .any(|row| { row.page_key == ".wiki/pages/concept/broken.md" }));
+    assert_eq!(fx.refresh(), 0, "持续损坏的页不应重复写入索引");
+
+    fx.page(
+        "concept/broken.md",
+        "broken",
+        "修复页",
+        "新摘要",
+        "修复正文。",
+    );
+    assert_eq!(fx.refresh(), 1);
+    assert_eq!(fx.only("修复正文").title, "修复页");
+    assert!(fx.hits("旧正文").is_empty());
+    assert_eq!(fx.refresh(), 0);
+}
+
+#[test]
+fn refresh_removes_a_malformed_fts_page_even_without_page_meta() {
+    let mut fx = Fixture::new();
+    fx.page("concept/broken.md", "broken", "旧页", "摘要", "旧正文。");
+    fx.reindex();
+    fx.store
+        .delete_page_meta(".wiki/pages/concept/broken.md")
+        .unwrap();
+    fs::write(fx.path("wiki", "concept/broken.md"), [0xff, 0xfe]).unwrap();
+
+    fx.refresh();
+    assert!(fx.hits("旧正文").is_empty(), "孤立的旧 FTS 正文也必须清除");
+    assert_eq!(fx.refresh(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // The CLI wiring.
 // ---------------------------------------------------------------------------

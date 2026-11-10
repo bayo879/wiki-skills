@@ -75,6 +75,7 @@ pub struct Config {
     pub parse: ParseCfg,
     pub ingest: IngestCfg,
     pub audit: AuditCfg,
+    #[serde(skip_serializing)]
     pub versions: VersionsCfg,
 }
 
@@ -382,8 +383,10 @@ pub struct IngestCfg {
     /// source, or the whole of a small one, so the cap follows how much text a
     /// page had to work with rather than how many files were scanned. `0`
     /// disables the brake.
+    #[serde(skip_serializing)]
     pub max_pages_per_slice: usize,
     /// New pages one merge may add before `submit` stops and asks.
+    #[serde(skip_serializing)]
     pub max_new_pages_per_run: usize,
     /// Directory holding distilled session records, relative to the repository
     /// root. Pages whose sources live here are what `query --no-archive` hides.
@@ -392,6 +395,7 @@ pub struct IngestCfg {
     /// Most sources one round takes.
     pub max_per_run: usize,
     /// Pending sources above this many mean the queue is not keeping up.
+    #[serde(skip_serializing)]
     pub max_pending_sources: usize,
     /// Seconds a source must sit untouched before a round may take it. The
     /// round then re-hashes the file: it converts only when the bytes are still

@@ -118,10 +118,8 @@ pub fn convert_one(
     let started = Instant::now();
 
     let source_path = paths::join_key(&root.join(&cfg.paths.source), key);
-    let bytes = std::fs::read(&source_path).map_err(|source| ConvertError::Io {
-        path: source_path.clone(),
-        source,
-    })?;
+    let input = hash::read_source(&source_path, cfg.parse.max_source_bytes)?;
+    let bytes = &input.bytes;
 
     let raw_rel = raw_key_for(key);
     let raw_key = slash_join(&cfg.paths.raw, &raw_rel);
@@ -150,11 +148,11 @@ pub fn convert_one(
         }
     }
 
-    let (extracted, backend) = parse::parse_with(cfg, &Source::inline(key, &bytes))?;
+    let (extracted, backend) = parse::parse_with(cfg, &Source::inline(key, bytes))?;
     let converted_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let document = render_raw(
         &source_ref,
-        &hash::hash_bytes(&bytes),
+        &hash::hash_bytes(bytes),
         &backend,
         &converted_at,
         &extracted,
@@ -164,7 +162,14 @@ pub fn convert_one(
     let raw_hash = hash::hash_bytes(document.as_bytes());
     write_atomic(&raw_path, document.as_bytes())?;
 
-    let source_row = converted_source_row(store, cfg, key, &source_path, &raw_key, &converted_at)?;
+    let source_row = SourceRow {
+        key: key.to_owned(),
+        hash: input.hash,
+        size: input.size,
+        mtime: input.mtime,
+        raw_key: Some(raw_key.clone()),
+        converted_at: Some(converted_at.clone()),
+    };
     // The `raws` key space is relative to `raw/`, like `scan_raw` reports it.
     let raw_row = RawRow {
         key: raw_rel,
@@ -172,7 +177,7 @@ pub fn convert_one(
         source_key: String::from(key),
         converted_at: converted_at.clone(),
     };
-    Ledger::new(store).record_conversion(&source_row, &raw_row)?;
+    Ledger::new(store).record_conversion_input(&source_row, &raw_row, input.mtime_ns)?;
 
     Ok(ConvertOutcome {
         raw_path: raw_key,
@@ -406,45 +411,6 @@ fn unquote(value: &str) -> String {
         }
     }
     out
-}
-
-/// The `sources` row a conversion should leave behind, keeping every other
-/// column as recorded.
-///
-/// A key the ledger has never seen gets a row derived from the file on disk, so
-/// `convert --key` works before the first scan. The digest is chosen exactly the
-/// way `scan` chooses it (full up to `parse.chunk_threshold`, sampled above), so
-/// the next scan sees an unchanged source instead of a spurious `changed`.
-fn converted_source_row(
-    store: &mut Store,
-    cfg: &Config,
-    key: &str,
-    source_path: &Path,
-    raw_key: &str,
-    converted_at: &str,
-) -> Result<SourceRow> {
-    let mut row = match store.get_source(key)? {
-        Some(row) => row,
-        None => {
-            let fingerprint = hash::fingerprint(source_path)?;
-            let digest = if fingerprint.size <= cfg.parse.chunk_threshold {
-                hash::hash_file(source_path, true)?
-            } else {
-                fingerprint.sample.clone()
-            };
-            SourceRow {
-                key: String::from(key),
-                hash: digest,
-                size: fingerprint.size as i64,
-                mtime: fingerprint.mtime,
-                raw_key: None,
-                converted_at: None,
-            }
-        }
-    };
-    row.raw_key = Some(String::from(raw_key));
-    row.converted_at = Some(String::from(converted_at));
-    Ok(row)
 }
 
 #[cfg(test)]

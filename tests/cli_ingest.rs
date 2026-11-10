@@ -1,5 +1,4 @@
-//! `ingest` is the one write-line command a human or agent runs: it scans,
-//! converts, and opens a round. These tests drive it through the binary.
+//! `ingest` converts sources and hands durable work to an author of live pages.
 
 use std::fs;
 
@@ -47,7 +46,7 @@ fn settle(dir: &TempDir, name: &str) {
 }
 
 #[test]
-fn ingest_without_arguments_converts_and_opens_a_round() {
+fn ingest_without_arguments_converts_and_hands_off_live_pages() {
     let dir = repo();
     write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
     write_source(&dir, "b.md", "# B\n\n退款走人工审核。\n");
@@ -58,7 +57,16 @@ fn ingest_without_arguments_converts_and_opens_a_round() {
     assert_eq!(code, 0, "{body}");
     assert_eq!(body["data"]["converted"], 2);
     assert_eq!(body["data"]["ingested"].as_array().unwrap().len(), 2);
-    assert!(dir.path().join(".wiki/staging/pending.json").is_file());
+    assert_eq!(body["data"]["write_to"], ".wiki/pages");
+    assert_eq!(body["data"]["schema"], ".wiki/SCHEMA.md");
+    assert!(body["data"]["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|ty| ty == "concept"));
+    assert_eq!(body["data"]["pending"].as_array().unwrap().len(), 2);
+    assert!(body["data"]["affected_pages"].is_array());
+    assert!(!dir.path().join(".wiki/staging/pending.json").exists());
 }
 
 #[test]
@@ -114,13 +122,13 @@ fn ingest_dry_run_key_prints_the_parse_preview() {
 }
 
 #[test]
-fn ingest_dry_run_tolerates_an_open_round() {
+fn ingest_dry_run_preserves_pending_work() {
     let dir = repo();
     write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
     settle(&dir, "a.md");
-    let (code, _) = run(&dir, &["ingest"]);
+    let (code, body) = run(&dir, &["ingest"]);
     assert_eq!(code, 0);
-    assert!(dir.path().join(".wiki/staging/pending.json").is_file());
+    assert_eq!(body["data"]["pending"].as_array().unwrap().len(), 1);
 
     let (code, body) = run(&dir, &["ingest", "--dry-run"]);
     assert_eq!(code, 0, "{body}");
@@ -153,4 +161,24 @@ fn ingest_force_converts_a_fresh_source() {
     let (code, body) = run(&dir, &["ingest", "--force"]);
     assert_eq!(code, 0, "{body}");
     assert_eq!(body["data"]["converted"], 1);
+}
+
+#[test]
+fn preview_force_large_does_not_bypass_the_byte_limit() {
+    let dir = repo();
+    let mut cfg = llm_wiki::config::Config::load(dir.path()).unwrap();
+    cfg.parse.max_source_bytes = 4;
+    fs::write(
+        dir.path().join(".wiki/wiki.toml"),
+        toml::to_string(&cfg).unwrap(),
+    )
+    .unwrap();
+    write_source(&dir, "a.md", "too large for the configured budget\n");
+    let (code, body) = run(
+        &dir,
+        &["ingest", "--dry-run", "--key", "a.md", "--force-large"],
+    );
+    assert_eq!(code, 2, "{body}");
+    assert_eq!(body["error"]["code"], "E_OVERSIZE");
+    assert!(!dir.path().join(".wiki/raw/a.md").exists());
 }

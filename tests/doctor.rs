@@ -10,10 +10,11 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
 
+use llm_wiki::lock;
 use serde_json::Value;
 use tempfile::TempDir;
 
-const CHECKS: [&str; 10] = [
+const CHECKS: [&str; 9] = [
     "config",
     "schema",
     "paths",
@@ -21,7 +22,6 @@ const CHECKS: [&str; 10] = [
     "fts5",
     "legacy_layout",
     "lock",
-    "staging",
     "token",
     "external_backend",
 ];
@@ -241,41 +241,77 @@ fn a_page_log_from_the_old_journal_layout_is_a_warning() {
 }
 
 #[test]
-fn a_live_lock_is_a_warning_and_a_stale_one_is_not() {
+fn a_held_lock_is_a_warning_and_a_leftover_file_is_not() {
     let dir = repo();
     let path = dir.path().join(".wiki/lock");
-    fs::write(
-        &path,
-        "{\"pid\":1,\"host\":\"test\",\"started_at\":\"2026-01-01T00:00:00Z\",\"run_id\":\"r\"}",
-    )
-    .expect("writable");
+    {
+        let _held = lock::acquire(dir.path()).expect("lock");
+        let (code, json) = doctor(dir.path());
+        assert_eq!(code, 0, "a lock may be legitimate");
+        assert_eq!(level(&json, "lock"), "warn", "a live command holds it");
+    }
+    // Releasing keeps the inode; the leftover body describes nobody.
+    assert!(path.is_file(), "the lock file is kept, not unlinked");
     let (code, json) = doctor(dir.path());
-    assert_eq!(code, 0, "a lock may be legitimate");
-    assert_eq!(level(&json, "lock"), "warn");
+    assert_eq!(code, 0);
+    assert_eq!(level(&json, "lock"), "ok", "a leftover file is not held");
 
-    // Aged past the 600s TTL it is a crash leftover, not a held lock.
+    // Age says nothing: an ancient file that nobody holds is still just a file.
     let file = fs::File::options().write(true).open(&path).expect("open");
-    file.set_modified(SystemTime::now() - Duration::from_secs(700))
+    file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
         .expect("set mtime");
     drop(file);
     let (code, json) = doctor(dir.path());
     assert_eq!(code, 0);
-    assert_eq!(level(&json, "lock"), "ok", "a stale lock is reclaimed");
+    assert_eq!(level(&json, "lock"), "ok", "age never makes a lock stale");
     assert!(fs::metadata(&path).is_ok(), "doctor never deletes the lock");
 }
 
 #[test]
-fn staged_candidates_without_a_ledger_are_a_warning() {
+fn legacy_review_and_version_data_are_ignored_and_preserved() {
     let dir = repo();
     write_page(
         dir.path(),
         "concept/alpha.md",
-        "id: alpha\ntitle: A\ntype: concept\nsummary: s\nsources: []\nstatus: draft\nupdated: 2026-10-27",
+        "id: alpha\ntitle: A\ntype: concept\nsummary: s\nsources: []\nstatus: draft",
         "body",
     );
-    let (code, json) = doctor(dir.path());
-    assert_eq!(code, 0);
-    assert_eq!(level(&json, "staging"), "warn");
+    let legacy = [
+        ".wiki/staging/concept/alpha.md",
+        ".wiki/staging/manifest.json",
+        ".wiki/objects/ab/legacy",
+        ".wiki/versions/v001/manifest.json",
+    ];
+    for path in &legacy[1..] {
+        let path = dir.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"legacy bytes, not a valid manifest").unwrap();
+    }
+    let before: Vec<_> = legacy
+        .iter()
+        .map(|path| fs::read(dir.path().join(path)).unwrap())
+        .collect();
+    for args in [
+        vec!["--json", "doctor"],
+        vec!["--json", "doctor", "--only", "scan"],
+        vec!["--json", "doctor", "--fix"],
+    ] {
+        let output = run(dir.path(), &args);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(json["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|check| check["name"] != "staging"));
+        for (path, expected) in legacy.iter().zip(&before) {
+            assert_eq!(
+                fs::read(dir.path().join(path)).unwrap(),
+                *expected,
+                "{path}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -352,6 +388,12 @@ fn doctor_fix_bootstraps_a_fresh_repo() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(dir.path().join(".wiki/wiki.toml").is_file());
     assert!(dir.path().join(".wiki/pages").is_dir());
+    for legacy in [".wiki/staging", ".wiki/objects", ".wiki/versions"] {
+        assert!(
+            !dir.path().join(legacy).exists(),
+            "must not create {legacy}"
+        );
+    }
 }
 
 #[test]

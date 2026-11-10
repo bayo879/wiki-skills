@@ -28,6 +28,12 @@ pub enum HashError {
         #[source]
         source: io::Error,
     },
+    /// The input exceeded the configured byte budget.
+    #[error("source {} exceeds {limit} bytes", path.display())]
+    Oversize { path: PathBuf, limit: u64 },
+    /// The input changed while being read.
+    #[error("source {} changed while reading", path.display())]
+    Unstable { path: PathBuf },
 }
 
 /// Result of the hashing helpers.
@@ -42,6 +48,68 @@ pub struct Fingerprint {
     pub mtime: i64,
     /// `blake3:` digest of the sampled windows.
     pub sample: String,
+}
+
+/// A bounded, stable source read used for both parsing and bookkeeping.
+pub struct SourceInput {
+    pub bytes: Vec<u8>,
+    pub hash: String,
+    pub size: i64,
+    pub mtime: i64,
+    pub mtime_ns: Option<i64>,
+}
+
+/// Read at most the configured budget plus one byte, rejecting growth or drift.
+pub fn read_source(path: &Path, limit: u64) -> Result<SourceInput> {
+    let file = open(path)?;
+    let before = file.metadata().map_err(|source| HashError::Io {
+        path: path.into(),
+        source,
+    })?;
+    if before.len() > limit {
+        return Err(HashError::Oversize {
+            path: path.into(),
+            limit,
+        });
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| HashError::Io {
+            path: path.into(),
+            source,
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(HashError::Oversize {
+            path: path.into(),
+            limit,
+        });
+    }
+    let after = std::fs::metadata(path).map_err(|source| HashError::Io {
+        path: path.into(),
+        source,
+    })?;
+    if before.len() != bytes.len() as u64
+        || before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+    {
+        return Err(HashError::Unstable { path: path.into() });
+    }
+    Ok(SourceInput {
+        hash: hash_bytes(&bytes),
+        size: bytes.len() as i64,
+        mtime: before.modified().map(unix_seconds).unwrap_or(0),
+        mtime_ns: metadata_mtime_ns(&before),
+        bytes,
+    })
+}
+
+/// Nanosecond timestamp, absent rather than guessed when unavailable.
+pub fn metadata_mtime_ns(meta: &std::fs::Metadata) -> Option<i64> {
+    let time = meta.modified().ok()?;
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(duration.as_nanos()).ok()
 }
 
 /// `blake3:<hex>` digest of an in-memory buffer.
