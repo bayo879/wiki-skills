@@ -91,14 +91,14 @@ cp -R skills/* ~/.claude/skills/
 |---|---|---|
 | PATH 上的目录（如 `~/.local/bin/llm-wiki`） | `llm-wiki ...` | 一个人维护多个 wiki 仓库 |
 | 仓库根的 `.wiki/llm-wiki` | `.wiki/llm-wiki ...` | 单个仓库自带工具，随仓库走 |
-| skill 目录（`skills/llm-wiki/llm-wiki`） | `llm-wiki ...`（PATH 没有时用同目录二进制） | 只把 skill 复制给别人，CLI 跟着走 |
+| skill 目录（`skills/llm-wiki/cli/llm-wiki`） | `llm-wiki ...`（PATH 没有时用这个） | 只把 skill 复制给别人，CLI 跟着走 |
 
 `.wiki/llm-wiki` 在 `.wiki/` 下；如果仓库用 git，记得把 `.wiki/` 加进根 `.gitignore`，否则它会被当成未跟踪文件。
 三种放法都要求在**仓库根目录**执行；CLI 不向上查找根。
 
 #### 把 skill 同步给别人
 
-`skills/` 整个复制进对方的技能根目录即可，不需要本仓库、不需要 Rust。把对应平台的 `llm-wiki` 二进制放进 `skills/llm-wiki/`，对方的 agent 在 PATH 里找不到命令时会直接用这一份。
+`skills/` 整个复制进对方的技能根目录即可，不需要本仓库、不需要 Rust。把对应平台的 `llm-wiki` 二进制放进 `skills/llm-wiki/cli/`，对方的 agent 在 PATH 里找不到命令时会直接用这一份。
 二进制从 Release 页按平台取：
 
 | 平台 | 资产 |
