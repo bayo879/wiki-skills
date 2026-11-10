@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `primary` | `"auto"` \| `"builtin"` \| `"external"` | `"auto"` | 后端选择模式 |
 | `chunk_threshold` | 尺寸 | `2MB` | 文本分块的阈值，不再用于切换抽样哈希；源摘要统一全文 |
-| `max_source_bytes` | 尺寸 | `100MB` | 源读取的硬上限（`scan` 报 `oversize`）；摄入及预览都受限，`--force` 与 `--force-large` 不能越过 |
+| `max_source_bytes` | 尺寸 | `100MB` | 源读取的硬上限（`scan` 判 `oversize`）；超限文件不转换、不进待办，`ingest` 每轮以 warning 点名；摄入及预览都受限，`--force` 与 `--force-large` 不能越过 |
 | `chunk_target` | 尺寸 | `64KB` | 单个文本块的目标大小；`ingest --key <KEY> --chunk N` 按它切分，分块视图只落 `.wiki/cache/`，`.wiki/raw/` 仍是一份完整 markdown（决策 43） |
 | `min_chars` | 整数 | `200` | 内置结果字符数低于它时，`auto` 才可能回退外部 |
 | `[parse.external]` | 表 | 无 | 可选的外部解析服务；不写就是没有 |

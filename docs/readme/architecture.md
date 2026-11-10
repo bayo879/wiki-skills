@@ -32,7 +32,7 @@
                      └── done：持锁核对所读 raw 哈希及当前源，只清对应来源待办
 ```
 
-`ingest` 保留稳定窗口，`--force` 可跳过等待并强制全文复核，不能越 `parse.max_source_bytes`。扫描以大小和修改时间缓存全文摘要：可漏检元数据保持的改动，不能宣称每轮重读所有源。转换对同一份受限固定字节计算摘要并解析，读取期间检测到变化则拒绝交付。
+`ingest` 保留稳定窗口，`--force` 可跳过等待并强制全文复核，不能越 `parse.max_source_bytes`。扫描以大小和修改时间缓存全文摘要：可漏检元数据保持的改动，不能宣称每轮重读所有源。转换对同一份受限固定字节计算摘要并解析，读取期间检测到变化则拒绝交付。超限源不进待办、不失败，但每轮以 `oversize:` warning 点名键名与上限——静默跳过会被读成「已经整理过」。
 
 来源待办独立于页面：转换登记时持久化，重跑交付未完成来源；作者可以更新已有页，不要求每源新建。`affected_pages` 是现有引用关系得到的提示，不保证语义影响完整。页面作者显式写真实 `sources` 与 `updated`，工具不补引用。
 
@@ -63,7 +63,7 @@
 | `src/version.rs` | 旧版本库兼容，CLI 无管理入口 |
 | `src/ignore.rs` | `.wiki/ignore` 的解析与增删；`ingest` 共用的唯一判定 |
 | `src/lock.rs` | 仓库锁（固定 inode + OS 文件锁，不按年龄回收） |
-| `src/store.rs` | SQLite 账本、schema 迁移、FTS5 |
+| `src/store.rs` | SQLite 账本、schema 迁移、FTS5；连接显式持有 5s busy_timeout |
 | `src/ledger.rs` | 账本唯一的写入口：登记转换、跟随改名、遗忘删除 |
 | `src/sync.rs` | 摄入一轮的执行体：`ingest` 调它跑 scan → convert → 来源待办交付 |
 | `src/query.rs` | FTS5 索引与检索 |

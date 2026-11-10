@@ -159,6 +159,23 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
             }
         }
     }
+
+    // A source above `parse.max_source_bytes` is never opened, so it never
+    // becomes a work item and never fails the round. Naming it once per round is
+    // the only way a human learns that `ingest` left it alone on purpose: a
+    // silent skip reads as "already handled".
+    for change in &changes {
+        if change.kind != ChangeKind::Oversize {
+            continue;
+        }
+        if explicit && !args.only.iter().any(|key| key == &change.key) {
+            continue;
+        }
+        warnings.push(format!(
+            "oversize: '{}' is above parse.max_source_bytes ({} bytes); it stays unconverted until the file is ignored or the limit is raised",
+            change.key, cfg.parse.max_source_bytes
+        ));
+    }
     let mut pending: Vec<&scan::Change> = Vec::new();
     for change in &changes {
         if !matches!(change.kind, ChangeKind::New | ChangeKind::Changed) {

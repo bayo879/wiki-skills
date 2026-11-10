@@ -144,6 +144,16 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 旧配置里的 `auto_ingest` / `stable_streak` 已删除。`IngestCfg` 带 `deny_unknown_fields`，带这两个键的 `wiki.toml` 会加载失败（`doctor --fix` 修不了配置），删掉那两行即可。
 `tests/sync.rs` 钉住：窗口内的文件等下一轮、mtime 够久就转换、`--force` 越权、大小与 mtime 不变的改动不被缓存掩盖、旧但存活的锁不可回收、掉电留下的锁文件原地复用。
 
+超过 `parse.max_source_bytes` 的源在 `scan` 里是 `Oversize`，既不是「待转换」也不是失败：不转换、不进待办、退出码不变，但 `sync` 每轮必须把它写成 `oversize:` warning（键名 + 上限）。静默跳过会被读成「已经整理过」，`tests/cli_ingest.rs::an_oversize_source_is_named_in_the_warnings_of_every_round` 钉住人类输出与 JSON 两侧。
+
+### 2.20 并发：锁管多步骤，busy_timeout 管单条写
+
+`lock::acquire` 只罩 `ingest` 与 `done`（多步骤写）；`query` 是高频入口不取锁，但它会写 FTS 与 `page_meta`。这类单条短写靠 SQLite 的 busy handler 排队，不靠仓库锁。
+
+**「SQLite 默认 busy timeout 是 0」在这个栈上是错的。** rusqlite 0.31 每次 `Connection::open` 都调 `sqlite3_busy_timeout(db, 5000)`（`inner_connection.rs`，busy.rs 文档也写默认 5000ms 但「may change」）。`src/store.rs` 仍显式设 5s：值钉在我们这边，驱动换掉或改默认时行为不变。持锁超过 5s 仍返回 `DatabaseBusy`，那是真实的长时间占用，不是配置缺失。`tests/store.rs::a_second_writer_waits_for_the_lock_instead_of_failing` 钉住「第二个写者会等」。
+
+`doctor --fix` 不取仓库锁：它本身要检查锁（`src/doctor.rs` 的 `check_lock`），持锁会把自己的检查变成 Warn。与 `ingest` 并发时两边各写派生文件，但都用原子替换，不会留下半个文件。
+
 ## 3. 提交前自查
 
 ```bash

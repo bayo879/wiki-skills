@@ -195,12 +195,12 @@ llm-wiki --version                         # 打印版本
 ## 服务特殊说明
 
 - 配置只有 `.wiki/wiki.toml`，页面契约在 `.wiki/SCHEMA.md`。新配置不再生成版本保留与发布页数预算；旧 `[versions].keep`、`[ingest].max_pages_per_slice`、`[ingest].max_new_pages_per_run` 只为兼容读取，在当前 CLI 不生效。未知键仍报错。`[paths]` 固定在 `.wiki/` 内，手写也不能迁出。
-- 哈希口径统一为全文：先以大小和修改时间初筛，元数据未变时可能复用已记录摘要，因此可能漏掉保留元数据的改动。`--force` 强制全文复核；它与 `--force-large` 都不能越过 `parse.max_source_bytes`（默认 100MB）。读取受限且对同一份固定字节哈希、解析；稳定窗口仍保留。详见 [parse 配置](docs/readme/config/parse.md)。
+- 哈希口径统一为全文：先以大小和修改时间初筛，元数据未变时可能复用已记录摘要，因此可能漏掉保留元数据的改动。`--force` 强制全文复核；它与 `--force-large` 都不能越过 `parse.max_source_bytes`（默认 100MB）；超限源不转换、不进待办，每轮 `ingest` 以 warning 点名，需改上限或加忽略。读取受限且对同一份固定字节哈希、解析；稳定窗口仍保留。详见 [parse 配置](docs/readme/config/parse.md)。
 - `done` 校验实际读过的 raw 哈希及当前源，不根据页面内容判断完成；成功不自动补引用。正文正确性、引用真实性、覆盖风险由作者核对。
 - 会话蒸馏源目录由 `[ingest].session_dir` 指定（默认 `sessions`，空串关闭）；`query --no-archive` 按页面目录前缀排除。
 - 外部解析凭据只从环境变量读取，`auth_env` 存变量名不存 token；内置与外部后端规则见 [解析后端](docs/readme/parse/external.md)。
 - 旧库的暂存、版本、对象与日志不自动清理或重新发布。可解析的旧待办只导入来源线索；异常项给出警告，保留原始数据供人工处理。
 - `.wiki/ignore` 使用 gitignore 语法，点名 `ingest <KEY>` 可绕忽略查看，但不绕稳定窗口和体积上限。
 - `.wiki/` 是单机事实源，不提供同步，不应搬移合并账本。工具不生成 git 配置，备份由用户另行安排；没有自动备份与工具内回退。
-- 仓库锁是一个固定 inode 上的 OS 文件锁：按占用判断，不按文件年龄判断；进程退出即释放，文件本身保留复用。直接写页不持这个锁，并发作者仍可能覆盖。
+- 仓库锁是一个固定 inode 上的 OS 文件锁：按占用判断，不按文件年龄判断；进程退出即释放，文件本身保留复用。直接写页不持这个锁，并发作者仍可能覆盖。数据库连接显式设 5s busy_timeout（不依赖驱动的默认值），并发短写排队而不是立即 `SQLITE_BUSY`。
 - 索引是派生状态，`query` 前增量刷新，直接写下的新页和修改可被检索；`doctor --fix` 可重建索引。

@@ -350,6 +350,12 @@ impl Store {
             });
         }
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // One file, two processes: `ingest` converts while a `query` refreshes
+        // the index, and WAL only lets readers through. A writer that finds the
+        // write lock taken would otherwise fail at once with `SQLITE_BUSY`,
+        // which reads as a broken database. Waiting a few seconds lets the short
+        // index writes queue; a long conversion still ends as a clean error.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Store {
             conn,
             path: path.to_path_buf(),

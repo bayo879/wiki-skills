@@ -113,3 +113,37 @@ fn full_row_roundtrips_and_updates() {
     // Deleting a key that is already gone is a no-op, not an error.
     s.delete_source(&full.key).unwrap();
 }
+
+/// Two `llm-wiki` processes share one `state.db`. rusqlite already installs a
+/// 5s busy handler on every connection, but that is the driver's default and the
+/// driver documents it as subject to change: `Store::open` sets the value
+/// itself, so a second writer waits for a short index write instead of failing
+/// at once with `SQLITE_BUSY`. If the timeout drops to zero, the writer thread
+/// panics here.
+#[test]
+fn a_second_writer_waits_for_the_lock_instead_of_failing() {
+    let d = tempdir().unwrap();
+    let p = d.path().join("state.db");
+    {
+        let mut s = Store::open(&p).unwrap();
+        s.migrate().unwrap();
+    }
+
+    // Hold the write lock the way another process sitting in `BEGIN IMMEDIATE`
+    // would, then let a `Store` writer try to get in.
+    let holder = rusqlite::Connection::open(&p).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let writer = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let mut s = Store::open(&p).unwrap();
+            s.upsert_source(&row("a.md", "blake3:aa")).unwrap();
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    holder.execute_batch("COMMIT").unwrap();
+    writer.join().expect("the writer must wait, not fail");
+
+    let s = Store::open(&p).unwrap();
+    assert!(s.get_source("a.md").unwrap().is_some());
+}

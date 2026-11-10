@@ -182,3 +182,49 @@ fn preview_force_large_does_not_bypass_the_byte_limit() {
     assert_eq!(body["error"]["code"], "E_OVERSIZE");
     assert!(!dir.path().join(".wiki/raw/a.md").exists());
 }
+
+/// An oversize source is never converted. Silence is the failure mode: the
+/// author would read "converted: 0, exit 0" as "nothing to do" and never learn
+/// that one file is above the limit.
+#[test]
+fn an_oversize_source_is_named_in_the_warnings_of_every_round() {
+    let dir = repo();
+    let mut cfg = llm_wiki::config::Config::load(dir.path()).unwrap();
+    cfg.parse.max_source_bytes = 4;
+    fs::write(
+        dir.path().join(".wiki/wiki.toml"),
+        toml::to_string(&cfg).unwrap(),
+    )
+    .unwrap();
+    write_source(&dir, "big.md", "far too large for the configured budget\n");
+
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(
+        code, 0,
+        "an oversize source is a warning, not a failure: {body}"
+    );
+    assert_eq!(body["data"]["converted"], 0, "{body}");
+    let warnings = body["data"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| {
+            let text = warning.as_str().unwrap_or_default();
+            text.contains("oversize")
+                && text.contains("big.md")
+                && text.contains("max_source_bytes")
+        }),
+        "the warning must name the file and the limit: {body}"
+    );
+
+    // The human rendering is the one a person actually reads.
+    let out = Command::cargo_bin("llm-wiki")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("ingest")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("warning: oversize: 'big.md'"),
+        "human output must show the skipped file:\n{text}"
+    );
+}
