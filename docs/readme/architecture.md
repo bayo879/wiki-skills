@@ -38,6 +38,8 @@
 
 `done` 对照作者实际读取的 raw 哈希；漂移退出 1，保留待办。重复确认是成功无动作。它不验证正文，不发布或恢复页面。页面直接落盘立即生效，没有候选发布、自动内容版本或内置回退；也没有自动备份。CLI 锁不能保护外部作者写页，并发作者可能覆盖，需单一作者及写前重读。独立备份是否存在由用户负责。
 
+一轮只开放一批来源。`sync` 在把来源待办交给作者时写 `.wiki/work.lock`（每条记录 `source_key`、`raw_key`、`raw_hash`，外加交付时间与进程号），这批没关完之前 `ingest` 不再转换新来源、`done` 也不接受批外的来源（`E_WORK_LEASE`、exit 4）——作者正在改的页面不该突然多出一个来源，也不该被别的批次抢先确认。批内来源仍可重新转换（作者刷新自己手上的那份），但消失源的收口与改名迁移在这期间一律推迟。`done` 清掉最后一条后租约文件消失；租约两小时后过期（`lease::LEASE_SECONDS`），`doctor --fix` 直接删掉过期文件，避免一次中断的批次永久堵住仓库。写入边界不变：它仍是 `.wiki/` 里的运行时文件，不进 `layout::LAYOUT` 的目录表，和 `.wiki/lock` 同类。
+
 源文件消失是唯一由引擎自己决定的界面变化，策略在 `[ingest].on_missing`：`forget`（默认）把页面里那一条引用去掉（Stable 转 Stale），一条来源都不剩的页整页删除，再删 raw 文件与账本行（`sources`/`raws`/`work_items`/`source_facts` 一次事务）；`mark_stale` 只把引用它的 Stable 页转 Stale；`ignore` 什么都不做。收口顺序是「先页与 raw、后账本行」，任何一步失败只增加本轮 `failures` 并把账本行留给下一轮，所以可以重试；页面与 raw 的删除不可撤销。`sync` 对受影响页复跑 `lint::page_quality`（`L12` 无来源、`L13` 未完成标记），把结果写进轮次 warning，不等 `doctor`。
 
 `doctor` 检查配置、账本、布局、锁、页面及解析后端；修复只处理机械问题。`query` 每次增量刷新正式页索引，`--graph` 读链接图；`--no-archive` 排除配置的会话页面前缀。旧库暂存、版本与对象不删不发，可解析的旧待办只导入来源线索，损坏项显式警告。
@@ -58,19 +60,16 @@
 | `src/chunk.rs` | 大文件的按需分块 |
 | `src/page.rs` | 页面 frontmatter 的读写与校验 |
 | `src/render.rs` | `index.md` 与人类可读渲染 |
-| `src/journal.rs` | 旧决策日志 `.wiki/journal.jsonl`（只读保留，当前 CLI 不再追加） |
-| `src/ingest.rs` | 旧库兼容实现，当前 CLI 不调用 |
-| `src/staging.rs` | 旧暂存库兼容，当前 CLI 不发布 |
 | `src/lint.rs` | 十三条规则，由 doctor 的 `lint` 检查与 `--fix` 使用；`page_quality`（L12/L13）也给 `sync` 复用 |
-| `src/version.rs` | 旧版本库兼容，CLI 无管理入口 |
 | `src/ignore.rs` | `.wiki/ignore` 的解析与增删；`ingest` 共用的唯一判定 |
 | `src/lock.rs` | 仓库锁（固定 inode + OS 文件锁，不按年龄回收） |
+| `src/lease.rs` | 工作租约：`.wiki/work.lock` 记录当前交付给作者的一批来源，`ingest` 只开一批，`done` 逐条关闭 |
 | `src/store.rs` | SQLite 账本、schema 迁移、FTS5；连接显式持有 5s busy_timeout |
 | `src/ledger.rs` | 账本唯一的写入口：登记转换、跟随改名、遗忘删除 |
 | `src/sync.rs` | 摄入一轮的执行体：`ingest` 调它跑 scan → convert → 来源待办交付，并收口消失的源（`on_missing`） |
 | `src/query.rs` | FTS5 索引与检索 |
 | `src/graph.rs` | `[[wikilink]]` 结构：出入度、边、孤立页、断链（`query --graph`） |
-| `src/doctor.rs` | 十项健康检查、`--fix` 修复、`--only` 单跑 |
+| `src/doctor.rs` | 十一项健康检查、`--fix` 修复、`--only` 单跑 |
 | `src/hash.rs` | 全文 blake3 与有界固定输入读取 |
 | `src/worklist.rs` | 来源完成核对、遗留来源线索导入 |
 | `src/report.rs` | JSON / 人类输出信封与退出码 |
@@ -81,7 +80,7 @@
 - 引擎目录布局只有一张表 `layout::LAYOUT`：每条只写 `path` 与 `authored`；`init` 全建，`check` 只看 `authored`，`provision` 只补 `authored = false` 的项，并跳过“父目录是缺失的产品目录”的子项——所以补建不会凭空造出 `.wiki/pages`。（检查：tests/precondition.rs::provision_never_creates_the_authored_tree_but_repairs_its_children_when_it_exists）
 - 账本表只有 `src/store.rs` 能执行 SQL，业务写入只有 `src/ledger.rs` 一个入口：`ingest` 登记、`moves` 改键都表达成 `ledger::Ledger` 的一次调用，顺序与失败语义写在 `ledger.rs` 的注释里。想加意图，加 `Ledger` 的方法，不要绕回 `store`。（检查：tests/invariants.rs::only_ledger_writes_the_ledger）
 - 转换一次只有一个事务：`Store::register_conversion` 在同一个事务里写 `sources`、`raws`、`work_items`、`source_facts` 四张表，raw 文件先落盘、字节与摘要来自同一次读取。半路失败整笔回滚，不会留下「转换成功、待办丢失」的中间态。事务只覆盖账本，不覆盖文件：落在盘的 raw 与账本之间仍可能因断电不一致，由 `doctor` 的 `scan`（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露。（检查：tests/worklist.rs::failed_enqueue_rolls_back_conversion_baseline_and_can_retry）
-- 对账只有一个答案：`scan::classify`（仓库根）与 `scan::classify_raw`（`.wiki/raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan` 输出的 `layer` 字段、`lint` `L7`、`ingest` 的 `orphan_pages` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这三处必须同答。（检查：tests/reconcile.rs::an_unledgered_raw_is_reported_the_same_way_by_all_three）
+- 对账只有一个答案：`scan::classify`（仓库根）与 `scan::classify_raw`（`.wiki/raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan` 输出的 `layer` 字段与 `lint` `L7` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这两处必须同答。（检查：tests/reconcile.rs::an_unledgered_raw_is_reported_the_same_way_by_both）
 - 页面字段必须显式填写，真实来源由作者核对，工具不自动补全。（检查：tests/cli_done.rs::done_clears_only_one_source_and_repeating_it_is_a_noop）
 - 页面必须有 frontmatter 七字段：`id`、`title`、`type`、`summary`、`sources`、`status`、`updated`；`type` 取自 `[schema].types`。（检查：tests/lint.rs::l1_reports_each_missing_required_field）
 - 作者直接写正式页，写后不经过发布，确认来源前也能检索。（检查：tests/cli_done.rs::directly_written_pages_are_queryable_before_done）

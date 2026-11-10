@@ -115,3 +115,32 @@ fn done_obeys_the_repository_lock() {
     assert_eq!(code, 4, "{body}");
     assert_eq!(body["error"]["code"], "E_LOCKED");
 }
+
+#[test]
+fn done_outside_the_open_batch_is_busy() {
+    let dir = repo();
+    let a_hash = raw_hash(&dir);
+    let lease = serde_json::json!({
+        "started_at": chrono::Utc::now().to_rfc3339(),
+        "pid": 1,
+        "run_id": "test",
+        "items": [{
+            "source_key": "b.md",
+            "raw_key": ".wiki/raw/b.md",
+            "raw_hash": llm_wiki::hash::hash_file(&dir.path().join(".wiki/raw/b.md"), true).unwrap(),
+        }],
+    });
+    std::fs::write(dir.path().join(".wiki/work.lock"), lease.to_string()).unwrap();
+
+    let (code, body) = run(&dir, &["done", "a.md", "--hash", &a_hash]);
+    assert_eq!(code, 4, "{body}");
+    assert_eq!(body["error"]["code"], "E_WORK_LEASE");
+    let cfg = llm_wiki::config::Config::load(dir.path()).unwrap();
+    let store =
+        llm_wiki::store::Store::open(&dir.path().join(cfg.paths.engine).join("state.db")).unwrap();
+    assert_eq!(
+        store.work_items().unwrap().len(),
+        2,
+        "a busy acknowledgement must not clear anything"
+    );
+}

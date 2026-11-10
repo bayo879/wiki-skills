@@ -46,7 +46,7 @@ use crate::page::{self, PageError};
 use crate::paths;
 use crate::render;
 use crate::scan::{self, RawLedger};
-use crate::staging;
+use crate::source_refs;
 use crate::store::{PageMetaRow, Store, StoreError};
 
 /// Severity of one finding.
@@ -580,7 +580,7 @@ fn cited_raws(cfg: &Config, pages: &[PageInfo]) -> BTreeMap<String, Vec<String>>
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for info in pages {
         let sources: Vec<String> = info.front.sources.clone();
-        for key in staging::source_keys(&sources, &prefix) {
+        for key in source_refs::source_keys(&sources, &prefix) {
             out.entry(key).or_default().push(info.key.clone());
         }
     }

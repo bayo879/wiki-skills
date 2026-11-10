@@ -5,6 +5,14 @@
 //! being read, and returns the bytes together with their full digest — so the
 //! parse and the hash always describe the same bytes.
 //!
+//! Only regular files are sources. Symbolic links, FIFOs and device files are
+//! rejected instead of being followed: `scan` already skips them, and following
+//! them would let an explicit `ingest <KEY>` hash bytes that no scan ever saw
+//! (and block forever on a FIFO). The stability check compares the opened
+//! descriptor's metadata before and after the read, so every byte and every
+//! size/mtime in the result describes the same inode — a replacement that lands
+//! during the read is a different file and is simply not the one read.
+//!
 //! [`hash_file`] with `full = true` digests every byte. The sampled mode
 //! (`full = false`, [`fingerprint`]) is legacy: only the retired `version`
 //! module calls it with `false`. It digests three windows (head, middle, tail)
@@ -41,6 +49,9 @@ pub enum HashError {
     /// The input changed while being read.
     #[error("source {} changed while reading", path.display())]
     Unstable { path: PathBuf },
+    /// The path is not a regular file: a symlink, FIFO or device.
+    #[error("source {} is not a regular file ({kind})", path.display())]
+    NotRegular { path: PathBuf, kind: &'static str },
 }
 
 /// Result of the hashing helpers.
@@ -68,11 +79,42 @@ pub struct SourceInput {
 
 /// Read at most the configured budget plus one byte, rejecting growth or drift.
 pub fn read_source(path: &Path, limit: u64) -> Result<SourceInput> {
+    read_source_with(path, limit, || {})
+}
+
+/// The read itself, with a seam the unit tests use to change the file between
+/// the read and the stability check. It is never called with a non-trivial hook
+/// outside `#[cfg(test)]`: the instability has to be reachable deterministically.
+fn read_source_with(path: &Path, limit: u64, between: impl FnOnce()) -> Result<SourceInput> {
+    // Check the type before opening: opening a FIFO without a writer blocks,
+    // and `scan` never reports one as a source in the first place.
+    let link = std::fs::symlink_metadata(path).map_err(|source| HashError::Io {
+        path: path.into(),
+        source,
+    })?;
+    if link.file_type().is_symlink() {
+        return Err(HashError::NotRegular {
+            path: path.into(),
+            kind: "symbolic link",
+        });
+    }
+    if !link.is_file() {
+        return Err(HashError::NotRegular {
+            path: path.into(),
+            kind: "not a regular file",
+        });
+    }
     let file = open(path)?;
     let before = file.metadata().map_err(|source| HashError::Io {
         path: path.into(),
         source,
     })?;
+    if !before.is_file() {
+        return Err(HashError::NotRegular {
+            path: path.into(),
+            kind: "not a regular file",
+        });
+    }
     if before.len() > limit {
         return Err(HashError::Oversize {
             path: path.into(),
@@ -93,7 +135,10 @@ pub fn read_source(path: &Path, limit: u64) -> Result<SourceInput> {
             limit,
         });
     }
-    let after = std::fs::metadata(path).map_err(|source| HashError::Io {
+    between();
+    // The same descriptor, not the path: a rename over the path during the read
+    // would describe a file whose bytes are not the ones in `bytes`.
+    let after = file.metadata().map_err(|source| HashError::Io {
         path: path.into(),
         source,
     })?;
@@ -223,5 +268,33 @@ fn unix_seconds(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
         Ok(since) => since.as_secs() as i64,
         Err(before) => -(before.duration().as_secs() as i64),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn a_source_that_grows_during_the_read_is_unstable() {
+        let dir =
+            std::env::temp_dir().join(format!("llm-wiki-hash-unstable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.md");
+        std::fs::write(&path, "短文\n").unwrap();
+
+        let Err(err) = read_source_with(&path, 1 << 20, || {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(b"more\n").unwrap();
+        }) else {
+            panic!("a read that raced a writer must not report a stable digest");
+        };
+        assert!(matches!(err, HashError::Unstable { .. }), "{err}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

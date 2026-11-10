@@ -176,7 +176,7 @@ fn only_ledger_writes_the_ledger() {
 ///
 /// Fooled by: joining through a different table (`page_meta`) to answer the same
 /// question. The behavioural half is `tests/reconcile.rs`, which fails if the
-/// three answers ever disagree.
+/// two answers ever disagree.
 #[test]
 fn only_scan_joins_the_raw_ledger() {
     // `L7` asks the question, so its body must go through `RawLedger`.
@@ -190,16 +190,6 @@ fn only_scan_joins_the_raw_ledger() {
     assert!(
         !body.contains("all_raws("),
         "L7 joins the raws ledger itself again; ask scan::RawLedger instead"
-    );
-
-    let ingest = fs::read_to_string("src/ingest.rs").expect("src/ingest.rs is missing");
-    assert!(
-        ingest.contains("RawLedger::load"),
-        "ingest begin no longer asks scan::RawLedger"
-    );
-    assert!(
-        !ingest.contains("all_raws("),
-        "ingest joins the raws ledger itself; ask scan::RawLedger instead"
     );
 }
 

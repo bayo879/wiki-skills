@@ -14,7 +14,7 @@ use llm_wiki::lock;
 use serde_json::Value;
 use tempfile::TempDir;
 
-const CHECKS: [&str; 9] = [
+const CHECKS: [&str; 10] = [
     "config",
     "schema",
     "paths",
@@ -22,6 +22,7 @@ const CHECKS: [&str; 9] = [
     "fts5",
     "legacy_layout",
     "lock",
+    "lease",
     "token",
     "external_backend",
 ];
@@ -428,4 +429,39 @@ fn doctor_only_convert_reports_an_unparseable_source() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON");
     assert_eq!(level(&json, "convert"), "fail", "{json}");
+}
+
+#[test]
+fn doctor_fix_drops_an_expired_batch() {
+    let dir = repo();
+    let lease = serde_json::json!({
+        "started_at": "2000-01-01T00:00:00Z",
+        "pid": 1,
+        "run_id": "old",
+        "items": [{
+            "source_key": "a.md",
+            "raw_key": ".wiki/raw/a.md",
+            "raw_hash": "blake3:00",
+        }],
+    });
+    let path = dir.path().join(".wiki/work.lock");
+    fs::write(&path, lease.to_string()).unwrap();
+
+    let output = run(dir.path(), &["--json", "doctor", "--fix"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        !path.exists(),
+        "an expired batch must not block a repository"
+    );
+    let detail = json["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "lease")
+        .unwrap()["detail"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(detail.contains("dropped"), "{detail}");
 }

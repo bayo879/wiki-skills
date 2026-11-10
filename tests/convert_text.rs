@@ -581,3 +581,55 @@ fn cli_parse_of_a_missing_source_is_a_runtime_error() {
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "E_IO");
 }
+
+/// The window between `write_atomic` and the ledger transaction: a crash there
+/// leaves a raw file nobody registered. The next round must reuse it, not clash
+/// with it and not need a manual delete first.
+#[test]
+fn a_raw_left_by_an_interrupted_conversion_is_reused_next_round() {
+    let (d, mut store, cfg) = setup();
+    fs::write(d.path().join("crash.md"), "第一版\n").unwrap();
+    convert::convert_one(d.path(), &cfg, &mut store, "crash.md").unwrap();
+
+    // Exactly the on-disk state of "raw written, transaction never ran".
+    store.delete_raw("crash.md").unwrap();
+    store.delete_source("crash.md").unwrap();
+    assert!(store.get_source("crash.md").unwrap().is_none());
+    assert!(store.all_raws().unwrap().is_empty());
+    assert!(d.path().join(".wiki/raw/crash.md").is_file());
+
+    convert::convert_one(d.path(), &cfg, &mut store, "crash.md").unwrap();
+    let row = store.get_source("crash.md").unwrap().unwrap();
+    assert_eq!(row.raw_key.as_deref(), Some(".wiki/raw/crash.md"));
+    assert_eq!(store.work_items().unwrap().len(), 1);
+}
+
+/// A filesystem refusal while writing the raw must leave no ledger trace, so the
+/// next round can simply try again.
+#[cfg(unix)]
+#[test]
+fn a_failed_raw_write_leaves_the_ledger_clean_and_the_round_retryable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (d, mut store, cfg) = setup();
+    fs::write(d.path().join("w.md"), "正文\n").unwrap();
+    let raw_dir = d.path().join(".wiki/raw");
+    fs::create_dir_all(&raw_dir).unwrap();
+    let writable = fs::metadata(&raw_dir).unwrap().permissions();
+    let mut read_only = writable.clone();
+    read_only.set_mode(0o555);
+    fs::set_permissions(&raw_dir, read_only).unwrap();
+
+    let Err(err) = convert::convert_one(d.path(), &cfg, &mut store, "w.md") else {
+        panic!("a read-only raw directory must fail the write");
+    };
+    assert!(matches!(err, convert::ConvertError::Io { .. }), "{err}");
+    assert!(store.get_source("w.md").unwrap().is_none());
+    assert!(store.all_raws().unwrap().is_empty());
+    assert!(store.work_items().unwrap().is_empty());
+    assert!(!raw_dir.join("w.md").exists());
+
+    fs::set_permissions(&raw_dir, writable).unwrap();
+    convert::convert_one(d.path(), &cfg, &mut store, "w.md").unwrap();
+    assert_eq!(store.work_items().unwrap().len(), 1);
+}

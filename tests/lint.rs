@@ -10,10 +10,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::Local;
 use llm_wiki::config::Config;
-use llm_wiki::ingest::{self, BeginInput};
 use llm_wiki::lint::{self, Finding, Level};
 use llm_wiki::store::{PageMetaRow, RawRow, Store};
-use llm_wiki::{hash, init, page, render, staging};
+use llm_wiki::{hash, init, page, render};
 use tempfile::{tempdir, TempDir};
 
 /// Body long enough for the lowered `min_page_chars` every fixture uses.
@@ -614,59 +613,4 @@ fn fix_leaves_judgement_calls_alone() {
     let report = f.fix();
     assert_eq!(report.fixed, 0);
     assert_eq!(rules(&report.remaining), vec!["L1"]);
-}
-
-// -------------------------------------------------------------------- CLI
-
-// --------------------------------------------------- ingest writes page_meta
-
-#[test]
-fn submit_records_page_meta_for_written_candidates() {
-    let mut f = Fixture::new();
-    let text = page_text("a", "concept", BODY);
-    staging::write_page(f.root(), &f.cfg, "concept/a", &text).unwrap();
-    staging::write_pending(
-        f.root(),
-        &[(String::from("a.md"), String::from("blake3:source"))]
-            .into_iter()
-            .collect(),
-    )
-    .unwrap();
-
-    let root = f.root().to_path_buf();
-    let cfg = f.cfg.clone();
-    ingest::submit(&root, &cfg, &mut f.store, &[String::from("concept/a")]).unwrap();
-
-    let staged = f.root().join(".wiki/staging/concept/a.md");
-    let row = f
-        .store
-        .get_page_meta(".wiki/pages/concept/a.md")
-        .unwrap()
-        .expect("submit records the candidate it wrote");
-    assert_eq!(
-        row.hash,
-        hash::hash_file(&staged, true).unwrap(),
-        "the record hashes the bytes after the date was stamped"
-    );
-    assert_eq!(row.updated, Local::now().date_naive().to_string());
-}
-
-#[test]
-fn begin_without_a_source_is_an_error_the_cli_reports() {
-    // Guards the ledger requirement the CLI layer relies on.
-    let mut f = Fixture::new();
-    let root = f.root().to_path_buf();
-    let cfg = f.cfg.clone();
-    let err = ingest::begin(
-        &root,
-        &cfg,
-        &mut f.store,
-        &BeginInput {
-            sources: Vec::new(),
-            pages: Vec::new(),
-            dry_run: true,
-        },
-    )
-    .unwrap_err();
-    assert_eq!(err.code(), "E_NO_SOURCE");
 }

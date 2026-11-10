@@ -1,14 +1,13 @@
 //! One question, one answer: does the `raws` ledger know this file?
 //!
-//! Three consumers ask it. `scan --layer raw` turns an unknown key into `New`,
-//! `lint` `L7` reports the file, and `ingest begin` reports the pages that cite
-//! it. The join used to be written out at each call site, which is how `L7` grew
-//! its own copy of "known" and drifted from `scan`. These tests pin the
-//! agreement, not the wording of any one message.
+//! Two consumers ask it. `scan --layer raw` turns an unknown key into `New`, and
+//! `lint` `L7` reports the file. The join used to be written out at each call
+//! site, which is how `L7` grew its own copy of "known" and drifted from `scan`.
+//! These tests pin the agreement, not the wording of any one message.
 
 use llm_wiki::{
     config::Config,
-    convert, hash, ingest, init, lint, scan,
+    convert, hash, init, lint, scan,
     store::{RawRow, Store},
 };
 use std::fs;
@@ -38,7 +37,7 @@ impl Fixture {
         self.dir.path()
     }
 
-    /// Converts `source/a.md`, so `ingest begin` has a key it accepts.
+    /// Converts `source/a.md`, so the fixture starts with one registered raw.
     fn convert_source(&mut self) {
         fs::write(self.root().join("a.md"), "重试上限是 3 次。\n").unwrap();
         let root = self.root().to_path_buf();
@@ -105,24 +104,6 @@ impl Fixture {
         keys.sort();
         keys
     }
-
-    /// Pages `ingest begin` reports as citing an unledgered raw.
-    fn orphaned(&mut self) -> Vec<String> {
-        let root = self.root().to_path_buf();
-        let cfg = self.cfg.clone();
-        let report = ingest::begin(
-            &root,
-            &cfg,
-            &mut self.store,
-            &ingest::BeginInput {
-                sources: vec![String::from("a.md")],
-                pages: Vec::new(),
-                dry_run: true,
-            },
-        )
-        .unwrap();
-        report.orphan_pages
-    }
 }
 
 /// The first `` `…` `` span in `msg`, without the backticks.
@@ -134,18 +115,17 @@ fn key_in_backticks(msg: &str) -> Option<String> {
 }
 
 #[test]
-fn an_unledgered_raw_is_reported_the_same_way_by_all_three() {
-    let mut fixture = Fixture::new();
+fn an_unledgered_raw_is_reported_the_same_way_by_both() {
+    let fixture = Fixture::new();
     fixture.put_raw("stray.md");
     fixture.put_page("retry", "stray.md");
 
     assert_eq!(fixture.scanned_new(), vec![String::from("stray.md")]);
     assert_eq!(fixture.linted(), vec![String::from("stray.md")]);
-    assert_eq!(fixture.orphaned(), vec![String::from("retry")]);
 }
 
 #[test]
-fn registering_the_raw_silences_all_three() {
+fn registering_the_raw_silences_both() {
     let mut fixture = Fixture::new();
     fixture.put_raw("stray.md");
     fixture.put_page("retry", "stray.md");
@@ -153,16 +133,12 @@ fn registering_the_raw_silences_all_three() {
 
     assert!(fixture.scanned_new().is_empty());
     assert!(fixture.linted().is_empty());
-    assert!(fixture.orphaned().is_empty());
 }
 
 #[test]
 fn a_converted_raw_is_in_the_ledger_for_every_consumer() {
-    let mut fixture = Fixture::new();
+    let fixture = Fixture::new();
     // `convert_one` above already registered `raw/a.md`; nothing should dispute it.
     assert!(!fixture.scanned_new().contains(&String::from("a.md")));
     assert!(!fixture.linted().contains(&String::from("a.md")));
-
-    fixture.put_page("retry", "a.md");
-    assert!(fixture.orphaned().is_empty());
 }

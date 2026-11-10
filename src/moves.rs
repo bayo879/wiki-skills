@@ -188,14 +188,31 @@ fn migrate_one(
     let raw_from = old_row.raw_key.clone();
     let raw_to = raw_from.as_ref().map(|_| raw_key_for(cfg, to));
 
+    // Pages first, then the raw file, then the ledger. A page that cannot be
+    // written is the only failure that can happen before anything moved, so the
+    // next round pairs the same two files and starts over. Later failures leave
+    // a state the resume branches below recognise: a raw that already names the
+    // new source is adopted, and an old ledger key still pairs with the file.
+    let pages = match (raw_from.as_deref(), raw_to.as_deref()) {
+        (Some(old_raw), Some(new_raw)) if old_raw != new_raw => {
+            rewrite_pages(root, cfg, store, old_raw, new_raw)?
+        }
+        _ => Vec::new(),
+    };
+
     let mut raw_digest = None;
     if let (Some(old_raw), Some(new_raw)) = (raw_from.as_deref(), raw_to.as_deref()) {
         let old_path = paths::join_key(root, old_raw);
         let new_path = paths::join_key(root, new_raw);
         if old_raw != new_raw {
-            // The destination is never overwritten: it may be a hand-maintained
-            // raw file that the rename has nothing to do with.
-            if new_path.exists() {
+            // A retry after the rename succeeded but something below failed: the
+            // raw already sits at the destination and names the new source, so
+            // adopting it resumes the move instead of reporting a collision.
+            if new_path.is_file() && !old_path.exists() && names_source(&new_path, to, cfg)? {
+                // fall through to the digest below
+            } else if new_path.exists() {
+                // The destination is never overwritten: it may be a hand-maintained
+                // raw file that the rename has nothing to do with.
                 return Ok(Outcome::Collision(format!(
                     "{new_raw} already exists; not overwriting it"
                 )));
@@ -250,8 +267,6 @@ fn migrate_one(
         _ => RawRelocation::Absent,
     };
 
-    // The source ledger row moves last among the ledgers, so a failure above
-    // leaves the old key in place and the next round simply retries.
     let mut new_row = old_row;
     new_row.key = String::from(to);
     if let Some(new_raw) = &raw_to {
@@ -259,13 +274,23 @@ fn migrate_one(
     }
     Ledger::new(store).relocate_source(from, &new_row, relocation)?;
 
-    let pages = match (raw_from.as_deref(), raw_to.as_deref()) {
-        (Some(old_raw), Some(new_raw)) if old_raw != new_raw => {
-            rewrite_pages(root, cfg, store, old_raw, new_raw)?
-        }
-        _ => Vec::new(),
-    };
     Ok(Outcome::Migrated(pages))
+}
+
+/// Whether `raw_path` already names `source_key` as its source.
+///
+/// Used only to recognise the half-finished state where the raw file was renamed
+/// but the ledger move did not finish: that file is ours, so resuming is safe.
+fn names_source(raw_path: &Path, source_key: &str, cfg: &Config) -> Result<bool> {
+    let Ok(text) = fs::read_to_string(raw_path) else {
+        return Ok(false);
+    };
+    let expected = format!("source: {}", slash_join(&cfg.paths.source, source_key));
+    Ok(text
+        .lines()
+        .skip(1)
+        .take_while(|line| line.trim_end() != "---")
+        .any(|line| line.trim_end() == expected))
 }
 
 /// `base/rel`, tolerating an empty base (the source tree is the repository

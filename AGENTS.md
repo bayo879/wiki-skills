@@ -24,8 +24,8 @@
 
 ### 2.2 「账本认不认识这个 raw」只有一个答案
 
-`scan::RawLedger` 负责这个判断，`doctor` 的 lint L7 与 `ingest` 的 `orphan_pages` 都必须调它，不许各自再写一遍 `raws` 表的 join——以前就是三处各写一遍，才出现「L7 提示的修法根本跑不通」。
-`tests/reconcile.rs` 钉住三处同答。
+`scan::RawLedger` 负责这个判断，`scan` 的 `layer` 输出与 `doctor` 的 lint L7 都必须调它，不许各自再写一遍 `raws` 表的 join——以前就是三处各写一遍，才出现「L7 提示的修法根本跑不通」。旧 `ingest` 模块随发布路径一起删除后，问这个问题的只剩这两处。
+`tests/reconcile.rs` 钉住两处同答。
 
 ### 2.3 技能不复述 CLI 的输出形状
 
@@ -103,7 +103,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.14 没有工具侧决策日志，旧 `journal.jsonl` 只读
 
-现行命令不再往 `.wiki/journal.jsonl` 追加（`journal::append` 只剩旧版本代码路径，CLI 没有入口）。它不进页面树、不进 `query` 索引，只是历史字节：不要为了让谁读到它而把它塞回 `pages/`，那会让「日志算不算知识内容」重新变成一个需要回答的问题。
+写它的代码已经删干净（`journal`/`staging`/`version`/`ingest` 四个模块连同测试一起移除），现行命令既不写也不读 `.wiki/journal.jsonl`。它不进页面树、不进 `query` 索引，只是历史字节：不要为了让谁读到它而把它塞回 `pages/`，那会让「日志算不算知识内容」重新变成一个需要回答的问题。
 若将来要加审计，写独立文件并在 `LAYOUT` 里登记，不要混进页面目录。
 
 ### 2.15 `page_meta` 是索引的变更检测，不是发布凭据
@@ -161,6 +161,19 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 顺序是「先页与 raw、后账本行」，所以任一步失败只是本轮多一条 `failures` 与一条 `vanished: ... could not be settled` warning，账本行留着下一轮重试。**删页与删 raw 不可撤销**，这是 `mark_stale` 仍然存在的唯一理由——不要给「页被删了怎么恢复」发明工具内退路（2.9 已说明没有）。
 判据只认页面自己的 `sources:`，不认账本的映射：页面可能引用一个账本已不认识的 raw，照样要清。`tests/sync.rs::forget_removes_the_page_the_raw_and_the_ledger_row`、`forget_keeps_a_page_that_still_has_another_source`、`a_failed_forget_keeps_the_ledger_row_for_the_next_round` 钉住三件事。
 页质量闸门 `lint::page_quality`（`L12` 页面不引用任何来源、`L13` 正文留着 `TODO`/`FIXME`/`待补`/`占位`，代码围栏内不算）既是 `lint` 的规则，也是 `sync` 对 `affected_pages` 复跑的那一份——直接写进轮次 warning，不等 `doctor`。两处共用同一个函数，不要各写一遍。
+
+### 2.22 一次只开放一批：工作租约不是第二把锁
+
+`ingest` 交付待办时把这一批写进 `.wiki/work.lock`（`src/lease.rs`：`source_key`、`raw_key`、`raw_hash`、`started_at`、`pid`、`run_id`），`done` 把最后一条结清时删掉它。这是用户要的「有 agent 处理中时，不接受其他来源的修改」的落地，**不是** `src/lock.rs` 那把仓库锁：仓库锁只在单次命令期间存在，租约跨命令、跨轮次，回答的是「谁的活还没交」。
+
+门禁只有三条，别再加：
+- 租约未过期且未结清时，`ingest` 只允许重转批内的源；新源一律不进本轮（warning `work lease: ...`），`moves` 与收口都不跑——批内页可能正在被写，改名和删页都得等。
+- `done` 只接受批内来源；批外来源是 `E_WORK_LEASE`、exit 4。已在待办里的来源重复确认仍是 exit 0、`completed: false`（2.11 的幂等优先于租约判断）。
+- 过期（`LEASE_SECONDS` = 2 小时，解析失败也算过期）只是让 `doctor` 报 warn、让 `doctor --fix` 删文件，**不**自动解锁：`done` 仍能结清过期批。
+
+租约是临时事实，不是知识，所以它只是 `.wiki/` 下的一个文件，不进 `LAYOUT`、不进账本、不做迁移。写入走 `render::write_atomic`；`items` 为空即删除文件，别留空壳让下一轮误判。每轮只在「本轮转换了新源」或「本来就没有租约」时重写，否则时间戳被不断刷新，废弃批次永远不会过期——`tests/sync.rs::an_open_batch_blocks_new_sources_but_not_its_own` 钉住这一条。
+
+不要把租约做成 `ingest --ignore-lease` 之类的开关：那等于把用户要求的门禁又还给人手动绕。
 
 ## 3. 提交前自查
 

@@ -304,7 +304,7 @@ fn parent_name(path: &Path) -> String {
 /// file intact instead of a truncated catalogue. The temporary name is
 /// dot-prefixed and process-tagged so a leftover from a killed run is invisible
 /// to the page walker.
-fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
