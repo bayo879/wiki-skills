@@ -16,7 +16,40 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
+
+/// The task tree: what the current ingest round still owes, and the page
+/// hashes the batch started from.
+///
+/// A row exists exactly while its task is unfinished; closing a task deletes
+/// it. `task_baseline` is one shared snapshot of `pages/` (`root_id = 0`),
+/// advanced after every merge: one machine and one author means one "what was
+/// here" per repository, not one per root.
+const MIGRATION_9: &str = r#"
+CREATE TABLE tasks(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('convert','breakdown','page')),
+    status TEXT NOT NULL CHECK(status IN ('pending','active','failed','blocked')),
+    source_key TEXT,
+    raw_hash TEXT,
+    target_path TEXT,
+    allowed_json TEXT,
+    payload_json TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX tasks_one_root_per_source ON tasks(source_key) WHERE kind='breakdown';
+CREATE UNIQUE INDEX tasks_one_convert_per_source ON tasks(source_key) WHERE kind='convert';
+CREATE TABLE task_baseline(
+    root_id INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    PRIMARY KEY(root_id,path)
+);
+"#;
 
 /// The failure note for a source that has never converted.
 ///
@@ -54,6 +87,77 @@ pub struct WorkItem {
     pub source_key: String,
     pub raw_key: String,
     pub raw_hash: String,
+}
+
+/// One row of the task tree.
+///
+/// `kind` is `convert` (source → raw markdown, internal), `breakdown` (one root
+/// per source, waiting for its leaf list) or `page` (one leaf, one target page).
+/// A row lives only while the task is unfinished; closing deletes it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TaskRow {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub kind: String,
+    pub status: String,
+    pub source_key: Option<String>,
+    pub raw_hash: Option<String>,
+    pub target_path: Option<String>,
+    pub allowed_json: Option<String>,
+    pub payload_json: Option<String>,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A task about to be inserted. Timestamps are passed in by the caller.
+#[derive(Debug, Clone, Default)]
+pub struct NewTask {
+    pub parent_id: Option<i64>,
+    pub kind: String,
+    pub status: String,
+    pub source_key: Option<String>,
+    pub raw_hash: Option<String>,
+    pub target_path: Option<String>,
+    pub allowed_json: Option<String>,
+    pub payload_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl NewTask {
+    /// A pending task of `kind` stamped at `now` (RFC 3339).
+    pub fn pending(kind: &str, now: &str) -> NewTask {
+        NewTask {
+            kind: String::from(kind),
+            status: String::from("pending"),
+            created_at: String::from(now),
+            updated_at: String::from(now),
+            ..NewTask::default()
+        }
+    }
+}
+
+impl TaskRow {
+    /// Reads one row in `tasks` column order.
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
+        Ok(TaskRow {
+            id: row.get(0)?,
+            parent_id: row.get(1)?,
+            kind: row.get(2)?,
+            status: row.get(3)?,
+            source_key: row.get(4)?,
+            raw_hash: row.get(5)?,
+            target_path: row.get(6)?,
+            allowed_json: row.get(7)?,
+            payload_json: row.get(8)?,
+            attempts: row.get(9)?,
+            last_error: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+        })
+    }
 }
 
 /// The last failed conversion of a source, kept only to order the queue.
@@ -432,6 +536,9 @@ impl Store {
         if version < 8 {
             self.apply_migration(MIGRATION_8, 8)?;
         }
+        if version < 9 {
+            self.apply_migration(MIGRATION_9, 9)?;
+        }
         Ok(())
     }
 
@@ -613,6 +720,63 @@ impl Store {
         Ok(items)
     }
 
+    /// Records one conversion failure as a `convert` task row.
+    ///
+    /// The row is the durable failure counter: `attempts` rises by one per
+    /// failure and the third failure parks it in `failed`. Returns the task id
+    /// and whether this call parked it, so the round can say so out loud.
+    pub(crate) fn record_convert_failure(
+        &mut self,
+        key: &str,
+        error: &str,
+        now: &str,
+    ) -> Result<(i64, bool)> {
+        self.conn.execute(
+            "INSERT INTO tasks(parent_id,kind,status,source_key,attempts,last_error,created_at,updated_at) \
+             VALUES(NULL,'convert','pending',?1,1,?2,?3,?3) \
+             ON CONFLICT(source_key) WHERE kind='convert' DO UPDATE SET \
+               attempts=attempts+1, \
+               last_error=?2, \
+               status=CASE WHEN attempts+1>=3 THEN 'failed' ELSE 'pending' END, \
+               updated_at=?3",
+            params![key, error, now],
+        )?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM tasks WHERE kind='convert' AND source_key=?1",
+            [key],
+            |row| row.get(0),
+        )?;
+        let attempts: i64 =
+            self.conn
+                .query_row("SELECT attempts FROM tasks WHERE id=?1", [id], |row| {
+                    row.get(0)
+                })?;
+        Ok((id, attempts >= 3))
+    }
+
+    /// Removes the `convert` row for a source that produced a raw file again.
+    pub(crate) fn clear_convert_failure(&mut self, key: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM tasks WHERE kind='convert' AND source_key=?1",
+            [key],
+        )?;
+        Ok(())
+    }
+
+    /// Sources parked in `failed` by three consecutive conversion failures.
+    pub fn failed_converts(&self) -> Result<Vec<TaskRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at \
+             FROM tasks WHERE kind='convert' AND status='failed' ORDER BY source_key",
+        )?;
+        let rows = stmt.query_map([], TaskRow::from_row)?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
     /// All unfinished sources in stable key order.
     pub fn work_items(&self) -> Result<Vec<WorkItem>> {
         let mut stmt = self
@@ -630,6 +794,145 @@ impl Store {
             items.push(row?);
         }
         Ok(items)
+    }
+
+    /// Inserts one task and returns its id.
+    pub(crate) fn insert_task(&mut self, t: &NewTask) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO tasks(parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,created_at,updated_at) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                t.parent_id,
+                t.kind,
+                t.status,
+                t.source_key,
+                t.raw_hash,
+                t.target_path,
+                t.allowed_json,
+                t.payload_json,
+                t.created_at,
+                t.updated_at
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Every task, ordered by id (roots and leaves interleaved in creation order).
+    pub fn tasks(&self) -> Result<Vec<TaskRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at FROM tasks ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], TaskRow::from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// One task by id, or `None` when it is already closed.
+    pub fn task(&self, id: i64) -> Result<Option<TaskRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at FROM tasks WHERE id=?1",
+                [id],
+                TaskRow::from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Moves a task to `status` and stamps it.
+    pub(crate) fn set_task_status(&mut self, id: i64, status: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET status=?1,updated_at=?2 WHERE id=?3",
+            params![status, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Re-anchors a root to the source's current raw digest and counts a replan.
+    pub(crate) fn update_task_source(
+        &mut self,
+        id: i64,
+        raw_hash: Option<&str>,
+        attempts: i64,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET raw_hash=?1,attempts=?2,updated_at=?3 WHERE id=?4",
+            params![raw_hash, attempts, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Stores the payload a leaf was closed with, and the page set it was allowed.
+    pub(crate) fn set_task_payload(
+        &mut self,
+        id: i64,
+        payload_json: &str,
+        allowed_json: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET payload_json=?1,allowed_json=COALESCE(?2,allowed_json),updated_at=?3 WHERE id=?4",
+            params![payload_json, allowed_json, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Counts one failure and parks the task as `failed`.
+    pub(crate) fn fail_task(&mut self, id: i64, error: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET attempts=attempts+1,status='failed',last_error=?1,updated_at=?2 WHERE id=?3",
+            params![error, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Clears a failure and returns the task to `pending`.
+    pub(crate) fn retry_task(&mut self, id: i64, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET status='pending',attempts=0,last_error=NULL,updated_at=?1 WHERE id=?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes one task. Children and baseline rows cascade with it.
+    pub(crate) fn delete_task(&mut self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM tasks WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    /// The page hashes a root started from, ordered by path.
+    pub fn baseline(&self, root_id: i64) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path,hash FROM task_baseline WHERE root_id=?1 ORDER BY path")?;
+        let rows = stmt.query_map([root_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Drops one baseline wholesale, so it can be re-snapshotted.
+    pub(crate) fn clear_baseline(&mut self, root_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM task_baseline WHERE root_id=?1", [root_id])?;
+        Ok(())
+    }
+
+    /// Records one page's hash in a root's baseline.
+    pub(crate) fn set_baseline(&mut self, root_id: i64, path: &str, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO task_baseline(root_id,path,hash) VALUES(?1,?2,?3) ON CONFLICT(root_id,path) DO UPDATE SET hash=excluded.hash",
+            params![root_id, path, hash],
+        )?;
+        Ok(())
     }
 
     /// Atomically register the exact parsed source and rendered raw, and enqueue it.

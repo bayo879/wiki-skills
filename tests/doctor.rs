@@ -14,11 +14,12 @@ use llm_wiki::lock;
 use serde_json::Value;
 use tempfile::TempDir;
 
-const CHECKS: [&str; 9] = [
+const CHECKS: [&str; 10] = [
     "config",
     "schema",
     "paths",
     "db",
+    "tasks",
     "fts5",
     "legacy_layout",
     "lock",
@@ -394,6 +395,23 @@ fn doctor_fix_bootstraps_a_fresh_repo() {
             "must not create {legacy}"
         );
     }
+}
+
+#[test]
+fn doctor_fix_restores_a_missing_schema_contract() {
+    let dir = repo();
+    fs::remove_file(dir.path().join(".wiki/SCHEMA.md")).expect("removable");
+    let (code, json) = doctor(dir.path());
+    assert_eq!(code, 1);
+    assert_eq!(level(&json, "schema"), "fail");
+
+    let fixed = run(dir.path(), &["doctor", "--fix"]);
+    assert!(fixed.status.success(), "{}", stderr(&fixed));
+    assert!(dir.path().join(".wiki/SCHEMA.md").is_file());
+
+    let (code, json) = doctor(dir.path());
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(level(&json, "schema"), "ok");
 }
 
 #[test]

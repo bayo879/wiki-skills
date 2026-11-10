@@ -31,8 +31,8 @@ use crate::ledger::Ledger;
 use crate::lint;
 use crate::page;
 use crate::scan::{self, ChangeKind, Layer};
-use crate::store::{PageMetaRow, Store};
-use crate::{convert, hash, lock, moves, paths, render, source_refs};
+use crate::store::{PageMetaRow, Store, TaskRow};
+use crate::{convert, hash, lock, moves, paths, render, source_refs, task};
 
 /// Knobs for one round, all of them from the command line.
 #[derive(Debug, Clone)]
@@ -70,6 +70,8 @@ pub struct SyncReport {
     pub warnings: Vec<String>,
     /// Conversions that failed.
     pub failures: usize,
+    /// The one task the next round should run, if any.
+    pub next_task: Option<TaskRow>,
 }
 
 /// Failure that ends a round before it can report.
@@ -99,6 +101,9 @@ pub enum SyncError {
     /// A rename could not be migrated.
     #[error(transparent)]
     Move(#[from] crate::moves::MoveError),
+    /// The task tree could not be advanced.
+    #[error(transparent)]
+    Task(#[from] task::TaskError),
     /// A path could not be turned into a repository key.
     #[error(transparent)]
     Path(#[from] crate::paths::PathError),
@@ -124,6 +129,7 @@ impl SyncError {
             SyncError::Store(_) => "E_DB",
             SyncError::Work(_) => "E_DB",
             SyncError::Move(err) => err.code(),
+            SyncError::Task(err) => err.code(),
             SyncError::Path(_) => "E_IO",
             SyncError::Io { .. } => "E_IO",
         }
@@ -241,6 +247,20 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     }
     order_pending(&mut pending, &live);
 
+    // 3d. A source parked in `failed` by three consecutive conversion failures
+    //     stays visible but takes no budget: it is a person's decision now.
+    let parked: std::collections::BTreeSet<String> = store
+        .failed_converts()?
+        .into_iter()
+        .filter_map(|task| task.source_key)
+        .collect();
+    for key in &parked {
+        warnings.push(format!(
+            "failed: {key} is parked after 3 conversion failures; fix it and run `task retry`"
+        ));
+    }
+    pending.retain(|change| !parked.contains(&change.key));
+
     // 4. Convert, first in queue order, up to the budget.
     let planned = pending.len();
     let budget = planned.min(args.limit);
@@ -268,6 +288,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
             waiting,
             warnings,
             failures: 0,
+            next_task: None,
         });
     }
 
@@ -304,35 +325,88 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     //     row; `mark_stale` only moves the pages that cited it to `stale`.
     let stale_pages = settle_missing(root, cfg, store, &changes, &mut warnings, &mut failures)?;
 
+    // 5. Convert. Reading and rendering are independent per source, so they
+    //    run on a small thread pool; writing the raw file and the ledger rows
+    //    stays on this thread because `Store` is not `Sync`.
     let mut converted = 0;
-    for change in pending.iter().take(budget) {
-        let key = change.key.as_str();
-        match convert::convert_one(root, cfg, store, key) {
-            Ok(outcome) => {
-                if outcome.skipped {
-                    warnings.push(format!(
-                        "{key}: skipped ({})",
-                        outcome.skip_reason.as_deref().unwrap_or("no reason given")
-                    ));
-                } else {
-                    converted += 1;
-                }
-                for warning in &outcome.warnings {
-                    warnings.push(format!("{key}: {}: {}", warning.code, warning.message));
-                }
+    let keys: Vec<String> = pending.iter().take(budget).map(|c| c.key.clone()).collect();
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(4)
+        .min(keys.len().max(1));
+    let chunk = keys.len().div_ceil(threads).max(1);
+    let prepared: Vec<(String, convert::Result<convert::Prepared>)> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for slice in keys.chunks(chunk) {
+            handles.push(scope.spawn(move || {
+                slice
+                    .iter()
+                    .map(|key| (key.clone(), convert::prepare(root, cfg, key)))
+                    .collect::<Vec<_>>()
+            }));
+        }
+        let mut out = Vec::new();
+        for handle in handles {
+            if let Ok(rows) = handle.join() {
+                out.extend(rows);
             }
+        }
+        out
+    });
+
+    for (key, prepared) in prepared {
+        let key = key.as_str();
+        let outcome = match prepared {
+            Ok(prepared) => match convert::commit(store, prepared) {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    failures += 1;
+                    let message = format!("{}: {err}", err.code());
+                    warnings.push(format!("{key}: conversion failed ({message})"));
+                    let (_, parked) = Ledger::new(store).record_failure(
+                        key,
+                        &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                        &message,
+                    )?;
+                    if parked {
+                        warnings.push(format!(
+                            "failed: {key} is parked after 3 conversion failures"
+                        ));
+                    }
+                    continue;
+                }
+            },
             Err(err) => {
                 // One bad source is a finding, not the end of the round — and
                 // not a reason to hand it the budget again next round.
                 failures += 1;
                 let message = format!("{}: {err}", err.code());
                 warnings.push(format!("{key}: conversion failed ({message})"));
-                Ledger::new(store).record_failure(
+                let (_, parked) = Ledger::new(store).record_failure(
                     key,
                     &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
                     &message,
                 )?;
+                if parked {
+                    warnings.push(format!(
+                        "failed: {key} is parked after 3 conversion failures"
+                    ));
+                }
+                continue;
             }
+        };
+        if outcome.skipped {
+            warnings.push(format!(
+                "{key}: skipped ({})",
+                outcome.skip_reason.as_deref().unwrap_or("no reason given")
+            ));
+        } else {
+            Ledger::new(store).clear_failure(key)?;
+            converted += 1;
+        }
+        for warning in &outcome.warnings {
+            warnings.push(format!("{key}: {}: {}", warning.code, warning.message));
         }
     }
 
@@ -341,6 +415,14 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         warnings.extend(crate::worklist::import_legacy(root, cfg, store)?);
     }
     let work_items = store.work_items()?;
+    // Every converted source gets exactly one root, and the tree says what the
+    // next round should run. A root keeps its baseline across rounds, so this
+    // call is idempotent after the first one.
+    let stamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    for item in &work_items {
+        task::ensure_root(root, cfg, store, item, &stamp)?;
+    }
+    let next_task = task::advance(root, cfg, store)?;
     let ingested = work_items
         .iter()
         .map(|item| item.source_key.clone())
@@ -396,6 +478,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         waiting,
         warnings,
         failures,
+        next_task,
     };
 
     // 7. The audit entry: what changed, what was converted, what was handed to

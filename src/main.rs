@@ -10,21 +10,23 @@ use clap::Parser;
 use serde::Serialize;
 
 use llm_wiki::chunk;
-use llm_wiki::cli::{Cli, Command, DoctorOnly};
-use llm_wiki::config::Config;
+use llm_wiki::cli::{Cli, Command, DoctorOnly, TaskAction};
+use llm_wiki::config::{Config, ConfigError, CONFIG_FILE, ENGINE_DIR};
 use llm_wiki::doctor::{self, Check, Level};
 use llm_wiki::graph;
 use llm_wiki::hash;
 use llm_wiki::ignore;
+use llm_wiki::init;
 use llm_wiki::lock;
 use llm_wiki::parse::{self, Warning};
 use llm_wiki::paths;
 use llm_wiki::precondition;
 use llm_wiki::query::{self, Scope as QueryScope};
+use llm_wiki::read::{self, MAX_LINES};
 use llm_wiki::report::{self, Exit};
-use llm_wiki::store::Store;
+use llm_wiki::store::{Store, StoreError};
 use llm_wiki::sync;
-use llm_wiki::worklist::{self, WorkError};
+use llm_wiki::task;
 
 /// Characters of parsed markdown echoed by `parse`.
 const HEAD_CHARS: usize = 200;
@@ -55,14 +57,29 @@ fn dispatch(cli: Cli) -> ! {
         Command::Doctor { fix, only, key } => run_doctor(fix, only, key),
         Command::Ingest {
             keys,
+            auto,
             dry_run,
             key,
             chunk,
             range,
             force_large,
             force,
-        } => run_ingest(keys, dry_run, key, chunk, range, force_large, force),
-        Command::Done { key, hash } => run_done(key, hash),
+        } => run_ingest(IngestOptions {
+            keys,
+            auto,
+            dry_run,
+            key,
+            chunk,
+            range,
+            force_large,
+            force,
+        }),
+        Command::Read {
+            reference,
+            offset,
+            limit,
+        } => run_read(reference, offset, limit),
+        Command::Task { action } => run_task(action),
         Command::Ignore { add, remove, check } => run_ignore(&add, &remove, check.as_deref()),
         Command::Query {
             text,
@@ -88,33 +105,41 @@ fn wiki_root(cmd: &str) -> PathBuf {
     }
 }
 
-/// Opens the repository for a command: proves it was initialised, provisions
+/// Opens the repository for a command: initialises a fresh directory, provisions
 /// the derived directories, then loads the contract.
 ///
-/// The order matters. `init` is the only way to create `wiki.toml`, `SCHEMA.md`
-/// and `wiki/`, so a command that finds one of them missing refuses with
-/// `E_NOT_INITIALISED` and a hint instead of failing later on a symptom (a
-/// missing database, an empty scan, a staging area with nothing to compare).
-/// Everything else in the layout is derived, so it is created here rather than
-/// demanded from the caller.
+/// A directory with no `.wiki/` is a first run, not an error: the default
+/// contract is created without printing anything and the command continues.
+/// A damaged repository (`.wiki/` exists but a contract or the page tree is
+/// missing) still refuses with `E_NOT_INITIALISED`, so `doctor` can diagnose it
+/// instead of silently recreating the product.
 fn open_repo(cmd: &str, root: &Path) -> Config {
     if let Err(missing) = precondition::check(root) {
-        report::fail_detail(
-            cmd,
-            Exit::Usage,
-            precondition::CODE,
-            &format!(
-                "the repository at {} is not initialised: {} `{}` is missing",
-                root.display(),
-                missing.kind(),
-                missing.path()
-            ),
-            Some(serde_json::json!({
-                "missing": missing.path(),
-                "kind": missing.kind(),
-                "hint": precondition::HINT,
-            })),
-        );
+        if root.join(ENGINE_DIR).exists() {
+            report::fail_detail(
+                cmd,
+                Exit::Usage,
+                precondition::CODE,
+                &format!(
+                    "the repository is not initialised: {} `{}` is missing",
+                    missing.kind(),
+                    missing.path()
+                ),
+                Some(serde_json::json!({
+                    "missing": missing.path(),
+                    "kind": missing.kind(),
+                    "hint": precondition::HINT,
+                })),
+            );
+        }
+        if let Err(err) = init::run(root, false) {
+            report::fail(
+                cmd,
+                Exit::Usage,
+                "E_IO",
+                &format!("cannot create the default engine: {err}"),
+            );
+        }
     }
     if let Err(err) = precondition::provision(root) {
         report::fail(
@@ -126,8 +151,28 @@ fn open_repo(cmd: &str, root: &Path) -> Config {
     }
     match Config::load(root) {
         Ok(cfg) => cfg,
-        Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
+        Err(err) => report::fail(cmd, Exit::Usage, err.code(), &config_error_message(&err)),
     }
+}
+
+/// The contract error without the host path.
+///
+/// `ConfigError`'s own `Display` names the absolute config path; the stable
+/// reason is enough to act on.
+fn config_error_message(err: &ConfigError) -> String {
+    match err {
+        ConfigError::NoConfig { .. } => {
+            format!("no {CONFIG_FILE} in the repository; run `llm-wiki doctor --fix` to create it")
+        }
+        ConfigError::Io { source, .. } => format!("cannot read {CONFIG_FILE}: {source}"),
+        ConfigError::Bad { message } | ConfigError::TokenInConfig { message } => message.clone(),
+    }
+}
+
+/// Drops the host path from a message that may have come from an internal
+/// error type. Command output names repository-relative files only.
+fn strip_root(root: &Path, message: &str) -> String {
+    message.replace(&root.display().to_string(), ".")
 }
 
 /// Opens and migrates the ledger.
@@ -138,7 +183,7 @@ fn open_store(cmd: &str, root: &Path, cfg: &Config) -> Store {
     let db = root.join(&cfg.paths.engine).join("state.db");
     let mut store = match Store::open(&db) {
         Ok(store) => store,
-        Err(err) => report::fail(cmd, Exit::Usage, "E_DB", &err.to_string()),
+        Err(err) => report::fail(cmd, Exit::Usage, "E_DB", &store_error_message(&err)),
     };
     if let Err(err) = store.migrate() {
         report::fail(cmd, Exit::Usage, "E_DB", &err.to_string());
@@ -146,16 +191,44 @@ fn open_store(cmd: &str, root: &Path, cfg: &Config) -> Store {
     store
 }
 
+/// The ledger error without the host path.
+///
+/// `StoreError`'s own `Display` names the absolute database file, which the
+/// command output must not expose; the stable reason is enough to act on.
+fn store_error_message(err: &StoreError) -> String {
+    match err {
+        StoreError::Sqlite(err) => format!("sqlite: {err}"),
+        StoreError::Io { source, .. } => format!("cannot prepare the ledger directory: {source}"),
+        StoreError::WalUnavailable { mode, .. } => {
+            format!("cannot enable WAL on the ledger: sqlite kept journal_mode={mode}")
+        }
+        StoreError::SchemaTooNew {
+            found, supported, ..
+        } => format!(
+            "the ledger was written by a newer build (schema {found}, this build reads up to {supported})"
+        ),
+    }
+}
+
 /// `init` writes the contract files and creates the engine directories. A
 /// failure to read the working directory, or to write the contract, is an
 /// environment error (exit 2) rather than a finding.
 ///
-/// The payload ends with a fixed follow-up prompt aimed at the agent: it names
-/// two steps the CLI cannot take itself (a per-project instruction and a
-/// scheduler). The human form prints it verbatim instead of folding it onto one
-/// `next: …` line.
+/// `doctor` is also safe as the first command: a directory with no `.wiki/`
+/// gets the default engine before the checks run, so a new repository reports a
+/// healthy result instead of asking for a separate initialisation step.
 fn run_doctor(fix: bool, only: Option<DoctorOnly>, key: Option<String>) -> ! {
     let root = wiki_root("doctor");
+    if !root.join(ENGINE_DIR).exists() {
+        if let Err(err) = init::run(&root, false) {
+            report::fail(
+                "doctor",
+                Exit::Usage,
+                "E_IO",
+                &format!("cannot create the default engine: {err}"),
+            );
+        }
+    }
     let cfg = Config::load(&root).ok();
     let opts = doctor::DoctorOptions { fix, only, key };
     let checks = doctor::run(&root, cfg.as_ref(), &opts);
@@ -164,10 +237,25 @@ fn run_doctor(fix: bool, only: Option<DoctorOnly>, key: Option<String>) -> ! {
     report::emit_with("doctor", DoctorData { checks }, exit, human_doctor)
 }
 
-/// Human rendering of the checks: one aligned row each, no summary line (the
-/// exit code is the summary).
+/// Human rendering of the checks: the result when everything passed, otherwise
+/// only the checks that need a decision.
+///
+/// The per-check table is still in `--json`; a healthy repository should not
+/// spend a screen explaining that nothing is wrong.
 fn human_doctor(data: &DoctorData) -> String {
-    data.checks
+    let issues: Vec<&Check> = data
+        .checks
+        .iter()
+        .filter(|check| check.level != Level::Ok)
+        .collect();
+    if issues.is_empty() {
+        return if data.checks.iter().any(|check| check.name == "init") {
+            String::from("初始化完成")
+        } else {
+            String::from("健康检查通过")
+        };
+    }
+    issues
         .iter()
         .map(|check| {
             format!(
@@ -330,16 +418,45 @@ fn parse_chunk_range(spec: &str) -> std::result::Result<(usize, usize), String> 
 }
 
 /// Convert sources and hand unfinished work to the author of live pages.
-fn run_ingest(
+struct IngestOptions {
     keys: Vec<String>,
+    auto: bool,
     dry_run: bool,
     key: Option<String>,
     chunk: Option<usize>,
     range: Option<String>,
     force_large: bool,
     force: bool,
-) -> ! {
+}
+
+fn run_ingest(options: IngestOptions) -> ! {
+    let IngestOptions {
+        keys,
+        auto,
+        dry_run,
+        key,
+        chunk,
+        range,
+        force_large,
+        force,
+    } = options;
     let cmd = "ingest";
+    if auto
+        && (dry_run
+            || !keys.is_empty()
+            || key.is_some()
+            || chunk.is_some()
+            || range.is_some()
+            || force_large
+            || force)
+    {
+        report::fail(
+            cmd,
+            Exit::Usage,
+            "E_USAGE",
+            "--auto runs one default round and cannot be combined with manual ingest options",
+        );
+    }
     let root = wiki_root(cmd);
     let cfg = open_repo(cmd, &root);
     // `--dry-run --key` is the parse preview that used to be its own command:
@@ -371,8 +488,8 @@ fn run_ingest(
         }
         Err(err) => {
             let message = match &err {
-                sync::SyncError::Lock(lock_err) => lock_err.hint(),
-                _ => err.to_string(),
+                sync::SyncError::Lock(lock_err) => lock_err.hint().to_string(),
+                _ => strip_root(&root, &err.to_string()),
             };
             let exit = if err.code() == "E_LOCKED" {
                 Exit::Busy
@@ -398,6 +515,8 @@ struct IngestData {
     failures: usize,
     pending: Vec<llm_wiki::store::WorkItem>,
     affected_pages: Vec<String>,
+    next_task: Option<llm_wiki::store::TaskRow>,
+    next_raw: Option<String>,
     write_to: String,
     types: Vec<String>,
     schema: String,
@@ -406,6 +525,16 @@ struct IngestData {
 
 impl IngestData {
     fn from_report(report: sync::SyncReport, cfg: &Config) -> Self {
+        let next_task = report.next_task.clone();
+        let next_raw = next_task.as_ref().and_then(|task| {
+            task.source_key.as_ref().and_then(|key| {
+                report
+                    .work_items
+                    .iter()
+                    .find(|item| &item.source_key == key)
+                    .map(|item| item.raw_key.clone())
+            })
+        });
         Self {
             run_id: report.run_id,
             changes: report.changes,
@@ -418,16 +547,28 @@ impl IngestData {
             failures: report.failures,
             pending: report.work_items,
             affected_pages: report.affected_pages,
+            next_task,
+            next_raw,
             write_to: cfg.paths.wiki.clone(),
             types: cfg.schema.types.clone(),
             schema: format!("{}/SCHEMA.md", cfg.paths.engine.trim_end_matches('/')),
-            instructions: String::from("Write or update live pages directly in write_to, following schema and types. The author must explicitly fill truthful sources and updated; the tool never adds sources. Writes take effect immediately. After checking pages, acknowledge each source with done using the raw hash actually read; done does not publish, validate prose, or roll back pages."),
+            instructions: String::from("Do not edit .wiki/pages/ directly. Read next_raw (and the target page when next_task is a page task), then close next_task with `llm-wiki task done <id>`: a breakdown task gets a leaf list with --leaves, a page task gets content with --payload. The tool renders frontmatter and writes staging; pages are merged when the last leaf closes."),
         }
     }
 }
 
 fn human_ingest(data: &IngestData) -> String {
     let mut out = format!("run_id: {}\nconverted: {}\nqueued: {}\npending_total: {}\nfailures: {}\nwrite_to: {}\ntypes: {}\nschema: {}\n{}", data.run_id, data.converted, data.queued, data.pending.len(), data.failures, data.write_to, data.types.join(", "), data.schema, data.instructions);
+    match &data.next_task {
+        Some(task) => out.push_str(&format!(
+            "\nnext_task: {} {} ({})",
+            task.kind, task.id, task.status
+        )),
+        None => out.push_str("\nnext_task: none"),
+    }
+    if let Some(raw) = &data.next_raw {
+        out.push_str(&format!("\nnext_raw: {raw}"));
+    }
     for item in &data.pending {
         out.push_str(&format!(
             "\npending: {} -> {} ({})",
@@ -443,6 +584,69 @@ fn human_ingest(data: &IngestData) -> String {
     for warning in &data.warnings {
         out.push_str(&format!("\nwarning: {warning}"));
     }
+    out
+}
+
+/// Prints one wiki file, windowed so a large page cannot flood the caller.
+///
+/// `--offset` is 1-based; `--limit` is capped at [`MAX_LINES`] rather than
+/// rejected, so a caller asking for "the whole file" still gets a bounded read.
+fn run_read(reference: String, offset: usize, limit: usize) -> ! {
+    let cmd = "read";
+    let root = wiki_root(cmd);
+    let cfg = open_repo(cmd, &root);
+    if offset == 0 || limit == 0 {
+        report::fail(
+            cmd,
+            Exit::Usage,
+            "E_USAGE",
+            "--offset and --limit must be at least 1",
+        );
+    }
+    let limit = limit.min(MAX_LINES);
+    let text = match read::read_text(&root, &cfg, &reference) {
+        Ok(text) => text,
+        Err(err) => {
+            let exit = if matches!(err, read::ReadError::BadRef(_)) {
+                Exit::Usage
+            } else {
+                Exit::Error
+            };
+            report::fail(cmd, exit, err.code(), &err.to_string())
+        }
+    };
+    let page = read::page(&text, offset, limit);
+    let data = ReadData {
+        reference,
+        content: page.content,
+        line_start: page.line_start,
+        line_end: page.line_end,
+        total_lines: page.total_lines,
+        truncated: page.truncated,
+    };
+    report::emit_with(cmd, data, Exit::Ok, human_read)
+}
+
+#[derive(Serialize)]
+struct ReadData {
+    reference: String,
+    content: String,
+    line_start: usize,
+    line_end: usize,
+    total_lines: usize,
+    truncated: bool,
+}
+
+fn human_read(data: &ReadData) -> String {
+    let mut out = format!(
+        "reference: {}\nlines: {}-{} of {}",
+        data.reference, data.line_start, data.line_end, data.total_lines
+    );
+    if data.truncated {
+        out.push_str(&format!(" (next --offset {})", data.line_end + 1));
+    }
+    out.push('\n');
+    out.push_str(&data.content);
     out
 }
 
@@ -503,67 +707,147 @@ fn fail_ignore(cmd: &str, err: &ignore::IgnoreError) -> ! {
 }
 
 /// Completion checks and clears work while holding the same lock as ingest.
-fn run_done(key: String, hash: String) -> ! {
-    let cmd = "done";
+fn run_task(action: TaskAction) -> ! {
+    let cmd = "task";
     let root = wiki_root(cmd);
     let cfg = open_repo(cmd, &root);
-    let guard = match lock::acquire(&root) {
-        Ok(guard) => guard,
-        Err(err) => report::fail(
-            cmd,
-            if err.code() == "E_LOCKED" {
-                Exit::Busy
-            } else {
-                Exit::Usage
-            },
-            err.code(),
-            &err.hint(),
-        ),
-    };
     let mut store = open_store(cmd, &root, &cfg);
-    let result = worklist::complete(&root, &cfg, &mut store, &key, &hash);
-    drop(guard);
-    match result {
-        Ok(completed) => report::emit_with(
-            cmd,
-            DoneData {
-                key,
-                hash,
-                completed,
-            },
-            Exit::Ok,
-            human_done,
-        ),
-        Err(err) => {
-            let code = match &err {
-                WorkError::Drift(_) => "E_SOURCE_DRIFT",
-                WorkError::UnknownSource(_) => "E_NO_SOURCE",
-                WorkError::MissingRaw(_) => "E_NO_RAW",
-                WorkError::Store(_) => "E_DB",
-                WorkError::Hash(_) => "E_IO",
+    match action {
+        TaskAction::Done {
+            id,
+            payload,
+            leaves,
+        } => {
+            let guard = match lock::acquire(&root) {
+                Ok(guard) => guard,
+                Err(err) => report::fail(
+                    cmd,
+                    if err.code() == "E_LOCKED" {
+                        Exit::Busy
+                    } else {
+                        Exit::Usage
+                    },
+                    err.code(),
+                    &err.hint(),
+                ),
             };
-            report::fail(cmd, Exit::Error, code, &err.to_string())
+            let result = task::close(
+                &root,
+                &cfg,
+                &mut store,
+                id,
+                payload.as_deref(),
+                leaves.as_deref(),
+            );
+            drop(guard);
+            match result {
+                Ok(next_task) => {
+                    let next_raw = next_task
+                        .as_ref()
+                        .and_then(|task| task.source_key.clone())
+                        .and_then(|key| {
+                            store
+                                .work_items()
+                                .ok()?
+                                .into_iter()
+                                .find(|item| item.source_key == key)
+                                .map(|item| item.raw_key)
+                        });
+                    report::emit_with(
+                        cmd,
+                        TaskDoneData {
+                            closed: id,
+                            next_task,
+                            next_raw,
+                        },
+                        Exit::Ok,
+                        human_task_done,
+                    )
+                }
+                Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
+            }
         }
+        TaskAction::Status => match task::status(&mut store) {
+            Ok(status) => report::emit_with(cmd, status, Exit::Ok, human_task_status),
+            Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
+        },
+        TaskAction::Retry { id } => match task::retry(&mut store, id) {
+            Ok(task) => report::emit_with(cmd, task, Exit::Ok, human_task_retry),
+            Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
+        },
     }
 }
 
 #[derive(Serialize)]
-struct DoneData {
-    key: String,
-    hash: String,
-    completed: bool,
+struct TaskDoneData {
+    closed: i64,
+    next_task: Option<llm_wiki::store::TaskRow>,
+    next_raw: Option<String>,
 }
 
-fn human_done(data: &DoneData) -> String {
-    format!(
-        "{}: {}",
-        data.key,
-        if data.completed {
-            "completed"
-        } else {
-            "already complete"
+fn human_task_done(data: &TaskDoneData) -> String {
+    let mut out = format!("closed: {}", data.closed);
+    match &data.next_task {
+        Some(task) => out.push_str(&format!(
+            "\nnext_task: {} {} ({})",
+            task.kind, task.id, task.status
+        )),
+        None => out.push_str("\nnext_task: none"),
+    }
+    if let Some(raw) = &data.next_raw {
+        out.push_str(&format!("\nnext_raw: {raw}"));
+    }
+    out
+}
+
+fn human_task_status(status: &task::TaskStatus) -> String {
+    let mut out = String::new();
+    for root in &status.roots {
+        out.push_str(&format!(
+            "\nroot {} {} [{}{}]",
+            root.id,
+            root.source_key,
+            root.status,
+            if root.attempts > 0 {
+                format!(", attempts {}", root.attempts)
+            } else {
+                String::new()
+            }
+        ));
+        for leaf in &root.leaves {
+            out.push_str(&format!(
+                "\n  leaf {} {} ({})",
+                leaf.id,
+                leaf.target_path.as_deref().unwrap_or("-"),
+                leaf.status
+            ));
         }
-    )
+    }
+    match &status.current {
+        Some(task) => out.push_str(&format!("\ncurrent: {} {}", task.kind, task.id)),
+        None => out.push_str("\ncurrent: none"),
+    }
+    for task in &status.failed {
+        out.push_str(&format!(
+            "\nfailed: {} {} {}",
+            task.kind,
+            task.id,
+            task.last_error.as_deref().unwrap_or("")
+        ));
+    }
+    for task in &status.blocked {
+        out.push_str(&format!(
+            "\nblocked: {} {} {}",
+            task.kind,
+            task.id,
+            task.last_error.as_deref().unwrap_or("")
+        ));
+    }
+    out
+}
+
+fn human_task_retry(task: &llm_wiki::store::TaskRow) -> String {
+    format!("retried: {} {} ({})", task.kind, task.id, task.status)
 }
 
 /// `query` is the only command that decides when to pay for an index update: a

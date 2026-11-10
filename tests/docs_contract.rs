@@ -166,17 +166,14 @@ fn shapes() -> BTreeMap<String, BTreeSet<String>> {
 
     capture(&mut out, "query", &["query", "retries"]);
     capture(&mut out, "query-graph", &["query", "--graph"]);
+    capture(
+        &mut out,
+        "read",
+        &["read", "page:concept/retry.md", "--limit", "2"],
+    );
     capture(&mut out, "ingest", &["ingest"]);
-    let ingest = run_json(root, &["ingest"]);
-    let digest = ingest["data"]["pending"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["source_key"] == "a.md")
-        .unwrap()["raw_hash"]
-        .as_str()
-        .unwrap();
-    capture(&mut out, "done", &["done", "a.md", "--hash", digest]);
+    let _ingest = run_json(root, &["ingest"]);
+    capture(&mut out, "task-status", &["task", "status"]);
     capture(&mut out, "ignore", &["ignore"]);
     out
 }
@@ -197,6 +194,7 @@ fn direct_page_workflow_is_the_only_shipped_workflow() {
         "skills/llm-wiki/SKILL.md",
         "skills/llm-wiki/content.md",
         "skills/llm-wiki/ops.md",
+        "skills/llm-wiki/init.md",
         "skills/llm-wiki-session/SKILL.md",
     ] {
         let text = fs::read_to_string(root.join(relative)).unwrap();
@@ -214,12 +212,50 @@ fn direct_page_workflow_is_the_only_shipped_workflow() {
         }
     }
     let skill = fs::read_to_string(root.join("skills/llm-wiki/SKILL.md")).unwrap();
-    for required in ["done", "实际读取", "raw", "直接", "并发", "备份"] {
+    for required in ["task done", "staging", "raw", "并发", "备份"] {
         assert!(
             skill.contains(required),
             "skill is missing the direct-page boundary: {required}"
         );
     }
+}
+
+#[test]
+fn the_skill_ships_the_command_sheet_and_the_scheduled_phrase() {
+    let root = workspace();
+    let skill = fs::read_to_string(root.join("skills/llm-wiki/SKILL.md")).unwrap();
+    for required in [
+        "wiki自动摄入",
+        "init.md",
+        "llm-wiki doctor",
+        "llm-wiki ingest",
+        "llm-wiki ingest --auto",
+        "llm-wiki read",
+        "llm-wiki query",
+        "llm-wiki task done",
+        "llm-wiki task status",
+        "llm-wiki ignore",
+    ] {
+        assert!(skill.contains(required), "SKILL.md: missing {required}");
+    }
+    assert!(
+        !skill.contains("## 定时任务：wiki自动摄入"),
+        "SKILL.md: the scheduled-task section belongs to the trigger, not the skill"
+    );
+    for forbidden in ["E_NOT_INITIALISED", "E_NO_CONFIG", "初始化"] {
+        assert!(
+            !skill.contains(forbidden),
+            "SKILL.md: must not expose the initialisation flow: {forbidden}"
+        );
+    }
+    let init = fs::read_to_string(root.join("skills/llm-wiki/init.md")).unwrap();
+    for required in ["工作区为 wiki", "持久化记忆", "wiki自动摄入", "01:00"] {
+        assert!(init.contains(required), "init.md: missing {required}");
+    }
+    assert!(
+        !init.contains("E_NOT_INITIALISED"),
+        "init.md: must not describe the CLI initialisation error"
+    );
 }
 
 #[test]

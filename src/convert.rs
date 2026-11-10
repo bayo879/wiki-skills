@@ -115,6 +115,33 @@ pub fn convert_one(
     store: &mut Store,
     key: &str,
 ) -> Result<ConvertOutcome> {
+    let prepared = prepare(root, cfg, key)?;
+    commit(store, prepared)
+}
+
+/// Everything a conversion needs to write, computed without touching the disk
+/// or the database. `sync` runs this half in parallel.
+#[derive(Debug)]
+pub struct Prepared {
+    /// What the caller reports once the write is committed.
+    pub outcome: ConvertOutcome,
+    /// The bytes and rows to persist; `None` for a pinned (skipped) raw file.
+    pub write: Option<Ready>,
+}
+
+/// The write half of a conversion: the rendered document and its ledger rows.
+#[derive(Debug)]
+pub struct Ready {
+    raw_path: PathBuf,
+    document: String,
+    source_row: SourceRow,
+    raw_row: RawRow,
+    mtime_ns: Option<i64>,
+}
+
+/// Reads, parses and renders one source. No file is written and no ledger row
+/// changes here, so several of these can run at once.
+pub fn prepare(root: &Path, cfg: &Config, key: &str) -> Result<Prepared> {
     let started = Instant::now();
 
     let source_path = paths::join_key(&root.join(&cfg.paths.source), key);
@@ -129,14 +156,17 @@ pub fn convert_one(
     match inspect_raw(&raw_path, &source_ref)? {
         RawState::Absent | RawState::Overwritable => {}
         RawState::Pinned { parser } => {
-            return Ok(ConvertOutcome {
-                raw_path: raw_key,
-                chars: 0,
-                backend: parser.unwrap_or_default(),
-                duration_ms: started.elapsed().as_millis() as u64,
-                warnings: Vec::new(),
-                skipped: true,
-                skip_reason: Some(String::from("pinned")),
+            return Ok(Prepared {
+                outcome: ConvertOutcome {
+                    raw_path: raw_key,
+                    chars: 0,
+                    backend: parser.unwrap_or_default(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    warnings: Vec::new(),
+                    skipped: true,
+                    skip_reason: Some(String::from("pinned")),
+                },
+                write: None,
             });
         }
         RawState::Foreign { source } => {
@@ -160,7 +190,6 @@ pub fn convert_one(
     // Digest the rendered document, not the source: `scan_raw` hashes the bytes
     // on disk, frontmatter included, and the two must agree.
     let raw_hash = hash::hash_bytes(document.as_bytes());
-    write_atomic(&raw_path, document.as_bytes())?;
 
     let source_row = SourceRow {
         key: key.to_owned(),
@@ -177,17 +206,40 @@ pub fn convert_one(
         source_key: String::from(key),
         converted_at: converted_at.clone(),
     };
-    Ledger::new(store).record_conversion_input(&source_row, &raw_row, input.mtime_ns)?;
 
-    Ok(ConvertOutcome {
-        raw_path: raw_key,
-        chars: extracted.markdown.chars().count(),
-        backend,
-        duration_ms: started.elapsed().as_millis() as u64,
-        warnings: extracted.warnings,
-        skipped: false,
-        skip_reason: None,
+    Ok(Prepared {
+        outcome: ConvertOutcome {
+            raw_path: raw_key,
+            chars: extracted.markdown.chars().count(),
+            backend,
+            duration_ms: started.elapsed().as_millis() as u64,
+            warnings: extracted.warnings,
+            skipped: false,
+            skip_reason: None,
+        },
+        write: Some(Ready {
+            raw_path,
+            document,
+            source_row,
+            raw_row,
+            mtime_ns: input.mtime_ns,
+        }),
     })
+}
+
+/// Writes the prepared document and its ledger rows. Database work stays on the
+/// calling thread: `Store` is not `Sync`.
+pub fn commit(store: &mut Store, prepared: Prepared) -> Result<ConvertOutcome> {
+    let Some(ready) = prepared.write else {
+        return Ok(prepared.outcome);
+    };
+    write_atomic(&ready.raw_path, ready.document.as_bytes())?;
+    Ledger::new(store).record_conversion_input(
+        &ready.source_row,
+        &ready.raw_row,
+        ready.mtime_ns,
+    )?;
+    Ok(prepared.outcome)
 }
 
 /// The raw file name for `key`: the same relative path with a `.md` extension.

@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 use chrono::Local;
 use llm_wiki::config::Config;
 use llm_wiki::store::Store;
-use llm_wiki::{convert, hash, init, lock, page, sync};
+use llm_wiki::{convert, hash, init, lock, page, sync, task};
 use tempfile::{tempdir, TempDir};
 
 /// Opens (and migrates) the ledger under `root`.
@@ -588,6 +588,41 @@ fn a_failed_source_yields_the_budget_and_its_note_dies_with_the_file() {
     // not outlive it.
     fs::remove_file(&bad).unwrap();
     sync::run(d.path(), &cfg, &mut store, &args(20)).unwrap();
+    assert!(store.attempts().unwrap().is_empty());
+}
+
+#[test]
+fn three_conversion_failures_park_the_source_and_retry_clears_it() {
+    let (d, cfg) = repo(0);
+    fs::write(d.path().join("a.pdf"), b"not a pdf").unwrap();
+    let mut store = open(d.path());
+
+    for _ in 0..3 {
+        let report = sync::run(d.path(), &cfg, &mut store, &args(20)).unwrap();
+        assert_eq!(report.failures, 1, "each round finds the same bad source");
+    }
+    let parked = store.failed_converts().unwrap();
+    assert_eq!(parked.len(), 1, "three failures park the source");
+    assert_eq!(parked[0].source_key.as_deref(), Some("a.pdf"));
+    assert_eq!(parked[0].attempts, 3);
+
+    // A parked source takes no budget and is not a failure of the round, but
+    // it must still be named: silence would read as "already handled".
+    let report = sync::run(d.path(), &cfg, &mut store, &args(20)).unwrap();
+    assert_eq!(report.failures, 0);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("failed: a.pdf")),
+        "the parked source is named: {:?}",
+        report.warnings
+    );
+
+    // Retrying is a person's decision: it drops the counter and the queue
+    // note, so the next round meets the file fresh.
+    task::retry(&mut store, parked[0].id).unwrap();
+    assert!(store.failed_converts().unwrap().is_empty());
     assert!(store.attempts().unwrap().is_empty());
 }
 

@@ -49,6 +49,10 @@ pub enum Command {
     Ingest {
         /// Repo-relative source keys; empty means every pending change.
         keys: Vec<String>,
+        /// Run one default round for the `wiki自动摄入` trigger. Manual options
+        /// cannot be combined with it.
+        #[arg(long)]
+        auto: bool,
         /// Report what a round would do and write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -69,15 +73,33 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Acknowledge one source after reading its raw and updating live pages.
+    /// Print one wiki file through an internal reference.
     ///
-    /// This only clears matching work; it never publishes or edits a page.
-    Done {
-        /// Repository-relative source key returned by ingest.
-        key: String,
-        /// Full raw hash actually read by the author.
-        #[arg(long)]
-        hash: String,
+    /// References are engine-relative (`pages/...`, `raw/...`, `.wiki/...`) or
+    /// aliases (`schema`, `index`, `page:<key>`, `raw:<key>`). Long files are
+    /// paginated: `--offset` is the 1-based first line, `--limit` defaults to
+    /// 2000 lines and is capped there.
+    ///
+    /// Examples: `llm-wiki read schema`, `llm-wiki read .wiki/pages/x.md`,
+    /// `llm-wiki read .wiki/raw/a.md --offset 201`.
+    Read {
+        /// Internal reference returned by ingest, or `schema`/`index`.
+        reference: String,
+        /// 1-based first line to print.
+        #[arg(long, default_value_t = 1)]
+        offset: usize,
+        /// Maximum lines to print; capped at 2000.
+        #[arg(long, default_value_t = 2000)]
+        limit: usize,
+    },
+    /// Work the ingest task tree.
+    ///
+    /// `done` closes the task you were handed and prints the next one;
+    /// `status` shows the tree without advancing it; `retry` is the human-only
+    /// exit for a failed or blocked task.
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
     },
     /// Manage the ignore list that keeps sources out of the wiki.
     ///
@@ -115,6 +137,32 @@ pub enum Command {
         /// Print the `[[wikilink]]` structure: degrees, edges, orphans, broken links.
         #[arg(long)]
         graph: bool,
+    },
+}
+
+/// Actions on the ingest task tree.
+#[derive(Debug, Subcommand)]
+pub enum TaskAction {
+    /// Close one task and print the next one.
+    ///
+    /// A `page` task needs `--payload <file>` with the page content; a
+    /// `breakdown` task needs `--leaves <file>` with the leaf list.
+    Done {
+        /// Task id from `next_task` or `task status`.
+        id: i64,
+        /// Page content JSON for a `page` task.
+        #[arg(long, value_name = "FILE")]
+        payload: Option<std::path::PathBuf>,
+        /// Leaf list JSON for a `breakdown` task.
+        #[arg(long, value_name = "FILE")]
+        leaves: Option<std::path::PathBuf>,
+    },
+    /// Show the tree without advancing it.
+    Status,
+    /// Reset a failed or blocked task to pending (human-only).
+    Retry {
+        /// Task id to reset.
+        id: i64,
     },
 }
 

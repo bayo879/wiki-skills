@@ -1,14 +1,15 @@
 # AGENTS
 
 本项目的开发指引。只写两类内容：用户定下的开发方向，以及这个项目特有的坑与解法。
-服务说明、模块划分、配置项看 [README.md](README.md) 与 [docs/readme/architecture.md](docs/readme/architecture.md)。
+服务说明、模块划分、配置项看 [README.md](README.md) 与 [docs/readme/architecture.md](docs/readme/architecture.md)；skill 与 CLI 的分工及设计原则见 [docs/readme/design-principles.md](docs/readme/design-principles.md)。
 
 ## 1. 开发方向
 
 （本节由用户决策；agent 不擅自增删。）
 
-- 移除候选暂存、`submit` 发布与工具内版本管理（含历史回退）；agent 整理后直接更新 `.wiki/pages/` 正式知识页，不再经过发布步骤。旧库遗留数据的处理方式另行确认，不自动删除。
-- 保留尚未整理成知识页的来源待办，供中断后继续。agent 直接写页后按来源确认完成；确认只核对读取时的 raw 哈希并清除对应待办，资料变化则保留待办，不发布页面、不生成版本、不自动追加来源。
+- 移除候选暂存、`submit` 发布与工具内版本管理（含历史回退）。agent 不直接改 `.wiki/pages/`：它只提交页面载荷（title/summary/tags/status/正文），工具渲染 frontmatter、写 staging、在最后一个子叶关闭时整批合并。旧库遗留数据的处理方式另行确认，不自动删除。
+- 保留尚未整理成知识页的来源待办，供中断后继续。来源由任务树结算：一棵根任务的所有子叶关闭后，根收尾合并页面、核对四道哈希并清除待办；资料变化则保留待办、根回到待拆叶。不发布页面、不生成版本、不自动追加来源。
+- agent 不直接修改 wiki 结构是硬设定，但它是流程约束不是权限隔离：文件系统层面 agent 仍能写 `.wiki/pages/`，工具只能在叶关闭与根收尾时比对基线发现越界（`E_PAGE_CONFLICT`），真正的隔离靠运行时沙箱。
 - 交互目标是「少交互、尽量无感」：能由规则直接判定的事就由工具自己处置，不要再让用户下一条命令。典型是源文件被删——raw、页面对它的引用、只靠它的孤儿页、账本行都应在下一轮摄入里自动收口，而不是等作者手工删页或跑额外命令。需要人判断的（正文冲突、结论取舍）仍然问。
 - [未决问题](docs/issues/) 是整个项目的长期问题收集目录，后续优化以此为准，不限于摄入流程。一个未完成的设计或待判别的问题一个文件，写清影响、证据、候选方案与验收条件；未确认方案不得视为定案，解决后删除文件，断点留在 git 与提交信息里。每个文件头标 `优先级：P1`–`P4`：P1 正在丢数据，或流程卡死且没有出口；P2 用户会真实踩到，已有明确修法或只差一个决定；P3 低频路径的边界与设计缺口；P4 测试、评估与文档澄清，不改变当前行为。被问「issues 情况」时按优先级分组回答，P1 在前；该级没有条目就直接说没有，不硬凑。
 
@@ -29,7 +30,7 @@
 
 ### 2.3 技能不复述 CLI 的输出形状
 
-`skills/llm-wiki/` 只写流程与判断；JSON 字段路径、必填字段、正式页位置、报错码含义都由 CLI 现打（`ingest` 给 `write_to` 与 `types`，`done` 点名哈希不符），技能里不再有枚举表、字段表、错误码表和 `data.*` 路径。
+`skills/llm-wiki/` 只写流程与判断；JSON 字段路径、必填字段、正式页位置、报错码含义都由 CLI 现打（`ingest` 给 `write_to`、`types` 与 `next_task`，`task done` 在源漂移时点名哈希不符），技能里不再有枚举表、字段表、错误码表和 `data.*` 路径。
 `tests/docs_contract.rs::the_skill_states_no_json_field_paths` 禁止技能文件出现 `data.*`（只放过 `error.code`/`error.message`/`error.detail`）；`tests/snapshots/cli-keys.json` 仍锁每条命令的输出形状（`LLM_WIKI_UPDATE_SNAPSHOTS=1` 重生成）。改输出形状时改快照即可，不需要同步技能。
 
 ### 2.4 schema 迁移必须与全新库同构
@@ -45,7 +46,7 @@
 |---|---|
 | `tests/invariants.rs` | SQL 单点、账本单入口、对账唯一、不变量都有测试、每条 lint 规则有 `l{n}_` 测试（不再比技能表） |
 | `tests/docs_contract.rs` | flag 存在、闭世界词表、`E_*` 存在、技能不写 JSON 字段路径 |
-| `tests/skills_pack.rs` | 只发一个技能、frontmatter 只有两项、正文行数上限、引用的子命令真实存在 |
+| `tests/skills_pack.rs` | 只发两个技能、frontmatter 只有两项、正文行数上限、引用的子命令真实存在 |
 | `tests/snapshots/cli-keys.json` | 每条命令输出的键路径 |
 | `tests/docs_tokens.allow` | 词表白名单，加名字要有理由 |
 
@@ -56,22 +57,23 @@
 引擎（契约、raw、pages、账本、来源待办、索引）全部在隐藏目录 `.wiki/` 里，`Config.paths` 用 `#[serde(skip)]` 固定成常量，手写 `[paths]` 移不出去；工具不生成也不检查任何 git 配置——用 git 的仓库自己把 `.wiki/` 加进根 `.gitignore`。`doctor --fix` 不再生成 `.wiki/.gitignore`（引擎里不放任何 git 文件），旧库遗留的那份不删、也不再被检查；`tests/init.rs::init_leaves_git_configuration_to_the_repository` 钉住新库不生成。`.wiki/` 之外的一切都是源，只读。
 `tests/e2e.rs::doctor_ingest_direct_page_query_round_trip` 在完整链路前后逐字节比对引擎外的文件，任何命令往引擎外写文件都会红。任何命令都**永远不删源文件**。
 
-### 2.7 一个技能，三份文件
+### 2.7 一个技能，四份文件
 
-`skills/llm-wiki/SKILL.md` 是 wiki 本身的入口（边界、路由、最小序列、来源确认、退出码）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、冲突与覆盖风险、忽略、叫人）。
+`skills/llm-wiki/SKILL.md` 是 wiki 本身的入口（边界、命令入口、最小序列、来源确认、触发入口、退出码）；`init.md` 写「首次接入」（持久化记忆与定时任务两件 agent 侧的事，不写 CLI 初始化流程）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、冲突与覆盖风险、忽略、叫人）。
 `skills/llm-wiki-session/` 是第二个技能：会话蒸馏，写进 `[ingest].session_dir` 指向的源目录（默认 `sessions`），原始会话不存。一个会话一个文件，不按时间切。
 拆分只为了让 agent 按需只读一份，不是新的契约；`tests/skills_pack.rs` 断言只发这两个技能、正文行数不超限。
 
 ### 2.8 技能的价值在流程纪律，不在用法说明
 
-用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——`ingest` 一次给出 `write_to`、待办 raw 哈希与受影响页，`done` 只认实际读过的 raw 哈希、漂移就不清待办；
-flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复，加长技能文本收益很低，反而会和 CLI 漂移。
+用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——`ingest` 一次给出 `write_to`、`next_task` 与受影响页，`task done` 只认根任务登记的 raw 哈希、漂移就不合并且保留待办；
+flag 与字段的解释与 `--help`、`init.rs` 生成的 `SCHEMA.md` 高度重复，加长技能文本收益很低，反而会和 CLI 漂移。
 所以：技能里写「什么时候做什么、做错了怎么判」，不写「这个参数是什么意思」。
+例外是 `SKILL.md` 保留一份最小命令速查（`doctor` / `ingest` / `ingest --auto` / `read` / `query` / `task done` / `task status` / `task retry` / `ignore` 与常用 flag）：agent 需要先知道入口存在，但参数、字段形状与报错码仍以 `--help` 和 CLI 输出为准。
 
-### 2.9 直接写页：没有候选、没有发布、没有工具内历史
+### 2.9 没有候选、没有发布、没有工具内历史
 
-`.wiki/pages/` 就是页面的唯一副本。写入立即生效，没有暂存区、没有 `submit`、没有 manifest/objects 版本，也没有 `restore` 回退；工具不自动备份，恢复只能靠仓库外的独立备份（通常是 git，但 `.wiki/` 未必进 git）。
-代价必须说清：工具侧没有撤销入口，同一页被两个人同时写会互相覆盖——CLI 锁只约束工具命令，不约束作者手工写文件。
+`.wiki/pages/` 就是页面的唯一副本。内容经 `task done` 提交载荷后由工具写进 staging，根收尾时整批合并；没有候选审核、没有 `submit`、没有 manifest/objects 版本，也没有 `restore` 回退；工具不自动备份，恢复只能靠仓库外的独立备份（通常是 git，但 `.wiki/` 未必进 git）。
+代价必须说清：工具侧没有撤销入口，同一页被两个人同时写会互相覆盖——CLI 锁只约束工具命令，不约束文件系统层的写页。
 工具自己写回内容文件时一律原子替换（`src/render.rs::write_atomic`、`src/convert.rs::write_atomic`：同目录临时文件再 rename），不得就地截断：作者可能正在读，而并发覆盖已经是既有限制，别再把它扩大到半个文件。
 
 ### 2.10 忽略列表只有一个解释入口
@@ -80,15 +82,15 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 不要在调用点自己拼通配，也不要把它和 `[scan].ignore`（只按目录名粗过滤）混用——两者语义不同，混了就会出现「列表里明明写了却还被扫到」。
 显式 `ingest <KEY>` 绕开忽略是故意的：先看一眼再决定要不要永久挡住。
 
-### 2.11 来源待办只由 `done` 清除
+### 2.11 来源待办只由根任务收尾清除
 
 一个来源一条待办，转换与入队写在同一个事务里（`Store::register_conversion` 同时写 `sources`、`raws`、`work_items`、`source_facts`）。半路失败时整笔回滚，不会出现「转换成功、待办丢了」的漂移状态；`tests/worklist.rs::failed_enqueue_rolls_back_conversion_baseline_and_can_retry` 用触发器注入失败钉住。
 
-`done <KEY> --hash <RAW_HASH>` 持仓库锁，三个条件全部成立才删那一条：源文件当前摘要 == 账本记录的源摘要，raw 文件当前摘要 == 待办记录的 raw 摘要 == 命令行给的哈希。三个都过才执行条件 `DELETE`（`source_key` + `raw_key` + `raw_hash`），任何一项不符都是 `E_SOURCE_DRIFT` exit 1，待办保留。
+`task::finish_root` 在整批合并成功后持仓库锁调 `worklist::complete`，四道哈希全部成立才删那一条：源文件当前摘要 == 账本记录的源摘要，raw 文件当前摘要 == 待办记录的 raw 摘要 == 根任务拆解时登记的 raw 哈希。任何一项不符都是 `E_SOURCE_DRIFT` exit 1，待办与任务都保留，staging 不清。
 
-幂等是刻意的：同一条再确认一次返回 exit 0、`completed: false`，不是错误；历史上「重复 submit 报错」的坑不要重演。
+幂等是刻意的：根已删、待办已清时，`advance` 返回下一个任务或空，不报错；历史上「重复 submit 报错」的坑不要重演。
 
-`done` 不读页面、不验正文、不回滚已写内容。写页期间源又变了，它只能保住待办不误清；正文质量与并发覆盖仍由作者负责。`tests/worklist.rs::done_rejects_old_hash_and_only_clears_the_matching_source` 与 `tests/cli_done.rs::done_drift_is_exit_one_and_keeps_pending` 钉住。
+根收尾不读页面正文、不验正文质量、不回滚已写内容。写页期间源又变了，它只能保住待办不误清；正文质量与并发覆盖仍由作者负责。`tests/worklist.rs::done_rejects_old_hash_and_only_clears_the_matching_source` 与 `tests/cli_task.rs::the_last_leaf_merges_the_batch_and_clears_the_queue` 钉住。
 
 ### 2.12 同步在 CLI 之外
 
@@ -122,20 +124,22 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 不要再加回 `DIRS` / `PROVISIONED` 这类第二份清单；加目录只改 `LAYOUT` 并标明是否 `authored`。
 `tests/precondition.rs::provision_never_creates_the_authored_tree_but_repairs_its_children_when_it_exists` 钉住补建不会复活产品目录；`src/layout.rs` 的单元测试钉住父先于子、只有 `.wiki/pages` 是 `authored`。
 
-### 2.17 初始化是被动路径，不是开场仪式
+### 2.17 初始化是自动的，不是开场仪式
 
-`doctor --fix` 与它的两步后续（写项目指令、把 `ingest` 排成定时任务）只在新仓库第一次有收益；放进技能开场，每轮日常都要背一段用不上的指令，还会和 `init` 自己的输出抢同一份事实。所以技能没有「开场」一节：agent 正常跑命令，撞上 `E_NOT_INITIALISED` / `E_NO_CONFIG` 才回头建，并按 CLI 的 message 与 `doctor --fix` 输出末尾的两步走。
-细节只写在 `src/init.rs` 的 `NEXT_STEPS`（默认周期、先问用户），技能只留触发条件与去向——两处都在讲同一件事，改一处必须改另一处；`tests/init.rs::init_ends_with_the_fixed_follow_up_prompt` 钉住 CLI 这一侧。
+初始化已经内化到 `open_repo` 与 `run_doctor`：目录里没有 `.wiki/` 时，第一条命令（包括 `doctor`）会静默建默认契约与目录，然后继续。技能不再提 CLI 初始化流程，也不再有 CLI 侧的后续提示；`init.md` 只保留 agent 侧的两件事。
+首次接入只保留两件 agent 侧的事：把「工作区为 wiki，咨询问题默认调用 wiki」写进持久化记忆，以及问用户是否把「wiki自动摄入」设为定时任务；具体实现由各 agent 自己的记忆与调度能力完成，CLI 和技能都不假定实现方式。
+只有 `.wiki/` 已存在但契约或产品目录缺失时才报 `E_NOT_INITIALISED`，让 `doctor` 诊断、`doctor --fix` 修；这条路径是损坏仓库的出口，不是首次使用的入口。
+`tests/precondition.rs::every_repository_command_bootstraps_an_empty_directory` 钉住空目录直接可用，`a_missing_product_directory_is_refused_even_when_the_contract_exists` 钉住损坏仓库仍拒绝。
 
 ### 2.18 删命令前先和 spec 做一次差集
 
-命令面收窄过两轮：22 → 6 删了 `version`，直接写页这一轮又删了 `submit` 与整套版本管理。两次都出现过文档还在教旧入口的情况（`README.md` 曾写着「submit 建版本」，而代码明确不建）。
+命令面收窄过三轮：22 → 6 删了 `version`，直接写页那一轮又删了 `submit` 与整套版本管理，任务树这一轮把 `done` 换成 `task done/status/retry`。两次都出现过文档还在教旧入口的情况（`README.md` 曾写着「submit 建版本」，而代码明确不建）。
 删之前先回答「删掉以后坏了怎么办」：`.wiki/` 是唯一内容所在，而且通常不进 git（2.12），所以没有回退就等于没有出口——现在答案只能是仓库外的独立备份，文档必须这么写，不能假装还有内置退路。
-删任何一条命令或 flag 前，`grep` 一遍 `README.md`、`docs/readme/`、`docs/issues/`、`skills/`、`src/init.rs`（`SCHEMA.md` 与 `NEXT_STEPS`），差集里没处理干净的要么补实现、要么改文档。旧命令现在由 clap 返回 `E_USAGE` exit 2，`tests/cli_submit.rs::submit_is_rejected_without_touching_legacy_candidates` 与 `tests/cli_version.rs::version_subcommands_are_rejected_and_preserve_legacy_bytes` 钉住「拒绝且不动旧字节」。
+删任何一条命令或 flag 前，`grep` 一遍 `README.md`、`docs/readme/`、`docs/issues/`、`skills/`、`src/init.rs`（`SCHEMA.md`），差集里没处理干净的要么补实现、要么改文档。旧命令现在由 clap 返回 `E_USAGE` exit 2，`tests/cli_submit.rs::submit_is_rejected_without_touching_legacy_candidates` 与 `tests/cli_version.rs::version_subcommands_are_rejected_and_preserve_legacy_bytes` 钉住「拒绝且不动旧字节」。
 
 ### 2.19 防抖只认 mtime，不记轮次
 
-一轮要不要转换某个源，只看两件事：mtime 距今超过 `[ingest].settle_seconds`（默认 300 秒），并且读到的内容与账本记录不同。没有 `sync_state`、没有连续轮数、没有失败熔断：跨轮状态只会把「等多久」变复杂，还要每一轮都记账。
+一轮要不要转换某个源，只看两件事：mtime 距今超过 `[ingest].settle_seconds`（默认 300 秒），并且读到的内容与账本记录不同。没有 `sync_state`、没有连续轮数：跨轮状态只会把「等多久」变复杂。转换失败的计数是另一件事，记在 `tasks` 的 `convert` 行里（2.24），不参与「等多久」的判断。
 `--force` 与 `settle_seconds = 0` 是仅有的两个越权口；点名一个 key 不越权，因为等待属于文件，不属于谁在问。
 
 **元数据缓存只用于省读，不用于证明内容没变。** `source_facts` 记上次全文读取的 hash + size + mtime_ns；只有三者全等且该源已经转换过，`scan` 才复用账本摘要，否则全文重读。代价是：大小和 mtime 都不变的改动会被漏掉，只能 `--force` 复核——文档不得写成「每轮全量校验」。
@@ -149,7 +153,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.20 并发：锁管多步骤，busy_timeout 管单条写
 
-`lock::acquire` 只罩 `ingest` 与 `done`（多步骤写）；`query` 是高频入口不取锁，但它会写 FTS 与 `page_meta`。这类单条短写靠 SQLite 的 busy handler 排队，不靠仓库锁。
+`lock::acquire` 只罩 `ingest` 与 `task done`（多步骤写）；`query` 是高频入口不取锁，但它会写 FTS 与 `page_meta`。这类单条短写靠 SQLite 的 busy handler 排队，不靠仓库锁。
 
 **「SQLite 默认 busy timeout 是 0」在这个栈上是错的。** rusqlite 0.31 每次 `Connection::open` 都调 `sqlite3_busy_timeout(db, 5000)`（`inner_connection.rs`，busy.rs 文档也写默认 5000ms 但「may change」）。`src/store.rs` 仍显式设 5s：值钉在我们这边，驱动换掉或改默认时行为不变。持锁超过 5s 仍返回 `DatabaseBusy`，那是真实的长时间占用，不是配置缺失。`tests/store.rs::a_second_writer_waits_for_the_lock_instead_of_failing` 钉住「第二个写者会等」。
 
@@ -162,19 +166,17 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 判据只认页面自己的 `sources:`，不认账本的映射：页面可能引用一个账本已不认识的 raw，照样要清。`tests/sync.rs::forget_removes_the_page_the_raw_and_the_ledger_row`、`forget_keeps_a_page_that_still_has_another_source`、`a_failed_forget_keeps_the_ledger_row_for_the_next_round` 钉住三件事。
 页质量闸门 `lint::page_quality`（`L12` 页面不引用任何来源、`L13` 正文留着 `TODO`/`FIXME`/`待补`/`占位`，代码围栏内不算）既是 `lint` 的规则，也是 `sync` 对 `affected_pages` 复跑的那一份——直接写进轮次 warning，不等 `doctor`。两处共用同一个函数，不要各写一遍。
 
-### 2.22 没有批次，也没有工作租约
+### 2.22 任务树取代批次与工作租约
 
-`.wiki/work.lock` 与 `src/lease.rs` 已删除。删它的理由不是「少一个文件」，而是它服务的概念不存在了：知识页没有版本、没有发布之后，「一批来源」不再是一个可操作的单位，剩下的只是「当前有哪些待处理文件」。
+`.wiki/work.lock` 与 `src/lease.rs` 已删除。它服务的概念是「一次只开放一批来源」，现在由 SQLite 的 `tasks` 表承担：一个来源一棵根任务（`breakdown`），agent 把它拆成子叶（`page`），子叶逐个交付、逐个关闭，全部关闭后根收尾合并。这个单位是**结算单位**，不是锁：它不阻止任何人写文件，只在叶关闭与根收尾时比对基线。
 
-不许以任何形式把这道门禁加回来：
+不许以任何形式把它变回「锁人」的门禁：
 
-- `ingest` 每轮交付全部未完成来源；转换只受稳定窗口与 `[ingest].max_per_run` 约束，交付清单不截断。
-- `done` 只核对四道哈希（源文件当前摘要、`raws` 行、待办记录、命令行给的哈希），不检查来源属于哪一批；没有 `E_WORK_LEASE`，也没有对应退出码。
-- `moves::apply` 与消失源收口每轮都跑，不再因为「批内页可能正在被写」而推迟。
+- `ingest` 与 `task done` 都经 `task::advance` 交付**一个** `next_task`；整棵树用 `task status` 看。交付清单不截断指的是树本身完整，不是一次塞一堆任务。
+- `done` 已移除；来源确认由根收尾的四道哈希取代；没有 `E_WORK_LEASE`。
+- `moves::apply` 与消失源收口每轮都跑，不因为「批内页可能正在被写」而推迟。
 
-当初的担忧是对的——改名或删页撞上正在写的页——但租约给的办法是错的：它假设「正在写」能从租约推断，而作者直接改 `.wiki/pages/` 下的文件，CLI 看不见，那条保护是假保证。正确的位置是被改的文件本身：`page::write_bytes` 在落盘前重读一次，与调用方读到的字节不一致就返回 `PageError::Changed`，调用方把它当成「这页正在被编辑」跳过并写进轮次 warning，下一轮再来（`src/moves.rs` 的改名引用、`src/sync.rs` 的收口都这么处理）。这是收窄竞态窗口，不是消除它——比对之后到 `rename` 之间仍有窗口；`src/page.rs` 的单元测试 `a_page_edited_after_it_was_read_is_not_rewritten` 钉住「读后被改则不写」。
-
-也不要引入 `ingest --ignore-lease` 之类的开关：那是把已经删掉的门禁又还给人手动绕。
+当初的担忧（改名或删页撞上正在写的页）仍然成立，但保护位置变了：`page::write_bytes` 落盘前重读比对，不一致就跳过并写进 warning；任务树的基线比对只做事后越界发现（`E_PAGE_CONFLICT`），不是锁，也抵不了手工写页。
 
 ### 2.23 改文档用会报错的工具，不用静默替换
 
@@ -188,11 +190,19 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.24 失败的源让位，但不被永久排除
 
-`source_attempts`（migration 8）只记「这个源上次转换失败的时间与错误」，不记状态、不记轮次、不做熔断。`sync::order_pending` 按 `(上次失败时间, key)` 升序排：从未失败过的源键是空串、排在最前，刚失败的源时间最新、沉到队尾。理由是把预算先让给能顺畅处理的文件（用户原话：「失败了，优先级可以放到最低」），同时坏文件不会消失——队列里只剩它时照样会被取到。
+`source_attempts`（migration 8）记「这个源上次转换失败的时间与错误」，只用于排序；同一份失败还会写进 `tasks` 的 `convert` 行（`kind='convert'`，`attempts` 自增，`last_error` 记录原因），那才是熔断依据。`sync::order_pending` 按 `(上次失败时间, key)` 升序排：从未失败过的源键是空串、排在最前，刚失败的源时间最新、沉到队尾。理由是把预算先让给能顺畅处理的文件（用户原话：「失败了，优先级可以放到最低」），同时坏文件不会消失——队列里只剩它时照样会被取到。
 
 写入只有一处：`sync.rs` 转换失败的 `Err` 分支调 `Ledger::record_failure`。清除有三个出口，都是为了「文件不在了笔记也不留」：`register_conversion`（转换成功）与 `delete_source`（源被遗忘）在各自事务里删，文件悄悄消失时由 `sync::run` 的 3c 段按「`source_attempts` 里的键还有没有对应文件」清掉——`book.md` 这类从未转换成功的源没有 `sources` 行，`settle_missing` 根本看不见它。`src/store.rs` 的 `a_failure_note_lives_until_the_source_converts_or_goes_away` 与 `tests/sync.rs` 的 `a_failed_source_yields_the_budget_and_its_note_dies_with_the_file` 钉住这几条出口，`src/sync.rs` 的 `a_failed_source_sinks_behind_untried_ones_but_keeps_its_turn` 钉住排序本身。
 
-不要把它扩展成失败计数、退避时间或「连续失败 N 次自动忽略」：连续失败多少次该放弃是人的判断，由 `docs/issues/` 或用户决定，不是账本该替你决定的事。`queued` 只是数字，超出预算的源还必须以 `waiting:` 逐条列出——只报数字等于没让人看见。
+连续 3 次转换失败把 `convert` 行置 `failed`：之后每轮只写 `failed: <key> ...` warning，不再给它预算、不再为它建根。它没有自动出口——源改了也不自动重置，只认 `task retry <id>` 删行并清 `source_attempts`。这是唯一允许的熔断，不要再往上加失败计数、退避时间或「N 次自动忽略」；具体放弃与否仍由人用 `task retry` 或 `doctor` 判断。`queued` 只是数字，超出预算的源还必须以 `waiting:` 逐条列出——只报数字等于没让人看见。
+
+
+
+### 2.25 任务树的推进只有一个函数
+
+`task::advance` 是唯一决定「下一个任务是谁」的地方：`ingest` 与 `task done` 都调它，别在两处各写一套排序，否则两边的「当前任务」会分叉。顺序是：有 `pending` 子叶先交付；全库没有子叶才取最早一棵待拆叶的根；根的子叶全清后在 `advance` 内部收尾。
+
+基线是**全局一份**（`GLOBAL_BASELINE = 0`），不是每棵树一份：先收敛的树合并出的页，必须被后收敛的树当成正常状态。`audit/` 与 `index.md` 是派生文件，不进基线；`tasks.id` 用 `AUTOINCREMENT`，删掉的叶 id 不能被复用，否则 staging 或基线会串页。
 
 ## 3. 提交前自查
 

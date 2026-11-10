@@ -94,6 +94,26 @@ fn ingest_on_an_empty_repo_reports_nothing_to_do() {
 }
 
 #[test]
+fn ingest_auto_runs_one_default_round() {
+    let dir = repo();
+    write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
+    settle(&dir, "a.md");
+
+    let (code, body) = run(&dir, &["ingest", "--auto"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["data"]["converted"], 1);
+    assert_eq!(body["data"]["write_to"], ".wiki/pages");
+}
+
+#[test]
+fn ingest_auto_refuses_manual_options() {
+    let dir = repo();
+    let (code, body) = run(&dir, &["ingest", "--auto", "--dry-run"]);
+    assert_eq!(code, 2, "{body}");
+    assert_eq!(body["error"]["code"], "E_USAGE");
+}
+
+#[test]
 fn ingest_dry_run_writes_no_round() {
     let dir = repo();
     write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");

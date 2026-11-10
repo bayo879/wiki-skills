@@ -28,8 +28,6 @@ pub struct InitOutcome {
     pub created: Vec<String>,
     /// Paths that already existed and were left alone.
     pub skipped: Vec<String>,
-    /// The fixed prompt that tells the agent what to do next.
-    pub next: String,
 }
 
 /// Failure while creating a directory or writing a contract file.
@@ -61,7 +59,7 @@ pub fn run(root: &Path, force: bool) -> Result<InitOutcome> {
             continue;
         }
         std::fs::create_dir_all(&path).map_err(|source| InitError::Io {
-            path: path.clone(),
+            path: path.strip_prefix(root).unwrap_or(&path).to_path_buf(),
             source,
         })?;
         outcome.created.push(dir.to_string());
@@ -74,32 +72,13 @@ pub fn run(root: &Path, force: bool) -> Result<InitOutcome> {
             continue;
         }
         std::fs::write(&path, body).map_err(|source| InitError::Io {
-            path: path.clone(),
+            path: path.strip_prefix(root).unwrap_or(&path).to_path_buf(),
             source,
         })?;
         outcome.created.push(name.to_string());
     }
 
-    outcome.next = next_steps(root);
-
     Ok(outcome)
-}
-
-/// The fixed follow-up prompt, printed once the repository exists.
-///
-/// It is addressed to the agent that ran `init`, not to a human: both steps
-/// live outside the engine (a per-project instruction and a scheduler), so the
-/// CLI can only point at them, never perform them. `{root}` is the only part
-/// that varies, which keeps the wording stable enough to assert on.
-const NEXT_STEPS: &str = "\
-项目初始化结束，请完成后续操作：
-
-1. 注入 User 设定：`{root}` 是知识库目录，优先借助 llm-wiki 技能检索信息。
-2. 把 `llm-wiki ingest` 设为定时任务，默认每天 01:00 执行一次；周期先与用户确认再落地。";
-
-/// Fills the prompt's one placeholder with the repository root.
-fn next_steps(root: &Path) -> String {
-    NEXT_STEPS.replace("{root}", &root.display().to_string())
 }
 
 /// Default `wiki.toml`: every section spelled out, every default made visible.
@@ -182,8 +161,8 @@ const SCHEMA_MD: &str = r#"# Page schema
 | `updated` | 是 | 作者填写的 ISO 日期，内容修改时同步更新 |
 
 必填字段与字段类型是固定的；CLI 的校验器不会为了省事而放松。
-作者直接写入正式页面，正确填写 `sources` 与 `updated`；CLI 不自动补挂证据。
-写页后用读取时的 raw 摘要执行 `done <来源键> --hash <摘要>`，只确认该来源待办，不发布、不回退正文。
+内容经 `task done` 提交：工具填 `id`、`type`、`sources` 与 `updated`，agent 只给标题、摘要、标签、状态与正文。
+最后一次子叶关闭后根任务整批合并；`task status` 看进度，`task retry <id>` 重置失败任务。不发布、不回退正文。
 
 ## type 枚举
 
@@ -209,7 +188,7 @@ const SCHEMA_MD: &str = r#"# Page schema
 
 ## status 三态
 
-- `draft`：内容尚不成熟，不当作结论引用；直接写入后也会被检索到。
+- `draft`：内容尚不成熟，不当作结论引用；合并后也会被检索到。
 - `stable`：作者判断当前可信的结论，不代表经过发布审批或版本备份。
 - `stale`：已过期。源发生变更、源缺失或结论被新源推翻，等待重新审阅；
   保留页面和源引用，不自动改写结论，也不自动删除。

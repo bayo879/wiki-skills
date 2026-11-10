@@ -93,23 +93,6 @@ fn the_template_names_every_config_section() {
 }
 
 #[test]
-fn init_ends_with_the_fixed_follow_up_prompt() {
-    let d = tempdir().unwrap();
-    let outcome = init(d.path());
-    let next = outcome.next.as_str();
-    let root = d.path();
-    assert!(
-        next.contains(&format!("`{}`", root.display())),
-        "the prompt must name the repository it just initialised: {next}"
-    );
-    assert!(next.contains("llm-wiki ingest"), "{next}");
-    assert!(
-        next.contains("01:00"),
-        "the default period must be stated: {next}"
-    );
-}
-
-#[test]
 fn init_force_rewrites_contracts_only() {
     let d = tempdir().unwrap();
     init(d.path());

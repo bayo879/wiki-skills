@@ -72,7 +72,7 @@ timeout_s = 120
 
 | 码 | 触发 |
 |---|---|
-| `E_NO_CONFIG` | `.wiki/wiki.toml` 读不出来（缺失会在更早的入口检查里变成 `E_NOT_INITIALISED`） |
+| `E_NO_CONFIG` | `.wiki/wiki.toml` 读不出来；缺失时若 `.wiki/` 已存在会变成 `E_NOT_INITIALISED`，空目录则由首条命令自动建默认契约 |
 | `E_BAD_CONFIG` | 非法 TOML、类型/单位错误、数值不变量不满足 |
 | `E_TOKEN_IN_CONFIG` | `auth_env` 里写的是 token 字面量 |
 

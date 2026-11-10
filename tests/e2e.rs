@@ -84,17 +84,6 @@ const PNG: &[u8] = &[
     0x42, 0x60, 0x82,
 ];
 
-const PAGE_FRONT: &str = "\
----
-id: alpha
-title: 重试与熔断
-type: concept
-summary: 重试与熔断的取舍
-sources: [\".wiki/raw/notes/retry.md\"]
-status: draft
-updated: 2026-10-27
----";
-
 fn page_body() -> String {
     // Long enough that the audit's min_page_chars (200) is satisfied.
     format!(
@@ -187,53 +176,110 @@ fn doctor_ingest_direct_page_query_round_trip() {
         root.join(".wiki/raw/notes/retry.md").is_file(),
         "conversion happened"
     );
-    let pending = ingest["pending"].as_array().expect("pending array");
-    let retry = pending
-        .iter()
-        .find(|item| item["source_key"] == "notes/retry.md")
-        .unwrap_or_else(|| panic!("the source is queued: {ingest}"));
-    let raw_hash = retry["raw_hash"].as_str().expect("raw hash").to_string();
-
-    // The agent writes the live page where the round said to. There is no
-    // candidate stage and no publish step: the bytes are live immediately.
-    write(
-        root,
-        ".wiki/pages/concept/alpha.md",
-        format!("{PAGE_FRONT}\n\n{}\n", page_body()),
+    assert!(
+        ingest["pending"].as_array().is_some_and(|pending| pending
+            .iter()
+            .any(|item| item["source_key"] == "notes/retry.md")),
+        "the source is queued: {ingest}"
     );
+
+    // The agent works the task tree instead of editing pages: a breakdown
+    // lists the leaves, each leaf submits content, and the last close merges
+    // the batch into the live tree. The round hands out one task at a time
+    // until the whole forest settles.
+    let mut next = ingest["next_task"].clone();
+    assert_eq!(next["kind"], "breakdown");
+    while !next.is_null() {
+        let id = next["id"].as_i64().expect("task id");
+        let kind = next["kind"].as_str().expect("task kind");
+        let source = next["source_key"].as_str().unwrap_or_default();
+        match kind {
+            "breakdown" => {
+                let (leaf_id, title) = if source == "notes/retry.md" {
+                    ("alpha", "重试与熔断")
+                } else {
+                    ("beta", "分页与重试")
+                };
+                let mut leaves = tempfile::NamedTempFile::new().unwrap();
+                std::io::Write::write_all(
+                    &mut leaves,
+                    serde_json::json!({"leaves":[{"type":"concept","id":leaf_id,"title":title,"brief":"写出来源里的结论"}]})
+                        .to_string()
+                        .as_bytes(),
+                )
+                .unwrap();
+                let out = ok_call(
+                    root,
+                    &[
+                        "task",
+                        "done",
+                        &id.to_string(),
+                        "--leaves",
+                        leaves.path().to_str().unwrap(),
+                    ],
+                );
+                next = out["next_task"].clone();
+            }
+            "page" => {
+                let note: serde_json::Value =
+                    serde_json::from_str(next["payload_json"].as_str().expect("leaf note"))
+                        .unwrap();
+                let mut payload = tempfile::NamedTempFile::new().unwrap();
+                let body = serde_json::json!({
+                    "title": note["title"],
+                    "summary": "来源给出的结论",
+                    "tags": ["resilience"],
+                    "status": "draft",
+                    "body": page_body(),
+                });
+                std::io::Write::write_all(&mut payload, body.to_string().as_bytes()).unwrap();
+                let out = ok_call(
+                    root,
+                    &[
+                        "task",
+                        "done",
+                        &id.to_string(),
+                        "--payload",
+                        payload.path().to_str().unwrap(),
+                    ],
+                );
+                next = out["next_task"].clone();
+            }
+            other => panic!("unexpected task kind {other}"),
+        }
+    }
+    assert_eq!(next, serde_json::Value::Null);
     assert!(
         root.join(".wiki/pages/concept/alpha.md").is_file(),
-        "the author writes the live tree directly"
+        "the last leaf merged the batch into the live tree"
     );
 
     // ----------------------------------------------------------- query
     let query = ok_call(root, &["query", "熔断"]);
     assert!(
         query["count"].as_u64().is_some_and(|count| count >= 1),
-        "a directly written page is searchable without a publish step: {query}"
+        "a merged page is searchable: {query}"
     );
     // ------------------------------------------------------------ done
-    let done = ok_call(root, &["done", "notes/retry.md", "--hash", &raw_hash]);
-    assert_eq!(done["completed"], serde_json::json!(true));
     let again = ok_call(root, &["ingest"]);
     let still_pending = again["pending"].as_array().expect("pending array");
     assert!(
         !still_pending
             .iter()
             .any(|item| item["source_key"] == "notes/retry.md"),
-        "acknowledging one source clears only its queue entry: {again}"
+        "closing the tree clears only its queue entry: {again}"
     );
     // The index is rendered by a round, not by a write: the next round sees
-    // the page the author left behind.
+    // the page the batch left behind.
     let index = read(root, ".wiki/pages/index.md");
     assert!(
         index.contains("concept/alpha.md") && index.contains("重试与熔断"),
-        "the next round lists the directly written page: {index}"
+        "the next round lists the merged page: {index}"
     );
     assert_eq!(
         outside_engine(root),
         expected_outside,
-        "done never rewrites the author's page"
+        "the task tree never rewrites the author's files"
     );
 
     // ---------------------------------------------------------- doctor

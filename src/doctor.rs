@@ -177,6 +177,7 @@ pub fn run(root: &Path, cfg: Option<&Config>, opts: &DoctorOptions) -> Vec<Check
             check_schema(root),
             check_paths(root, effective),
             check_db(root, effective),
+            check_tasks(root, effective),
             check_fts5(),
             check_legacy(root),
             check_lock(root, effective),
@@ -194,7 +195,8 @@ pub fn run(root: &Path, cfg: Option<&Config>, opts: &DoctorOptions) -> Vec<Check
 /// run, and lint's rewrites have to land before the index is rebuilt from them.
 fn repair(root: &Path) -> Vec<Check> {
     let mut out = Vec::new();
-    if !root.join(CONFIG_FILE).is_file() {
+    let missing_contract = !root.join(CONFIG_FILE).is_file() || !root.join(SCHEMA_FILE).is_file();
+    if missing_contract {
         match crate::init::run(root, false) {
             Ok(outcome) => out.push(Check::ok(
                 "init",
@@ -253,6 +255,49 @@ fn repair(root: &Path) -> Vec<Check> {
         Err(err) => out.push(Check::fail("index", err.to_string())),
     }
     out
+}
+
+/// Parked tasks (`failed` after three conversion failures, `blocked` after two
+/// replans) are visible here because nothing else would surface them: they are
+/// never handed to an agent again.
+fn check_tasks(root: &Path, cfg: &Config) -> Check {
+    const NAME: &str = "tasks";
+    let db = root.join(&cfg.paths.engine).join(DB_FILE);
+    let mut store = match Store::open(&db) {
+        Ok(store) => store,
+        Err(err) => return Check::warn(NAME, format!("cannot open the ledger: {err}")),
+    };
+    if let Err(err) = store.migrate() {
+        return Check::warn(NAME, format!("cannot migrate the ledger: {err}"));
+    }
+    let tasks = match store.tasks() {
+        Ok(tasks) => tasks,
+        Err(err) => return Check::warn(NAME, format!("cannot read tasks: {err}")),
+    };
+    let parked: Vec<&store::TaskRow> = tasks
+        .iter()
+        .filter(|task| task.status == "failed" || task.status == "blocked")
+        .collect();
+    if parked.is_empty() {
+        return Check::ok(NAME, "no parked tasks");
+    }
+    let detail = parked
+        .iter()
+        .map(|task| {
+            format!(
+                "#{} {} {} {} ({}x, {}): {}",
+                task.id,
+                task.kind,
+                task.source_key.as_deref().unwrap_or("-"),
+                task.status,
+                task.attempts,
+                task.updated_at,
+                task.last_error.as_deref().unwrap_or("no reason recorded")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Check::warn(NAME, detail)
 }
 
 /// `--only convert`: every pending source still parses.
@@ -401,26 +446,25 @@ fn check_session(root: &Path, cfg: &Config, only_key: Option<&str>) -> Vec<Check
 }
 
 /// `config`: the contract exists, parses, validates, and carries its sections.
-fn check_config(root: &Path, text: Option<&str>) -> Check {
+fn check_config(_root: &Path, text: Option<&str>) -> Check {
     const NAME: &str = "config";
-    let path = root.join(CONFIG_FILE);
     let Some(text) = text else {
         return Check::fail(
             NAME,
-            format!("{} is missing; run `llm-wiki doctor --fix`", path.display()),
+            format!("{CONFIG_FILE} is missing; run `llm-wiki doctor --fix`"),
         );
     };
 
     let value: toml::Value = match text.parse() {
         Ok(value) => value,
-        Err(err) => return Check::fail(NAME, format!("{} does not parse: {err}", path.display())),
+        Err(err) => return Check::fail(NAME, format!("{CONFIG_FILE} does not parse: {err}")),
     };
     let cfg: Config = match toml::from_str(text) {
         Ok(cfg) => cfg,
-        Err(err) => return Check::fail(NAME, format!("{} is invalid: {err}", path.display())),
+        Err(err) => return Check::fail(NAME, format!("{CONFIG_FILE} is invalid: {err}")),
     };
     if let Err(err) = cfg.validate() {
-        return Check::fail(NAME, format!("{} is invalid: {err}", path.display()));
+        return Check::fail(NAME, format!("{CONFIG_FILE} is invalid: {err}"));
     }
 
     let missing: Vec<&str> = SECTIONS
@@ -512,13 +556,11 @@ fn check_paths(root: &Path, cfg: &Config) -> Check {
 fn check_db(root: &Path, cfg: &Config) -> Check {
     const NAME: &str = "db";
     let path = root.join(&cfg.paths.engine).join(DB_FILE);
+    let reference = format!("{}/{}", cfg.paths.engine.trim_end_matches('/'), DB_FILE);
     if !path.is_file() {
         return Check::warn(
             NAME,
-            format!(
-                "{} does not exist yet; the first scan or query creates it",
-                path.display()
-            ),
+            format!("{reference} does not exist yet; the first scan or query creates it"),
         );
     }
 
@@ -530,15 +572,20 @@ fn check_db(root: &Path, cfg: &Config) -> Check {
             return Check::fail(
                 NAME,
                 format!(
-                    "{} was written by a newer build (schema {found}, this build reads up to {supported})",
-                    path.display()
+                    "{reference} was written by a newer build (schema {found}, this build reads up to {supported})"
                 ),
             )
         }
-        Err(err) => {
+        Err(StoreError::Sqlite(err)) => {
+            return Check::fail(NAME, format!("{reference} cannot be opened: sqlite: {err}"))
+        }
+        Err(StoreError::Io { .. }) => {
+            return Check::fail(NAME, format!("cannot prepare {reference}"))
+        }
+        Err(StoreError::WalUnavailable { mode, .. }) => {
             return Check::fail(
                 NAME,
-                format!("{} cannot be opened: {err}", path.display()),
+                format!("cannot enable WAL on {reference}: sqlite kept journal_mode={mode}"),
             )
         }
     };
@@ -546,18 +593,14 @@ fn check_db(root: &Path, cfg: &Config) -> Check {
         Ok(version) if version > store::SCHEMA_VERSION => Check::fail(
             NAME,
             format!(
-                "{} reports schema {version}, but this build reads up to {}; upgrade the CLI",
-                path.display(),
+                "{reference} reports schema {version}, but this build reads up to {}; upgrade the CLI",
                 store::SCHEMA_VERSION
             ),
         ),
-        Ok(version) => Check::ok(
-            NAME,
-            format!("{} opens at schema {version}", path.display()),
-        ),
+        Ok(version) => Check::ok(NAME, format!("{reference} opens at schema {version}")),
         Err(err) => Check::fail(
             NAME,
-            format!("{} has no readable schema version: {err}", path.display()),
+            format!("{reference} has no readable schema version: {err}"),
         ),
     }
 }

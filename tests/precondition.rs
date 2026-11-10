@@ -49,42 +49,45 @@ fn repo() -> TempDir {
 }
 
 #[test]
-fn every_repository_command_refuses_an_uninitialised_directory() {
+fn every_repository_command_bootstraps_an_empty_directory() {
     let d = TempDir::new().unwrap();
     // One command per family: the layout, the ledger, the work queue, the
-    // pages and the search index.
+    // pages and the search index. None of them may ask for a separate init.
     for args in [
         vec!["ingest"],
-        vec!["done", "a.md", "--hash", "blake3:0"],
+        vec!["task", "status"],
         vec!["ingest", "--dry-run"],
         vec!["query", "alpha"],
         vec!["query", "--graph"],
     ] {
         let (code, v) = call(d.path(), &args);
-        assert_eq!(code, 2, "`{}` must be a usage error: {v}", args.join(" "));
-        assert_eq!(v["ok"], false, "`{}`: {v}", args.join(" "));
-        assert_eq!(v["error"]["code"], "E_NOT_INITIALISED", "{v}");
-        assert_eq!(v["error"]["detail"]["missing"], ".wiki/wiki.toml", "{v}");
-        assert_eq!(v["error"]["detail"]["kind"], "file", "{v}");
         assert!(
-            v["error"]["detail"]["hint"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("llm-wiki doctor --fix"),
-            "the hint must name the fix: {v}"
+            d.path().join(".wiki/wiki.toml").is_file(),
+            "`{}` did not bootstrap the engine: {v}",
+            args.join(" ")
+        );
+        assert_ne!(
+            v["error"]["code"],
+            "E_NOT_INITIALISED",
+            "`{}` must not expose initialisation: {v}",
+            args.join(" ")
+        );
+        assert!(
+            code == 0 || code == 1,
+            "`{}` must run after bootstrapping: {v}",
+            args.join(" ")
         );
     }
 }
 
 #[test]
-fn the_message_names_the_missing_path_and_the_command_that_creates_it() {
+fn a_fresh_directory_bootstraps_without_a_message() {
     let d = TempDir::new().unwrap();
     let out = run(d.path(), &["ingest"]);
-    assert_eq!(out.status.code(), Some(2));
+    assert!(out.status.success());
+    assert!(d.path().join(".wiki/wiki.toml").is_file());
     let text = String::from_utf8_lossy(&out.stderr);
-    assert!(text.contains(".wiki/wiki.toml"), "stderr: {text}");
-    assert!(text.contains("not initialised"), "stderr: {text}");
-    assert!(text.contains("llm-wiki doctor --fix"), "stderr: {text}");
+    assert!(!text.contains("not initialised"), "stderr: {text}");
 }
 
 #[test]
@@ -106,23 +109,13 @@ fn doctor_fix_is_idempotent_so_the_advice_is_always_safe_to_follow() {
 }
 
 #[test]
-fn an_engine_deleted_in_full_asks_for_repair() {
-    // The contract lives inside the engine, and the whole engine is out of git.
-    // A clone therefore starts with no wiki at all: the tool says how to make
-    // one instead of silently creating a default engine in an arbitrary
-    // directory.
+fn an_engine_deleted_in_full_is_bootstrapped_again() {
     let d = repo();
     fs::remove_dir_all(d.path().join(".wiki")).unwrap();
     let (code, v) = call(d.path(), &["ingest"]);
-    assert_eq!(code, 2, "no contract, no ingest: {v}");
-    assert_eq!(v["error"]["code"], "E_NOT_INITIALISED", "{v}");
-    assert!(
-        v["error"]["detail"]["hint"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("llm-wiki doctor --fix"),
-        "the hint must name the fix: {v}"
-    );
+    assert_eq!(code, 0, "a fresh engine is created: {v}");
+    assert!(d.path().join(".wiki/wiki.toml").is_file());
+    assert!(d.path().join(".wiki/pages").is_dir());
 }
 
 #[test]
@@ -142,9 +135,10 @@ fn provision_never_creates_the_authored_tree_but_repairs_its_children_when_it_ex
 }
 
 #[test]
-fn doctor_still_works_before_init_so_the_problem_can_be_diagnosed() {
+fn doctor_on_a_fresh_directory_reports_healthy() {
     let d = TempDir::new().unwrap();
     let (code, v) = call(d.path(), &["doctor"]);
-    assert_eq!(code, 1, "doctor reports the missing contract: {v}");
+    assert_eq!(code, 0, "doctor bootstraps and reports: {v}");
     assert_eq!(v["ok"], true, "doctor reports, it does not refuse: {v}");
+    assert!(d.path().join(".wiki/wiki.toml").is_file());
 }

@@ -171,6 +171,84 @@ pub fn parse(bytes: &[u8]) -> Result<(FrontMatter, String)> {
     Ok((parse_header(header, block.close_line)?, String::from(body)))
 }
 
+/// Renders a whole page from a frontmatter value and body.
+///
+/// This is the one writer that creates page bytes from scratch; the in-place
+/// writers above still preserve every byte they do not own. The key order is
+/// fixed (`id`, `title`, `type`, `summary`, `tags`, `sources`, `status`,
+/// `updated`, then unknown keys), and every scalar is double-quoted so `#`, `:`
+/// and spaces stay literal. Staging output exists so the tool — not the agent —
+/// decides this syntax.
+pub fn render(front: &FrontMatter, body: &str) -> Vec<u8> {
+    let mut out = String::from("---\n");
+    for (key, value) in [
+        ("id", front.id.as_str()),
+        ("title", front.title.as_str()),
+        ("type", front.typ.as_str()),
+        ("summary", front.summary.as_str()),
+    ] {
+        out.push_str(key);
+        out.push_str(": ");
+        out.push_str(&quote(value));
+        out.push('\n');
+    }
+    out.push_str("tags: ");
+    out.push_str(&inline_list(&front.tags));
+    out.push('\n');
+    out.push_str("sources: ");
+    out.push_str(&inline_list(&front.sources));
+    out.push('\n');
+    out.push_str("status: ");
+    out.push_str(front.status.as_str());
+    out.push('\n');
+    out.push_str("updated: ");
+    out.push_str(&front.updated.format("%Y-%m-%d").to_string());
+    out.push('\n');
+    for (key, value) in &front.extra {
+        out.push_str(key);
+        out.push_str(": ");
+        out.push_str(&quote(value));
+        out.push('\n');
+    }
+    out.push_str("---\n");
+    out.push_str(body);
+    if !body.ends_with('\n') {
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
+/// Double-quotes one scalar, escaping what the parser unescapes.
+fn quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Renders a string vector as the inline-array form the parser accepts.
+fn inline_list(items: &[String]) -> String {
+    let mut out = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&quote(item));
+    }
+    out.push(']');
+    out
+}
+
 /// Replaces the scalar of the `updated:` line with `d`, touching nothing else.
 ///
 /// A missing `updated:` line is [`PageError::NoUpdated`]: the field is required
