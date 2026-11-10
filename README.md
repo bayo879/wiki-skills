@@ -71,7 +71,7 @@ llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"c
 `skills/llm-wiki/` 维护 wiki 本身：`SKILL.md` 是入口（边界、命令、最小序列、门禁、退出码）；`init.md` 写「首次接入」（持久化记忆与定时任务两件 agent 侧的事）；`content.md` 写「写什么」（建页判断、新源、切片、矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、冲突与覆盖风险、忽略、叫人）。
 `skills/llm-wiki-session/` 写会话蒸馏：从一段对话里抽出值得留给项目的判断，产物写进 `[ingest].session_dir`（默认 `sessions`），原始会话不存。一个会话一个文件，不按时间切。
 
-字段名、正式页位置、schema、待办与报错含义由 CLI 现打，技能不复述。skill 只有 markdown，复制即可；CLI 是另一个可执行文件，按下面的方式放到能调用的地方。
+字段名、正式页位置、schema、待办与报错含义由 CLI 现打，技能不复述。skill 本身是 markdown；CLI 是可执行文件，可以放 PATH，也可以直接放进 skill 目录随技能一起复制。
 
 ```bash
 # CLI：编译一次，放到 PATH 上
@@ -91,14 +91,15 @@ cp -R skills/* ~/.claude/skills/
 |---|---|---|
 | PATH 上的目录（如 `~/.local/bin/llm-wiki`） | `llm-wiki ...` | 一个人维护多个 wiki 仓库 |
 | 仓库根的 `.wiki/llm-wiki` | `.wiki/llm-wiki ...` | 单个仓库自带工具，随仓库走 |
+| skill 目录（`skills/llm-wiki/llm-wiki`） | `llm-wiki ...`（PATH 没有时用同目录二进制） | 只把 skill 复制给别人，CLI 跟着走 |
 
 `.wiki/llm-wiki` 在 `.wiki/` 下；如果仓库用 git，记得把 `.wiki/` 加进根 `.gitignore`，否则它会被当成未跟踪文件。
-两种放法都要求在**仓库根目录**执行；CLI 不向上查找根。
+三种放法都要求在**仓库根目录**执行；CLI 不向上查找根。
 
 #### 把 skill 同步给别人
 
-`skills/` 是纯文本，整个复制进对方的技能根目录即可，不需要本仓库、不需要 Rust。
-对方另外需要一份 `llm-wiki`，从 Release 页按平台取：
+`skills/` 整个复制进对方的技能根目录即可，不需要本仓库、不需要 Rust。把对应平台的 `llm-wiki` 二进制放进 `skills/llm-wiki/`，对方的 agent 在 PATH 里找不到命令时会直接用这一份。
+二进制从 Release 页按平台取：
 
 | 平台 | 资产 |
 |---|---|
