@@ -393,6 +393,7 @@ struct IngestData {
     converted: usize,
     ingested: Vec<String>,
     queued: usize,
+    waiting: Vec<String>,
     warnings: Vec<String>,
     failures: usize,
     pending: Vec<llm_wiki::store::WorkItem>,
@@ -412,6 +413,7 @@ impl IngestData {
             converted: report.converted,
             ingested: report.ingested,
             queued: report.queued,
+            waiting: report.waiting,
             warnings: report.warnings,
             failures: report.failures,
             pending: report.work_items,
@@ -425,12 +427,15 @@ impl IngestData {
 }
 
 fn human_ingest(data: &IngestData) -> String {
-    let mut out = format!("run_id: {}\nconverted: {}\nqueued: {}\nfailures: {}\nwrite_to: {}\ntypes: {}\nschema: {}\n{}", data.run_id, data.converted, data.queued, data.failures, data.write_to, data.types.join(", "), data.schema, data.instructions);
+    let mut out = format!("run_id: {}\nconverted: {}\nqueued: {}\npending_total: {}\nfailures: {}\nwrite_to: {}\ntypes: {}\nschema: {}\n{}", data.run_id, data.converted, data.queued, data.pending.len(), data.failures, data.write_to, data.types.join(", "), data.schema, data.instructions);
     for item in &data.pending {
         out.push_str(&format!(
             "\npending: {} -> {} ({})",
             item.source_key, item.raw_key, item.raw_hash
         ));
+    }
+    for key in &data.waiting {
+        out.push_str(&format!("\nwaiting: {key}"));
     }
     for page in &data.affected_pages {
         out.push_str(&format!("\naffected_page: {page}"));

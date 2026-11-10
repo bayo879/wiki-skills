@@ -57,6 +57,18 @@ impl<'a> Ledger<'a> {
             .record_source_facts(&source.key, &source.hash, source.size, mtime_ns)
     }
 
+    /// Remember that this source failed to convert, so the next round can put
+    /// it behind the files that have not been tried yet.
+    pub fn record_failure(&mut self, key: &str, attempted_at: &str, error: &str) -> Result<()> {
+        self.store.record_attempt(key, attempted_at, error)
+    }
+
+    /// Forget the failure note for a source that never converted and is now
+    /// gone, so a note cannot outlive the file it describes.
+    pub fn forget_failure(&mut self, key: &str) -> Result<()> {
+        self.store.delete_attempt(key)
+    }
+
     /// Follow a source rename: raw rows first, the `sources` row last, so a
     /// failure anywhere above leaves the old key readable and the next round
     /// retries.

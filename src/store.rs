@@ -16,7 +16,21 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
+
+/// The failure note for a source that has never converted.
+///
+/// `sources` and `work_items` only get a row once a conversion succeeds, so a
+/// file that keeps failing leaves nothing behind to remember it by. This table
+/// is that memory: it exists only so the next round can put a known-bad file at
+/// the back of the queue instead of letting it hold the budget forever.
+const MIGRATION_8: &str = r#"
+CREATE TABLE source_attempts(
+    key TEXT PRIMARY KEY,
+    attempted_at TEXT NOT NULL,
+    error TEXT NOT NULL
+);
+"#;
 
 /// High precision observations only certify bytes that were successfully converted.
 const MIGRATION_7: &str = r#"
@@ -40,6 +54,16 @@ pub struct WorkItem {
     pub source_key: String,
     pub raw_key: String,
     pub raw_hash: String,
+}
+
+/// The last failed conversion of a source, kept only to order the queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attempt {
+    pub key: String,
+    /// RFC 3339, from the round that failed.
+    pub attempted_at: String,
+    /// The error code and message a human would have seen.
+    pub error: String,
 }
 
 /// DDL for version 1, applied once per database.
@@ -405,6 +429,9 @@ impl Store {
         if version < 7 {
             self.apply_migration(MIGRATION_7, 7)?;
         }
+        if version < 8 {
+            self.apply_migration(MIGRATION_8, 8)?;
+        }
         Ok(())
     }
 
@@ -541,6 +568,51 @@ impl Store {
         Ok(removed != 0)
     }
 
+    /// Remembers that `key` failed to convert at `attempted_at`.
+    ///
+    /// This is bookkeeping for the queue order, not a status: a source is only
+    /// ever "pending" or "converted". Overwriting the previous note is the
+    /// point — every failure pushes the file further back.
+    pub(crate) fn record_attempt(
+        &mut self,
+        key: &str,
+        attempted_at: &str,
+        error: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO source_attempts(key,attempted_at,error) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET attempted_at=excluded.attempted_at,error=excluded.error",
+            params![key, attempted_at, error],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets a failure note. A source that disappears before it ever
+    /// converted has no `sources` row to delete the note through.
+    pub(crate) fn delete_attempt(&mut self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM source_attempts WHERE key=?1", [key])?;
+        Ok(())
+    }
+
+    /// Every source that failed to convert, in key order.
+    pub fn attempts(&self) -> Result<Vec<Attempt>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key,attempted_at,error FROM source_attempts ORDER BY key")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Attempt {
+                key: row.get(0)?,
+                attempted_at: row.get(1)?,
+                error: row.get(2)?,
+            })
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
     /// All unfinished sources in stable key order.
     pub fn work_items(&self) -> Result<Vec<WorkItem>> {
         let mut stmt = self
@@ -571,6 +643,7 @@ impl Store {
         tx.execute("INSERT INTO sources(key,hash,size,mtime,raw_key,converted_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,size=excluded.size,mtime=excluded.mtime,raw_key=excluded.raw_key,converted_at=excluded.converted_at", params![source.key,source.hash,source.size,source.mtime,source.raw_key,source.converted_at])?;
         tx.execute("INSERT INTO raws(key,hash,source_key,converted_at) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,source_key=excluded.source_key,converted_at=excluded.converted_at", params![raw.key,raw.hash,raw.source_key,raw.converted_at])?;
         tx.execute("INSERT INTO work_items(source_key,raw_key,raw_hash) VALUES(?1,?2,?3) ON CONFLICT(source_key) DO UPDATE SET raw_key=excluded.raw_key,raw_hash=excluded.raw_hash", params![source.key,raw.key,raw.hash])?;
+        tx.execute("DELETE FROM source_attempts WHERE key=?1", [&source.key])?;
         if let Some(ns) = mtime_ns {
             tx.execute("INSERT INTO source_facts(key,hash,size,mtime_ns) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,size=excluded.size,mtime_ns=excluded.mtime_ns", params![source.key,source.hash,source.size,ns])?;
         } else {
@@ -615,6 +688,7 @@ impl Store {
         tx.execute("DELETE FROM sources WHERE key = ?1", [key])?;
         tx.execute("DELETE FROM work_items WHERE source_key = ?1", [key])?;
         tx.execute("DELETE FROM source_facts WHERE key = ?1", [key])?;
+        tx.execute("DELETE FROM source_attempts WHERE key = ?1", [key])?;
         tx.commit()?;
         Ok(())
     }
@@ -905,6 +979,40 @@ mod tests {
             source_key: String::from("a.pdf"),
             converted_at: String::from("2026-10-27T10:00:00Z"),
         }
+    }
+
+    #[test]
+    fn a_failure_note_lives_until_the_source_converts_or_goes_away() {
+        let d = tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("state.db")).unwrap();
+        s.migrate().unwrap();
+
+        s.record_attempt("a.pdf", "2026-11-09T10:00:00Z", "E_PARSE: broken")
+            .unwrap();
+        assert_eq!(s.attempts().unwrap().len(), 1);
+
+        // Success ends the note: the source is now on the queue, not at the
+        // back of it.
+        let source = SourceRow {
+            key: String::from("a.pdf"),
+            hash: String::from("blake3:aa"),
+            size: 10,
+            mtime: 1,
+            raw_key: Some(String::from("raw/a.md")),
+            converted_at: Some(String::from("2026-11-10T10:00:00Z")),
+        };
+        s.register_conversion(&source, &raw_row("raw/a.md", "blake3:bb"), None)
+            .unwrap();
+        assert!(
+            s.attempts().unwrap().is_empty(),
+            "a converted source must not stay in the failure order"
+        );
+
+        // A note for a source that disappears goes with it.
+        s.record_attempt("b.pdf", "2026-11-09T10:00:00Z", "E_PARSE: broken")
+            .unwrap();
+        s.delete_source("b.pdf").unwrap();
+        assert!(s.attempts().unwrap().is_empty());
     }
 
     fn user_version(store: &Store) -> i64 {

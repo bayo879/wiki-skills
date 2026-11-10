@@ -186,6 +186,14 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 - 整段重写或超过五处独立替换：才用脚本，并且同一轮 `grep` 到新内容才算改完。
 - 复核是取证，不是礼貌：报告"文档已改"之前，先看见 `grep` 的输出。
 
+### 2.24 失败的源让位，但不被永久排除
+
+`source_attempts`（migration 8）只记「这个源上次转换失败的时间与错误」，不记状态、不记轮次、不做熔断。`sync::order_pending` 按 `(上次失败时间, key)` 升序排：从未失败过的源键是空串、排在最前，刚失败的源时间最新、沉到队尾。理由是把预算先让给能顺畅处理的文件（用户原话：「失败了，优先级可以放到最低」），同时坏文件不会消失——队列里只剩它时照样会被取到。
+
+写入只有一处：`sync.rs` 转换失败的 `Err` 分支调 `Ledger::record_failure`。清除有三个出口，都是为了「文件不在了笔记也不留」：`register_conversion`（转换成功）与 `delete_source`（源被遗忘）在各自事务里删，文件悄悄消失时由 `sync::run` 的 3c 段按「`source_attempts` 里的键还有没有对应文件」清掉——`book.md` 这类从未转换成功的源没有 `sources` 行，`settle_missing` 根本看不见它。`src/store.rs` 的 `a_failure_note_lives_until_the_source_converts_or_goes_away` 与 `tests/sync.rs` 的 `a_failed_source_yields_the_budget_and_its_note_dies_with_the_file` 钉住这几条出口，`src/sync.rs` 的 `a_failed_source_sinks_behind_untried_ones_but_keeps_its_turn` 钉住排序本身。
+
+不要把它扩展成失败计数、退避时间或「连续失败 N 次自动忽略」：连续失败多少次该放弃是人的判断，由 `docs/issues/` 或用户决定，不是账本该替你决定的事。`queued` 只是数字，超出预算的源还必须以 `waiting:` 逐条列出——只报数字等于没让人看见。
+
 ## 3. 提交前自查
 
 ```bash

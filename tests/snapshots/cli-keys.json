@@ -39,6 +39,7 @@
     "data.schema",
     "data.stale_pages[]",
     "data.types[]",
+    "data.waiting[]",
     "data.warnings[]",
     "data.write_to",
     "ok"
@@ -61,6 +62,7 @@
     "data.schema",
     "data.stale_pages[]",
     "data.types[]",
+    "data.waiting[]",
     "data.warnings[]",
     "data.write_to",
     "ok"

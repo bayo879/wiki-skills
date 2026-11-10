@@ -563,6 +563,35 @@ fn on_missing_ignore_leaves_the_pages_alone() {
 }
 
 #[test]
+fn a_failed_source_yields_the_budget_and_its_note_dies_with_the_file() {
+    let (d, cfg) = repo(0);
+    let bad = d.path().join("a.pdf");
+    fs::write(&bad, b"not a pdf").unwrap();
+    let mut store = open(d.path());
+
+    let report = sync::run(d.path(), &cfg, &mut store, &args(20)).unwrap();
+    assert_eq!(report.failures, 1);
+    assert_eq!(
+        store.attempts().unwrap().len(),
+        1,
+        "a failure is remembered so the next round can put it last"
+    );
+
+    // Alphabetically `a.pdf` comes first; the failure note is what sends it
+    // behind the healthy file, so the budget goes to the file that can succeed.
+    fs::write(d.path().join("b.md"), "# b\n").unwrap();
+    let report = sync::run(d.path(), &cfg, &mut store, &args(1)).unwrap();
+    assert_eq!(report.converted, 1);
+    assert_eq!(report.waiting, vec![String::from("a.pdf")]);
+
+    // The file never converted, so it has no `sources` row; the note still must
+    // not outlive it.
+    fs::remove_file(&bad).unwrap();
+    sync::run(d.path(), &cfg, &mut store, &args(20)).unwrap();
+    assert!(store.attempts().unwrap().is_empty());
+}
+
+#[test]
 fn forget_removes_the_page_the_raw_and_the_ledger_row() {
     let (d, cfg) = repo(0);
     assert_eq!(

@@ -23,7 +23,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::SystemTime;
 
-use chrono::{Local, NaiveDate};
+use chrono::{Local, NaiveDate, SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::config::Config;
@@ -64,6 +64,8 @@ pub struct SyncReport {
     pub affected_pages: Vec<String>,
     /// Sources left for the next round by `limit`.
     pub queued: usize,
+    /// Those sources by name, in the order the next round will take them.
+    pub waiting: Vec<String>,
     /// Everything worth telling a human about this round.
     pub warnings: Vec<String>,
     /// Conversions that failed.
@@ -223,10 +225,27 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     // 3b. Nothing gates the list: every pending source is visible and the
     //     agent decides how many it can write this time.
 
-    // 4. Convert, newest unchanged set first, up to the budget.
+    // 3c. Order the queue for the budget below. Files that already failed go
+    //     behind files nobody has tried yet: a source that breaks conversion
+    //     would otherwise hold a slot every single round while healthy files
+    //     waited for it to be repaired. A note whose file is gone orders
+    //     nothing, so it goes rather than accumulating in the ledger.
+    let mut live = Vec::new();
+    for attempt in store.attempts()? {
+        let path = paths::join_key(&root.join(&cfg.paths.source), &attempt.key);
+        if path.exists() {
+            live.push(attempt);
+        } else if !args.dry_run {
+            Ledger::new(store).forget_failure(&attempt.key)?;
+        }
+    }
+    order_pending(&mut pending, &live);
+
+    // 4. Convert, first in queue order, up to the budget.
     let planned = pending.len();
     let budget = planned.min(args.limit);
-    let queued = planned - budget;
+    let waiting: Vec<String> = pending.iter().skip(budget).map(|c| c.key.clone()).collect();
+    let queued = waiting.len();
 
     if args.dry_run {
         if budget > 0 {
@@ -246,6 +265,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
             work_items: store.work_items()?,
             affected_pages: Vec::new(),
             queued,
+            waiting,
             warnings,
             failures: 0,
         });
@@ -302,9 +322,16 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
                 }
             }
             Err(err) => {
-                // One bad source is a finding, not the end of the round.
+                // One bad source is a finding, not the end of the round — and
+                // not a reason to hand it the budget again next round.
                 failures += 1;
-                warnings.push(format!("{key}: conversion failed ({}) {err}", err.code()));
+                let message = format!("{}: {err}", err.code());
+                warnings.push(format!("{key}: conversion failed ({message})"));
+                Ledger::new(store).record_failure(
+                    key,
+                    &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                    &message,
+                )?;
             }
         }
     }
@@ -366,6 +393,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         work_items,
         affected_pages,
         queued,
+        waiting,
         warnings,
         failures,
     };
@@ -650,6 +678,27 @@ fn refresh_page_meta(
     Ok(())
 }
 
+/// Puts sources that already failed behind sources nobody has tried yet.
+///
+/// `scan` hands back changes in key order, and the budget takes the first N, so
+/// without this a file that breaks conversion occupies a slot every round while
+/// healthy files queue behind it. A source that has never failed sorts as
+/// `""` — ahead of every recorded attempt; a source that just failed carries the
+/// newest timestamp and sinks to the back. Key order breaks ties, so the queue
+/// is deterministic and a failing file still comes back once nothing healthier
+/// is left.
+fn order_pending(pending: &mut [&scan::Change], attempts: &[crate::store::Attempt]) {
+    let failed: std::collections::HashMap<&str, &str> = attempts
+        .iter()
+        .map(|attempt| (attempt.key.as_str(), attempt.attempted_at.as_str()))
+        .collect();
+    pending.sort_by(|a, b| {
+        let a_at = failed.get(a.key.as_str()).copied().unwrap_or("");
+        let b_at = failed.get(b.key.as_str()).copied().unwrap_or("");
+        a_at.cmp(b_at).then_with(|| a.key.cmp(&b.key))
+    });
+}
+
 /// Whether `path` still hashes to the digest `scan` classified.
 ///
 /// `None` means `scan` recorded no digest, so there is nothing to compare and the
@@ -772,5 +821,60 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.md");
         assert!(still_the_same_bytes(&path, None));
+    }
+
+    fn change(key: &str) -> crate::scan::Change {
+        crate::scan::Change {
+            kind: crate::scan::ChangeKind::New,
+            key: String::from(key),
+            hash: None,
+            moved_from: None,
+            layer: crate::scan::Layer::Source,
+        }
+    }
+
+    fn attempt(key: &str, at: &str) -> crate::store::Attempt {
+        crate::store::Attempt {
+            key: String::from(key),
+            attempted_at: String::from(at),
+            error: String::from("E_PARSE: broken"),
+        }
+    }
+
+    #[test]
+    fn a_failed_source_sinks_behind_untried_ones_but_keeps_its_turn() {
+        let a = change("a.md");
+        let b = change("b.md");
+        let c = change("c.md");
+        let mut pending = vec![&a, &b, &c];
+        let attempts = [attempt("a.md", "2026-11-09T10:00:00Z")];
+
+        super::order_pending(&mut pending, &attempts);
+        let order: Vec<&str> = pending.iter().map(|change| change.key.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["b.md", "c.md", "a.md"],
+            "a source that failed waits behind the ones nobody has tried"
+        );
+
+        // With nothing healthier left, the failed source comes back rather
+        // than being dropped: this is an ordering, not a filter.
+        let mut only_failed = vec![&a];
+        super::order_pending(&mut only_failed, &attempts);
+        assert_eq!(only_failed.len(), 1);
+    }
+
+    #[test]
+    fn the_oldest_failure_comes_back_before_the_newest() {
+        let a = change("a.md");
+        let b = change("b.md");
+        let mut pending = vec![&b, &a];
+        let attempts = [
+            attempt("a.md", "2026-11-01T10:00:00Z"),
+            attempt("b.md", "2026-11-09T10:00:00Z"),
+        ];
+        super::order_pending(&mut pending, &attempts);
+        assert_eq!(pending[0].key, "a.md");
+        assert_eq!(pending[1].key, "b.md");
     }
 }
