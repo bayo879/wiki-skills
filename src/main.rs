@@ -717,6 +717,8 @@ fn run_task(action: TaskAction) -> ! {
             id,
             payload,
             leaves,
+            accept,
+            regenerate,
         } => {
             let guard = match lock::acquire(&root) {
                 Ok(guard) => guard,
@@ -731,6 +733,11 @@ fn run_task(action: TaskAction) -> ! {
                     &err.hint(),
                 ),
             };
+            let verdict = match (accept, regenerate) {
+                (true, false) => Some(task::Verdict::Accept),
+                (false, true) => Some(task::Verdict::Regenerate),
+                _ => None,
+            };
             let result = task::close(
                 &root,
                 &cfg,
@@ -738,6 +745,7 @@ fn run_task(action: TaskAction) -> ! {
                 id,
                 payload.as_deref(),
                 leaves.as_deref(),
+                verdict,
             );
             drop(guard);
             match result {

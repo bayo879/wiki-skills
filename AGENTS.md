@@ -204,6 +204,8 @@ flag 与字段的解释与 `--help`、`init.rs` 生成的 `SCHEMA.md` 高度重�
 
 基线是**全局一份**（`GLOBAL_BASELINE = 0`），不是每棵树一份：先收敛的树合并出的页，必须被后收敛的树当成正常状态。`audit/` 与 `index.md` 是派生文件，不进基线；`tasks.id` 用 `AUTOINCREMENT`，删掉的叶 id 不能被复用，否则 staging 或基线会串页。
 
+任务外的改动**不静默吸收**：`advance` 开头调 `task::reconcile_scan`，把当前 `pages/` 与全局基线比对。有 `sources` 的差异页建 `reconcile` 任务，agent 用 `--accept`（承认改动、把该页当前哈希写进基线）或 `--regenerate`（重建来源待办并 `ensure_root`，走正常拆解覆盖）关闭；没有 `sources` 的页直接写进基线；基线里已消失的页删行（源也没了由 `on_missing` 收口）。空闲轮不再无条件 `refresh_global_baseline`——那正是手工改动被吞掉的原因。
+
 ## 3. 提交前自查
 
 ```bash

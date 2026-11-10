@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// The task tree: what the current ingest round still owes, and the page
 /// hashes the batch started from.
@@ -25,6 +25,33 @@ pub const SCHEMA_VERSION: i64 = 9;
 /// it. `task_baseline` is one shared snapshot of `pages/` (`root_id = 0`),
 /// advanced after every merge: one machine and one author means one "what was
 /// here" per repository, not one per root.
+/// `reconcile` joins the task kinds: an authored page changed outside the task
+/// tree, and someone has to decide whether the change stands or the source is
+/// regenerated. SQLite cannot alter a CHECK constraint, so the table is rebuilt.
+const MIGRATION_10: &str = r#"
+ALTER TABLE tasks RENAME TO tasks_v9;
+CREATE TABLE tasks(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('convert','breakdown','page','reconcile')),
+    status TEXT NOT NULL CHECK(status IN ('pending','active','failed','blocked')),
+    source_key TEXT,
+    raw_hash TEXT,
+    target_path TEXT,
+    allowed_json TEXT,
+    payload_json TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO tasks(id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at)
+    SELECT id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at FROM tasks_v9;
+DROP TABLE tasks_v9;
+CREATE UNIQUE INDEX tasks_one_root_per_source ON tasks(source_key) WHERE kind='breakdown';
+CREATE UNIQUE INDEX tasks_one_convert_per_source ON tasks(source_key) WHERE kind='convert';
+"#;
+
 const MIGRATION_9: &str = r#"
 CREATE TABLE tasks(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -539,6 +566,9 @@ impl Store {
         if version < 9 {
             self.apply_migration(MIGRATION_9, 9)?;
         }
+        if version < 10 {
+            self.apply_migration(MIGRATION_10, 10)?;
+        }
         Ok(())
     }
 
@@ -923,6 +953,16 @@ impl Store {
     pub(crate) fn clear_baseline(&mut self, root_id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM task_baseline WHERE root_id=?1", [root_id])?;
+        Ok(())
+    }
+
+    /// Drops one page from a root's baseline, after the page went away and the
+    /// removal is accepted as a real edit rather than a task's business.
+    pub(crate) fn delete_baseline_path(&mut self, root_id: i64, path: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM task_baseline WHERE root_id=?1 AND path=?2",
+            params![root_id, path],
+        )?;
         Ok(())
     }
 

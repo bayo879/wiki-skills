@@ -25,7 +25,8 @@
 3. **拆解**：`ingest` 给出一棵待拆叶的根任务（`breakdown`）。agent 读 raw 与受影响页面清单，把这一批拆成一页一片的子叶，用 `task done <id> --leaves <文件>` 提交；每个现有受影响页要么落成一片叶，要么显式标 `unchanged` 并写理由。
 4. **逐叶生成**：`task done` 返回下一页叶子任务。agent 读该页正文与拆解要点，提交载荷（`title`/`summary`/`tags`/`status`/正文），用 `task done <id> --payload <文件>` 关闭；工具渲染 frontmatter、写 `.wiki/cache/staging/`，不碰正式页。
 5. **合并**：最后一片叶关闭后，根任务收尾：全批硬校验、与全局基线比对、逐页原子写入 `.wiki/pages/`、刷索引、核对四道哈希并清待办。源在期间变了就 `E_SOURCE_DRIFT`，staging 保留、根回到待拆叶。`query` 默认含会话蒸馏，`--no-archive` 排除它们。
-6. **删源**：源文件被删后不用另外下命令，下一轮 `ingest` 按 `[ingest].on_missing` 自动收口（默认 `forget`）：页面对它的引用去掉、转 `stale`，一条来源不剩的页整页删除，raw 文件与账本行（含待办）一并清掉，轮次警告以 `vanished:` 开头。收口是自动的、可重试的，失败只报 finding 并把账本行留到下一轮；删除本身不可撤销，只能靠你自己的备份。
+6. **复核**：任务外被改过的页面会先变成 `reconcile` 任务，`target_path` 是那页、载荷里是它引用的 raw 键。agent 读页与关联源后二选一：`task done <id> --accept` 承认改动并推进基线；`--regenerate` 把来源重新入队，走正常拆解与生成覆盖它。没有 `sources` 的页没有可对照的源，直接吸收进基线。
+7. **删源**：源文件被删后不用另外下命令，下一轮 `ingest` 按 `[ingest].on_missing` 自动收口（默认 `forget`）：页面对它的引用去掉、转 `stale`，一条来源不剩的页整页删除，raw 文件与账本行（含待办）一并清掉，轮次警告以 `vanished:` 开头。收口是自动的、可重试的，失败只报 finding 并把账本行留到下一轮；删除本身不可撤销，只能靠你自己的备份。
 
 **写页没有发布门。** 根收尾不验证正文质量，也不回滚已合并页面；工具不自动备份，没有内置历史恢复。CLI 锁只约束工具命令，不能阻止文件系统层的写页；任务外改动会在关闭时以 `E_PAGE_CONFLICT` 列出。需要恢复必须有独立备份。
 
@@ -175,7 +176,7 @@ llm-wiki --version                         # 打印版本
 | `doctor [--fix] [--only scan\|convert\|session] [--key <KEY>]` | 体检；补建目录、契约与索引 |
 | `ingest [<KEY>...] [--dry-run] [--key <KEY>] [--chunk <N>] [--range <A-B>] [--force-large] [--force]` | 扫描、转换、登记及交付来源待办；`--key` 只预览，`--force` 强制复核并跳过等待；保留的 `--force-large` 不绕体积上限 |
 | `read <REF> [--offset <N>] [--limit <N>]` | 读取 wiki 内部文件；`REF` 用 ingest 返回的路径或 `schema`/`index`，单次最多 2000 行 |
-| `task done <ID> [--leaves <FILE>] [--payload <FILE>]` | 关闭当前任务：拆解交叶清单，生成交页面载荷；返回下一个任务 |
+| `task done <ID> [--leaves <FILE>] [--payload <FILE>] [--accept] [--regenerate]` | 关闭当前任务：拆解交叶清单，生成交页面载荷，复核二选一；返回下一个任务 |
 | `task status` | 看任务树、当前任务、失败与阻塞的根 |
 | `task retry <ID>` | 人工重置失败任务；技能不教自动重试 |
 | `query [TEXT] [--no-archive] [--graph] [--limit <N>]` | FTS5 检索与链接图，无命中 exit 0 |
@@ -203,6 +204,7 @@ llm-wiki --version                         # 打印版本
 - 配置只有 `.wiki/wiki.toml`，页面契约在 `.wiki/SCHEMA.md`。新配置不再生成版本保留与发布页数预算；旧 `[versions].keep`、`[ingest].max_pages_per_slice`、`[ingest].max_new_pages_per_run` 只为兼容读取，在当前 CLI 不生效。未知键仍报错。`[paths]` 固定在 `.wiki/` 内，手写也不能迁出。
 - 哈希口径统一为全文：先以大小和修改时间初筛，元数据未变时可能复用已记录摘要，因此可能漏掉保留元数据的改动。`--force` 强制全文复核；它与 `--force-large` 都不能越过 `parse.max_source_bytes`（默认 100MB）；超限源不转换、不进待办，每轮 `ingest` 以 warning 点名，需改上限或加忽略。读取受限且对同一份固定字节哈希、解析；稳定窗口仍保留。详见 [parse 配置](docs/readme/config/parse.md)。
 - `task done` 关闭叶子时校验载荷、路径与全局基线；根收尾时核对四道哈希，不根据页面内容判断完成。正文正确性、引用真实性与覆盖风险仍由作者核对。
+- 任务外改动不再被静默吸收：`advance` 先把当前页面与全局基线比对，有 sources 的差异页变成 `reconcile` 任务，由 agent 判定保留（`--accept`）还是按源重生成（`--regenerate`）；没有 sources 的页才直接吸收。
 - 源文件消失由 `[ingest].on_missing` 一次决定：`forget`（默认）清引用与 raw、删空壳页、删账本行；`mark_stale` 只把页转 `stale`；`ignore` 全部留给作者。这也适用于被 `.wiki/ignore` 挡住的源——忽略只挡新摄入，不挡收口。
 - 页面质量有两道自动闸门：`lint` 的 `L12`（页面不引用任何来源）与 `L13`（正文留着 `TODO`/`FIXME`/`待补`/`占位`），都是 warning；`ingest` 对受影响的页复跑这两条，直接写进轮次 warning，不等 `doctor`。
 - 会话蒸馏源目录由 `[ingest].session_dir` 指定（默认 `sessions`，空串关闭）；`query --no-archive` 按页面目录前缀排除。

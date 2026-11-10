@@ -223,3 +223,94 @@ fn status_reports_the_tree_without_advancing_it() {
     let (_, again) = run(&dir, &["task", "status"]);
     assert_eq!(again["roots"], body["roots"]);
 }
+
+/// A repository with one source already merged into one page.
+fn one_source_repo() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    llm_wiki::init::run(dir.path(), false).unwrap();
+    std::fs::write(dir.path().join("a.md"), "# A\n\nEvidence A\n").unwrap();
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0, "{body}");
+    let root_id = body["next_task"]["id"].as_i64().unwrap();
+    let leaves = leaves(&dir, "写 A 的结论");
+    let (code, body) = run(
+        &dir,
+        &["task", "done", &root_id.to_string(), "--leaves", &leaves],
+    );
+    assert_eq!(code, 0, "{body}");
+    let leaf_id = body["next_task"]["id"].as_i64().unwrap();
+    let payload = payload(&dir);
+    let (code, body) = run(
+        &dir,
+        &["task", "done", &leaf_id.to_string(), "--payload", &payload],
+    );
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["next_task"], Value::Null, "{body}");
+    dir
+}
+
+fn page_path(dir: &TempDir) -> std::path::PathBuf {
+    dir.path().join(".wiki/pages/concept/alpha.md")
+}
+
+#[test]
+fn a_page_edited_outside_the_tree_is_queued_for_review() {
+    let dir = one_source_repo();
+    let mut page = std::fs::read_to_string(page_path(&dir)).unwrap();
+    page.push_str("\nHuman correction.\n");
+    std::fs::write(page_path(&dir), page).unwrap();
+
+    let task = next_task(&dir);
+    assert_eq!(task["kind"], "reconcile", "{task}");
+    assert!(
+        task["target_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("concept/alpha.md"),
+        "{task}"
+    );
+    // Accepting the edit absorbs it: the next round has nothing left to say.
+    let id = task["id"].as_i64().unwrap();
+    let (code, body) = run(&dir, &["task", "done", &id.to_string(), "--accept"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(next_task(&dir), Value::Null);
+}
+
+#[test]
+fn regenerating_review_puts_the_source_back_in_the_queue() {
+    let dir = one_source_repo();
+    let mut page = std::fs::read_to_string(page_path(&dir)).unwrap();
+    page.push_str("\nHuman correction.\n");
+    std::fs::write(page_path(&dir), page).unwrap();
+
+    let task = next_task(&dir);
+    assert_eq!(task["kind"], "reconcile", "{task}");
+    let id = task["id"].as_i64().unwrap();
+    let (code, body) = run(&dir, &["task", "done", &id.to_string(), "--regenerate"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["next_task"]["kind"], "breakdown", "{body}");
+    assert_eq!(body["next_task"]["source_key"], "a.md", "{body}");
+}
+
+#[test]
+fn a_review_needs_exactly_one_verdict() {
+    let dir = one_source_repo();
+    let mut page = std::fs::read_to_string(page_path(&dir)).unwrap();
+    page.push_str("\nHuman correction.\n");
+    std::fs::write(page_path(&dir), page).unwrap();
+    let id = next_task(&dir)["id"].as_i64().unwrap();
+    let (code, body) = run(&dir, &["task", "done", &id.to_string()]);
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_TASK_BAD_PAYLOAD");
+}
+
+#[test]
+fn a_page_without_sources_is_absorbed_not_reviewed() {
+    let dir = one_source_repo();
+    std::fs::write(
+        dir.path().join(".wiki/pages/concept/notes.md"),
+        "---\nid: \"notes\"\ntitle: \"Notes\"\ntype: \"concept\"\nsummary: \"\"\ntags: []\nsources: []\nstatus: \"draft\"\nupdated: \"2026-11-10\"\n---\n\nA note.\n",
+    )
+    .unwrap();
+    assert_eq!(next_task(&dir), Value::Null);
+}

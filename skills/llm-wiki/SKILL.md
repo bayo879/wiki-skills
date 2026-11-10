@@ -20,7 +20,7 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 - `llm-wiki doctor` 体检；`llm-wiki doctor --fix` 修可修的机械缺陷与索引；失败任务与原因也在这里看。
 - `llm-wiki ingest` 摄入并交付下一个任务；`--dry-run` 先看计划；`ingest <KEY>...` 只处理点名源。
 - 用户输入 `wiki自动摄入` 时运行 `llm-wiki ingest --auto`：只跑默认一轮，不能和手动参数组合。
-- `llm-wiki task done <ID> --leaves <FILE>` 关闭拆解任务，提交叶清单；`--payload <FILE>` 关闭页面任务，提交一页内容。关闭后返回下一个任务。
+- `llm-wiki task done <ID> --leaves <FILE>` 关闭拆解任务，提交叶清单；`--payload <FILE>` 关闭页面任务，提交一页内容；`--accept` / `--regenerate` 关闭复核任务。关闭后返回下一个任务。
 - `llm-wiki task status` 看任务树、当前任务与失败任务；`llm-wiki task retry <ID>` 由人重置失败任务，不要自动重试。
 - `llm-wiki read <REF>` 读取内部文件；一次最多 2000 行，`--offset` 从第几行开始，`--limit` 改条数。
 - `llm-wiki query <词>` 检索；`--graph` 看链接图。
@@ -50,7 +50,16 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 
 - 结论冲突、需要删页或大改结构：问用户，不静默覆盖。
 - `error.code` 分类，`error.message` 指下一步；有 `error.detail` 时以具体证据为准。
-- `E_PAGE_CONFLICT`：任务外有人改过页面。先让人确认那些改动，再重试；不要绕过校验直接写。
+- `E_PAGE_CONFLICT`：任务外有人改过页面。先跑 `ingest` 看有没有 `reconcile` 任务，而不是绕过校验直接写。
+
+## 任务外改动的复核
+
+页面在任务外被改过时，`ingest` 会先交付一条 `reconcile` 任务，`target_path` 是被改的页，载荷里是该页引用的 raw 键。读这页和它引用的源，然后二选一：
+
+- `task done <ID> --accept`：改动成立，保留现状并推进基线。用户手动修正过正文、或改动只是补充上下文时选这个。
+- `task done <ID> --regenerate`：改动不该保留，把该页引用的来源重新入队，走正常的拆解与生成覆盖它。
+
+没有 sources 的页不会进复核：工具没有可对照的源，直接吸收进基线。页被删除也被当作接受的删除，来源消失仍由 `on_missing` 收口。不要用直接改 `.wiki/pages/` 的方式"修好"冲突——那只会让下一次扫描再报一遍。
 - 退出码 1 是执行失败或体检 Fail；退出码 2 修用法、配置或环境；退出码 4 等占锁进程结束。
 - 找不到命令先找项目构建产物，不绕过 CLI 手改账本。
 

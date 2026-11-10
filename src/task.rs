@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::hash;
+use crate::ledger::Ledger;
 use crate::page::{self, FrontMatter, Status};
 use crate::paths;
 use crate::query;
@@ -145,6 +146,25 @@ struct LeafPayload {
     body: String,
 }
 
+/// A page changed outside the task tree: the agent decides whether the edit
+/// stands (`--accept`) or the sources behind it are regenerated.
+#[derive(Debug, Serialize, Deserialize)]
+struct ReconcilePayload {
+    /// Hash of the page as it stands now, so `--accept` absorbs exactly this.
+    page_hash: String,
+    /// Raw keys the page cites; `--regenerate` re-queues each of them.
+    raw_keys: Vec<String>,
+}
+
+/// What the agent decided about a page edited outside the task tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The edit stands; absorb exactly this page hash into the baseline.
+    Accept,
+    /// Re-queue every source the page cites and regenerate it.
+    Regenerate,
+}
+
 /// The leaf brief the workspace shows the agent.
 #[derive(Debug, Serialize)]
 struct LeafNote {
@@ -172,6 +192,7 @@ pub struct RootView {
 pub struct TaskStatus {
     pub roots: Vec<RootView>,
     pub current: Option<TaskRow>,
+    pub reconcile: Vec<TaskRow>,
     pub failed: Vec<TaskRow>,
     pub blocked: Vec<TaskRow>,
 }
@@ -210,37 +231,15 @@ pub fn ensure_root(
 /// agent, so an `active` row is a delivery from a previous round, not a lease.
 pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<TaskRow>> {
     let stamp = now();
+    reconcile_scan(root, cfg, store)?;
     for task in store.tasks()? {
-        if task.kind == "page" && task.status == "active" {
+        if (task.kind == "page" || task.kind == "reconcile") && task.status == "active" {
             store.set_task_status(task.id, "pending", &stamp)?;
         }
     }
 
     loop {
         let tasks = store.tasks()?;
-        {
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/adv.log")
-            {
-                let _ = writeln!(
-                    f,
-                    "ADV {:?}",
-                    tasks
-                        .iter()
-                        .map(|t| (
-                            t.id,
-                            t.kind.clone(),
-                            t.status.clone(),
-                            t.payload_json.is_some(),
-                            t.parent_id
-                        ))
-                        .collect::<Vec<_>>()
-                );
-            }
-        }
 
         // 1. A root whose leaves are gone is merged here, not handed out.
         if let Some(root_task) = tasks.iter().find(|t| {
@@ -272,7 +271,17 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<Ta
             return Ok(store.task(task.id)?);
         }
 
-        // 3. Only now, the earliest root waiting for a breakdown.
+        // 3. A page edited outside the tree goes to review before new work.
+        if let Some(task) = tasks
+            .iter()
+            .filter(|t| t.kind == "reconcile" && t.status == "pending")
+            .min_by_key(|t| t.id)
+        {
+            store.set_task_status(task.id, "active", &stamp)?;
+            return Ok(store.task(task.id)?);
+        }
+
+        // 4. Only now, the earliest root waiting for a breakdown.
         if let Some(task) = tasks
             .iter()
             .filter(|t| {
@@ -299,23 +308,11 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<Ta
                 store.update_task_source(task.id, drifted.as_deref(), attempts, &stamp)?;
             }
             store.set_task_status(task.id, "active", &stamp)?;
-            let got = store.task(task.id)?;
-            {
-                use std::io::Write as _;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/adv.log")
-                {
-                    let _ = writeln!(f, "RET3 id={} some={}", task.id, got.is_some());
-                }
-            }
-            return Ok(got);
+            return Ok(store.task(task.id)?);
         }
 
-        // Nothing is owed: the next round starts from whatever `pages/`
-        // holds now, including edits made while no task was open.
-        refresh_global_baseline(root, cfg, store)?;
+        // Nothing is owed. `reconcile_scan` has already absorbed edits that
+        // have no source to answer to and queued the rest for review.
         return Ok(None);
     }
 }
@@ -323,8 +320,9 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<Ta
 /// Closes one task the agent says it finished.
 ///
 /// A `page` needs `payload` (the JSON content) and must leave `pages/` exactly
-/// as the root's baseline found it; a `breakdown` needs `leaves`. Anything else
-/// is a usage error rather than a guess.
+/// as the root's baseline found it; a `breakdown` needs `leaves`; a `reconcile`
+/// needs exactly one of `accept` or `regenerate`. Anything else is a usage error
+/// rather than a guess.
 pub fn close(
     root: &Path,
     cfg: &Config,
@@ -332,9 +330,16 @@ pub fn close(
     id: i64,
     payload: Option<&Path>,
     leaves: Option<&Path>,
+    verdict: Option<Verdict>,
 ) -> Result<Option<TaskRow>> {
     let task = store.task(id)?.ok_or(TaskError::Unknown(id))?;
     match task.kind.as_str() {
+        "page" if verdict.is_some() => {
+            return Err(bad(
+                "E_TASK_BAD_PAYLOAD",
+                "only a reconcile task takes --accept or --regenerate",
+            ))
+        }
         "page" => {
             let payload = payload.ok_or_else(|| {
                 bad(
@@ -352,6 +357,9 @@ pub fn close(
                 )
             })?;
             close_breakdown(root, cfg, store, &task, leaves)?;
+        }
+        "reconcile" => {
+            close_reconcile(root, cfg, store, &task, verdict)?;
         }
         other => {
             return Err(bad(
@@ -408,6 +416,12 @@ pub fn status(store: &mut Store) -> Result<TaskStatus> {
         .or_else(|| {
             tasks
                 .iter()
+                .filter(|t| t.kind == "reconcile" && t.status == "pending")
+                .min_by_key(|t| t.id)
+        })
+        .or_else(|| {
+            tasks
+                .iter()
                 .filter(|t| t.kind == "breakdown" && t.status == "pending")
                 .min_by_key(|t| t.id)
         })
@@ -415,6 +429,11 @@ pub fn status(store: &mut Store) -> Result<TaskStatus> {
     Ok(TaskStatus {
         roots,
         current,
+        reconcile: tasks
+            .iter()
+            .filter(|t| t.kind == "reconcile")
+            .cloned()
+            .collect(),
         failed: tasks
             .iter()
             .filter(|t| t.status == "failed")
@@ -452,6 +471,140 @@ pub fn affected_pages(root: &Path, cfg: &Config, raw_key: &str) -> Result<Vec<St
     }
     out.sort();
     Ok(out)
+}
+
+/// Looks for authored pages that moved since the baseline.
+///
+/// A page with sources is queued as a `reconcile` task: the agent reads it and
+/// decides whether the edit stands (`--accept`) or the sources behind it are
+/// regenerated (`--regenerate`). A page with no sources has nothing to compare
+/// against, so the baseline absorbs it. A page that disappeared is accepted as
+/// a deletion here; a source that also disappeared is `on_missing`'s business,
+/// not this function's.
+fn reconcile_scan(root: &Path, cfg: &Config, store: &mut Store) -> Result<()> {
+    ensure_global_baseline(root, cfg, store)?;
+    let baseline: BTreeMap<String, String> = store.baseline(GLOBAL_BASELINE)?.into_iter().collect();
+    let current = page_hashes(root, cfg)?;
+    for key in baseline.keys() {
+        if !current.contains_key(key) {
+            store.delete_baseline_path(GLOBAL_BASELINE, key)?;
+        }
+    }
+    let mut open: BTreeSet<String> = store
+        .tasks()?
+        .into_iter()
+        .filter(|task| task.kind == "reconcile")
+        .filter_map(|task| task.target_path)
+        .collect();
+    let stamp = now();
+    for (key, digest) in &current {
+        if baseline.get(key) == Some(digest) {
+            continue;
+        }
+        let Ok((front, _)) = page::read(&root.join(key)) else {
+            // An unparsable page is `doctor`'s to report; it cites nothing this
+            // function could reconcile either.
+            store.set_baseline(GLOBAL_BASELINE, key, digest)?;
+            continue;
+        };
+        let raw_keys: Vec<String> = front
+            .sources
+            .iter()
+            .map(|reference| reference_key(&cfg.paths.raw, reference))
+            .filter(|raw| !raw.is_empty())
+            .collect();
+        if raw_keys.is_empty() || open.contains(key) {
+            if raw_keys.is_empty() {
+                store.set_baseline(GLOBAL_BASELINE, key, digest)?;
+            }
+            continue;
+        }
+        let payload = serde_json::to_string(&ReconcilePayload {
+            page_hash: digest.clone(),
+            raw_keys,
+        })
+        .map_err(|err| {
+            bad(
+                "E_TASK_BAD_PAYLOAD",
+                format!("cannot encode reconcile task: {err}"),
+            )
+        })?;
+        let mut new = NewTask::pending("reconcile", &stamp);
+        new.target_path = Some(key.clone());
+        new.payload_json = Some(payload);
+        store.insert_task(&new)?;
+        open.insert(key.clone());
+    }
+    Ok(())
+}
+
+/// Settles one page that changed outside the tree.
+///
+/// `--accept` absorbs the edit; `--regenerate` re-queues every source the page
+/// cites, so the normal breakdown/leaf path replaces it. Both advance the
+/// baseline past the current bytes: an accepted edit must not be reported
+/// again, and a page about to be replaced must not race its own review.
+fn close_reconcile(
+    root: &Path,
+    cfg: &Config,
+    store: &mut Store,
+    task: &TaskRow,
+    verdict: Option<Verdict>,
+) -> Result<()> {
+    let verdict = verdict.ok_or_else(|| {
+        bad(
+            "E_TASK_BAD_PAYLOAD",
+            "a reconcile task needs exactly one of --accept or --regenerate",
+        )
+    })?;
+    let target = task.target_path.clone().ok_or_else(|| {
+        bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("reconcile task {} has no target", task.id),
+        )
+    })?;
+    let payload: ReconcilePayload =
+        serde_json::from_str(task.payload_json.as_deref().ok_or_else(|| {
+            bad(
+                "E_TASK_BAD_PAYLOAD",
+                format!("reconcile task {} has no payload", task.id),
+            )
+        })?)
+        .map_err(|err| {
+            bad(
+                "E_TASK_BAD_PAYLOAD",
+                format!("reconcile payload is not valid JSON: {err}"),
+            )
+        })?;
+
+    if verdict == Verdict::Regenerate {
+        let mut requeued = 0;
+        for raw_key in &payload.raw_keys {
+            let Some(raw) = store.get_raw(raw_key)? else {
+                continue;
+            };
+            let item = WorkItem {
+                source_key: raw.source_key.clone(),
+                raw_key: raw.key.clone(),
+                raw_hash: raw.hash.clone(),
+            };
+            Ledger::new(store).import_work_item(&item)?;
+            ensure_root(root, cfg, store, &item, &now())?;
+            requeued += 1;
+        }
+        if requeued == 0 {
+            return Err(bad(
+                "E_TASK_BAD_SOURCE",
+                format!(
+                    "no raw left to regenerate from; the page cites {}",
+                    payload.raw_keys.join(", ")
+                ),
+            ));
+        }
+    }
+    store.set_baseline(GLOBAL_BASELINE, &target, &payload.page_hash)?;
+    store.delete_task(task.id)?;
+    Ok(())
 }
 
 fn close_page(

@@ -131,6 +131,7 @@
     "data.current.target_path",
     "data.current.updated_at",
     "data.failed[]",
+    "data.reconcile[]",
     "data.roots[].attempts",
     "data.roots[].id",
     "data.roots[].last_error",
