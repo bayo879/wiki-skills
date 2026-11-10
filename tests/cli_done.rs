@@ -144,3 +144,35 @@ fn done_outside_the_open_batch_is_busy() {
         "a busy acknowledgement must not clear anything"
     );
 }
+
+#[test]
+fn acknowledging_one_source_heartbeats_the_batch() {
+    let dir = repo();
+    let a_hash = raw_hash(&dir);
+    let file = dir.path().join(".wiki/work.lock");
+    let mut body: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    // A batch whose only sign of life is this acknowledgement.
+    body["started_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    body["refreshed_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    std::fs::write(&file, body.to_string()).unwrap();
+    let before = body["items"].as_array().unwrap().len();
+
+    let (code, out) = run(&dir, &["done", "a.md", "--hash", &a_hash]);
+    assert_eq!(code, 0, "{out}");
+
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        saved["started_at"], "2020-01-01T00:00:00Z",
+        "the batch keeps the moment it opened"
+    );
+    assert_ne!(
+        saved["refreshed_at"], "2020-01-01T00:00:00Z",
+        "acknowledging is progress, so expiry counts from now"
+    );
+    let items = saved["items"].as_array().unwrap();
+    assert_eq!(items.len(), before - 1, "only the acknowledged source left");
+    assert!(
+        !items.iter().any(|item| item["source_key"] == "a.md"),
+        "the acknowledged source is not handed over again"
+    );
+}

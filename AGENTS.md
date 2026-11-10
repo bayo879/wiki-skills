@@ -164,14 +164,14 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 ### 2.22 一次只开放一批：工作租约不是第二把锁
 
-`ingest` 交付待办时把这一批写进 `.wiki/work.lock`（`src/lease.rs`：`source_key`、`raw_key`、`raw_hash`、`started_at`、`pid`、`run_id`），`done` 把最后一条结清时删掉它。这是用户要的「有 agent 处理中时，不接受其他来源的修改」的落地，**不是** `src/lock.rs` 那把仓库锁：仓库锁只在单次命令期间存在，租约跨命令、跨轮次，回答的是「谁的活还没交」。
+`ingest` 交付待办时把这一批写进 `.wiki/work.lock`（`src/lease.rs`：`source_key`、`raw_key`、`raw_hash`、`started_at`、`refreshed_at`、`pid`、`run_id`），`done` 把最后一条结清时删掉它。这是用户要的「有 agent 处理中时，不接受其他来源的修改」的落地，**不是** `src/lock.rs` 那把仓库锁：仓库锁只在单次命令期间存在，租约跨命令、跨轮次，回答的是「谁的活还没交」。
 
 门禁只有三条，别再加：
 - 租约未过期且未结清时，`ingest` 只允许重转批内的源；新源一律不进本轮（warning `work lease: ...`），`moves` 与收口都不跑——批内页可能正在被写，改名和删页都得等。
 - `done` 只接受批内来源；批外来源是 `E_WORK_LEASE`、exit 4。已在待办里的来源重复确认仍是 exit 0、`completed: false`（2.11 的幂等优先于租约判断）。
-- 过期（`LEASE_SECONDS` = 2 小时，解析失败也算过期）只是让 `doctor` 报 warn、让 `doctor --fix` 删文件，**不**自动解锁：`done` 仍能结清过期批。
+- 过期按**最后一次确认**算，不是按开批时间算：每结清一条 `done` 就把 `refreshed_at` 推到当下（`started_at` 保持不变，只做审计），所以一个边做边确认的长批次永远不会被自己的时长腰斩，而一个停手的批次在最后一次动作后 `LEASE_SECONDS`（2 小时）过期。解析失败也算过期。过期只是让 `doctor` 报 warn、让 `doctor --fix` 删文件，**不**自动解锁：`done` 仍能结清过期批。
 
-租约是临时事实，不是知识，所以它只是 `.wiki/` 下的一个文件，不进 `LAYOUT`、不进账本、不做迁移。写入走 `render::write_atomic`；`items` 为空即删除文件，别留空壳让下一轮误判。每轮只在「本轮转换了新源」或「本来就没有租约」时重写，否则时间戳被不断刷新，废弃批次永远不会过期——`tests/sync.rs::an_open_batch_blocks_new_sources_but_not_its_own` 钉住这一条。
+租约是临时事实，不是知识，所以它只是 `.wiki/` 下的一个文件，不进 `LAYOUT`、不进账本、不做迁移。写入走 `render::write_atomic`；`items` 为空即删除文件，别留空壳让下一轮误判。`ingest` 每轮只在「本轮转换了新源」或「本来就没有租约」时重写整个文件，否则安静的一轮会把时间戳不断刷新，废弃批次永远不会过期——`tests/sync.rs::an_open_batch_blocks_new_sources_but_not_its_own` 钉住这一条；`done` 的那次重写是唯一的另一次，它必须重新落盘（心跳），`tests/cli_done.rs::acknowledging_one_source_heartbeats_the_batch` 与 `tests/lease.rs` 钉住「`started_at` 不动、`refreshed_at` 前移」。
 
 不要把租约做成 `ingest --ignore-lease` 之类的开关：那等于把用户要求的门禁又还给人手动绕。
 

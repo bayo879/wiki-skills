@@ -10,6 +10,12 @@
 //! human-sized batch, it has to be readable and clearable without the ledger,
 //! and `doctor --fix` must be able to drop an expired one after a crashed or
 //! abandoned batch. It never blocks reading, only converting and acknowledging.
+//!
+//! Expiry is measured from the last acknowledgement, not from the moment the
+//! batch opened: every `done` rewrites `refreshed_at`, so a batch that keeps
+//! making progress never expires, while a batch whose agent died stops being
+//! live [`LEASE_SECONDS`] after its last real action. `started_at` is kept
+//! unchanged for the audit trail (`doctor` prints it).
 
 use std::path::{Path, PathBuf};
 
@@ -41,8 +47,13 @@ pub struct Item {
 /// The batch currently handed to the agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lease {
-    /// When the batch was delivered, RFC 3339.
+    /// When the batch was delivered, RFC 3339. Never changes afterwards.
     pub started_at: String,
+    /// When the batch last made progress (delivered or acknowledged), RFC 3339.
+    /// Absent in files written before the heartbeat existed; those fall back to
+    /// `started_at`.
+    #[serde(default)]
+    pub refreshed_at: String,
     /// Process that delivered it, for `doctor` and for humans.
     pub pid: u32,
     /// Round identifier the handoff belongs to.
@@ -96,24 +107,18 @@ pub fn read(root: &Path) -> Result<Option<Lease>, LeaseError> {
     }
 }
 
-/// Replace the lease with `items`, or delete it when there is nothing to hold.
+/// Open a fresh batch of `items`, or delete the lease when there is nothing to
+/// hold.
 pub fn write(root: &Path, run_id: &str, items: Vec<Item>) -> Result<(), LeaseError> {
-    let file = path(root);
     if items.is_empty() {
         return clear(root);
     }
-    let lease = Lease {
-        started_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        pid: std::process::id(),
-        run_id: run_id.to_owned(),
-        items,
-    };
-    let body = serde_json::to_vec_pretty(&lease)
-        .map_err(|_| LeaseError::Unreadable { path: file.clone() })?;
-    write_atomic(&file, &body).map_err(|error| LeaseError::Io {
-        path: file,
-        source: std::io::Error::other(error.to_string()),
-    })
+    Lease::open(run_id, items).save(root)
+}
+
+/// Timestamp shape every field uses: RFC 3339, UTC, whole seconds.
+fn stamp() -> String {
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// Remove the lease file; a missing file is not an error.
@@ -127,17 +132,62 @@ pub fn clear(root: &Path) -> Result<(), LeaseError> {
 }
 
 impl Lease {
+    /// A batch that starts right now.
+    pub fn open(run_id: &str, items: Vec<Item>) -> Lease {
+        let now = stamp();
+        Lease {
+            started_at: now.clone(),
+            refreshed_at: now,
+            pid: std::process::id(),
+            run_id: run_id.to_owned(),
+            items,
+        }
+    }
+
+    /// Persist the batch as it stands. An empty batch means the lease is gone.
+    pub fn save(&self, root: &Path) -> Result<(), LeaseError> {
+        if self.items.is_empty() {
+            return clear(root);
+        }
+        let file = path(root);
+        let body = serde_json::to_vec_pretty(self)
+            .map_err(|_| LeaseError::Unreadable { path: file.clone() })?;
+        write_atomic(&file, &body).map_err(|error| LeaseError::Io {
+            path: file,
+            source: std::io::Error::other(error.to_string()),
+        })
+    }
+
+    /// Record that the batch made progress just now.
+    pub fn refresh(&mut self) {
+        self.refreshed_at = stamp();
+    }
+
+    /// When the batch last moved, for the expiry check.
+    fn last_progress(&self) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        let last = if self.refreshed_at.is_empty() {
+            &self.started_at
+        } else {
+            &self.refreshed_at
+        };
+        chrono::DateTime::parse_from_rfc3339(last).ok()
+    }
+
     /// Whether `key` belongs to this batch.
     pub fn covers(&self, key: &str) -> bool {
         self.items.iter().any(|item| item.source_key == key)
     }
 
-    /// Whether the batch has been open longer than [`LEASE_SECONDS`].
+    /// Whether the batch went [`LEASE_SECONDS`] without progress.
+    ///
+    /// A file whose timestamps cannot be parsed counts as expired: there is no
+    /// way to tell how long it has been sitting there, and guessing "fresh"
+    /// would let a corrupted lease block the repository forever.
     pub fn expired(&self) -> bool {
-        let Ok(started) = chrono::DateTime::parse_from_rfc3339(&self.started_at) else {
+        let Some(last) = self.last_progress() else {
             return true;
         };
-        Utc::now().signed_duration_since(started) > Duration::seconds(LEASE_SECONDS)
+        Utc::now().signed_duration_since(last) > Duration::seconds(LEASE_SECONDS)
     }
 
     /// Drop `key` from the batch, reporting whether anything is left.

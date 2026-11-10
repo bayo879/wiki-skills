@@ -148,8 +148,13 @@ pub fn complete(
     if completed {
         if let Some(mut open) = held {
             if open.covers(key) {
+                // Each acknowledgement is a heartbeat: the batch keeps its
+                // `started_at`, but expiry now counts from this moment. The
+                // source leaves the batch first, so it is never handed over
+                // twice.
                 if open.settle(key) {
-                    lease::write(root, &open.run_id.clone(), open.items)?;
+                    open.refresh();
+                    open.save(root)?;
                 } else {
                     lease::clear(root)?;
                 }
