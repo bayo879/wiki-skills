@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::{
     config::Config,
-    hash, lease,
+    hash,
     ledger::Ledger,
     paths,
     store::{Store, StoreError},
@@ -21,14 +21,6 @@ pub enum WorkError {
     MissingRaw(String),
     #[error("source or raw changed; reread before acknowledging: {0}")]
     Drift(String),
-    /// Another batch is open, and this source is not part of it.
-    #[error(
-        "work lease: the open batch does not contain '{0}'; finish the batch listed in .wiki/work.lock first"
-    )]
-    NotLeased(String),
-    /// The lease file could not be read or updated.
-    #[error(transparent)]
-    Lease(#[from] lease::LeaseError),
 }
 
 /// Import only source hints from the retired queue. Never publish or alter it.
@@ -107,7 +99,7 @@ pub fn complete(
         .as_deref()
         .ok_or_else(|| WorkError::MissingRaw(key.into()))?;
     // No work item means nothing to acknowledge: a second `done` for the same
-    // source is a validated no-op, not a reason to complain about the lease.
+    // source is a validated no-op, not an error.
     let Some(item) = store
         .work_items()?
         .into_iter()
@@ -135,31 +127,5 @@ pub fn complete(
     if input.hash != source.hash {
         return Err(WorkError::Drift(key.into()));
     }
-    // A batch that is still open is the agent's working set: completing a source
-    // outside it would let a second batch start while the first is underway.
-    // An expired batch is not enforced, only cleaned up when its own key lands.
-    let held = lease::read(root)?;
-    if let Some(open) = &held {
-        if !open.expired() && !open.covers(key) {
-            return Err(WorkError::NotLeased(key.into()));
-        }
-    }
-    let completed = Ledger::new(store).complete_work_item(key, &raw.key, expected_hash)?;
-    if completed {
-        if let Some(mut open) = held {
-            if open.covers(key) {
-                // Each acknowledgement is a heartbeat: the batch keeps its
-                // `started_at`, but expiry now counts from this moment. The
-                // source leaves the batch first, so it is never handed over
-                // twice.
-                if open.settle(key) {
-                    open.refresh();
-                    open.save(root)?;
-                } else {
-                    lease::clear(root)?;
-                }
-            }
-        }
-    }
-    Ok(completed)
+    Ok(Ledger::new(store).complete_work_item(key, &raw.key, expected_hash)?)
 }

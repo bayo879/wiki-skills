@@ -32,7 +32,7 @@ use crate::lint;
 use crate::page;
 use crate::scan::{self, ChangeKind, Layer};
 use crate::store::{PageMetaRow, Store};
-use crate::{convert, hash, lease, lock, moves, paths, render, source_refs};
+use crate::{convert, hash, lock, moves, paths, render, source_refs};
 
 /// Knobs for one round, all of them from the command line.
 #[derive(Debug, Clone)]
@@ -100,9 +100,6 @@ pub enum SyncError {
     /// A path could not be turned into a repository key.
     #[error(transparent)]
     Path(#[from] crate::paths::PathError),
-    /// The work lease could not be read or written.
-    #[error(transparent)]
-    Lease(#[from] lease::LeaseError),
     /// A derived file could not be written.
     #[error("cannot write {}: {source}", path.display())]
     Io {
@@ -126,7 +123,6 @@ impl SyncError {
             SyncError::Work(_) => "E_DB",
             SyncError::Move(err) => err.code(),
             SyncError::Path(_) => "E_IO",
-            SyncError::Lease(err) => err.code(),
             SyncError::Io { .. } => "E_IO",
         }
     }
@@ -224,52 +220,8 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         }
     }
 
-    // 3b. One batch at a time. A batch that is still open means the agent is
-    //     writing pages for sources it was given; converting new ones now would
-    //     hand it two moving targets. The lease only blocks conversion and
-    //     acknowledgement, never reading, and `doctor --fix` can drop an
-    //     abandoned one after it expires.
-    let lease = if args.dry_run {
-        None
-    } else {
-        lease::read(root)?
-    };
-    let mut blocked = false;
-    if let Some(held) = &lease {
-        if !held.items.is_empty() && !held.expired() {
-            blocked = true;
-            let keys: Vec<&str> = held
-                .items
-                .iter()
-                .map(|item| item.source_key.as_str())
-                .collect();
-            // The batch's own sources may still be reconverted: that is the
-            // agent refreshing what it already holds, not a second moving
-            // target. Everything else waits.
-            pending.retain(|change| keys.iter().any(|key| *key == change.key));
-            warnings.push(format!(
-                "work lease: {} source(s) are still being written ({}); only those may be reconverted. Finish them with `done`",
-                keys.len(),
-                keys.join(", ")
-            ));
-            let vanished = changes
-                .iter()
-                .filter(|change| {
-                    change.kind == ChangeKind::Missing && change.layer == Layer::Source
-                })
-                .count();
-            if vanished > 0 {
-                warnings.push(format!(
-                    "work lease: {vanished} source(s) vanished; settling them waits until the batch closes"
-                ));
-            }
-        } else if !held.items.is_empty() {
-            warnings.push(format!(
-                "work lease: expired with {} source(s) still pending; `done` still clears them, `doctor --fix` drops the file",
-                held.items.len()
-            ));
-        }
-    }
+    // 3b. Nothing gates the list: every pending source is visible and the
+    //     agent decides how many it can write this time.
 
     // 4. Convert, newest unchanged set first, up to the budget.
     let planned = pending.len();
@@ -304,34 +256,33 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     //     A collision is left untouched for a human; it is a finding (exit 1),
     //     never a reason to overwrite a file.
     let mut failures = 0;
-    let stale_pages = if blocked {
-        // An open batch owns the repository's write face: no move, no settling.
-        // Both would change pages under the agent's hands.
-        Vec::new()
-    } else {
-        let moved = moves::apply(root, cfg, store, &changes)?;
-        for applied in &moved.applied {
-            warnings.push(format!(
-                "moved: {} -> {} ({} page(s) rewritten)",
-                applied.from,
-                applied.to,
-                applied.pages.len()
-            ));
-        }
-        for collision in &moved.collisions {
-            failures += 1;
-            warnings.push(format!(
-                "moved: {} -> {} skipped: {} ({})",
-                collision.from, collision.to, collision.message, collision.code
-            ));
-        }
+    let moved = moves::apply(root, cfg, store, &changes)?;
+    for applied in &moved.applied {
+        warnings.push(format!(
+            "moved: {} -> {} ({} page(s) rewritten)",
+            applied.from,
+            applied.to,
+            applied.pages.len()
+        ));
+    }
+    for key in &moved.busy {
+        warnings.push(format!(
+            "moved: '{key}' was being edited; its old citation stays until the next round"
+        ));
+    }
+    for collision in &moved.collisions {
+        failures += 1;
+        warnings.push(format!(
+            "moved: {} -> {} skipped: {} ({})",
+            collision.from, collision.to, collision.message, collision.code
+        ));
+    }
 
-        // 4b. A source that disappeared leaves conclusions without a source
-        //     behind them. What happens next is `[ingest].on_missing`: `forget`
-        //     (the default) removes the reference, the raw file and the ledger
-        //     row; `mark_stale` only moves the pages that cited it to `stale`.
-        settle_missing(root, cfg, store, &changes, &mut warnings, &mut failures)?
-    };
+    // 4b. A source that disappeared leaves conclusions without a source
+    //     behind them. What happens next is `[ingest].on_missing`: `forget`
+    //     (the default) removes the reference, the raw file and the ledger
+    //     row; `mark_stale` only moves the pages that cited it to `stale`.
+    let stale_pages = settle_missing(root, cfg, store, &changes, &mut warnings, &mut failures)?;
 
     let mut converted = 0;
     for change in pending.iter().take(budget) {
@@ -363,24 +314,6 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         warnings.extend(crate::worklist::import_legacy(root, cfg, store)?);
     }
     let work_items = store.work_items()?;
-    if !blocked {
-        // The handoff is written down only when it changes: refreshing the
-        // timestamp on every quiet round would keep an abandoned batch alive
-        // forever and never let it expire.
-        let items: Vec<lease::Item> = work_items
-            .iter()
-            .map(|item| lease::Item {
-                source_key: item.source_key.clone(),
-                raw_key: item.raw_key.clone(),
-                raw_hash: item.raw_hash.clone(),
-            })
-            .collect();
-        if items.is_empty() {
-            lease::clear(root)?;
-        } else if converted > 0 || lease.is_none() {
-            lease::write(root, &run_id, items)?;
-        }
-    }
     let ingested = work_items
         .iter()
         .map(|item| item.source_key.clone())
@@ -524,6 +457,9 @@ struct Settled {
     raw_dropped: bool,
     /// The source never converted, so only its ledger row went.
     ledger_only: bool,
+    /// Pages the author was editing while the round ran: untouched, retried next
+    /// round rather than overwritten.
+    busy: Vec<String>,
 }
 
 impl Settled {
@@ -535,7 +471,11 @@ impl Settled {
                 "vanished: '{key}' -> never converted; ledger row dropped"
             ));
         }
-        if self.stale.is_empty() && self.deleted.is_empty() && !self.raw_dropped {
+        if self.stale.is_empty()
+            && self.deleted.is_empty()
+            && self.busy.is_empty()
+            && !self.raw_dropped
+        {
             return None;
         }
         let mut detail: Vec<String> = Vec::new();
@@ -553,6 +493,13 @@ impl Settled {
                 "{} page(s) deleted with no source left: {}",
                 self.deleted.len(),
                 self.deleted.join(", ")
+            ));
+        }
+        if !self.busy.is_empty() {
+            detail.push(format!(
+                "{} page(s) were being edited and were left for the next round: {}",
+                self.busy.len(),
+                self.busy.join(", ")
             ));
         }
         Some(format!("vanished: '{key}' -> {}", detail.join("; ")))
@@ -605,7 +552,14 @@ fn settle_one(
             // a staleness nobody published, and an already-stale page is not
             // touched again.
             if front.status == page::Status::Stable {
-                page::set_status(&path, page::Status::Stale)?;
+                match page::set_status(&path, page::Status::Stale) {
+                    Ok(()) => {}
+                    Err(page::PageError::Changed { .. }) => {
+                        settled.busy.push(page_key);
+                        continue;
+                    }
+                    Err(err) => return Err(SyncError::Page(err)),
+                }
                 refresh_page_meta(root, store, &path, &page_key, front.updated)?;
                 settled.stale.push(page_key);
             }
@@ -614,7 +568,14 @@ fn settle_one(
 
         // Drop exactly this citation; every other source the page cites stays.
         let (removed, _) =
-            page::replace_sources(&path, std::slice::from_ref(&raw_key.to_string()), &[])?;
+            match page::replace_sources(&path, std::slice::from_ref(&raw_key.to_string()), &[]) {
+                Ok(counts) => counts,
+                Err(page::PageError::Changed { .. }) => {
+                    settled.busy.push(page_key);
+                    continue;
+                }
+                Err(err) => return Err(SyncError::Page(err)),
+            };
         if removed == 0 {
             continue;
         }
@@ -631,7 +592,14 @@ fn settle_one(
             continue;
         }
         if front.status == page::Status::Stable {
-            page::set_status(&path, page::Status::Stale)?;
+            match page::set_status(&path, page::Status::Stale) {
+                Ok(()) => {}
+                Err(page::PageError::Changed { .. }) => {
+                    settled.busy.push(page_key);
+                    continue;
+                }
+                Err(err) => return Err(SyncError::Page(err)),
+            }
         }
         refresh_page_meta(root, store, &path, &page_key, front.updated)?;
         settled.stale.push(page_key);

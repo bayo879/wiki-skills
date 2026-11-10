@@ -169,7 +169,6 @@ pub fn run(root: &Path, cfg: Option<&Config>, opts: &DoctorOptions) -> Vec<Check
             check_paths(root, effective),
             check_legacy(root),
             check_lock(root, effective),
-            check_lease(root),
         ],
         Some(DoctorOnly::Convert) => check_convert(root, effective, opts.key.as_deref()),
         Some(DoctorOnly::Session) => check_session(root, effective, opts.key.as_deref()),
@@ -181,7 +180,6 @@ pub fn run(root: &Path, cfg: Option<&Config>, opts: &DoctorOptions) -> Vec<Check
             check_fts5(),
             check_legacy(root),
             check_lock(root, effective),
-            check_lease(root),
             check_token(text.as_deref()),
             check_external_backend(effective),
         ],
@@ -211,21 +209,6 @@ fn repair(root: &Path) -> Vec<Check> {
                 return out;
             }
         }
-    }
-
-    match crate::lease::read(root) {
-        Ok(Some(open)) if open.expired() => {
-            let pending = open.items.len();
-            match crate::lease::clear(root) {
-                Ok(()) => out.push(Check::ok(
-                    "lease",
-                    format!("dropped an expired batch of {pending} source(s)"),
-                )),
-                Err(err) => out.push(Check::fail("lease", err.to_string())),
-            }
-        }
-        Ok(_) => {}
-        Err(err) => out.push(Check::fail("lease", err.to_string())),
     }
 
     let Ok(cfg) = Config::load(root) else {
@@ -650,34 +633,6 @@ fn check_lock(root: &Path, _cfg: &Config) -> Check {
             NAME,
             "the lock file is present but no command holds it (left over from an earlier run)",
         )
-    }
-}
-
-/// `lease`: the batch handed to the agent is either open or gone.
-///
-/// The lease is a file so a crashed batch cannot deadlock a repository: it
-/// expires on its own, and `doctor --fix` deletes an expired one instead of
-/// making a human reconstruct what `.wiki/work.lock` should have held.
-fn check_lease(root: &Path) -> Check {
-    const NAME: &str = "lease";
-    match crate::lease::read(root) {
-        Ok(None) => Check::ok(NAME, "no batch is open"),
-        Ok(Some(open)) if open.expired() => Check::warn(
-            NAME,
-            format!(
-                "the batch is expired with {} source(s) still pending; \"doctor --fix\" drops it and the next ingest starts a fresh one",
-                open.items.len()
-            ),
-        ),
-        Ok(Some(open)) => Check::ok(
-            NAME,
-            format!(
-                "{} source(s) are being written (started {})",
-                open.items.len(),
-                open.started_at
-            ),
-        ),
-        Err(err) => Check::fail(NAME, err.to_string()),
     }
 }
 

@@ -14,7 +14,6 @@ pub mod hash;
 pub mod ignore;
 pub mod init;
 pub mod layout;
-pub mod lease;
 pub mod ledger;
 pub mod lint;
 pub mod lock;

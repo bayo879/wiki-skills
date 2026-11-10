@@ -536,15 +536,8 @@ fn run_done(key: String, hash: String) -> ! {
                 WorkError::MissingRaw(_) => "E_NO_RAW",
                 WorkError::Store(_) => "E_DB",
                 WorkError::Hash(_) => "E_IO",
-                WorkError::NotLeased(_) => "E_WORK_LEASE",
-                WorkError::Lease(_) => "E_LEASE",
             };
-            let exit = if matches!(err, WorkError::NotLeased(_)) {
-                Exit::Busy
-            } else {
-                Exit::Error
-            };
-            report::fail(cmd, exit, code, &err.to_string())
+            report::fail(cmd, Exit::Error, code, &err.to_string())
         }
     }
 }

@@ -104,6 +104,9 @@ pub struct MoveReport {
     pub applied: Vec<AppliedMove>,
     /// The renames that were skipped to avoid overwriting something.
     pub collisions: Vec<Collision>,
+    /// Pages that were being edited while the round ran; they keep their old
+    /// citation until the next round, when the author is no longer writing.
+    pub busy: Vec<String>,
 }
 
 impl MoveReport {
@@ -132,11 +135,14 @@ pub fn apply(
             continue;
         };
         match migrate_one(root, cfg, store, from, &change.key)? {
-            Outcome::Migrated(pages) => report.applied.push(AppliedMove {
-                from: String::from(from),
-                to: change.key.clone(),
-                pages,
-            }),
+            Outcome::Migrated(pages, busy) => {
+                report.busy.extend(busy);
+                report.applied.push(AppliedMove {
+                    from: String::from(from),
+                    to: change.key.clone(),
+                    pages,
+                })
+            }
             Outcome::Collision(message) => report.collisions.push(Collision {
                 from: String::from(from),
                 to: change.key.clone(),
@@ -150,8 +156,9 @@ pub fn apply(
 
 /// What one rename did.
 enum Outcome {
-    /// The migration ran; the listed pages were rewritten.
-    Migrated(Vec<String>),
+    /// The migration ran; the listed pages were rewritten, and the second list
+    /// names pages that were being edited and keep their old citation.
+    Migrated(Vec<String>, Vec<String>),
     /// Something already occupies the destination; nothing was written.
     Collision(String),
 }
@@ -174,10 +181,10 @@ fn migrate_one(
 ) -> Result<Outcome> {
     // Already migrated (or renamed twice): the old key is gone, nothing to do.
     let Some(old_row) = store.get_source(from)? else {
-        return Ok(Outcome::Migrated(Vec::new()));
+        return Ok(Outcome::Migrated(Vec::new(), Vec::new()));
     };
     if from == to {
-        return Ok(Outcome::Migrated(Vec::new()));
+        return Ok(Outcome::Migrated(Vec::new(), Vec::new()));
     }
     if store.get_source(to)?.is_some() {
         return Ok(Outcome::Collision(format!(
@@ -193,9 +200,12 @@ fn migrate_one(
     // next round pairs the same two files and starts over. Later failures leave
     // a state the resume branches below recognise: a raw that already names the
     // new source is adopted, and an old ledger key still pairs with the file.
+    let mut busy_pages = Vec::new();
     let pages = match (raw_from.as_deref(), raw_to.as_deref()) {
         (Some(old_raw), Some(new_raw)) if old_raw != new_raw => {
-            rewrite_pages(root, cfg, store, old_raw, new_raw)?
+            let (rewritten, busy) = rewrite_pages(root, cfg, store, old_raw, new_raw)?;
+            busy_pages = busy;
+            rewritten
         }
         _ => Vec::new(),
     };
@@ -274,7 +284,7 @@ fn migrate_one(
     }
     Ledger::new(store).relocate_source(from, &new_row, relocation)?;
 
-    Ok(Outcome::Migrated(pages))
+    Ok(Outcome::Migrated(pages, busy_pages))
 }
 
 /// Whether `raw_path` already names `source_key` as its source.
@@ -381,8 +391,9 @@ fn rewrite_pages(
     store: &mut Store,
     old_raw: &str,
     new_raw: &str,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Vec<String>)> {
     let mut rewritten = Vec::new();
+    let mut busy = Vec::new();
     for path in page_files(root, cfg) {
         let (front, _) = match page::read(&path) {
             Ok(read) => read,
@@ -397,7 +408,17 @@ fn rewrite_pages(
         {
             continue;
         }
-        page::replace_sources(&path, &[String::from(old_raw)], &[String::from(new_raw)])?;
+        match page::replace_sources(&path, &[String::from(old_raw)], &[String::from(new_raw)]) {
+            Ok(_) => {}
+            Err(PageError::Changed { .. }) => {
+                // The author is editing this page right now. Rewriting it would
+                // erase that edit, so the citation keeps the old name until the
+                // next round; the rename itself still lands.
+                busy.push(paths::identity_key(root, &path)?);
+                continue;
+            }
+            Err(err) => return Err(MoveError::Page(err)),
+        }
         let key = paths::identity_key(root, &path)?;
         let updated = match store.get_page_meta(&key)? {
             Some(meta) => meta.updated,
@@ -411,7 +432,8 @@ fn rewrite_pages(
         rewritten.push(key);
     }
     rewritten.sort();
-    Ok(rewritten)
+    busy.sort();
+    Ok((rewritten, busy))
 }
 
 /// Every markdown page under the formal page tree.

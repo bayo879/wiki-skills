@@ -162,18 +162,19 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 判据只认页面自己的 `sources:`，不认账本的映射：页面可能引用一个账本已不认识的 raw，照样要清。`tests/sync.rs::forget_removes_the_page_the_raw_and_the_ledger_row`、`forget_keeps_a_page_that_still_has_another_source`、`a_failed_forget_keeps_the_ledger_row_for_the_next_round` 钉住三件事。
 页质量闸门 `lint::page_quality`（`L12` 页面不引用任何来源、`L13` 正文留着 `TODO`/`FIXME`/`待补`/`占位`，代码围栏内不算）既是 `lint` 的规则，也是 `sync` 对 `affected_pages` 复跑的那一份——直接写进轮次 warning，不等 `doctor`。两处共用同一个函数，不要各写一遍。
 
-### 2.22 一次只开放一批：工作租约不是第二把锁
+### 2.22 没有批次，也没有工作租约
 
-`ingest` 交付待办时把这一批写进 `.wiki/work.lock`（`src/lease.rs`：`source_key`、`raw_key`、`raw_hash`、`started_at`、`refreshed_at`、`pid`、`run_id`），`done` 把最后一条结清时删掉它。这是用户要的「有 agent 处理中时，不接受其他来源的修改」的落地，**不是** `src/lock.rs` 那把仓库锁：仓库锁只在单次命令期间存在，租约跨命令、跨轮次，回答的是「谁的活还没交」。
+`.wiki/work.lock` 与 `src/lease.rs` 已删除。删它的理由不是「少一个文件」，而是它服务的概念不存在了：知识页没有版本、没有发布之后，「一批来源」不再是一个可操作的单位，剩下的只是「当前有哪些待处理文件」。
 
-门禁只有三条，别再加：
-- 租约未过期且未结清时，`ingest` 只允许重转批内的源；新源一律不进本轮（warning `work lease: ...`），`moves` 与收口都不跑——批内页可能正在被写，改名和删页都得等。
-- `done` 只接受批内来源；批外来源是 `E_WORK_LEASE`、exit 4。已在待办里的来源重复确认仍是 exit 0、`completed: false`（2.11 的幂等优先于租约判断）。
-- 过期按**最后一次确认**算，不是按开批时间算：每结清一条 `done` 就把 `refreshed_at` 推到当下（`started_at` 保持不变，只做审计），所以一个边做边确认的长批次永远不会被自己的时长腰斩，而一个停手的批次在最后一次动作后 `LEASE_SECONDS`（2 小时）过期。解析失败也算过期。过期只是让 `doctor` 报 warn、让 `doctor --fix` 删文件，**不**自动解锁：`done` 仍能结清过期批。
+不许以任何形式把这道门禁加回来：
 
-租约是临时事实，不是知识，所以它只是 `.wiki/` 下的一个文件，不进 `LAYOUT`、不进账本、不做迁移。写入走 `render::write_atomic`；`items` 为空即删除文件，别留空壳让下一轮误判。`ingest` 每轮只在「本轮转换了新源」或「本来就没有租约」时重写整个文件，否则安静的一轮会把时间戳不断刷新，废弃批次永远不会过期——`tests/sync.rs::an_open_batch_blocks_new_sources_but_not_its_own` 钉住这一条；`done` 的那次重写是唯一的另一次，它必须重新落盘（心跳），`tests/cli_done.rs::acknowledging_one_source_heartbeats_the_batch` 与 `tests/lease.rs` 钉住「`started_at` 不动、`refreshed_at` 前移」。
+- `ingest` 每轮交付全部未完成来源；转换只受稳定窗口与 `[ingest].max_per_run` 约束，交付清单不截断。
+- `done` 只核对四道哈希（源文件当前摘要、`raws` 行、待办记录、命令行给的哈希），不检查来源属于哪一批；没有 `E_WORK_LEASE`，也没有对应退出码。
+- `moves::apply` 与消失源收口每轮都跑，不再因为「批内页可能正在被写」而推迟。
 
-不要把租约做成 `ingest --ignore-lease` 之类的开关：那等于把用户要求的门禁又还给人手动绕。
+当初的担忧是对的——改名或删页撞上正在写的页——但租约给的办法是错的：它假设「正在写」能从租约推断，而作者直接改 `.wiki/pages/` 下的文件，CLI 看不见，那条保护是假保证。正确的位置是被改的文件本身：`page::write_bytes` 在落盘前重读一次，与调用方读到的字节不一致就返回 `PageError::Changed`，调用方把它当成「这页正在被编辑」跳过并写进轮次 warning，下一轮再来（`src/moves.rs` 的改名引用、`src/sync.rs` 的收口都这么处理）。这是收窄竞态窗口，不是消除它——比对之后到 `rename` 之间仍有窗口；`src/page.rs` 的单元测试 `a_page_edited_after_it_was_read_is_not_rewritten` 钉住「读后被改则不写」。
+
+也不要引入 `ingest --ignore-lease` 之类的开关：那是把已经删掉的门禁又还给人手动绕。
 
 ### 2.23 改文档用会报错的工具，不用静默替换
 

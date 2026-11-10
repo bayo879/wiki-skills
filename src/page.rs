@@ -110,6 +110,15 @@ pub enum PageError {
         /// Page that lacks the field.
         path: PathBuf,
     },
+    /// The page changed after it was read, so rewriting it would erase that edit.
+    #[error(
+        "{} changed after it was read; left untouched for the next round",
+        path.display()
+    )]
+    Changed {
+        /// Page that was being edited while the round ran.
+        path: PathBuf,
+    },
     /// The frontmatter could not be understood; the line number locates it.
     #[error("bad frontmatter at line {line}: {message}")]
     BadFrontmatter {
@@ -124,7 +133,7 @@ impl PageError {
     /// Stable error code for the response envelope.
     pub fn code(&self) -> &'static str {
         match self {
-            PageError::Io { .. } => "E_IO",
+            PageError::Io { .. } | PageError::Changed { .. } => "E_IO",
             PageError::NoUpdated { .. } => "E_NO_UPDATED",
             PageError::BadFrontmatter { .. } => "E_BAD_FRONTMATTER",
         }
@@ -179,6 +188,7 @@ pub fn write_updated(p: &Path, d: NaiveDate) -> Result<()> {
     let value = d.format("%Y-%m-%d").to_string();
     write_bytes(
         p,
+        &bytes,
         splice(
             &bytes,
             start + value_start,
@@ -203,7 +213,9 @@ pub fn write_updated_lenient(p: &Path, d: NaiveDate) -> Result<()> {
     match find_field_line(&bytes, &block, UPDATED) {
         // Replace the whole line, not just the scalar: a malformed value is
         // exactly the case this variant exists for.
-        Some((start, end, _)) => write_bytes(p, splice(&bytes, start, end, stamp.as_bytes())),
+        Some((start, end, _)) => {
+            write_bytes(p, &bytes, splice(&bytes, start, end, stamp.as_bytes()))
+        }
         None => {
             let eol: &[u8] = if bytes[..block.content_start].ends_with(b"\r\n") {
                 b"\r\n"
@@ -215,6 +227,7 @@ pub fn write_updated_lenient(p: &Path, d: NaiveDate) -> Result<()> {
             inserted.extend_from_slice(eol);
             write_bytes(
                 p,
+                &bytes,
                 splice(&bytes, block.content_start, block.content_start, &inserted),
             )
         }
@@ -234,6 +247,7 @@ pub fn set_status(p: &Path, s: Status) -> Result<()> {
             let (value_start, value_end) = scalar_span(&bytes[start..end], STATUS.len(), line)?;
             write_bytes(
                 p,
+                &bytes,
                 splice(
                     &bytes,
                     start + value_start,
@@ -255,6 +269,7 @@ pub fn set_status(p: &Path, s: Status) -> Result<()> {
             inserted.extend_from_slice(eol);
             write_bytes(
                 p,
+                &bytes,
                 splice(&bytes, block.content_start, block.content_start, &inserted),
             )
         }
@@ -296,6 +311,7 @@ pub fn append_sources(p: &Path, items: &[String]) -> Result<usize> {
         }
         write_bytes(
             p,
+            &bytes,
             splice(&bytes, block.content_start, block.content_start, &inserted),
         )?;
         return Ok(items.len());
@@ -331,7 +347,7 @@ pub fn append_sources(p: &Path, items: &[String]) -> Result<usize> {
             inserted.extend_from_slice(quote_item(item).as_bytes());
             needs_comma = true;
         }
-        write_bytes(p, splice(&bytes, close, close, &inserted))?;
+        write_bytes(p, &bytes, splice(&bytes, close, close, &inserted))?;
         return Ok(items.len());
     }
 
@@ -350,7 +366,7 @@ pub fn append_sources(p: &Path, items: &[String]) -> Result<usize> {
             inserted.extend_from_slice(b"  - ");
             inserted.extend_from_slice(quote_item(item).as_bytes());
         }
-        write_bytes(p, splice(&bytes, colon + 1, end, &inserted))?;
+        write_bytes(p, &bytes, splice(&bytes, colon + 1, end, &inserted))?;
         return Ok(items.len());
     }
 
@@ -389,7 +405,7 @@ pub fn append_sources(p: &Path, items: &[String]) -> Result<usize> {
     for item in items {
         push_item(&mut inserted, &indent, item, eol);
     }
-    write_bytes(p, splice(&bytes, insert_at, insert_at, &inserted))?;
+    write_bytes(p, &bytes, splice(&bytes, insert_at, insert_at, &inserted))?;
     Ok(items.len())
 }
 
@@ -511,7 +527,11 @@ pub fn replace_sources(p: &Path, remove: &[String], add: &[String]) -> Result<(u
     for item in &items {
         push_item(&mut inserted, &indent, item, eol);
     }
-    write_bytes(p, splice(&bytes, region_start, region_end, &inserted))?;
+    write_bytes(
+        p,
+        &bytes,
+        splice(&bytes, region_start, region_end, &inserted),
+    )?;
     Ok((removed, added))
 }
 
@@ -558,8 +578,19 @@ fn read_bytes(p: &Path) -> Result<Vec<u8>> {
     })
 }
 
-/// Writes the whole page back, treating every OS error as [`PageError::Io`].
-fn write_bytes(p: &Path, bytes: Vec<u8>) -> Result<()> {
+/// Writes the whole page back, refusing when the file no longer holds the bytes
+/// the caller started from.
+///
+/// Pages are edited by hand while a round runs; rewriting from a stale read
+/// would erase whatever the author just typed. The comparison happens as close
+/// to the write as this module can get, which narrows the window to the copy
+/// itself rather than the whole scan.
+fn write_bytes(p: &Path, original: &[u8], bytes: Vec<u8>) -> Result<()> {
+    if read_bytes(p)? != original {
+        return Err(PageError::Changed {
+            path: p.to_path_buf(),
+        });
+    }
     std::fs::write(p, bytes).map_err(|source| PageError::Io {
         path: p.to_path_buf(),
         source,
@@ -1098,5 +1129,39 @@ fn bad(line: usize, message: impl Into<String>) -> PageError {
     PageError::BadFrontmatter {
         line,
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A page edited between the read and the write is not overwritten: the
+    /// bytes the caller saw are the only state the write is allowed to replace.
+    #[test]
+    fn a_page_edited_after_it_was_read_is_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.md");
+        let original = b"---\nid: p\ntitle: P\ntype: concept\nupdated: 2026-01-01\n---\nbody\n";
+        std::fs::write(&path, original).unwrap();
+
+        let seen = read_bytes(&path).unwrap();
+        std::fs::write(
+            &path,
+            b"---\nid: p\ntitle: Edited\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        .unwrap();
+
+        let err = write_bytes(&path, &seen, b"replacement".to_vec())
+            .expect_err("a stale write must be refused");
+        assert!(matches!(err, PageError::Changed { .. }), "{err}");
+        assert_eq!(err.code(), "E_IO");
+        assert!(
+            std::fs::read(&path)
+                .unwrap()
+                .windows(6)
+                .any(|w| w == b"Edited"),
+            "the author's edit survived"
+        );
     }
 }

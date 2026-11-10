@@ -38,7 +38,7 @@
 
 `done` 对照作者实际读取的 raw 哈希；漂移退出 1，保留待办。重复确认是成功无动作。它不验证正文，不发布或恢复页面。页面直接落盘立即生效，没有候选发布、自动内容版本或内置回退；也没有自动备份。CLI 锁不能保护外部作者写页，并发作者可能覆盖，需单一作者及写前重读。独立备份是否存在由用户负责。
 
-一轮只开放一批来源。`sync` 在把来源待办交给作者时写 `.wiki/work.lock`（每条记录 `source_key`、`raw_key`、`raw_hash`，外加交付时间与进程号），这批没关完之前 `ingest` 不再转换新来源、`done` 也不接受批外的来源（`E_WORK_LEASE`、exit 4）——作者正在改的页面不该突然多出一个来源，也不该被别的批次抢先确认。批内来源仍可重新转换（作者刷新自己手上的那份），但消失源的收口与改名迁移在这期间一律推迟。`done` 清掉最后一条后租约文件消失。每个 `done` 还是一次心跳：`refreshed_at` 推到当下而 `started_at` 不动，过期从最后一次确认算（`lease::LEASE_SECONDS` = 两小时），所以只有真正停手的批次才会过期，`doctor --fix` 直接删掉过期文件，避免一次中断的批次永久堵住仓库。写入边界不变：它仍是 `.wiki/` 里的运行时文件，不进 `layout::LAYOUT` 的目录表，和 `.wiki/lock` 同类。
+转换与确认之间没有批次门禁。`ingest` 每轮把全部未完成来源交给作者，`done` 不看在不在某一批里，只核对实际读取的 raw 哈希与当前源。曾经存在的 `.wiki/work.lock` 工作租约随「一次只开放一批」一起删除：它服务的是批次调度，而知识页没有版本与发布之后，「一批来源」不再是一个可操作的单位，剩下的只是「当前有哪些待处理文件」。`moves::apply` 与消失源收口因此每轮都跑，不再等某个批次关闭。`src/lock.rs` 的仓库锁仍在，只在单次命令期间存在，与这里无关。
 
 源文件消失是唯一由引擎自己决定的界面变化，策略在 `[ingest].on_missing`：`forget`（默认）把页面里那一条引用去掉（Stable 转 Stale），一条来源都不剩的页整页删除，再删 raw 文件与账本行（`sources`/`raws`/`work_items`/`source_facts` 一次事务）；`mark_stale` 只把引用它的 Stable 页转 Stale；`ignore` 什么都不做。收口顺序是「先页与 raw、后账本行」，任何一步失败只增加本轮 `failures` 并把账本行留给下一轮，所以可以重试；页面与 raw 的删除不可撤销。`sync` 对受影响页复跑 `lint::page_quality`（`L12` 无来源、`L13` 未完成标记），把结果写进轮次 warning，不等 `doctor`。
 
@@ -63,7 +63,6 @@
 | `src/lint.rs` | 十三条规则，由 doctor 的 `lint` 检查与 `--fix` 使用；`page_quality`（L12/L13）也给 `sync` 复用 |
 | `src/ignore.rs` | `.wiki/ignore` 的解析与增删；`ingest` 共用的唯一判定 |
 | `src/lock.rs` | 仓库锁（固定 inode + OS 文件锁，不按年龄回收） |
-| `src/lease.rs` | 工作租约：`.wiki/work.lock` 记录当前交付给作者的一批来源，`ingest` 只开一批，`done` 逐条关闭 |
 | `src/store.rs` | SQLite 账本、schema 迁移、FTS5；连接显式持有 5s busy_timeout |
 | `src/ledger.rs` | 账本唯一的写入口：登记转换、跟随改名、遗忘删除 |
 | `src/sync.rs` | 摄入一轮的执行体：`ingest` 调它跑 scan → convert → 来源待办交付，并收口消失的源（`on_missing`） |

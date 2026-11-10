@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 use chrono::Local;
 use llm_wiki::config::Config;
 use llm_wiki::store::Store;
-use llm_wiki::{convert, hash, init, lock, page, sync, worklist};
+use llm_wiki::{convert, hash, init, lock, page, sync};
 use tempfile::{tempdir, TempDir};
 
 /// Opens (and migrates) the ledger under `root`.
@@ -679,15 +679,7 @@ fn a_failed_forget_keeps_the_ledger_row_for_the_next_round() {
         store.get_source("a.md").unwrap().is_some(),
         "the ledger row is dropped last, so a failure leaves it for a retry"
     );
-    // The failed round still handed the source over, and an open batch freezes
-    // the write face: no settling until the batch is closed.
-    let open = llm_wiki::lease::read(d.path())
-        .unwrap()
-        .expect("a round that queues work opens a batch");
-    assert!(open.covers("a.md"));
-    llm_wiki::lease::clear(d.path()).unwrap();
-
-    // With the obstacle and the batch gone the next round finishes the job.
+    // With the obstacle gone the next round finishes the job.
     fs::remove_dir(&raw).unwrap();
     let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
     assert_eq!(report.failures, 0, "{:?}", report.warnings);
@@ -706,50 +698,4 @@ fn an_unknown_on_missing_value_fails_config_validation() {
     fs::write(&path, text.replace("\"forget\"", "\"explode\"")).unwrap();
     let err = Config::load(d.path()).expect_err("an unknown on_missing is a config error");
     assert_eq!(err.code(), "E_BAD_CONFIG");
-}
-
-#[test]
-fn an_open_batch_blocks_new_sources_but_not_its_own() {
-    let (d, cfg) = repo(0);
-    write(d.path(), "a.md", "# A\n\nalpha body\n");
-    let mut store = open(d.path());
-    sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-    assert!(
-        d.path().join(".wiki/work.lock").is_file(),
-        "a round that queued work opens a batch"
-    );
-    write(d.path(), "b.md", "# B\n\nbeta body\n");
-    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-    assert!(
-        report.warnings.iter().any(|w| w.contains("work lease")),
-        "{:?}",
-        report.warnings
-    );
-    assert_eq!(report.converted, 0, "a second batch must wait");
-    assert!(store.get_source("b.md").unwrap().is_none());
-    assert!(d.path().join(".wiki/work.lock").is_file());
-
-    // The batch's own source may be reconverted while it is open.
-    write(d.path(), "a.md", "# A\n\nrefreshed alpha body\n");
-    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-    assert_eq!(report.converted, 1, "{:?}", report.warnings);
-
-    // Closing the batch lets the next one through.
-    worklist::complete(
-        d.path(),
-        &cfg,
-        &mut store,
-        "a.md",
-        &raw_hash(d.path(), "a.md"),
-    )
-    .unwrap();
-    assert!(!d.path().join(".wiki/work.lock").exists());
-    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
-    assert_eq!(report.converted, 1, "{:?}", report.warnings);
-    assert!(store.get_source("b.md").unwrap().is_some());
-}
-
-fn raw_hash(root: &std::path::Path, key: &str) -> String {
-    let raw = root.join(".wiki/raw").join(key).with_extension("md");
-    hash::hash_file(&raw, true).unwrap()
 }
