@@ -325,9 +325,9 @@ fn migrate_steps_through_every_schema_version() {
     );
 }
 
-/// The twelve rules exist in two places that can drift apart: the doc comment
+/// The thirteen rules exist in two places that can drift apart: the doc comment
 /// in `src/lint.rs` (rule and severity) and `tests/lint.rs` (one `l{n}_` test
-/// per rule). This holds both against rule numbers 1..=11.
+/// per rule). This holds both against rule numbers 1..=13.
 #[test]
 fn every_lint_rule_has_a_test() {
     let lint = fs::read_to_string("src/lint.rs").expect("src/lint.rs is missing");
@@ -359,8 +359,8 @@ fn every_lint_rule_has_a_test() {
             .iter()
             .map(|(number, _)| *number)
             .collect::<Vec<_>>(),
-        (1..=11).collect::<Vec<u32>>(),
-        "src/lint.rs must declare L1..L11 once each, in order"
+        (1..=13).collect::<Vec<u32>>(),
+        "src/lint.rs must declare L1..L13 once each, in order"
     );
 
     let tests = fs::read_to_string("tests/lint.rs").expect("tests/lint.rs is missing");

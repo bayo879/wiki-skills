@@ -83,6 +83,24 @@ fn page_text(id: &str, typ: &str, body: &str) -> String {
     )
 }
 
+/// Makes `text` cite an existing raw file, so L6, L10, L11 and L12 stay quiet
+/// and a test can look at the one rule it is about.
+fn cited(f: &mut Fixture, text: String) -> String {
+    f.put_raw("shared.md", "共享的原始内容。\n");
+    f.db()
+        .upsert_raw(&RawRow {
+            key: String::from("shared.md"),
+            hash: String::from("blake3:shared"),
+            source_key: String::from("shared.pdf"),
+            converted_at: String::from("2026-10-27T00:00:00Z"),
+        })
+        .unwrap();
+    text.replace(
+        "status: stable",
+        "status: stable\nsources: [.wiki/raw/shared.md]",
+    )
+}
+
 fn rules(findings: &[Finding]) -> Vec<&'static str> {
     findings.iter().map(|f| f.rule).collect()
 }
@@ -185,8 +203,11 @@ fn l4_reports_a_non_canonical_status() {
 
 #[test]
 fn l5_reports_a_missing_updated_field() {
-    let f = Fixture::new();
-    let text = page_text("a", "concept", BODY).replace("updated: 2026-10-20\n", "");
+    let mut f = Fixture::new();
+    let text = cited(
+        &mut f,
+        page_text("a", "concept", BODY).replace("updated: 2026-10-20\n", ""),
+    );
     f.put_page("concept", "a", &text);
 
     let findings = f.lint();
@@ -197,9 +218,11 @@ fn l5_reports_a_missing_updated_field() {
 
 #[test]
 fn l5_reports_an_updated_that_is_not_a_date() {
-    let f = Fixture::new();
-    let text =
-        page_text("a", "concept", BODY).replace("updated: 2026-10-20", "updated: 2026/10/20");
+    let mut f = Fixture::new();
+    let text = cited(
+        &mut f,
+        page_text("a", "concept", BODY).replace("updated: 2026-10-20", "updated: 2026/10/20"),
+    );
     f.put_page("concept", "a", &text);
 
     let findings = f.lint();
@@ -367,6 +390,60 @@ fn l10_does_not_fire_at_three_pages() {
 }
 
 #[test]
+fn l12_reports_a_page_that_cites_nothing() {
+    let f = Fixture::new();
+    f.put_page("concept", "bare", &page_text("bare", "concept", BODY));
+
+    let findings = f.lint();
+    let l12 = only(&findings, "L12");
+    assert_eq!(l12.len(), 1, "{l12:?}");
+    assert_eq!(l12[0].level, Level::Warning);
+    assert_eq!(l12[0].page.as_deref(), Some(".wiki/pages/concept/bare.md"));
+}
+
+#[test]
+fn l12_accepts_a_page_with_a_cited_source() {
+    let mut f = Fixture::new();
+    f.put_raw("a.md", "原始内容。\n");
+    f.db()
+        .upsert_raw(&RawRow {
+            key: String::from("a.md"),
+            hash: String::from("blake3:x"),
+            source_key: String::from("a.pdf"),
+            converted_at: String::from("2026-10-27T00:00:00Z"),
+        })
+        .unwrap();
+    let text = page_text("sourced", "concept", BODY).replace(
+        "status: stable",
+        "status: stable\nsources: [.wiki/raw/a.md]",
+    );
+    f.put_page("concept", "sourced", &text);
+
+    assert!(only(&f.lint(), "L12").is_empty());
+}
+
+#[test]
+fn l13_reports_the_first_unfinished_marker_outside_a_fence() {
+    let f = Fixture::new();
+    let body = format!("{BODY}\n\nTODO: 补上第二段。\n\nFIXME: 这里也不对。");
+    f.put_page("concept", "half", &page_text("half", "concept", &body));
+
+    let findings = f.lint();
+    let l13 = only(&findings, "L13");
+    assert_eq!(l13.len(), 1, "one unfinished page is one finding: {l13:?}");
+    assert!(l13[0].msg.contains("TODO"), "{}", l13[0].msg);
+}
+
+#[test]
+fn l13_ignores_a_marker_inside_a_code_fence() {
+    let f = Fixture::new();
+    let body = format!("{BODY}\n\n```\n// TODO: upstream\n```\n");
+    f.put_page("concept", "quoted", &page_text("quoted", "concept", &body));
+
+    assert!(only(&f.lint(), "L13").is_empty());
+}
+
+#[test]
 fn l11_reports_an_unreferenced_asset() {
     let mut f = Fixture::new();
     f.db()
@@ -399,13 +476,18 @@ fn l11_reports_an_unreferenced_asset() {
 fn findings_are_sorted_by_level_then_rule_then_page() {
     let mut f = Fixture::new();
     // A warning from a missing date.
-    let text = page_text("c", "concept", BODY).replace("updated: 2026-10-20\n", "");
+    let text = cited(
+        &mut f,
+        page_text("c", "concept", BODY).replace("updated: 2026-10-20\n", ""),
+    );
     f.put_page("concept", "c", &text);
     // A warning from a short page.
-    f.put_page("concept", "a", &page_text("a", "concept", "短"));
+    let short = cited(&mut f, page_text("a", "concept", "短"));
+    f.put_page("concept", "a", &short);
     // An error from a dead link.
     let body = format!("{BODY} [[ghost]]");
-    f.put_page("concept", "b", &page_text("b", "concept", &body));
+    let linked = cited(&mut f, page_text("b", "concept", &body));
+    f.put_page("concept", "b", &linked);
     // An info from an unreferenced asset.
     f.db()
         .upsert_raw(&RawRow {
@@ -455,9 +537,14 @@ fn fails_is_strict_about_warnings_only() {
 #[test]
 fn fix_repairs_l5_and_lint_is_clean_afterwards() {
     let mut f = Fixture::new();
-    let missing = page_text("a", "concept", BODY).replace("updated: 2026-10-20\n", "");
-    let malformed =
-        page_text("b", "concept", BODY).replace("updated: 2026-10-20", "updated: 2026/10/20");
+    let missing = cited(
+        &mut f,
+        page_text("a", "concept", BODY).replace("updated: 2026-10-20\n", ""),
+    );
+    let malformed = cited(
+        &mut f,
+        page_text("b", "concept", BODY).replace("updated: 2026-10-20", "updated: 2026/10/20"),
+    );
     let a = f.put_page("concept", "a", &missing);
     let b = f.put_page("concept", "b", &malformed);
 
@@ -520,7 +607,7 @@ fn fix_rewrites_a_stale_index_without_touching_pages() {
 #[test]
 fn fix_leaves_judgement_calls_alone() {
     let mut f = Fixture::new();
-    let text = page_text("a", "concept", BODY).replace("title: a\n", "");
+    let text = cited(&mut f, page_text("a", "concept", BODY)).replace("title: a\n", "");
     f.put_page("concept", "a", &text);
     render::write_index(f.root(), &f.cfg).unwrap();
 

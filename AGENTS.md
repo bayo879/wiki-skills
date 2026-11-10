@@ -9,6 +9,7 @@
 
 - 移除候选暂存、`submit` 发布与工具内版本管理（含历史回退）；agent 整理后直接更新 `.wiki/pages/` 正式知识页，不再经过发布步骤。旧库遗留数据的处理方式另行确认，不自动删除。
 - 保留尚未整理成知识页的来源待办，供中断后继续。agent 直接写页后按来源确认完成；确认只核对读取时的 raw 哈希并清除对应待办，资料变化则保留待办，不发布页面、不生成版本、不自动追加来源。
+- 交互目标是「少交互、尽量无感」：能由规则直接判定的事就由工具自己处置，不要再让用户下一条命令。典型是源文件被删——raw、页面对它的引用、只靠它的孤儿页、账本行都应在下一轮摄入里自动收口，而不是等作者手工删页或跑额外命令。需要人判断的（正文冲突、结论取舍）仍然问。
 - [未决问题](docs/issues/) 是整个项目的长期问题收集目录，后续优化以此为准，不限于摄入流程。一个未完成的设计或待判别的问题一个文件，写清影响、证据、候选方案与验收条件；未确认方案不得视为定案，解决后删除文件，断点留在 git 与提交信息里。每个文件头标 `优先级：P1`–`P4`：P1 正在丢数据，或流程卡死且没有出口；P2 用户会真实踩到，已有明确修法或只差一个决定；P3 低频路径的边界与设计缺口；P4 测试、评估与文档澄清，不改变当前行为。被问「issues 情况」时按优先级分组回答，P1 在前；该级没有条目就直接说没有，不硬凑。
 
 ## 2. 特有问题与解决方案
@@ -111,7 +112,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 页面被读坏（frontmatter 解析失败）时，`refresh` 必须把该 key 的旧 FTS 记录连同 `page_meta` 一起删掉，否则搜索会一直返回已经不存在的旧正文；稍后页面修好，再靠摘要变化重建。`tests/query.rs` 里「变坏后清除」「修好后重新可搜」两条钉住。
 
-`sync::mark_stale` 改完状态也要刷新 `page_meta` 摘要，否则下一轮 `refresh` 会把刚标成 stale 的页面当成「未变化」继续用旧索引。`doctor --fix` 仍可整体重建索引，是最后的兜底。
+改完页面状态（`sync` 的收口与转 stale）也要刷新 `page_meta` 摘要，否则下一轮 `refresh` 会把刚标成 stale 的页面当成「未变化」继续用旧索引。`doctor --fix` 仍可整体重建索引，是最后的兜底。
 
 
 ### 2.16 目录布局只有一张表
@@ -153,6 +154,13 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 **「SQLite 默认 busy timeout 是 0」在这个栈上是错的。** rusqlite 0.31 每次 `Connection::open` 都调 `sqlite3_busy_timeout(db, 5000)`（`inner_connection.rs`，busy.rs 文档也写默认 5000ms 但「may change」）。`src/store.rs` 仍显式设 5s：值钉在我们这边，驱动换掉或改默认时行为不变。持锁超过 5s 仍返回 `DatabaseBusy`，那是真实的长时间占用，不是配置缺失。`tests/store.rs::a_second_writer_waits_for_the_lock_instead_of_failing` 钉住「第二个写者会等」。
 
 `doctor --fix` 不取仓库锁：它本身要检查锁（`src/doctor.rs` 的 `check_lock`），持锁会把自己的检查变成 Warn。与 `ingest` 并发时两边各写派生文件，但都用原子替换，不会留下半个文件。
+
+### 2.21 消失的源自动收口，删页是不可撤销的那一步
+
+`[ingest].on_missing` 有三个值，默认 `forget`：`forget` 去掉页面里那一条引用（Stable 转 Stale）、一条来源都不剩的页整页删除、删 raw 文件、删账本行（`sources`/`raws`/`work_items`/`source_facts` 同一次事务）；`mark_stale` 只把引用它的 Stable 页转 Stale；`ignore` 直接返回空。
+顺序是「先页与 raw、后账本行」，所以任一步失败只是本轮多一条 `failures` 与一条 `vanished: ... could not be settled` warning，账本行留着下一轮重试。**删页与删 raw 不可撤销**，这是 `mark_stale` 仍然存在的唯一理由——不要给「页被删了怎么恢复」发明工具内退路（2.9 已说明没有）。
+判据只认页面自己的 `sources:`，不认账本的映射：页面可能引用一个账本已不认识的 raw，照样要清。`tests/sync.rs::forget_removes_the_page_the_raw_and_the_ledger_row`、`forget_keeps_a_page_that_still_has_another_source`、`a_failed_forget_keeps_the_ledger_row_for_the_next_round` 钉住三件事。
+页质量闸门 `lint::page_quality`（`L12` 页面不引用任何来源、`L13` 正文留着 `TODO`/`FIXME`/`待补`/`占位`，代码围栏内不算）既是 `lint` 的规则，也是 `sync` 对 `affected_pages` 复跑的那一份——直接写进轮次 warning，不等 `doctor`。两处共用同一个函数，不要各写一遍。
 
 ## 3. 提交前自查
 

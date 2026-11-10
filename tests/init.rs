@@ -169,7 +169,7 @@ fn init_template_loads_and_validates() {
     assert_eq!(cfg.ingest.settle_seconds, 300);
     assert_eq!(cfg.ingest.read_retries, 3);
     assert_eq!(cfg.ingest.lag_warn_rounds, 3);
-    assert_eq!(cfg.ingest.on_missing, "mark_stale");
+    assert_eq!(cfg.ingest.on_missing, "forget");
 }
 
 #[test]

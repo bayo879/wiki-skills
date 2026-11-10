@@ -23,10 +23,12 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::SystemTime;
 
-use chrono::Local;
+use chrono::{Local, NaiveDate};
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::ledger::Ledger;
+use crate::lint;
 use crate::page;
 use crate::scan::{self, ChangeKind, Layer};
 use crate::store::{PageMetaRow, Store};
@@ -269,10 +271,10 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     }
 
     // 4b. A source that disappeared leaves conclusions without a source behind
-    //     them. `on_missing = "mark_stale"` marks the published pages that cited
-    //     it stale; drafts are left alone, because marking one stale would claim
-    //     a staleness its reader never saw.
-    let stale_pages = stale_pages_for_missing(root, cfg, store, &changes)?;
+    //     them. What happens next is `[ingest].on_missing`: `forget` (the
+    //     default) removes the reference, the raw file and the ledger row;
+    //     `mark_stale` only moves the pages that cited it to `stale`.
+    let stale_pages = settle_missing(root, cfg, store, &changes, &mut warnings, &mut failures)?;
 
     let mut converted = 0;
     for change in pending.iter().take(budget) {
@@ -330,6 +332,20 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     }
     affected_pages.sort();
 
+    // 5b. A page the round just handed to an agent is checked before the next
+    //     round trusts it. Only L12/L13 — the two findings that mean "this page
+    //     is not finished" — and only for the pages this round touched, so a
+    //     quiet round stays quiet and `lint` keeps owning the full contract.
+    for key in &affected_pages {
+        let path = paths::join_key(root, key);
+        let Ok((front, body)) = page::read(&path) else {
+            continue;
+        };
+        for finding in lint::page_quality(key, &front, &body) {
+            warnings.push(format!("page: '{key}': {}", finding.msg));
+        }
+    }
+
     // 6. The index always reflects the raw layer, even on a quiet round.
     render::write_index(root, cfg)?;
 
@@ -353,44 +369,146 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     Ok(report)
 }
 
-/// The published pages that must go stale because a source they cite vanished.
+/// Settles the sources that vanished from disk, and returns the pages that went
+/// stale because of it.
 ///
-/// The page's own `sources:` list is the truth here, not the ledger's
-/// mapping: nothing in the engine writes that table after `init`, so a round
-/// that trusted it would mark nothing. A `draft` is left alone — marking it
-/// stale would claim a staleness its reader never saw — and a page already
-/// `stale` is not touched again, so a long-gone source rewrites nothing after
-/// the first round. The rewritten page refreshes its `page_meta` digest with the
-/// old `updated` date: only the status line moved, so the page is not re-dated
-/// and lint L9 cannot read this as undated drift.
-fn stale_pages_for_missing(
+/// `[ingest].on_missing` picks the policy, per source:
+///
+/// - `mark_stale` moves the pages that cited the source to `stale` and leaves
+///   every other byte alone. It is the conservative setting: nothing but a
+///   status line changes, which suits a repository that treats `.wiki/` as
+///   precious.
+/// - `forget` (the default) settles the ledger instead of leaving a dangling
+///   reference forever. Each citing page drops that one entry from `sources`; a
+///   page left with no source at all is deleted; the raw file and the ledger row
+///   (with its work item and cached facts) go too.
+/// - `ignore` does nothing at all.
+///
+/// Forgetting is retryable by construction: the pages and the raw are cleaned
+/// first and the ledger row is dropped last, so a failure half way leaves the
+/// source in the ledger and the next round runs the same steps. Deleting a page
+/// is the only irreversible step — that is why `mark_stale` still exists.
+///
+/// The page's own `sources:` list is the truth here, not the ledger's mapping: a
+/// page may cite a raw the ledger no longer has, and it must still be cleaned.
+fn settle_missing(
     root: &Path,
     cfg: &Config,
     store: &mut Store,
     changes: &[scan::Change],
+    warnings: &mut Vec<String>,
+    failures: &mut usize,
 ) -> Result<Vec<String>> {
-    if cfg.ingest.on_missing != "mark_stale" {
+    if cfg.ingest.on_missing == "ignore" {
         return Ok(Vec::new());
     }
-    let mut vanished: Vec<String> = Vec::new();
+
+    let mut stale: Vec<String> = Vec::new();
     for change in changes {
         if change.kind != ChangeKind::Missing || change.layer != Layer::Source {
             continue;
         }
-        // A source that never converted left no raw file, so no page can cite it.
-        let Some(row) = store.get_source(&change.key)? else {
+        let key = change.key.clone();
+        // A source the ledger already forgot cannot vanish a second time.
+        let Some(row) = store.get_source(&key)? else {
             continue;
         };
-        if row.raw_key.is_none() {
-            continue;
+        match settle_one(root, cfg, store, &key, row.raw_key.as_deref()) {
+            Ok(settled) => {
+                stale.extend(settled.stale.iter().cloned());
+                if let Some(line) = settled.describe(&key) {
+                    warnings.push(line);
+                }
+            }
+            Err(err) => {
+                // One source that cannot be settled is a finding, not the end of
+                // the round; the ledger row stays, so the next round retries.
+                *failures += 1;
+                warnings.push(format!(
+                    "vanished: '{key}' could not be settled ({}) {err}",
+                    err.code()
+                ));
+            }
         }
-        vanished.push(convert::raw_key_for(&change.key));
     }
-    if vanished.is_empty() {
-        return Ok(Vec::new());
-    }
+    stale.sort();
+    stale.dedup();
+    Ok(stale)
+}
 
-    let mut stale = Vec::new();
+/// What settling one vanished source did.
+#[derive(Debug, Default)]
+struct Settled {
+    /// Pages that lost the citation and kept at least one other source.
+    stale: Vec<String>,
+    /// Pages deleted because the vanished source was their last one.
+    deleted: Vec<String>,
+    /// Pending work items dropped together with the source.
+    work_items: usize,
+    /// Whether a raw file was removed.
+    raw_dropped: bool,
+    /// The source never converted, so only its ledger row went.
+    ledger_only: bool,
+}
+
+impl Settled {
+    /// One line for the round's warnings, or `None` when the conservative
+    /// policy ran and the round already reports the stale pages structurally.
+    fn describe(&self, key: &str) -> Option<String> {
+        if self.ledger_only {
+            return Some(format!(
+                "vanished: '{key}' -> never converted; ledger row dropped"
+            ));
+        }
+        if self.stale.is_empty() && self.deleted.is_empty() && !self.raw_dropped {
+            return None;
+        }
+        let mut detail: Vec<String> = Vec::new();
+        if self.raw_dropped {
+            detail.push(String::from("raw dropped"));
+        }
+        if self.work_items > 0 {
+            detail.push(format!("{} work item(s) dropped", self.work_items));
+        }
+        if !self.stale.is_empty() {
+            detail.push(format!("{} page(s) lost the citation", self.stale.len()));
+        }
+        if !self.deleted.is_empty() {
+            detail.push(format!(
+                "{} page(s) deleted with no source left: {}",
+                self.deleted.len(),
+                self.deleted.join(", ")
+            ));
+        }
+        Some(format!("vanished: '{key}' -> {}", detail.join("; ")))
+    }
+}
+
+/// Applies `on_missing` to one vanished source.
+fn settle_one(
+    root: &Path,
+    cfg: &Config,
+    store: &mut Store,
+    key: &str,
+    raw_key: Option<&str>,
+) -> Result<Settled> {
+    let forget = cfg.ingest.on_missing == "forget";
+    let mut settled = Settled::default();
+
+    // A source that never converted left no raw file, so no page can cite it;
+    // there is nothing to clean but the ledger row itself.
+    let Some(raw_key) = raw_key else {
+        if forget {
+            Ledger::new(store).forget_source(key, None)?;
+            settled.ledger_only = true;
+        }
+        return Ok(settled);
+    };
+    // `sources.raw_key` is the repository path (`.wiki/raw/a.md`); the `raws`
+    // table and the page's citation key are `raw/`-relative (`a.md`).
+    let raw_rel =
+        source_refs::source_key(raw_key, &cfg.paths.raw).unwrap_or_else(|| raw_key.to_string());
+
     for path in moves::page_files(root, cfg) {
         let (front, _) = match page::read(&path) {
             Ok(read) => read,
@@ -398,29 +516,95 @@ fn stale_pages_for_missing(
             Err(page::PageError::BadFrontmatter { .. }) => continue,
             Err(err) => return Err(SyncError::Page(err)),
         };
-        if front.status != page::Status::Stable {
+        if !source_refs::source_keys(&front.sources, &cfg.paths.raw)
+            .iter()
+            .any(|cited| cited == &raw_rel)
+        {
             continue;
         }
-        let cited = source_refs::source_keys(&front.sources, &cfg.paths.raw);
-        if !cited.iter().any(|key| vanished.contains(key)) {
+        let page_key = paths::identity_key(root, &path)?;
+
+        if !forget {
+            // Conservative: only the status line moves, and only for a page the
+            // reader has already seen as `stable`. A draft is not promoted into
+            // a staleness nobody published, and an already-stale page is not
+            // touched again.
+            if front.status == page::Status::Stable {
+                page::set_status(&path, page::Status::Stale)?;
+                refresh_page_meta(root, store, &path, &page_key, front.updated)?;
+                settled.stale.push(page_key);
+            }
             continue;
         }
-        page::set_status(&path, page::Status::Stale)?;
-        let key = paths::identity_key(root, &path)?;
-        let updated = match store.get_page_meta(&key)? {
-            Some(meta) => meta.updated,
-            None => front.updated.to_string(),
-        };
-        store.upsert_page_meta(&PageMetaRow {
-            page_key: key.clone(),
-            hash: hash::hash_file(&path, true)?,
-            updated,
-        })?;
-        stale.push(key);
+
+        // Drop exactly this citation; every other source the page cites stays.
+        let (removed, _) =
+            page::replace_sources(&path, std::slice::from_ref(&raw_key.to_string()), &[])?;
+        if removed == 0 {
+            continue;
+        }
+        let (front, _) = page::read(&path)?;
+        if front.sources.is_empty() {
+            // The page stood on this one source. With the source gone it has
+            // nothing behind it, and an orphan left in place would keep being
+            // reported by L6 and `orphan_pages` forever.
+            fs::remove_file(&path).map_err(|source| SyncError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            settled.deleted.push(page_key);
+            continue;
+        }
+        if front.status == page::Status::Stable {
+            page::set_status(&path, page::Status::Stale)?;
+        }
+        refresh_page_meta(root, store, &path, &page_key, front.updated)?;
+        settled.stale.push(page_key);
     }
-    stale.sort();
-    stale.dedup();
-    Ok(stale)
+
+    if forget {
+        settled.work_items = store
+            .work_items()?
+            .iter()
+            .filter(|item| item.source_key == key)
+            .count();
+        let raw_path = paths::join_key(root, raw_key);
+        match fs::remove_file(&raw_path) {
+            Ok(()) => settled.raw_dropped = true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(SyncError::Io {
+                    path: raw_path,
+                    source,
+                })
+            }
+        }
+        Ledger::new(store).forget_source(key, Some(&raw_rel))?;
+    }
+    Ok(settled)
+}
+
+/// Keeps the index's change detection in step with a page whose frontmatter the
+/// round just rewrote: the digest moves, the `updated` date does not, so L9
+/// cannot read a status change as undated drift.
+fn refresh_page_meta(
+    root: &Path,
+    store: &mut Store,
+    path: &Path,
+    page_key: &str,
+    updated: NaiveDate,
+) -> Result<()> {
+    let _ = root;
+    let updated = match store.get_page_meta(page_key)? {
+        Some(meta) => meta.updated,
+        None => updated.to_string(),
+    };
+    store.upsert_page_meta(&PageMetaRow {
+        page_key: page_key.to_owned(),
+        hash: hash::hash_file(path, true)?,
+        updated,
+    })?;
+    Ok(())
 }
 
 /// Whether `path` still hashes to the digest `scan` classified.

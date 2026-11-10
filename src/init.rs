@@ -146,7 +146,11 @@ max_per_run         = 20
 settle_seconds      = 300
 read_retries        = 3
 lag_warn_rounds     = 3
-on_missing          = "mark_stale"
+# What a round does with a source somebody deleted. "forget" drops the page's
+# reference to it, the raw file, its ledger row and the pending work item, and
+# deletes a page left with no source at all; "mark_stale" only marks those pages
+# stale; "ignore" leaves everything alone.
+on_missing          = "forget"
 
 [audit]
 min_page_chars = 200
@@ -210,5 +214,8 @@ const SCHEMA_MD: &str = r#"# Page schema
 - `stale`：已过期。源发生变更、源缺失或结论被新源推翻，等待重新审阅；
   保留页面和源引用，不自动改写结论，也不自动删除。
 
-状态由作者维护；CLI 仅在已配置的来源缺失处理时标记 `stale`，不替作者判断结论是否可信。
+状态由作者维护，CLI 不替作者判断结论是否可信。唯一例外是来源文件消失：
+`[ingest].on_missing = "forget"`（默认）时，引用该来源的页会去掉这一条 `sources` 并转 `stale`；
+如果它一条来源都不剩，整页会被删掉——没有资料支撑的结论留着只会误导下一位读者。
+`"mark_stale"` 只转 `stale`，`"ignore"` 什么都不做，两者都留给作者收拾。
 "#;

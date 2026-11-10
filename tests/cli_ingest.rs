@@ -228,3 +228,31 @@ fn an_oversize_source_is_named_in_the_warnings_of_every_round() {
         "human output must show the skipped file:\n{text}"
     );
 }
+
+#[test]
+fn a_round_names_the_page_it_handed_over_that_is_still_unfinished() {
+    let dir = repo();
+    write_source(&dir, "a.md", "# A\n\n订单超时后重试三次。\n");
+    settle(&dir, "a.md");
+    let (code, _body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0);
+
+    let page = dir.path().join(".wiki/pages/concept/alpha.md");
+    fs::create_dir_all(page.parent().unwrap()).unwrap();
+    fs::write(
+        &page,
+        "---\nid: alpha\ntitle: alpha\nstatus: draft\nupdated: 2026-11-10\nsources: [.wiki/raw/a.md]\n---\n\nTODO: 补上重试次数的出处。\n",
+    )
+    .unwrap();
+
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0, "{body}");
+    let warnings = body["data"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| {
+            let text = warning.as_str().unwrap_or_default();
+            text.contains(".wiki/pages/concept/alpha.md") && text.contains("unfinished marker")
+        }),
+        "an unfinished page is named in the round that handed it over: {body}"
+    );
+}

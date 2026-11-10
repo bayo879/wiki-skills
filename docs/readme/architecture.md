@@ -38,6 +38,8 @@
 
 `done` 对照作者实际读取的 raw 哈希；漂移退出 1，保留待办。重复确认是成功无动作。它不验证正文，不发布或恢复页面。页面直接落盘立即生效，没有候选发布、自动内容版本或内置回退；也没有自动备份。CLI 锁不能保护外部作者写页，并发作者可能覆盖，需单一作者及写前重读。独立备份是否存在由用户负责。
 
+源文件消失是唯一由引擎自己决定的界面变化，策略在 `[ingest].on_missing`：`forget`（默认）把页面里那一条引用去掉（Stable 转 Stale），一条来源都不剩的页整页删除，再删 raw 文件与账本行（`sources`/`raws`/`work_items`/`source_facts` 一次事务）；`mark_stale` 只把引用它的 Stable 页转 Stale；`ignore` 什么都不做。收口顺序是「先页与 raw、后账本行」，任何一步失败只增加本轮 `failures` 并把账本行留给下一轮，所以可以重试；页面与 raw 的删除不可撤销。`sync` 对受影响页复跑 `lint::page_quality`（`L12` 无来源、`L13` 未完成标记），把结果写进轮次 warning，不等 `doctor`。
+
 `doctor` 检查配置、账本、布局、锁、页面及解析后端；修复只处理机械问题。`query` 每次增量刷新正式页索引，`--graph` 读链接图；`--no-archive` 排除配置的会话页面前缀。旧库暂存、版本与对象不删不发，可解析的旧待办只导入来源线索，损坏项显式警告。
 
 ## 模块
@@ -59,13 +61,13 @@
 | `src/journal.rs` | 旧决策日志 `.wiki/journal.jsonl`（只读保留，当前 CLI 不再追加） |
 | `src/ingest.rs` | 旧库兼容实现，当前 CLI 不调用 |
 | `src/staging.rs` | 旧暂存库兼容，当前 CLI 不发布 |
-| `src/lint.rs` | 十一条规则，由 doctor 的 `lint` 检查与 `--fix` 使用 |
+| `src/lint.rs` | 十三条规则，由 doctor 的 `lint` 检查与 `--fix` 使用；`page_quality`（L12/L13）也给 `sync` 复用 |
 | `src/version.rs` | 旧版本库兼容，CLI 无管理入口 |
 | `src/ignore.rs` | `.wiki/ignore` 的解析与增删；`ingest` 共用的唯一判定 |
 | `src/lock.rs` | 仓库锁（固定 inode + OS 文件锁，不按年龄回收） |
 | `src/store.rs` | SQLite 账本、schema 迁移、FTS5；连接显式持有 5s busy_timeout |
 | `src/ledger.rs` | 账本唯一的写入口：登记转换、跟随改名、遗忘删除 |
-| `src/sync.rs` | 摄入一轮的执行体：`ingest` 调它跑 scan → convert → 来源待办交付 |
+| `src/sync.rs` | 摄入一轮的执行体：`ingest` 调它跑 scan → convert → 来源待办交付，并收口消失的源（`on_missing`） |
 | `src/query.rs` | FTS5 索引与检索 |
 | `src/graph.rs` | `[[wikilink]]` 结构：出入度、边、孤立页、断链（`query --graph`） |
 | `src/doctor.rs` | 十项健康检查、`--fix` 修复、`--only` 单跑 |

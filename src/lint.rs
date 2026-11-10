@@ -19,6 +19,9 @@
 //! - `L9` warning: the body changed but `updated` did not.
 //! - `L10` info: one raw file is cited by more than three pages.
 //! - `L11` info: an asset raw file is cited by no page.
+//! - `L12` warning: a page cites no source at all.
+//! - `L13` warning: the body still carries an unfinished marker (`TODO`,
+//!   `FIXME`, `待补`, `占位`).
 //!
 //! Two of the rules are easy to get wrong, so they are called out here:
 //!
@@ -180,6 +183,9 @@ pub fn lint(root: &Path, cfg: &Config, store: &Store) -> Result<Vec<Finding>> {
     check_duplicate_ids(&pages, &mut found);
     check_missing_sources(root, cfg, &pages, &mut found);
     check_short_pages(cfg, &pages, &mut found);
+    for page in &pages {
+        found.extend(page_quality(&page.key, &page.front, &page.body));
+    }
     check_unledgered_raws(root, cfg, store, &mut found)?;
 
     let cited = cited_raws(cfg, &pages);
@@ -456,6 +462,62 @@ fn check_missing_sources(root: &Path, cfg: &Config, pages: &[PageInfo], found: &
             }
         }
     }
+}
+
+/// `L12` and `L13` for one page: it cites nothing, or it is still unfinished.
+///
+/// Both are warnings, not errors: a draft that an agent has not finished writing
+/// yet is a normal state of the tree, but a *published* page with nothing behind
+/// it is what this rule exists to catch. `sync` calls the same function over the
+/// pages it just handed to an agent, so the round warns without waiting for
+/// somebody to run `lint`.
+pub fn page_quality(key: &str, front: &page::FrontMatter, body: &str) -> Vec<Finding> {
+    let mut found = Vec::new();
+    if front.sources.is_empty() {
+        found.push(Finding::new(
+            "L12",
+            Level::Warning,
+            Some(key.to_owned()),
+            String::from("cites no source; a conclusion with nothing behind it cannot be checked"),
+        ));
+    }
+    if let Some(marker) = first_unfinished_marker(body) {
+        found.push(Finding::new(
+            "L13",
+            Level::Warning,
+            Some(key.to_owned()),
+            format!("unfinished marker `{marker}` left in the body"),
+        ));
+    }
+    found
+}
+
+/// Markers an author leaves behind on purpose while a page is half-written.
+const UNFINISHED_MARKERS: [&str; 4] = ["TODO", "FIXME", "待补", "占位"];
+
+/// The first unfinished marker in `body` outside a fenced block.
+///
+/// Fenced blocks are skipped because a page may legitimately quote code that
+/// contains `TODO`. One marker is enough to report a page: five of them are one
+/// unfinished page, not five findings.
+fn first_unfinished_marker(body: &str) -> Option<&'static str> {
+    let mut in_fence = false;
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if let Some(marker) = UNFINISHED_MARKERS
+            .iter()
+            .find(|marker| line.contains(*marker))
+        {
+            return Some(marker);
+        }
+    }
+    None
 }
 
 /// `L8`: the body must reach `[audit].min_page_chars` characters.

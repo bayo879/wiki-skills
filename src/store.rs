@@ -603,10 +603,19 @@ impl Store {
         Ok(())
     }
 
-    /// Removes the source `key`. Deleting an unknown key is not an error.
+    /// Removes everything the ledger knows about the source `key`: its row, the
+    /// pending work item it left behind, and the cached file facts. Deleting an
+    /// unknown key is not an error.
+    ///
+    /// The three rows are one fact about one source, so they go together: a
+    /// source forgotten while its work item stayed behind would resurrect a
+    /// pending task for a file that no longer exists.
     pub fn delete_source(&mut self, key: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM sources WHERE key = ?1", [key])?;
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM sources WHERE key = ?1", [key])?;
+        tx.execute("DELETE FROM work_items WHERE source_key = ?1", [key])?;
+        tx.execute("DELETE FROM source_facts WHERE key = ?1", [key])?;
+        tx.commit()?;
         Ok(())
     }
 

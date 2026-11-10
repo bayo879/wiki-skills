@@ -120,10 +120,10 @@ impl Config {
 
     fn validate_on_missing(&self) -> Result<()> {
         match self.ingest.on_missing.as_str() {
-            "mark_stale" | "ignore" => Ok(()),
+            "forget" | "mark_stale" | "ignore" => Ok(()),
             other => Err(ConfigError::Bad {
                 message: format!(
-                    "sync.on_missing must be \"mark_stale\" or \"ignore\", not {other:?}"
+                    "ingest.on_missing must be \"forget\", \"mark_stale\" or \"ignore\", not {other:?}"
                 ),
             }),
         }
@@ -405,7 +405,9 @@ pub struct IngestCfg {
     pub read_retries: u32,
     /// Rounds a source may lag before the audit reports it.
     pub lag_warn_rounds: u32,
-    /// What a round does with a source that disappeared from disk.
+    /// What a round does with a source that disappeared from disk: `forget`
+    /// drops the pages, the raw file and the ledger row; `mark_stale` only moves
+    /// the citing pages to `stale`; `ignore` leaves everything alone.
     pub on_missing: String,
 }
 
@@ -420,7 +422,7 @@ impl Default for IngestCfg {
             settle_seconds: 300,
             read_retries: 3,
             lag_warn_rounds: 3,
-            on_missing: String::from("mark_stale"),
+            on_missing: String::from("forget"),
         }
     }
 }

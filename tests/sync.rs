@@ -473,7 +473,8 @@ fn audit_text(root: &Path) -> String {
 
 #[test]
 fn a_missing_source_turns_its_stable_pages_stale_and_names_them_in_the_audit() {
-    let (d, cfg) = repo(0);
+    let (d, mut cfg) = repo(0);
+    cfg.ingest.on_missing = String::from("mark_stale");
     write(d.path(), "a.md", "# A\n\nalpha body\n");
     let mut store = open(d.path());
     convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();
@@ -562,11 +563,140 @@ fn on_missing_ignore_leaves_the_pages_alone() {
 }
 
 #[test]
+fn forget_removes_the_page_the_raw_and_the_ledger_row() {
+    let (d, cfg) = repo(0);
+    assert_eq!(
+        cfg.ingest.on_missing, "forget",
+        "the default settles the ledger instead of leaving a dangling reference"
+    );
+    write(d.path(), "a.md", "# A\n\nalpha body\n");
+    let mut store = open(d.path());
+    convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();
+    let item = store.work_items().unwrap();
+    assert_eq!(item.len(), 1, "the conversion enqueued the source");
+    write_page(
+        d.path(),
+        ".wiki/pages/concept/alpha.md",
+        "stable",
+        &[".wiki/raw/a.md"],
+    );
+    fs::remove_file(d.path().join("a.md")).unwrap();
+
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+
+    assert!(
+        !d.path().join(".wiki/pages/concept/alpha.md").exists(),
+        "a page that stood on the only source it had is not left as an orphan"
+    );
+    assert!(
+        !d.path().join(".wiki/raw/a.md").exists(),
+        "the raw file follows the source"
+    );
+    assert!(
+        store.get_source("a.md").unwrap().is_none(),
+        "the ledger forgot the source"
+    );
+    assert!(store.get_raw("a.md").unwrap().is_none(), "and its raw row");
+    assert!(
+        store.work_items().unwrap().is_empty(),
+        "and the pending work item"
+    );
+    assert!(
+        report.stale_pages.is_empty(),
+        "a deleted page is not a stale page"
+    );
+    assert_eq!(report.failures, 0, "{:?}", report.warnings);
+    let warning = report
+        .warnings
+        .iter()
+        .find(|warning| warning.starts_with("vanished: 'a.md'"))
+        .unwrap_or_else(|| panic!("the round names the vanished source: {:?}", report.warnings));
+    assert!(warning.contains("raw dropped"), "{warning}");
+    assert!(warning.contains("1 page(s) deleted"), "{warning}");
+    assert!(warning.contains("work item"), "{warning}");
+}
+
+#[test]
+fn forget_keeps_a_page_that_still_has_another_source() {
+    let (d, cfg) = repo(0);
+    write(d.path(), "a.md", "# A\n\nalpha body\n");
+    write(d.path(), "b.md", "# B\n\nbeta body\n");
+    let mut store = open(d.path());
+    for key in ["a.md", "b.md"] {
+        convert::convert_one(d.path(), &cfg, &mut store, key).unwrap();
+    }
+    write_page(
+        d.path(),
+        ".wiki/pages/concept/both.md",
+        "stable",
+        &[".wiki/raw/a.md", ".wiki/raw/b.md"],
+    );
+    fs::remove_file(d.path().join("a.md")).unwrap();
+
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+
+    let path = d.path().join(".wiki/pages/concept/both.md");
+    let (front, _) = page::read(&path).expect("the page keeps the source it still has");
+    assert_eq!(front.sources, vec![String::from(".wiki/raw/b.md")]);
+    assert_eq!(
+        front.status,
+        page::Status::Stale,
+        "one leg of the conclusion is gone, so it needs another look"
+    );
+    assert_eq!(report.stale_pages, vec![".wiki/pages/concept/both.md"]);
+    assert!(
+        d.path().join(".wiki/raw/b.md").is_file(),
+        "the other raw stays"
+    );
+    assert!(!d.path().join(".wiki/raw/a.md").exists());
+    assert!(store.get_source("a.md").unwrap().is_none());
+    assert!(store.get_source("b.md").unwrap().is_some());
+}
+
+#[test]
+fn a_failed_forget_keeps_the_ledger_row_for_the_next_round() {
+    let (d, cfg) = repo(0);
+    write(d.path(), "a.md", "# A\n\nalpha body\n");
+    let mut store = open(d.path());
+    convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();
+    fs::remove_file(d.path().join("a.md")).unwrap();
+    // Make the raw impossible to remove, so the round fails half way through.
+    let raw = d.path().join(".wiki/raw/a.md");
+    fs::remove_file(&raw).unwrap();
+    fs::create_dir(&raw).unwrap();
+
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(report.failures, 1, "{:?}", report.warnings);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("could not be settled")),
+        "{:?}",
+        report.warnings
+    );
+    assert!(
+        store.get_source("a.md").unwrap().is_some(),
+        "the ledger row is dropped last, so a failure leaves it for a retry"
+    );
+
+    // With the obstacle gone the next round finishes the job.
+    fs::remove_dir(&raw).unwrap();
+    let report = sync::run(d.path(), &cfg, &mut store, &args(10)).unwrap();
+    assert_eq!(report.failures, 0, "{:?}", report.warnings);
+    assert!(store.get_source("a.md").unwrap().is_none());
+}
+
+#[test]
 fn an_unknown_on_missing_value_fails_config_validation() {
     let (d, _cfg) = repo(0);
     let path = d.path().join(".wiki/wiki.toml");
     let text = fs::read_to_string(&path).unwrap();
-    fs::write(&path, text.replace("\"mark_stale\"", "\"explode\"")).unwrap();
+    assert!(
+        text.contains("\"forget\""),
+        "the template writes the default: {text}"
+    );
+    fs::write(&path, text.replace("\"forget\"", "\"explode\"")).unwrap();
     let err = Config::load(d.path()).expect_err("an unknown on_missing is a config error");
     assert_eq!(err.code(), "E_BAD_CONFIG");
 }
