@@ -19,8 +19,8 @@
 //! 2. Files whose extension is not in `formats.allow` only bump
 //!    [`ScanReport::ignored_count`]; they produce no change.
 //! 3. Files above `parse.max_source_bytes` are `Oversize` and are never opened.
-//! 4. Content digest: full for files up to `parse.chunk_threshold`, sampled
-//!    above it.
+//! 4. Content digest: always the full file, read once through
+//!    `hash::read_source` (no sampling; size and mtime only key the cache).
 //! 5. Join with the ledger by key: unknown is `New`, equal digest is unchanged,
 //!    different digest is `Changed`.
 //! 6. Deduplicate the `New` candidates by digest, keeping the lexicographically
@@ -33,9 +33,12 @@
 //! 8. Ledger keys missing from disk and claimed by nobody are `Missing`.
 //!
 //! Only the digest decides whether a file changed; `mtime` is not part of the
-//! judgement, so touching a file does not schedule a re-ingest. A digest that
-//! moves across `chunk_threshold` switches from full to sampled and is reported
-//! as `Changed` once, which is accepted.
+//! judgement, so touching a file does not schedule a re-ingest. `source_facts`
+//! (`hash` + `size` + `mtime_ns`) only saves the read: when all three match the
+//! ledger digest is reused, and `--force` bypasses it. Two consequences follow
+//! and both are accepted: a file whose size and mtime are preserved is not
+//! re-read, and a file read while it is being written is an `Unstable` error
+//! rather than a half digest.
 //!
 //! Two pieces here are shared on purpose, because other modules ask the same
 //! questions this module answers. [`RawLedger`] is the only place that decides
@@ -137,7 +140,7 @@ pub type Result<T> = std::result::Result<T, ScanError>;
 
 /// Digest outcome for one file on disk.
 enum DiskDigest {
-    /// `blake3:` digest of the content, full or sampled.
+    /// `blake3:` digest of the full content.
     Digest(String),
     /// Above the size cap; the file was not opened.
     Oversize,

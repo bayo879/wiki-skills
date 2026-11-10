@@ -76,7 +76,7 @@ impl LockError {
     pub fn hint(&self) -> String {
         match self {
             LockError::Held { path } => format!(
-                "another process holds {}; if no process is running, delete that file",
+                "another process holds {}; wait for it to finish and do not delete that file",
                 path.display()
             ),
             LockError::Io { path, source } => format!("cannot access {}: {source}", path.display()),

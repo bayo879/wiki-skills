@@ -59,7 +59,7 @@
 | `src/journal.rs` | 旧决策日志 `.wiki/journal.jsonl`（只读保留，当前 CLI 不再追加） |
 | `src/ingest.rs` | 旧库兼容实现，当前 CLI 不调用 |
 | `src/staging.rs` | 旧暂存库兼容，当前 CLI 不发布 |
-| `src/lint.rs` | 十二条规则，由 doctor 的 `lint` 检查与 `--fix` 使用 |
+| `src/lint.rs` | 十一条规则，由 doctor 的 `lint` 检查与 `--fix` 使用 |
 | `src/version.rs` | 旧版本库兼容，CLI 无管理入口 |
 | `src/ignore.rs` | `.wiki/ignore` 的解析与增删；`ingest` 共用的唯一判定 |
 | `src/lock.rs` | 仓库锁（固定 inode + OS 文件锁，不按年龄回收） |
@@ -78,7 +78,7 @@
 - 账本只由 CLI 写；仓库根是唯一输入，`.wiki/raw/` 与 `.wiki/pages/` 都是派生产物，且都与账本一起留在 `.wiki/` 里。**任何命令都不写 `.wiki/` 之外**（检查：tests/e2e.rs::doctor_ingest_direct_page_query_round_trip）
 - 引擎目录布局只有一张表 `layout::LAYOUT`：每条只写 `path` 与 `authored`；`init` 全建，`check` 只看 `authored`，`provision` 只补 `authored = false` 的项，并跳过“父目录是缺失的产品目录”的子项——所以补建不会凭空造出 `.wiki/pages`。（检查：tests/precondition.rs::provision_never_creates_the_authored_tree_but_repairs_its_children_when_it_exists）
 - 账本表只有 `src/store.rs` 能执行 SQL，业务写入只有 `src/ledger.rs` 一个入口：`ingest` 登记、`moves` 改键都表达成 `ledger::Ledger` 的一次调用，顺序与失败语义写在 `ledger.rs` 的注释里。想加意图，加 `Ledger` 的方法，不要绕回 `store`。（检查：tests/invariants.rs::only_ledger_writes_the_ledger）
-- 先文件后账本：`ingest` 先原子写 `.wiki/raw/`，再登记两张表，两步之间没有跨表事务。中断留下的缺口由 `doctor` 的 `scan` 检查（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露，所以「账本与磁盘暂时不一致」是被允许并会被检出的状态，不是靠事务禁止的状态。（未机器化：没有崩溃注入测试，无法证明两次写入的先后）
+- 转换一次只有一个事务：`Store::register_conversion` 在同一个事务里写 `sources`、`raws`、`work_items`、`source_facts` 四张表，raw 文件先落盘、字节与摘要来自同一次读取。半路失败整笔回滚，不会留下「转换成功、待办丢失」的中间态。事务只覆盖账本，不覆盖文件：落在盘的 raw 与账本之间仍可能因断电不一致，由 `doctor` 的 `scan`（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露。（检查：tests/worklist.rs::failed_enqueue_rolls_back_conversion_baseline_and_can_retry）
 - 对账只有一个答案：`scan::classify`（仓库根）与 `scan::classify_raw`（`.wiki/raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan` 输出的 `layer` 字段、`lint` `L7`、`ingest` 的 `orphan_pages` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这三处必须同答。（检查：tests/reconcile.rs::an_unledgered_raw_is_reported_the_same_way_by_all_three）
 - 页面字段必须显式填写，真实来源由作者核对，工具不自动补全。（检查：tests/cli_done.rs::done_clears_only_one_source_and_repeating_it_is_a_noop）
 - 页面必须有 frontmatter 七字段：`id`、`title`、`type`、`summary`、`sources`、`status`、`updated`；`type` 取自 `[schema].types`。（检查：tests/lint.rs::l1_reports_each_missing_required_field）

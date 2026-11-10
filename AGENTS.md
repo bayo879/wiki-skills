@@ -9,7 +9,7 @@
 
 - 移除候选暂存、`submit` 发布与工具内版本管理（含历史回退）；agent 整理后直接更新 `.wiki/pages/` 正式知识页，不再经过发布步骤。旧库遗留数据的处理方式另行确认，不自动删除。
 - 保留尚未整理成知识页的来源待办，供中断后继续。agent 直接写页后按来源确认完成；确认只核对读取时的 raw 哈希并清除对应待办，资料变化则保留待办，不发布页面、不生成版本、不自动追加来源。
-- [Wiki 待办](docs/readme/todo.md) 是整个项目的长期问题收集清单，后续优化以此为准，不限于摄入流程。发现问题时补充证据及已有方案，解决后更新状态与验证结果；未确认方案不得视为定案。
+- [未决问题](docs/issues/) 是整个项目的长期问题收集目录，后续优化以此为准，不限于摄入流程。一个未完成的设计或待判别的问题一个文件，写清影响、证据、候选方案与验收条件；未确认方案不得视为定案，解决后删除文件，断点留在 git 与提交信息里。
 
 ## 2. 特有问题与解决方案
 
@@ -130,7 +130,7 @@ flag 与字段的解释与 `--help`、`init` 生成的 `SCHEMA.md` 高度重复�
 
 命令面收窄过两轮：22 → 6 删了 `version`，直接写页这一轮又删了 `submit` 与整套版本管理。两次都出现过文档还在教旧入口的情况（`README.md` 曾写着「submit 建版本」，而代码明确不建）。
 删之前先回答「删掉以后坏了怎么办」：`.wiki/` 是唯一内容所在，而且通常不进 git（2.12），所以没有回退就等于没有出口——现在答案只能是仓库外的独立备份，文档必须这么写，不能假装还有内置退路。
-删任何一条命令或 flag 前，`grep` 一遍 `README.md`、`docs/readme/`、`skills/`、`src/init.rs`（`SCHEMA.md` 与 `NEXT_STEPS`）和 `docs/readme/todo.md`，差集里没处理干净的要么补实现、要么改文档。旧命令现在由 clap 返回 `E_USAGE` exit 2，`tests/cli_submit.rs::submit_is_rejected_without_touching_legacy_candidates` 与 `tests/cli_version.rs::version_subcommands_are_rejected_and_preserve_legacy_bytes` 钉住「拒绝且不动旧字节」。
+删任何一条命令或 flag 前，`grep` 一遍 `README.md`、`docs/readme/`、`docs/issues/`、`skills/`、`src/init.rs`（`SCHEMA.md` 与 `NEXT_STEPS`），差集里没处理干净的要么补实现、要么改文档。旧命令现在由 clap 返回 `E_USAGE` exit 2，`tests/cli_submit.rs::submit_is_rejected_without_touching_legacy_candidates` 与 `tests/cli_version.rs::version_subcommands_are_rejected_and_preserve_legacy_bytes` 钉住「拒绝且不动旧字节」。
 
 ### 2.19 防抖只认 mtime，不记轮次
 

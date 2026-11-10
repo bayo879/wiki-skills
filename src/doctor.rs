@@ -582,10 +582,10 @@ fn fts5_check(available: store::Result<bool>) -> Check {
 
 /// `legacy_layout`: the pre-`.wiki` layout is still lying around.
 ///
-/// The upgrade is destructive by decision: old wikis are rebuilt, not migrated.
-/// The tool cannot delete the old files (they are outside the engine, and the
-/// engine boundary is what makes it safe to run at all), so it points at them
-/// and leaves the removal to the user.
+/// Old-layout files are reported, never touched. The current build reads
+/// `.wiki/wiki.toml`, keeps no tool-side journal, and treats everything outside
+/// `.wiki/` as source material — so `source/` is a user's own directory, not
+/// debris, and deleting it is not this tool's advice.
 fn check_legacy(root: &Path) -> Check {
     const NAME: &str = "legacy_layout";
     let mut found: Vec<&str> = Vec::new();
@@ -604,10 +604,9 @@ fn check_legacy(root: &Path) -> Check {
         Check::warn(
             NAME,
             format!(
-                "{} is from an older layout; this build reads {} and journals to .wiki/{} — delete it and run `llm-wiki doctor --fix` to rebuild",
+                "{} belongs to an older layout; this build reads {} and no longer writes .wiki/journal.jsonl. Old files are left untouched — remove only what you know is redundant, then run `llm-wiki doctor --fix`",
                 found.join(", "),
-                CONFIG_FILE,
-                crate::journal::JOURNAL_FILE
+                CONFIG_FILE
             ),
         )
     }

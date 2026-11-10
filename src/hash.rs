@@ -1,8 +1,15 @@
-//! Content hashing and cheap change detection.
+//! Content hashing and change detection.
 //!
-//! [`hash_file`] with `full = true` digests every byte; with `full = false` it
-//! digests three windows (head, middle, tail) plus the file size and mtime, which
-//! is enough to notice an edit without reading a multi-gigabyte scan target.
+//! [`read_source`] is the one path current code must use: it opens the file
+//! once, enforces `parse.max_source_bytes`, rejects a file that changes while
+//! being read, and returns the bytes together with their full digest — so the
+//! parse and the hash always describe the same bytes.
+//!
+//! [`hash_file`] with `full = true` digests every byte. The sampled mode
+//! (`full = false`, [`fingerprint`]) is legacy: only the retired `version`
+//! module calls it with `false`. It digests three windows (head, middle, tail)
+//! plus size and mtime, which was a scan-cost trade-off; do not use it for new
+//! change detection, because it cannot prove the middle bytes are unchanged.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};

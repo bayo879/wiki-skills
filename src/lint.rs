@@ -1,4 +1,4 @@
-//! `lint`: the twelve audit rules over `wiki/`, and the mechanical `--fix`.
+//! `lint`: the eleven audit rules over `wiki/`, and the mechanical `--fix`.
 //!
 //! `lint` reads the wiki directory and the ledger and returns findings sorted by
 //! severity, rule and page, so the output is a stable value that can be

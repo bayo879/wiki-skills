@@ -155,9 +155,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     if explicit {
         for key in &args.only {
             if !changes.iter().any(|change| &change.key == key) {
-                warnings.push(format!(
-                    "--only {key}: no new or changed source has that key"
-                ));
+                warnings.push(format!("{key}: no new or changed source has that key"));
             }
         }
     }
