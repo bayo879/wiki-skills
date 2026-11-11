@@ -503,13 +503,22 @@ fn run_ingest(options: IngestOptions) -> ! {
     };
     match sync::run(&root, &cfg, &mut store, &args) {
         Ok(report) => {
+            let task_view = match report
+                .next_task
+                .as_ref()
+                .map(|row| task::view(&root, &cfg, &store, row))
+                .transpose()
+            {
+                Ok(view) => view,
+                Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
+            };
+            let counts = remaining(&store, report.waiting.len());
             let exit = if report.failures > 0 {
                 Exit::Error
             } else {
                 Exit::Ok
             };
-            // The author writes live pages directly and owns every source citation.
-            let data = IngestData::from_report(report, &cfg);
+            let data = IngestData::from_report(report, &cfg, counts, task_view);
             report::emit_with(cmd, data, exit, human_ingest)
         }
         Err(err) => {
@@ -527,89 +536,202 @@ fn run_ingest(options: IngestOptions) -> ! {
     }
 }
 
+/// What one operation actually changed.
+#[derive(Default, Serialize)]
+struct Effects {
+    merged_pages: Vec<String>,
+    confirmed_sources: Vec<String>,
+    removed_pages: Vec<String>,
+}
+
+/// Work the tool still knows about, counted rather than dumped.
+#[derive(Serialize)]
+struct Remaining {
+    actionable: usize,
+    waiting: usize,
+    failed: usize,
+    blocked: usize,
+}
+
+fn remaining(store: &Store, waiting: usize) -> Remaining {
+    let mut out = Remaining {
+        actionable: 0,
+        waiting,
+        failed: 0,
+        blocked: 0,
+    };
+    for task in store.tasks().unwrap_or_default() {
+        match task.status.as_str() {
+            "pending" | "active"
+                if matches!(task.kind.as_str(), "page" | "breakdown" | "reconcile") =>
+            {
+                out.actionable += 1
+            }
+            "failed" => out.failed += 1,
+            "blocked" => out.blocked += 1,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The single completion rule shared by ingest and task done.
+fn outcome(
+    has_task: bool,
+    effects: &Effects,
+    remaining: &Remaining,
+    issues: &[String],
+) -> &'static str {
+    if !effects.merged_pages.is_empty()
+        && (remaining.failed > 0 || remaining.blocked > 0 || !issues.is_empty())
+    {
+        "partial"
+    } else if remaining.failed > 0 || remaining.blocked > 0 || !issues.is_empty() {
+        "needs_attention"
+    } else if has_task {
+        "in_progress"
+    } else if remaining.waiting > 0 {
+        "waiting"
+    } else {
+        "complete"
+    }
+}
+
 /// Source conversion results and the direct-page authoring contract.
 #[derive(Serialize)]
 struct IngestData {
     run_id: String,
+    outcome: String,
     changes: Vec<llm_wiki::scan::Change>,
-    stale_pages: Vec<String>,
     converted: usize,
     ingested: Vec<String>,
     queued: usize,
     waiting: Vec<String>,
+    events: Vec<String>,
     warnings: Vec<String>,
     failures: usize,
-    pending: Vec<llm_wiki::store::WorkItem>,
-    affected_pages: Vec<String>,
-    next_task: Option<llm_wiki::store::TaskRow>,
-    next_raw: Option<String>,
+    effects: Effects,
+    remaining: Remaining,
+    issues: Vec<String>,
+    next_task: Option<llm_wiki::task::TaskView>,
     write_to: String,
     types: Vec<String>,
     schema: String,
-    instructions: String,
 }
 
 impl IngestData {
-    fn from_report(report: sync::SyncReport, cfg: &Config) -> Self {
-        let next_task = report.next_task.clone();
-        let next_raw = next_task.as_ref().and_then(|task| {
-            task.source_key.as_ref().and_then(|key| {
-                report
-                    .work_items
-                    .iter()
-                    .find(|item| &item.source_key == key)
-                    .map(|item| item.raw_key.clone())
-            })
-        });
+    fn from_report(
+        report: sync::SyncReport,
+        cfg: &Config,
+        remaining: Remaining,
+        task: Option<llm_wiki::task::TaskView>,
+    ) -> Self {
+        let effects = Effects {
+            merged_pages: report.merged_pages,
+            confirmed_sources: report.confirmed_sources,
+            removed_pages: report.removed_pages,
+        };
+        let outcome = outcome(task.is_some(), &effects, &remaining, &report.issues).to_string();
         Self {
             run_id: report.run_id,
+            outcome,
             changes: report.changes,
-            stale_pages: report.stale_pages,
             converted: report.converted,
             ingested: report.ingested,
             queued: report.queued,
             waiting: report.waiting,
+            events: report.events,
             warnings: report.warnings,
             failures: report.failures,
-            pending: report.work_items,
-            affected_pages: report.affected_pages,
-            next_task,
-            next_raw,
+            effects,
+            remaining,
+            issues: report.issues,
+            next_task: task,
             write_to: cfg.paths.wiki.clone(),
             types: cfg.schema.types.clone(),
             schema: format!("{}/SCHEMA.md", cfg.paths.engine.trim_end_matches('/')),
-            instructions: String::from("Do not edit .wiki/pages/ directly. Read next_raw (and the target page when next_task is a page task), then close next_task with `llm-wiki task done <id>`: a breakdown task gets a leaf list with --leaves, a page task gets content with --payload. The tool renders frontmatter and writes staging; pages are merged when the last leaf closes."),
         }
     }
 }
 
 fn human_ingest(data: &IngestData) -> String {
-    let mut out = format!("run_id: {}\nconverted: {}\nqueued: {}\npending_total: {}\nfailures: {}\nwrite_to: {}\ntypes: {}\nschema: {}\n{}", data.run_id, data.converted, data.queued, data.pending.len(), data.failures, data.write_to, data.types.join(", "), data.schema, data.instructions);
-    match &data.next_task {
-        Some(task) => out.push_str(&format!(
-            "\nnext_task: {} {} ({})",
-            task.kind, task.id, task.status
-        )),
-        None => out.push_str("\nnext_task: none"),
-    }
-    if let Some(raw) = &data.next_raw {
-        out.push_str(&format!("\nnext_raw: {raw}"));
-    }
-    for item in &data.pending {
-        out.push_str(&format!(
-            "\npending: {} -> {} ({})",
-            item.source_key, item.raw_key, item.raw_hash
-        ));
-    }
+    let mut out = format!(
+        "run_id: {}\noutcome: {}\nconverted: {}\nqueued: {}\nactionable: {}\nwaiting: {}\nfailed: {}\nblocked: {}\nwrite_to: {}\nschema: {}",
+        data.run_id,
+        data.outcome,
+        data.converted,
+        data.queued,
+        data.remaining.actionable,
+        data.remaining.waiting,
+        data.remaining.failed,
+        data.remaining.blocked,
+        data.write_to,
+        data.schema
+    );
+    out.push_str(&human_effects(&data.effects));
+    out.push_str(&human_task_view(data.next_task.as_ref()));
     for key in &data.waiting {
         out.push_str(&format!("\nwaiting: {key}"));
     }
-    for page in &data.affected_pages {
-        out.push_str(&format!("\naffected_page: {page}"));
+    for event in &data.events {
+        out.push_str(&format!("\nevent: {event}"));
     }
     for warning in &data.warnings {
         out.push_str(&format!("\nwarning: {warning}"));
     }
+    for issue in &data.issues {
+        out.push_str(&format!("\nissue: {issue}"));
+    }
+    out
+}
+
+fn human_effects(effects: &Effects) -> String {
+    let mut out = String::new();
+    if !effects.merged_pages.is_empty() {
+        out.push_str(&format!(
+            "\nmerged_pages: {}",
+            effects.merged_pages.join(", ")
+        ));
+    }
+    if !effects.confirmed_sources.is_empty() {
+        out.push_str(&format!(
+            "\nconfirmed_sources: {}",
+            effects.confirmed_sources.join(", ")
+        ));
+    }
+    if !effects.removed_pages.is_empty() {
+        out.push_str(&format!(
+            "\nremoved_pages: {}",
+            effects.removed_pages.join(", ")
+        ));
+    }
+    out
+}
+
+fn human_task_view(task: Option<&llm_wiki::task::TaskView>) -> String {
+    let Some(task) = task else {
+        return String::from("\ntask: none");
+    };
+    let mut out = format!("\ntask: {} {} ({})", task.kind, task.id, task.status);
+    if let Some(source) = &task.source {
+        out.push_str(&format!(
+            "\nsource: {} read {}",
+            source.key, source.read_ref
+        ));
+    }
+    if let Some(target) = &task.target {
+        out.push_str(&format!(
+            "\ntarget: {} (exists: {})",
+            target.reference, target.exists
+        ));
+    }
+    for page in &task.affected_pages {
+        out.push_str(&format!("\naffected_page: {page}"));
+    }
+    out.push_str(&format!(
+        "\nsubmit: {} [{}]",
+        task.submit.command, task.submit.schema
+    ));
     out
 }
 
@@ -775,24 +897,33 @@ fn run_task(action: TaskAction) -> ! {
             );
             drop(guard);
             match result {
-                Ok(next_task) => {
-                    let next_raw = next_task
+                Ok(settled) => {
+                    let task_view = match settled
+                        .task
                         .as_ref()
-                        .and_then(|task| task.source_key.clone())
-                        .and_then(|key| {
-                            store
-                                .work_items()
-                                .ok()?
-                                .into_iter()
-                                .find(|item| item.source_key == key)
-                                .map(|item| item.raw_key)
-                        });
+                        .map(|row| task::view(&root, &cfg, &store, row))
+                        .transpose()
+                    {
+                        Ok(view) => view,
+                        Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
+                    };
+                    let effects = Effects {
+                        merged_pages: settled.merged_pages,
+                        confirmed_sources: settled.confirmed_sources,
+                        removed_pages: Vec::new(),
+                    };
+                    let counts = remaining(&store, 0);
+                    let outcome = outcome(task_view.is_some(), &effects, &counts, &settled.issues)
+                        .to_string();
                     report::emit_with(
                         cmd,
                         TaskDoneData {
                             closed: id,
-                            next_task,
-                            next_raw,
+                            outcome,
+                            effects,
+                            remaining: counts,
+                            issues: settled.issues,
+                            next_task: task_view,
                         },
                         Exit::Ok,
                         human_task_done,
@@ -815,21 +946,27 @@ fn run_task(action: TaskAction) -> ! {
 #[derive(Serialize)]
 struct TaskDoneData {
     closed: i64,
-    next_task: Option<llm_wiki::store::TaskRow>,
-    next_raw: Option<String>,
+    outcome: String,
+    effects: Effects,
+    remaining: Remaining,
+    issues: Vec<String>,
+    next_task: Option<task::TaskView>,
 }
 
 fn human_task_done(data: &TaskDoneData) -> String {
-    let mut out = format!("closed: {}", data.closed);
-    match &data.next_task {
-        Some(task) => out.push_str(&format!(
-            "\nnext_task: {} {} ({})",
-            task.kind, task.id, task.status
-        )),
-        None => out.push_str("\nnext_task: none"),
-    }
-    if let Some(raw) = &data.next_raw {
-        out.push_str(&format!("\nnext_raw: {raw}"));
+    let mut out = format!(
+        "closed: {}\noutcome: {}\nactionable: {}\nwaiting: {}\nfailed: {}\nblocked: {}",
+        data.closed,
+        data.outcome,
+        data.remaining.actionable,
+        data.remaining.waiting,
+        data.remaining.failed,
+        data.remaining.blocked
+    );
+    out.push_str(&human_effects(&data.effects));
+    out.push_str(&human_task_view(data.next_task.as_ref()));
+    for issue in &data.issues {
+        out.push_str(&format!("\nissue: {issue}"));
     }
     out
 }

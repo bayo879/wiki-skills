@@ -56,6 +56,8 @@ pub struct SyncReport {
     pub changes: Vec<scan::Change>,
     /// Pages turned stale this round because the source they cited disappeared.
     pub stale_pages: Vec<String>,
+    /// Pages deleted because their last source vanished.
+    pub removed_pages: Vec<String>,
     /// Sources that produced a fresh raw file.
     pub converted: usize,
     /// Sources handed to an ingest round.
@@ -68,10 +70,18 @@ pub struct SyncReport {
     pub waiting: Vec<String>,
     /// Everything worth telling a human about this round.
     pub warnings: Vec<String>,
+    /// Normal maintenance events, safe to summarize instead of relaying.
+    pub events: Vec<String>,
     /// Conversions that failed.
     pub failures: usize,
     /// The one task the next round should run, if any.
     pub next_task: Option<TaskRow>,
+    /// Pages this round merged into the wiki.
+    pub merged_pages: Vec<String>,
+    /// Sources whose settlement completed this round.
+    pub confirmed_sources: Vec<String>,
+    /// Known problems the round could not settle.
+    pub issues: Vec<String>,
 }
 
 /// Failure that ends a round before it can report.
@@ -280,6 +290,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
             run_id,
             changes,
             stale_pages: Vec::new(),
+            removed_pages: Vec::new(),
             converted: 0,
             ingested: Vec::new(),
             work_items: store.work_items()?,
@@ -287,8 +298,12 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
             queued,
             waiting,
             warnings,
+            events: Vec::new(),
             failures: 0,
             next_task: None,
+            merged_pages: Vec::new(),
+            confirmed_sources: Vec::new(),
+            issues: Vec::new(),
         });
     }
 
@@ -297,9 +312,10 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     //     A collision is left untouched for a human; it is a finding (exit 1),
     //     never a reason to overwrite a file.
     let mut failures = 0;
+    let mut events = Vec::new();
     let moved = moves::apply(root, cfg, store, &changes)?;
     for applied in &moved.applied {
-        warnings.push(format!(
+        events.push(format!(
             "moved: {} -> {} ({} page(s) rewritten)",
             applied.from,
             applied.to,
@@ -323,7 +339,8 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     //     behind them. What happens next is `[ingest].on_missing`: `forget`
     //     (the default) removes the reference, the raw file and the ledger
     //     row; `mark_stale` only moves the pages that cited it to `stale`.
-    let stale_pages = settle_missing(root, cfg, store, &changes, &mut warnings, &mut failures)?;
+    let (stale_pages, removed_pages) =
+        settle_missing(root, cfg, store, &changes, &mut warnings, &mut failures)?;
 
     // 5. Convert. Reading and rendering are independent per source, so they
     //    run on a small thread pool; writing the raw file and the ledger rows
@@ -422,7 +439,8 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     for item in &work_items {
         task::ensure_root(root, cfg, store, item, &stamp)?;
     }
-    let next_task = task::advance(root, cfg, store)?;
+    let settled = task::advance(root, cfg, store)?;
+    let next_task = settled.task.clone();
     let ingested = work_items
         .iter()
         .map(|item| item.source_key.clone())
@@ -457,6 +475,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         run_id,
         changes,
         stale_pages,
+        removed_pages,
         converted,
         ingested,
         work_items,
@@ -464,8 +483,12 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         queued,
         waiting,
         warnings,
+        events,
         failures,
         next_task,
+        merged_pages: settled.merged_pages,
+        confirmed_sources: settled.confirmed_sources,
+        issues: settled.issues,
     };
 
     // 7. The audit entry: what changed, what was converted, what was handed to
@@ -504,12 +527,13 @@ fn settle_missing(
     changes: &[scan::Change],
     warnings: &mut Vec<String>,
     failures: &mut usize,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Vec<String>)> {
     if cfg.ingest.on_missing == "ignore" {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     let mut stale: Vec<String> = Vec::new();
+    let mut deleted: Vec<String> = Vec::new();
     for change in changes {
         if change.kind != ChangeKind::Missing || change.layer != Layer::Source {
             continue;
@@ -522,6 +546,7 @@ fn settle_missing(
         match settle_one(root, cfg, store, &key, row.raw_key.as_deref()) {
             Ok(settled) => {
                 stale.extend(settled.stale.iter().cloned());
+                deleted.extend(settled.deleted.iter().cloned());
                 if let Some(line) = settled.describe(&key) {
                     warnings.push(line);
                 }
@@ -539,7 +564,9 @@ fn settle_missing(
     }
     stale.sort();
     stale.dedup();
-    Ok(stale)
+    deleted.sort();
+    deleted.dedup();
+    Ok((stale, deleted))
 }
 
 /// What settling one vanished source did.

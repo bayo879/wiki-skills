@@ -81,7 +81,7 @@ fn a_breakdown_hands_out_one_page_leaf() {
     assert_eq!(code, 0, "{body}");
     assert_eq!(body["next_task"]["kind"], "page");
     assert!(
-        body["next_task"]["target_path"]
+        body["next_task"]["target"]["reference"]
             .as_str()
             .unwrap()
             .ends_with("concept/alpha.md"),
@@ -107,7 +107,7 @@ fn the_last_leaf_merges_the_batch_and_clears_the_queue() {
     );
     assert_eq!(code, 0, "{body}");
     // The other source still has a root, so the tool hands that one out next.
-    assert_eq!(body["next_task"]["source_key"], "b.md", "{body}");
+    assert_eq!(body["next_task"]["source"]["key"], "b.md", "{body}");
 
     let page = dir.path().join(".wiki/pages/concept/alpha.md");
     let text = std::fs::read_to_string(&page).unwrap();
@@ -118,12 +118,9 @@ fn the_last_leaf_merges_the_batch_and_clears_the_queue() {
     );
 
     let (_, again) = run(&dir, &["ingest"]);
-    assert!(
-        !again["pending"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["source_key"] == "a.md"),
+    assert_ne!(
+        again["next_task"]["source"]["key"].as_str(),
+        Some("a.md"),
         "closing the tree clears its queue entry: {again}"
     );
 }
@@ -263,7 +260,7 @@ fn a_page_edited_outside_the_tree_is_queued_for_review() {
     let task = next_task(&dir);
     assert_eq!(task["kind"], "reconcile", "{task}");
     assert!(
-        task["target_path"]
+        task["target"]["reference"]
             .as_str()
             .unwrap()
             .ends_with("concept/alpha.md"),
@@ -289,7 +286,7 @@ fn regenerating_review_puts_the_source_back_in_the_queue() {
     let (code, body) = run(&dir, &["task", "done", &id.to_string(), "--regenerate"]);
     assert_eq!(code, 0, "{body}");
     assert_eq!(body["next_task"]["kind"], "breakdown", "{body}");
-    assert_eq!(body["next_task"]["source_key"], "a.md", "{body}");
+    assert_eq!(body["next_task"]["source"]["key"], "a.md", "{body}");
 }
 
 #[test]

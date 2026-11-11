@@ -197,6 +197,118 @@ pub struct TaskStatus {
     pub blocked: Vec<TaskRow>,
 }
 
+/// What one advance actually settled, alongside the task it delivered.
+///
+/// A root finishing is a side effect of advancing; callers must report the
+/// merged pages and confirmed sources instead of inferring completion from
+/// `task.is_none()`.
+#[derive(Debug, Default)]
+pub struct Advance {
+    pub task: Option<TaskRow>,
+    pub merged_pages: Vec<String>,
+    pub confirmed_sources: Vec<String>,
+    pub issues: Vec<String>,
+}
+
+/// The work interface handed to the agent: only what the task needs, never a
+/// database row.
+#[derive(Debug, Serialize)]
+pub struct TaskView {
+    pub id: i64,
+    pub kind: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<TaskSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<TaskTarget>,
+    pub affected_pages: Vec<String>,
+    pub submit: SubmitView,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskSource {
+    pub key: String,
+    pub read_ref: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskTarget {
+    pub reference: String,
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SubmitView {
+    pub command: String,
+    pub schema: String,
+}
+
+/// Builds the agent-facing view of one task. Diagnostics stay in `status`.
+pub fn view(root: &Path, cfg: &Config, store: &Store, task: &TaskRow) -> Result<TaskView> {
+    let raw_key = work_item_raw_key(store, task.source_key.as_deref())?;
+    let source = task.source_key.as_ref().map(|key| TaskSource {
+        key: key.clone(),
+        read_ref: if raw_key.is_empty() {
+            String::new()
+        } else {
+            format!("{}/{}", cfg.paths.raw.trim_end_matches('/'), raw_key)
+        },
+    });
+    let (leaf_title, leaf_brief) = leaf_note(task);
+    let target = task.target_path.as_ref().map(|reference| TaskTarget {
+        reference: reference.clone(),
+        exists: root.join(reference).is_file(),
+        title: leaf_title,
+        brief: leaf_brief,
+    });
+    let affected_pages = if task.kind == "breakdown" && !raw_key.is_empty() {
+        affected_pages(store, std::slice::from_ref(&raw_key))?
+    } else {
+        Vec::new()
+    };
+    let (suffix, schema) = match task.kind.as_str() {
+        "page" => ("--payload <FILE>", "page-content-v1"),
+        "breakdown" => ("--leaves <FILE>", "leaf-list-v1"),
+        "reconcile" => ("--accept | --regenerate", "reconcile-v1"),
+        _ => ("", ""),
+    };
+    Ok(TaskView {
+        id: task.id,
+        kind: task.kind.clone(),
+        status: task.status.clone(),
+        source,
+        target,
+        affected_pages,
+        submit: SubmitView {
+            command: format!("llm-wiki task done {} {suffix}", task.id),
+            schema: String::from(schema),
+        },
+    })
+}
+
+fn leaf_note(task: &TaskRow) -> (Option<String>, Option<String>) {
+    if task.kind != "page" {
+        return (None, None);
+    }
+    let Ok(note) =
+        serde_json::from_str::<serde_json::Value>(task.payload_json.as_deref().unwrap_or("null"))
+    else {
+        return (None, None);
+    };
+    (
+        note.get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        note.get("brief")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    )
+}
+
 /// Ensures a root exists for `item`, and snapshots `pages/` as its baseline.
 ///
 /// Idempotent: the unique index on `(source_key) WHERE kind='breakdown'` is the
@@ -229,7 +341,8 @@ pub fn ensure_root(
 /// Order: finish any root whose leaves are all closed → a pending leaf → a
 /// pending root. An `active` leaf is reset to `pending` first: one machine, one
 /// agent, so an `active` row is a delivery from a previous round, not a lease.
-pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<TaskRow>> {
+pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> {
+    let mut out = Advance::default();
     let stamp = now();
     reconcile_scan(root, cfg, store)?;
     // Later steps read relations (affected pages, page quality); one refresh
@@ -251,13 +364,37 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<Ta
                 && t.payload_json.is_some()
                 && !tasks.iter().any(|child| child.parent_id == Some(t.id))
         }) {
-            match finish_root(root, cfg, store, root_task) {
+            let before = out.merged_pages.len();
+            let source_key = root_task.source_key.clone().unwrap_or_default();
+            match finish_root(root, cfg, store, root_task, &mut out.merged_pages) {
                 Ok(()) => {
+                    out.confirmed_sources.push(source_key);
+                    let indexed: std::collections::BTreeSet<String> = store
+                        .all_relation_nodes()?
+                        .into_iter()
+                        .map(|node| node.page_key)
+                        .collect();
+                    for key in &out.merged_pages[before..] {
+                        if !indexed.contains(key) {
+                            out.issues.push(format!(
+                                "merged page {key} is missing from the relation index after refresh"
+                            ));
+                        }
+                    }
                     refresh_global_baseline(root, cfg, store)?;
                     continue;
                 }
                 Err(err) => {
                     let message = format!("{}: {err}", err.code());
+                    let grew = out.merged_pages.len() > before;
+                    out.issues.push(if grew {
+                        format!(
+                            "source {source_key} merged {} page(s) but its settlement failed: {message}",
+                            out.merged_pages.len() - before
+                        )
+                    } else {
+                        format!("source {source_key} could not settle: {message}")
+                    });
                     store.fail_task(root_task.id, &message, &stamp)?;
                     continue;
                 }
@@ -271,7 +408,8 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<Ta
             .min_by_key(|t| t.id)
         {
             store.set_task_status(task.id, "active", &stamp)?;
-            return Ok(store.task(task.id)?);
+            out.task = store.task(task.id)?;
+            return Ok(out);
         }
 
         // 3. A page edited outside the tree goes to review before new work.
@@ -281,7 +419,8 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<Ta
             .min_by_key(|t| t.id)
         {
             store.set_task_status(task.id, "active", &stamp)?;
-            return Ok(store.task(task.id)?);
+            out.task = store.task(task.id)?;
+            return Ok(out);
         }
 
         // 4. Only now, the earliest root waiting for a breakdown.
@@ -311,12 +450,13 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<Ta
                 store.update_task_source(task.id, drifted.as_deref(), attempts, &stamp)?;
             }
             store.set_task_status(task.id, "active", &stamp)?;
-            return Ok(store.task(task.id)?);
+            out.task = store.task(task.id)?;
+            return Ok(out);
         }
 
         // Nothing is owed. `reconcile_scan` has already absorbed edits that
         // have no source to answer to and queued the rest for review.
-        return Ok(None);
+        return Ok(out);
     }
 }
 
@@ -334,7 +474,7 @@ pub fn close(
     payload: Option<&Path>,
     leaves: Option<&Path>,
     verdict: Option<Verdict>,
-) -> Result<Option<TaskRow>> {
+) -> Result<Advance> {
     let task = store.task(id)?.ok_or(TaskError::Unknown(id))?;
     match task.kind.as_str() {
         "page" if verdict.is_some() => {
@@ -816,7 +956,13 @@ fn close_breakdown(
 
 /// Merges one settled root: validate the batch, confirm nobody touched `pages/`,
 /// write every staged page atomically, then clear the work item and the tree.
-fn finish_root(root: &Path, cfg: &Config, store: &mut Store, task: &TaskRow) -> Result<()> {
+fn finish_root(
+    root: &Path,
+    cfg: &Config,
+    store: &mut Store,
+    task: &TaskRow,
+    merged: &mut Vec<String>,
+) -> Result<()> {
     let source_key = task
         .source_key
         .clone()
@@ -840,6 +986,7 @@ fn finish_root(root: &Path, cfg: &Config, store: &mut Store, task: &TaskRow) -> 
     for (key, bytes) in &staged {
         let path = root.join(key);
         render::write_atomic(&path, bytes)?;
+        merged.push(key.clone());
     }
     query::refresh(root, cfg, store)?;
 

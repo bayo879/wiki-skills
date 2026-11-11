@@ -176,11 +176,9 @@ fn doctor_ingest_direct_page_query_round_trip() {
         root.join(".wiki/raw/notes/retry.md").is_file(),
         "conversion happened"
     );
-    assert!(
-        ingest["pending"].as_array().is_some_and(|pending| pending
-            .iter()
-            .any(|item| item["source_key"] == "notes/retry.md")),
-        "the source is queued: {ingest}"
+    assert_eq!(
+        ingest["remaining"]["actionable"], 2,
+        "both converted sources are handed out as tasks: {ingest}"
     );
 
     // The agent works the task tree instead of editing pages: a breakdown
@@ -192,7 +190,7 @@ fn doctor_ingest_direct_page_query_round_trip() {
     while !next.is_null() {
         let id = next["id"].as_i64().expect("task id");
         let kind = next["kind"].as_str().expect("task kind");
-        let source = next["source_key"].as_str().unwrap_or_default();
+        let source = next["source"]["key"].as_str().unwrap_or_default();
         match kind {
             "breakdown" => {
                 let (leaf_id, title) = if source == "notes/retry.md" {
@@ -221,12 +219,9 @@ fn doctor_ingest_direct_page_query_round_trip() {
                 next = out["next_task"].clone();
             }
             "page" => {
-                let note: serde_json::Value =
-                    serde_json::from_str(next["payload_json"].as_str().expect("leaf note"))
-                        .unwrap();
                 let mut payload = tempfile::NamedTempFile::new().unwrap();
                 let body = serde_json::json!({
-                    "title": note["title"],
+                    "title": next["target"]["title"].as_str().expect("leaf title"),
                     "summary": "来源给出的结论",
                     "tags": ["resilience"],
                     "status": "draft",
@@ -262,11 +257,9 @@ fn doctor_ingest_direct_page_query_round_trip() {
     );
     // ------------------------------------------------------------ done
     let again = ok_call(root, &["ingest"]);
-    let still_pending = again["pending"].as_array().expect("pending array");
-    assert!(
-        !still_pending
-            .iter()
-            .any(|item| item["source_key"] == "notes/retry.md"),
+    assert_ne!(
+        again["next_task"]["source"]["key"].as_str(),
+        Some("notes/retry.md"),
         "closing the tree clears only its queue entry: {again}"
     );
     // The index is rendered by a round, not by a write: the next round sees

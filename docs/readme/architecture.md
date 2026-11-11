@@ -45,7 +45,9 @@ agent 生成 ── task done --payload ──▶ .wiki/cache/staging/
 
 页面与全局基线的比对发生在 `advance` 开头（`task::reconcile_scan`）：有 `sources` 的差异页建 `reconcile` 任务，没 `sources` 的直接写进基线，基线里已不存在的页按接受的删除删掉对应行。基线不再在空闲轮无条件刷新，否则任务外的改动会被静默吸收。
 
-转换与确认之间没有批次门禁，取代它的是 SQLite 里的任务树：一个来源一棵 `breakdown` 根，agent 拆出的 `page` 子叶逐个交付、逐个关闭，全部关闭后根收尾。`task::advance` 是唯一决定下一个任务的函数，`ingest` 与 `task done` 都调它：有 `pending` 子叶先交付子叶；没有子叶时先交付 `reconcile`（任务外改动待复核）；再取最早一棵待拆叶的根。`.wiki/work.lock` 工作租约随「一次只开放一批」一起删除——它服务的是锁人，而任务树只做结算。`moves::apply` 与消失源收口因此每轮都跑。`src/lock.rs` 的仓库锁仍在，只罩 `ingest` 与 `task done`。
+转换与确认之间没有批次门禁，取代它的是 SQLite 里的任务树：一个来源一棵 `breakdown` 根，agent 拆出的 `page` 子叶逐个交付、逐个关闭，全部关闭后根收尾。`task::advance` 是唯一决定下一个任务的函数，`ingest` 与 `task done` 都调它：有 `pending` 子叶先交付子叶；没有子叶时先交付 `reconcile`（任务外改动待复核）；再取最早一棵待拆叶的根。
+
+`ingest` 与 `task done` 交付同一种 `task::view` 结果：`source.read_ref` 是要读的 raw，`target` 带目标页、是否存在与叶子标题/要点，`submit` 给关闭命令与载荷 schema，`affected_pages` 只含本任务根自己的页；不再把 `TaskRow` 的数据库列暴露给 agent。推进后的公共结果用 `outcome`（`complete`/`in_progress`/`waiting`/`needs_attention`/`partial`）、`effects`（`merged_pages`/`confirmed_sources`/`removed_pages`）、`remaining`（`actionable`/`waiting`/`failed`/`blocked`）与 `issues` 表达：页面合并、来源确认、页面删除是三种独立事实。正常改名进 `events`，碰撞、超限、失败进 `warnings` 或 `failures`。根收尾在 `query::refresh` 后自检新页是否进了关系索引，缺失写进 `issues`，不要求 agent 再跑一次 `query` 证明索引可用。`.wiki/work.lock` 工作租约随「一次只开放一批」一起删除——它服务的是锁人，而任务树只做结算。`moves::apply` 与消失源收口因此每轮都跑。`src/lock.rs` 的仓库锁仍在，只罩 `ingest` 与 `task done`。
 
 转换预算按队列顺序取前 `[ingest].max_per_run` 条，而队列顺序里带着一条让位规则：`source_attempts` 记下每个源最近一次转换失败的时间与错误，上一轮失败的源排在从未尝试过的文件之后，最近失败的沉到队尾。这样坏文件不会每轮占住一个名额把健康文件堵在后面，同时也不会被永久排除——队列里只剩它时照样会被取到。转换成功或源被遗忘时这条记录随同一次事务删除；文件悄悄消失时由下一轮 `ingest` 按「键还有没有对应文件」清掉——从未转换成功的源没有 `sources` 行，消失源收口看不见它。本轮超出预算的源以 `waiting:` 逐条列出，不只是一个数字。
 

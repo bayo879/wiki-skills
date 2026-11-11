@@ -25,7 +25,7 @@
 3. **拆解**：`ingest` 给出一棵待拆叶的根任务（`breakdown`）。agent 读 raw 与受影响页面清单，把这一批拆成一页一片的子叶，用 `task done <id> --leaves <文件>` 提交；每个现有受影响页要么落成一片叶，要么显式标 `unchanged` 并写理由。
 4. **逐叶生成**：`task done` 返回下一页叶子任务。agent 读该页正文与拆解要点，提交载荷（`title`/`summary`/`tags`/`status`/正文），用 `task done <id> --payload <文件>` 关闭；工具渲染 frontmatter、写 `.wiki/cache/staging/`，不碰正式页。
 5. **合并**：最后一片叶关闭后，根任务收尾：全批硬校验、与全局基线比对、逐页原子写入 `.wiki/pages/`、刷索引、核对四道哈希并清待办。源在期间变了就 `E_SOURCE_DRIFT`，staging 保留、根回到待拆叶。`query` 默认含会话蒸馏，`--no-archive` 排除它们。
-6. **复核**：任务外被改过的页面会先变成 `reconcile` 任务，`target_path` 是那页、载荷里是它引用的 raw 键。agent 读页与关联源后二选一：`task done <id> --accept` 承认改动并推进基线；`--regenerate` 把来源重新入队，走正常拆解与生成覆盖它。没有 `sources` 的页没有可对照的源，直接吸收进基线。
+6. **复核**：任务外被改过的页面会先变成 `reconcile` 任务，任务视图的 `target.reference` 是那页，源键写在任务视图里。agent 读页与关联源后二选一：`task done <id> --accept` 承认改动并推进基线；`--regenerate` 把来源重新入队，走正常拆解与生成覆盖它。没有 `sources` 的页没有可对照的源，直接吸收进基线。
 7. **删源**：源文件被删后不用另外下命令，下一轮 `ingest` 按 `[ingest].on_missing` 自动收口（默认 `forget`）：页面对它的引用去掉、转 `stale`，一条来源不剩的页整页删除，raw 文件与账本行（含待办）一并清掉，轮次警告以 `vanished:` 开头。收口是自动的、可重试的，失败只报 finding 并把账本行留到下一轮；删除本身不可撤销，只能靠你自己的备份。
 
 **写页没有发布门。** 根收尾不验证正文质量，也不回滚已合并页面；工具不自动备份，没有内置历史恢复。CLI 锁只约束工具命令，不能阻止文件系统层的写页；任务外改动会在关闭时以 `E_PAGE_CONFLICT` 列出。需要恢复必须有独立备份。

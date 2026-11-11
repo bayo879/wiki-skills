@@ -64,8 +64,8 @@ fn ingest_without_arguments_converts_and_hands_off_live_pages() {
         .unwrap()
         .iter()
         .any(|ty| ty == "concept"));
-    assert_eq!(body["data"]["pending"].as_array().unwrap().len(), 2);
-    assert!(body["data"]["affected_pages"].is_array());
+    assert_eq!(body["data"]["next_task"]["kind"], "breakdown");
+    assert!(body["data"]["next_task"]["affected_pages"].is_array());
     assert!(!dir.path().join(".wiki/staging/pending.json").exists());
 }
 
@@ -148,9 +148,15 @@ fn ingest_dry_run_preserves_pending_work() {
     settle(&dir, "a.md");
     let (code, body) = run(&dir, &["ingest"]);
     assert_eq!(code, 0);
-    assert_eq!(body["data"]["pending"].as_array().unwrap().len(), 1);
+    let first = body["data"]["next_task"]["id"].clone();
 
     let (code, body) = run(&dir, &["ingest", "--dry-run"]);
+    assert_eq!(code, 0, "{body}");
+    assert!(body["data"]["next_task"].is_null());
+
+    let (code, body) = run(&dir, &["ingest"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["data"]["next_task"]["id"], first);
     assert_eq!(code, 0, "{body}");
 }
 

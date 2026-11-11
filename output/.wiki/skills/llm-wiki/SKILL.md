@@ -17,7 +17,7 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 
 先确认用户要操作的工作区根，使用其 `.wiki/cli/llm-wiki` 的绝对路径（Windows 为 `llm-wiki.exe`）；下文 `llm-wiki` 均指这一份，不用 PATH 中的其他版本。CLI 从自身位置定位工作区根，源、叶清单和载荷的相对路径也以该根为准。技能复制到 agent 目录后，不能从技能所在位置推断工作区；根不明确就问用户。首次安装引导见目标工作区 `.wiki/readme.md`，首次接入见 init.md。下面只列常用入口。
 
-- `llm-wiki doctor` 体检；`llm-wiki doctor --fix` 修可修的机械缺陷与索引；失败任务与原因也在这里看。
+- `llm-wiki doctor` 体检；`llm-wiki doctor --fix` 修可修的机械缺陷与索引。摄入与关闭任务已自带机械自检，不需要每轮先跑它。
 - `llm-wiki ingest` 摄入并交付下一个任务；`--dry-run` 先看计划；`ingest <KEY>...` 只处理点名源。
 - 用户输入 `wiki自动摄入` 时运行 `llm-wiki ingest --auto`：只跑默认一轮，不能和手动参数组合。
 - `llm-wiki task done <ID> --leaves <FILE>` 关闭拆解任务，提交叶清单；`--payload <FILE>` 关闭页面任务，提交一页内容；`--accept` / `--regenerate` 关闭复核任务。关闭后返回下一个任务。
@@ -37,12 +37,12 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 
 ## 最小序列
 
-1. `doctor` 看健康与变化；有 Fail 先修。
-2. `ingest` 转换源、登记来源待办并交付下一个任务。任务一次只给一个，按返回的 `next_task` 推进；`next_raw` 是要读的 raw。
-3. 拆解任务（`breakdown`）：读源正文与页索引，按 `affected_pages` 逐页决定「给一片叶」或「显式不改 + 理由」，用 `--leaves` 提交。这一步不读页正文。
-4. 页面任务（`page`）：只读自己的目标页（存在时）与拆解要点，用 `--payload` 提交正文载荷。工具填 id、type、路径、sources、updated。
-5. 每次关闭都返回下一个任务；`next_task` 为空才算收敛。中断后重跑 `ingest` 会从任务树继续，不重建。
-6. 写完用 `query` 验证新页可检索；合并后要汇报哪些页已落地、哪些来源被显式跳过。
+1. `ingest` 转换源、登记来源待办并交付下一个任务；`--dry-run` 只看计划。任务视图自带要读的源（`source.read_ref`）、目标页（`target`）与提交命令，按它推进，一次只做一个。
+2. 拆解任务（`breakdown`）：读源正文与页索引，按 `affected_pages` 逐页决定「给一片叶」或「显式不改 + 理由」，用 `--leaves` 提交。这一步不读页正文。
+3. 页面任务（`page`）：只读自己的目标页（存在时）与 `target.brief`，用 `--payload` 提交正文载荷。工具填 id、type、路径、sources、updated。
+4. 关闭后看 `outcome` 与 `remaining`：`complete` 表示这一轮没有可做的事，`in_progress` 还有下一个任务，`waiting` 在等源稳定，`needs_attention` / `partial` 要看 `issues` 或 `effects`。不要再用「没有下一个任务」猜收敛。
+5. 合并与来源确认是两件事：`effects.merged_pages` 是已写进页面的页，`effects.confirmed_sources` 是四道哈希通过、待办已清的源。`partial` 表示页面已生效但结算没完成，要照实汇报。
+6. 工具在刷新索引后自检新页是否进了关系索引；正文质量、结论是否成立仍由你判断，需要时再 `query` 查重或看引用。
 
 刚改过的源默认等稳定窗口；`--force` 可跳过等待并全文复核，但不能越过最大源文件体积。元数据缓存可能漏掉大小与修改时间都保持不变的改动，需要时强制复核。
 
@@ -54,7 +54,7 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 
 ## 任务外改动的复核
 
-页面在任务外被改过时，`ingest` 会先交付一条 `reconcile` 任务，`target_path` 是被改的页，载荷里是该页引用的 raw 键。读这页和它引用的源，然后二选一：
+页面在任务外被改过时，`ingest` 会先交付一条 `reconcile` 任务，`target.reference` 是被改的页，任务视图里是该页引用的 raw 键。读这页和它引用的源，然后二选一：
 
 - `task done <ID> --accept`：改动成立，保留现状并推进基线。用户手动修正过正文、或改动只是补充上下文时选这个。
 - `task done <ID> --regenerate`：改动不该保留，把该页引用的来源重新入队，走正常的拆解与生成覆盖它。
