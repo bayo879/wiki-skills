@@ -125,19 +125,47 @@ pub enum Command {
     /// `[ingest] session_dir`. With no `TEXT`, `--graph` is the only useful
     /// form. Examples: `llm-wiki query 订单超时`,
     /// `llm-wiki query 订单超时 --no-archive`, `llm-wiki query --graph`.
-    Query {
-        /// Words to search for; omit together with `--graph`.
-        text: Option<String>,
-        /// Return at most this many hits.
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
-        /// Hide pages distilled from sources under `[ingest] session_dir`.
-        #[arg(long)]
-        no_archive: bool,
-        /// Print the `[[wikilink]]` structure: degrees, edges, orphans, broken links.
-        #[arg(long)]
-        graph: bool,
-    },
+    Query(QueryArgs),
+}
+
+/// Search, or read one page's or source's relations exactly.
+#[derive(Debug, clap::Args)]
+pub struct QueryArgs {
+    /// Words to search for; omit together with `--graph`.
+    ///
+    /// Examples: `llm-wiki query 订单超时`,
+    /// `llm-wiki query --page concept/retry --relation incoming`.
+    pub text: Option<String>,
+    /// Read this page exactly: its links, backlinks and sources.
+    #[arg(long, value_name = "PAGE", conflicts_with_all = ["text", "source", "graph"])]
+    pub page: Option<String>,
+    /// Read this source exactly: the pages citing it.
+    #[arg(long, value_name = "RAW", conflicts_with_all = ["text", "page", "graph"])]
+    pub source: Option<String>,
+    /// Which relation to list; `citing` belongs to `--source`.
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub relation: Option<RelationFlag>,
+    /// Skip this many relation items.
+    #[arg(long, default_value_t = 0)]
+    pub offset: usize,
+    /// Return at most this many hits (10 for text, 20 for relations).
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// Hide pages distilled from sources under `[ingest] session_dir`.
+    #[arg(long)]
+    pub no_archive: bool,
+    /// Print the `[[wikilink]]` structure: degrees, edges, orphans, broken links.
+    #[arg(long)]
+    pub graph: bool,
+}
+
+/// The `--relation` vocabulary, kept in the CLI layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RelationFlag {
+    Outgoing,
+    Incoming,
+    Both,
+    Citing,
 }
 
 /// Actions on the ingest task tree.

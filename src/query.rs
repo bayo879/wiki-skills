@@ -98,6 +98,99 @@ pub struct ExpandedRef {
     pub summary: String,
 }
 
+/// Which edge set an exact page read returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationKind {
+    /// Pages this page links to.
+    Outgoing,
+    /// Pages linking to this page.
+    Incoming,
+    /// Both directions.
+    Both,
+}
+
+/// Default page size for one relation group.
+pub const RELATION_LIMIT_DEFAULT: usize = 20;
+/// Upper bound a caller cannot raise.
+pub const RELATION_LIMIT_MAX: usize = 100;
+
+/// One page plus the relation groups a reader may traverse.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecallItem {
+    /// Repository-relative page path.
+    pub page: String,
+    pub title: String,
+    pub summary: String,
+    pub status: String,
+    /// Body excerpt for a search hit; empty for an exact read.
+    pub snippet: String,
+    /// Pages this page links to.
+    pub outgoing: PageGroup,
+    /// Pages linking to this page.
+    pub incoming: PageGroup,
+    /// Raw files this page cites.
+    pub sources: SourceGroup,
+    /// Relation index generation this answer was read from.
+    pub generation: i64,
+    /// True when the page itself could not be fully indexed.
+    pub incomplete: bool,
+}
+
+/// One paginated page group.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PageGroup {
+    /// Resolved items in the group, before pagination.
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    /// Offset for the next page, `None` at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
+    pub truncated: bool,
+    pub items: Vec<RecallPage>,
+    /// Link literals that do not resolve, never paginated.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<Unresolved>,
+}
+
+/// One neighbour page in a group.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecallPage {
+    pub page: String,
+    pub title: String,
+    pub summary: String,
+    pub status: String,
+}
+
+/// A link literal that resolved to nothing, or to more than one page.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Unresolved {
+    pub literal: String,
+    pub resolution: String,
+}
+
+/// The source references of one page; frontmatter bounds the list, so it is
+/// returned whole rather than paginated.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SourceGroup {
+    pub total: usize,
+    pub items: Vec<RecallSource>,
+}
+
+/// One raw reference with the facts needed to open it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecallSource {
+    /// The reference as written, fragment included.
+    pub raw: String,
+    /// Raw path without the fragment.
+    pub raw_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<String>,
+    pub raw_available: bool,
+}
+
 /// What to search for, and how much to bring back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchQuery {
@@ -142,6 +235,15 @@ pub enum QueryError {
     /// A page path could not be turned into a repository-relative key.
     #[error(transparent)]
     Path(#[from] paths::PathError),
+    /// An exact reference names no indexed page.
+    #[error("no page matches `{0}`")]
+    PageNotFound(String),
+    /// An exact reference matches more than one page.
+    #[error("`{0}` is ambiguous; use the type-qualified name")]
+    PageAmbiguous(String),
+    /// `--relation` does not apply to the given target.
+    #[error("{0}")]
+    BadRelation(String),
 }
 
 impl QueryError {
@@ -152,6 +254,9 @@ impl QueryError {
             QueryError::Store(_) => "E_DB",
             QueryError::Render(err) => err.code(),
             QueryError::Hash(_) | QueryError::Path(_) => "E_IO",
+            QueryError::PageNotFound(_) => "E_PAGE_NOT_FOUND",
+            QueryError::PageAmbiguous(_) => "E_PAGE_AMBIGUOUS",
+            QueryError::BadRelation(_) => "E_USAGE",
         }
     }
 }
@@ -482,6 +587,165 @@ fn wiki_rel(key: &str, wiki_prefix: &str) -> String {
         .trim_start_matches('/')
         .trim_end_matches(".md")
         .to_string()
+}
+
+/// Reads one page and one or both of its relation groups.
+///
+/// The reference is accepted in every spelling the resolver knows: full key,
+/// `type/id`, or a unique bare id. The relation index must already be current;
+/// the CLI refreshes before calling, and a direct caller gets the last snapshot
+/// with its `generation`.
+pub fn exact_page(
+    root: &Path,
+    cfg: &Config,
+    store: &Store,
+    reference: &str,
+    kind: RelationKind,
+    offset: usize,
+    limit: usize,
+) -> Result<RecallItem> {
+    let nodes = store.all_relation_nodes()?;
+    let by_key: BTreeMap<String, RelationNode> = nodes
+        .iter()
+        .map(|node| (node.page_key.clone(), node.clone()))
+        .collect();
+    let ids: Vec<PageIdentity> = nodes
+        .iter()
+        .map(|node| PageIdentity {
+            key: node.page_key.clone(),
+            id: node.page_id.clone(),
+            wiki_rel: wiki_rel(&node.page_key, &cfg.paths.wiki),
+        })
+        .collect();
+    let resolver = Resolver::new(&ids);
+    let key = match resolver.resolve(reference, &cfg.paths.wiki) {
+        (crate::relation::Resolution::Resolved, Some(key)) => key,
+        (crate::relation::Resolution::Ambiguous, _) => {
+            return Err(QueryError::PageAmbiguous(String::from(reference)));
+        }
+        _ => return Err(QueryError::PageNotFound(String::from(reference))),
+    };
+    let node = by_key
+        .get(&key)
+        .ok_or_else(|| QueryError::PageNotFound(String::from(reference)))?;
+    let limit = if limit == 0 {
+        RELATION_LIMIT_DEFAULT
+    } else {
+        limit.min(RELATION_LIMIT_MAX)
+    };
+
+    let outgoing = if matches!(kind, RelationKind::Outgoing | RelationKind::Both) {
+        page_group(
+            &store.relation_links_from(&key)?,
+            &by_key,
+            offset,
+            limit,
+            true,
+        )
+    } else {
+        PageGroup::default()
+    };
+    let incoming = if matches!(kind, RelationKind::Incoming | RelationKind::Both) {
+        page_group(
+            &store.relation_links_to(&key)?,
+            &by_key,
+            offset,
+            limit,
+            false,
+        )
+    } else {
+        PageGroup::default()
+    };
+    let sources = source_group(root, &store.relation_sources(&key)?);
+    Ok(RecallItem {
+        page: node.page_key.clone(),
+        title: node.title.clone(),
+        summary: node.summary.clone(),
+        status: node.status.clone(),
+        snippet: String::new(),
+        outgoing,
+        incoming,
+        sources,
+        generation: store.relation_generation()?,
+        incomplete: false,
+    })
+}
+
+/// Slices one direction's links into a page group.
+///
+/// `unresolved` is never paginated: a reader asking for the next page of
+/// neighbours should not be handed the same broken literals again.
+fn page_group(
+    links: &[RelationLink],
+    nodes: &BTreeMap<String, RelationNode>,
+    offset: usize,
+    limit: usize,
+    outbound: bool,
+) -> PageGroup {
+    let mut items: Vec<RecallPage> = Vec::new();
+    let mut unresolved: Vec<Unresolved> = Vec::new();
+    for link in links {
+        match &link.to_page {
+            Some(target) => {
+                let key = if outbound { target } else { &link.from_page };
+                if let Some(node) = nodes.get(key) {
+                    items.push(RecallPage {
+                        page: node.page_key.clone(),
+                        title: node.title.clone(),
+                        summary: node.summary.clone(),
+                        status: node.status.clone(),
+                    });
+                }
+            }
+            None if outbound => unresolved.push(Unresolved {
+                literal: link.target_literal.clone(),
+                resolution: link.resolution.clone(),
+            }),
+            None => {}
+        }
+    }
+    items.sort_by(|a, b| a.page.cmp(&b.page));
+    items.dedup_by(|a, b| a.page == b.page);
+    let total = items.len();
+    let start = offset.min(total);
+    let end = (start + limit).min(total);
+    let next_offset = if end < total { Some(end) } else { None };
+    PageGroup {
+        total,
+        offset,
+        limit,
+        next_offset,
+        truncated: next_offset.is_some(),
+        items: items[start..end].to_vec(),
+        unresolved,
+    }
+}
+
+/// Joins indexed source references to the facts on disk.
+fn source_group(root: &Path, sources: &[RelationSource]) -> SourceGroup {
+    let items: Vec<RecallSource> = sources
+        .iter()
+        .map(|source| {
+            let path = root.join(&source.raw_key);
+            let raw_available = path.is_file();
+            let original = if raw_available {
+                raw_source(&path)
+            } else {
+                None
+            };
+            RecallSource {
+                raw: source.raw_ref.clone(),
+                raw_key: source.raw_key.clone(),
+                source: original,
+                fragment: source.fragment.clone(),
+                raw_available,
+            }
+        })
+        .collect();
+    SourceGroup {
+        total: items.len(),
+        items,
+    }
 }
 
 /// Searches the index. Read-only: it never writes to the ledger.

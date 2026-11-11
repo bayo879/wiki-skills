@@ -10,7 +10,7 @@ use clap::Parser;
 use serde::Serialize;
 
 use llm_wiki::chunk;
-use llm_wiki::cli::{Cli, Command, DoctorOnly, TaskAction};
+use llm_wiki::cli::{Cli, Command, DoctorOnly, QueryArgs, RelationFlag, TaskAction};
 use llm_wiki::config::{Config, ConfigError, CONFIG_FILE};
 use llm_wiki::doctor::{self, Check, Level};
 use llm_wiki::graph;
@@ -81,12 +81,7 @@ fn dispatch(cli: Cli) -> ! {
         } => run_read(reference, offset, limit),
         Command::Task { action } => run_task(action),
         Command::Ignore { add, remove, check } => run_ignore(&add, &remove, check.as_deref()),
-        Command::Query {
-            text,
-            limit,
-            no_archive,
-            graph,
-        } => run_query(text, limit, no_archive, graph),
+        Command::Query(args) => run_query(args),
     }
 }
 
@@ -892,26 +887,65 @@ fn human_task_retry(task: &llm_wiki::store::TaskRow) -> String {
 /// `query` is the only command that decides when to pay for an index update: a
 /// plain search catches up incrementally. A full rebuild is `doctor --fix`,
 /// which nobody asks for by accident.
-fn run_query(text: Option<String>, limit: usize, no_archive: bool, graph: bool) -> ! {
+fn run_query(args: QueryArgs) -> ! {
     let cmd = "query";
     let root = wiki_root(cmd);
     let cfg = open_repo(cmd, &root);
 
-    if graph {
+    if args.graph {
         match graph::build(&root, &cfg) {
             Ok(data) => report::emit_with(cmd, data, Exit::Ok, human_graph),
             Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
         }
     }
 
+    if let Some(reference) = args.page.as_deref() {
+        let kind = match args.relation {
+            Some(RelationFlag::Outgoing) => query::RelationKind::Outgoing,
+            Some(RelationFlag::Incoming) => query::RelationKind::Incoming,
+            Some(RelationFlag::Both) | None => query::RelationKind::Both,
+            Some(RelationFlag::Citing) => report::fail(
+                cmd,
+                Exit::Usage,
+                "E_USAGE",
+                "--relation citing is only valid with --source",
+            ),
+        };
+        let mut store = open_store(cmd, &root, &cfg);
+        if let Err(err) = query::refresh(&root, &cfg, &mut store) {
+            fail_query(cmd, &err)
+        }
+        match query::exact_page(
+            &root,
+            &cfg,
+            &store,
+            reference,
+            kind,
+            args.offset,
+            args.limit.unwrap_or(0),
+        ) {
+            Ok(item) => report::emit_with(cmd, item, Exit::Ok, human_recall),
+            Err(err) => fail_query(cmd, &err),
+        }
+    }
+
+    if args.source.is_some() {
+        report::fail(
+            cmd,
+            Exit::Usage,
+            "E_USAGE",
+            "--source is not available yet; use --page or text search",
+        )
+    }
+
     let mut store = open_store(cmd, &root, &cfg);
-    let text = text.unwrap_or_default();
+    let text = args.text.unwrap_or_default();
     if text.trim().is_empty() {
         report::fail(
             cmd,
             Exit::Usage,
             "E_EMPTY_QUERY",
-            "no query text; pass a word to search for, or --graph",
+            "no query text; pass a word to search for, --page, or --graph",
         )
     }
     if let Err(err) = query::refresh(&root, &cfg, &mut store) {
@@ -920,9 +954,9 @@ fn run_query(text: Option<String>, limit: usize, no_archive: bool, graph: bool) 
 
     let search = query::SearchQuery {
         text,
-        limit,
+        limit: args.limit.unwrap_or(10),
         expand: 0,
-        scope: if no_archive {
+        scope: if args.no_archive {
             QueryScope::ExcludingSessions
         } else {
             QueryScope::All
@@ -937,6 +971,65 @@ fn run_query(text: Option<String>, limit: usize, no_archive: bool, graph: bool) 
             report::emit_with(cmd, data, Exit::Ok, human_query)
         }
         Err(err) => fail_query(cmd, &err),
+    }
+}
+
+/// One block per requested relation group, then the sources.
+fn human_recall(item: &query::RecallItem) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{}  {}", item.page, item.title));
+    if !item.status.is_empty() {
+        out.push_str(&format!("  [{}]", item.status));
+    }
+    out.push('\n');
+    if !item.summary.is_empty() {
+        out.push_str(&format!("  {}\n", item.summary));
+    }
+    if item.incomplete {
+        out.push_str("  (index incomplete)\n");
+    }
+    recall_group(&mut out, "outgoing", &item.outgoing);
+    recall_group(&mut out, "incoming", &item.incoming);
+    if item.sources.total > 0 {
+        out.push_str(&format!("\nsources ({})\n", item.sources.total));
+        for source in &item.sources.items {
+            let availability = if source.raw_available {
+                "available"
+            } else {
+                "missing"
+            };
+            out.push_str(&format!("  {}  {}\n", source.raw, availability));
+        }
+    }
+    out
+}
+
+fn recall_group(out: &mut String, label: &str, group: &query::PageGroup) {
+    if group.total == 0 && group.unresolved.is_empty() {
+        return;
+    }
+    let first = if group.items.is_empty() {
+        0
+    } else {
+        group.offset + 1
+    };
+    out.push_str(&format!(
+        "\n{label} ({}-{} of {})\n",
+        first,
+        group.offset + group.items.len(),
+        group.total
+    ));
+    for page in &group.items {
+        out.push_str(&format!("  {}  {}  {}\n", page.page, page.title, page.summary));
+    }
+    for unresolved in &group.unresolved {
+        out.push_str(&format!(
+            "  [[{}]]  {}\n",
+            unresolved.literal, unresolved.resolution
+        ));
+    }
+    if let Some(next) = group.next_offset {
+        out.push_str(&format!("  next: --offset {next}\n"));
     }
 }
 
