@@ -19,6 +19,7 @@
 //! - **The tool owns the page structure.** `id`, `type`, `sources`, `updated`
 //!   and the frontmatter syntax come from the task, not from the payload.
 
+mod contract;
 mod plan;
 mod route;
 
@@ -137,7 +138,7 @@ struct Unchanged {
 
 /// What one leaf submits: content, never structure.
 #[derive(Debug, Deserialize)]
-struct LeafPayload {
+pub(crate) struct LeafPayload {
     title: String,
     #[serde(default)]
     summary: String,
