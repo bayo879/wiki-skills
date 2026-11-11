@@ -16,7 +16,38 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
+
+/// The routing task: `route` becomes a task kind of its own.
+///
+/// Every root owns at most one `route` child, which is the only entry point for
+/// assigning a source to pages; the partial unique index makes a second one
+/// impossible even if a caller tries. The table is rebuilt because SQLite
+/// cannot alter a CHECK constraint.
+const MIGRATION_12: &str = r#"
+ALTER TABLE tasks RENAME TO tasks_v11;
+CREATE TABLE tasks(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('convert','breakdown','page','route','reconcile')),
+    status TEXT NOT NULL CHECK(status IN ('pending','active','failed','blocked')),
+    source_key TEXT,
+    raw_hash TEXT,
+    target_path TEXT,
+    allowed_json TEXT,
+    payload_json TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO tasks(id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at)
+    SELECT id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at FROM tasks_v11;
+DROP TABLE tasks_v11;
+CREATE UNIQUE INDEX tasks_one_root_per_source ON tasks(source_key) WHERE kind='breakdown';
+CREATE UNIQUE INDEX tasks_one_convert_per_source ON tasks(source_key) WHERE kind='convert';
+CREATE UNIQUE INDEX tasks_one_route_per_root ON tasks(parent_id) WHERE kind='route';
+"#;
 
 /// The relation index: who points at whom, and which pages cite which raw.
 ///
@@ -160,8 +191,9 @@ pub struct WorkItem {
 /// One row of the task tree.
 ///
 /// `kind` is `convert` (source → raw markdown, internal), `breakdown` (one root
-/// per source, waiting for its leaf list) or `page` (one leaf, one target page).
-/// A row lives only while the task is unfinished; closing deletes it.
+/// per source, the settlement container), `route` (the root's single source
+/// assignment step) or `page` (one leaf, one target page). A row lives only
+/// while the task is unfinished; closing deletes it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TaskRow {
     pub id: i64,
@@ -692,6 +724,9 @@ impl Store {
         if version < 11 {
             self.apply_migration(MIGRATION_11, 11)?;
         }
+        if version < 12 {
+            self.apply_migration(MIGRATION_12, 12)?;
+        }
         Ok(())
     }
 
@@ -951,7 +986,15 @@ impl Store {
 
     /// Inserts one task and returns its id.
     pub(crate) fn insert_task(&mut self, t: &NewTask) -> Result<i64> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let id = Self::insert_task_row(&tx, t)?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Inserts one task inside an existing transaction and returns its id.
+    fn insert_task_row(tx: &rusqlite::Transaction<'_>, t: &NewTask) -> Result<i64> {
+        tx.execute(
             "INSERT INTO tasks(parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,created_at,updated_at) \
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
@@ -967,7 +1010,114 @@ impl Store {
                 t.updated_at
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(tx.last_insert_rowid())
+    }
+
+    /// Creates a root and its single `route` child in one transaction.
+    ///
+    /// The route always hangs off the new root; callers do not have to fill in
+    /// `parent_id`. Either both rows exist or neither does, so a round never
+    /// finds a root with nothing to deliver.
+    pub(crate) fn create_root_with_route(
+        &mut self,
+        root: &NewTask,
+        route: &NewTask,
+    ) -> Result<(i64, i64)> {
+        let tx = self.conn.transaction()?;
+        let root_id = Self::insert_task_row(&tx, root)?;
+        let route = NewTask {
+            parent_id: Some(root_id),
+            ..route.clone()
+        };
+        let route_id = Self::insert_task_row(&tx, &route)?;
+        tx.commit()?;
+        Ok((root_id, route_id))
+    }
+
+    /// Closes a `route`: saves the root plan, creates its pages, deletes the route.
+    ///
+    /// One transaction for all three steps, so a page row the schema rejects
+    /// leaves the route in place and the payload unconsumed. Page tasks are
+    /// parented to `root_id` regardless of what the caller passed.
+    pub(crate) fn commit_route(
+        &mut self,
+        root_id: i64,
+        root_payload: &str,
+        pages: &[NewTask],
+        route_id: i64,
+        now: &str,
+    ) -> Result<Vec<i64>> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3",
+            params![root_payload, now, root_id],
+        )?;
+        let mut page_ids = Vec::with_capacity(pages.len());
+        for page in pages {
+            let page = NewTask {
+                parent_id: Some(root_id),
+                ..page.clone()
+            };
+            page_ids.push(Self::insert_task_row(&tx, &page)?);
+        }
+        tx.execute("DELETE FROM tasks WHERE id=?1", [route_id])?;
+        tx.commit()?;
+        Ok(page_ids)
+    }
+
+    /// Closes a `page`: saves the root plan and deletes the page in one transaction.
+    pub(crate) fn commit_page(
+        &mut self,
+        root_id: i64,
+        page_id: i64,
+        root_payload: &str,
+        now: &str,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3",
+            params![root_payload, now, root_id],
+        )?;
+        tx.execute("DELETE FROM tasks WHERE id=?1", [page_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Rebuilds a root's plan: saves it, drops every child, creates a fresh route.
+    ///
+    /// Written pages stay where they are; only the task tree is rebuilt, which
+    /// is why the page rows and their staging are not touched here.
+    pub(crate) fn replan_root(
+        &mut self,
+        root_id: i64,
+        root_payload: &str,
+        route: &NewTask,
+        now: &str,
+    ) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3",
+            params![root_payload, now, root_id],
+        )?;
+        tx.execute("DELETE FROM tasks WHERE parent_id=?1", [root_id])?;
+        let route = NewTask {
+            parent_id: Some(root_id),
+            ..route.clone()
+        };
+        let route_id = Self::insert_task_row(&tx, &route)?;
+        tx.commit()?;
+        Ok(route_id)
+    }
+
+    /// Parks a task as `blocked`, counts the attempt and records why.
+    pub(crate) fn block_task(&mut self, id: i64, error: &str, now: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE tasks SET status='blocked',attempts=attempts+1,last_error=?1,updated_at=?2 WHERE id=?3",
+            params![error, now, id],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Every task, ordered by id (roots and leaves interleaved in creation order).
@@ -1899,6 +2049,58 @@ mod tests {
         let second = page_meta("wiki/concept/a.md", "blake3:bb", "2026-10-28");
         s.upsert_page_meta(&second).unwrap();
         assert_eq!(s.all_page_metas().unwrap(), vec![second]);
+    }
+
+    #[test]
+    fn schema_12_allows_one_route_per_root() {
+        let d = tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("state.db")).unwrap();
+        s.migrate().unwrap();
+        let now = "2026-11-11T00:00:00Z";
+        let mut root = NewTask::pending("breakdown", now);
+        root.source_key = Some("a.md".into());
+        let mut route = NewTask::pending("route", now);
+        route.source_key = Some("a.md".into());
+        let (_, route_id) = s.create_root_with_route(&root, &route).unwrap();
+
+        let mut second = NewTask::pending("route", now);
+        second.parent_id = s.task(route_id).unwrap().unwrap().parent_id;
+        second.source_key = Some("a.md".into());
+        assert!(s.insert_task(&second).is_err());
+    }
+
+    #[test]
+    fn commit_route_rolls_back_when_a_page_row_is_invalid() {
+        let d = tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("state.db")).unwrap();
+        s.migrate().unwrap();
+        let now = "2026-11-11T00:00:00Z";
+        let mut root = NewTask::pending("breakdown", now);
+        root.source_key = Some("a.md".into());
+        let mut route = NewTask::pending("route", now);
+        route.source_key = Some("a.md".into());
+        let (root_id, route_id) = s.create_root_with_route(&root, &route).unwrap();
+
+        let mut page = NewTask::pending("page", now);
+        page.status = "not-a-status".into();
+        assert!(s
+            .commit_route(
+                root_id,
+                "{\"schema\":\"root-plan-v1\"}",
+                &[page],
+                route_id,
+                now
+            )
+            .is_err());
+        assert!(
+            s.task(route_id).unwrap().is_some(),
+            "the route must survive a failed commit"
+        );
+        assert_eq!(
+            s.task(root_id).unwrap().unwrap().payload_json,
+            None,
+            "the root payload must roll back with the failed commit"
+        );
     }
 
     #[test]
