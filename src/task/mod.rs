@@ -20,6 +20,7 @@
 //!   and the frontmatter syntax come from the task, not from the payload.
 
 mod plan;
+mod route;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
