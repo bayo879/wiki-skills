@@ -48,6 +48,29 @@ impl Fixture {
         .unwrap();
     }
 
+    fn page_citing(&self, rel: &str, id: &str, sources: &[&str]) {
+        let path = self.root().join(".wiki/pages").join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut meta = format!(
+            "id: {id}\ntitle: {id}\ntype: concept\nsummary: {id} summary\n\
+             status: stable\nupdated: 2026-10-27\nsources:\n"
+        );
+        for source in sources {
+            meta.push_str(&format!("  - {source}\n"));
+        }
+        fs::write(&path, format!("---\n{meta}---\n\n见 [[a]]\n")).unwrap();
+    }
+
+    fn raw(&self, rel: &str) {
+        let path = self.root().join(".wiki/raw").join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "---\nsource: notes.pdf\nsource_hash: blake3:00\nparser: text\n---\n\n原文\n",
+        )
+        .unwrap();
+    }
+
     fn query(&self, args: &[&str]) -> std::process::Output {
         Command::cargo_bin("llm-wiki")
             .unwrap()
@@ -180,4 +203,72 @@ fn human_output_names_the_next_offset() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("incoming (1-1 of 2)"), "{text}");
     assert!(text.contains("next: --offset 1"), "{text}");
+}
+
+#[test]
+fn a_source_read_lists_the_pages_citing_it() {
+    let f = Fixture::new();
+    f.page("concept/a.md", "a", "");
+    f.raw("s.md");
+    f.page_citing("concept/b.md", "b", &[".wiki/raw/s.md#p=1"]);
+    f.page_citing("concept/c.md", "c", &[".wiki/raw/s.md"]);
+
+    let out = f.query(&["--source", ".wiki/raw/s.md"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let body = json(&out);
+    assert_eq!(body["data"]["raw_key"], ".wiki/raw/s.md");
+    assert!(body["data"]["available"].as_bool().unwrap());
+    let citing = &body["data"]["citing"];
+    assert_eq!(citing["total"], 2);
+    assert_eq!(citing["items"][0]["page"], ".wiki/pages/concept/b.md");
+    assert_eq!(citing["items"][1]["page"], ".wiki/pages/concept/c.md");
+
+    // The same raw may be named without the raw directory prefix.
+    let out = f.query(&["--source", "s.md#p=1"]);
+    assert_eq!(json(&out)["data"]["citing"]["total"], 2);
+}
+
+#[test]
+fn an_absent_source_is_an_empty_answer() {
+    let f = Fixture::new();
+    f.page("concept/a.md", "a", "");
+
+    let out = f.query(&["--source", ".wiki/raw/none.md"]);
+    assert!(out.status.success());
+    let body = json(&out);
+    assert!(!body["data"]["available"].as_bool().unwrap());
+    assert_eq!(body["data"]["citing"]["total"], 0);
+}
+
+#[test]
+fn source_relations_page_and_reject_page_kinds() {
+    let f = Fixture::new();
+    f.page("concept/a.md", "a", "");
+    f.raw("s.md");
+    f.page_citing("concept/b.md", "b", &[".wiki/raw/s.md"]);
+    f.page_citing("concept/c.md", "c", &[".wiki/raw/s.md"]);
+
+    let out = f.query(&["--source", ".wiki/raw/s.md", "--limit", "1"]);
+    let citing = &json(&out)["data"]["citing"];
+    assert_eq!(citing["total"], 2);
+    assert_eq!(citing["next_offset"], 1);
+    assert!(citing["truncated"].as_bool().unwrap());
+
+    let out = f.query(&["--source", ".wiki/raw/s.md", "--relation", "outgoing"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(json(&out)["error"]["code"], "E_USAGE");
+}
+
+#[test]
+fn the_sources_kind_lists_only_the_raw_files() {
+    let f = Fixture::new();
+    f.raw("s.md");
+    f.page_citing("concept/b.md", "b", &[".wiki/raw/s.md#p=1"]);
+
+    let out = f.query(&["--page", "concept/b", "--relation", "sources"]);
+    let body = json(&out);
+    assert_eq!(body["data"]["outgoing"]["total"], 0);
+    assert_eq!(body["data"]["incoming"]["total"], 0);
+    assert_eq!(body["data"]["sources"]["total"], 1);
+    assert_eq!(body["data"]["sources"]["items"][0]["fragment"], "p=1");
 }

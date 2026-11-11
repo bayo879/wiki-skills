@@ -892,6 +892,15 @@ fn run_query(args: QueryArgs) -> ! {
     let root = wiki_root(cmd);
     let cfg = open_repo(cmd, &root);
 
+    if args.relation.is_some() && args.page.is_none() && args.source.is_none() {
+        report::fail(
+            cmd,
+            Exit::Usage,
+            "E_USAGE",
+            "--relation is only valid with --page or --source",
+        )
+    }
+
     if args.graph {
         match graph::build(&root, &cfg) {
             Ok(data) => report::emit_with(cmd, data, Exit::Ok, human_graph),
@@ -903,7 +912,8 @@ fn run_query(args: QueryArgs) -> ! {
         let kind = match args.relation {
             Some(RelationFlag::Outgoing) => query::RelationKind::Outgoing,
             Some(RelationFlag::Incoming) => query::RelationKind::Incoming,
-            Some(RelationFlag::Both) | None => query::RelationKind::Both,
+            Some(RelationFlag::Sources) => query::RelationKind::Sources,
+            None => query::RelationKind::All,
             Some(RelationFlag::Citing) => report::fail(
                 cmd,
                 Exit::Usage,
@@ -929,13 +939,31 @@ fn run_query(args: QueryArgs) -> ! {
         }
     }
 
-    if args.source.is_some() {
-        report::fail(
-            cmd,
-            Exit::Usage,
-            "E_USAGE",
-            "--source is not available yet; use --page or text search",
-        )
+    if let Some(reference) = args.source.as_deref() {
+        match args.relation {
+            Some(RelationFlag::Citing) | None => {}
+            _ => report::fail(
+                cmd,
+                Exit::Usage,
+                "E_USAGE",
+                "--relation with --source only accepts citing",
+            ),
+        }
+        let mut store = open_store(cmd, &root, &cfg);
+        if let Err(err) = query::refresh(&root, &cfg, &mut store) {
+            fail_query(cmd, &err)
+        }
+        match query::exact_source(
+            &root,
+            &cfg,
+            &store,
+            reference,
+            args.offset,
+            args.limit.unwrap_or(0),
+        ) {
+            Ok(view) => report::emit_with(cmd, view, Exit::Ok, human_source),
+            Err(err) => fail_query(cmd, &err),
+        }
     }
 
     let mut store = open_store(cmd, &root, &cfg);
@@ -1000,6 +1028,39 @@ fn human_recall(item: &query::RecallItem) -> String {
             };
             out.push_str(&format!("  {}  {}\n", source.raw, availability));
         }
+    }
+    out
+}
+
+/// A source read: the raw's availability, then the pages citing it.
+fn human_source(view: &query::SourceView) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{}  {}\n",
+        view.raw_key,
+        if view.available {
+            "available"
+        } else {
+            "missing"
+        }
+    ));
+    if view.citing.total == 0 {
+        out.push_str("\nno page cites this source\n");
+        return out;
+    }
+    let citing = &view.citing;
+    let first = if citing.items.is_empty() { 0 } else { citing.offset + 1 };
+    out.push_str(&format!(
+        "\nciting ({}-{} of {})\n",
+        first,
+        citing.offset + citing.items.len(),
+        citing.total
+    ));
+    for page in &citing.items {
+        out.push_str(&format!("  {}  {}  {}\n", page.page, page.title, page.summary));
+    }
+    if let Some(next) = citing.next_offset {
+        out.push_str(&format!("  next: --offset {next}\n"));
     }
     out
 }

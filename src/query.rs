@@ -105,8 +105,10 @@ pub enum RelationKind {
     Outgoing,
     /// Pages linking to this page.
     Incoming,
-    /// Both directions.
-    Both,
+    /// Only the raw files this page cites.
+    Sources,
+    /// Every group.
+    All,
 }
 
 /// Default page size for one relation group.
@@ -189,6 +191,21 @@ pub struct RecallSource {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
     pub raw_available: bool,
+}
+
+/// Exact reverse lookup: one raw reference and the pages citing it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SourceView {
+    /// The reference as the caller wrote it.
+    pub raw: String,
+    /// Raw path without the fragment, as stored in the index.
+    pub raw_key: String,
+    /// Whether that raw file is present in this checkout.
+    pub available: bool,
+    /// Pages whose frontmatter cites the raw.
+    pub citing: PageGroup,
+    /// Index generation the answer came from.
+    pub generation: i64,
 }
 
 /// What to search for, and how much to bring back.
@@ -634,7 +651,7 @@ pub fn exact_page(
         limit.min(RELATION_LIMIT_MAX)
     };
 
-    let outgoing = if matches!(kind, RelationKind::Outgoing | RelationKind::Both) {
+    let outgoing = if matches!(kind, RelationKind::Outgoing | RelationKind::All) {
         page_group(
             &store.relation_links_from(&key)?,
             &by_key,
@@ -645,7 +662,7 @@ pub fn exact_page(
     } else {
         PageGroup::default()
     };
-    let incoming = if matches!(kind, RelationKind::Incoming | RelationKind::Both) {
+    let incoming = if matches!(kind, RelationKind::Incoming | RelationKind::All) {
         page_group(
             &store.relation_links_to(&key)?,
             &by_key,
@@ -668,6 +685,88 @@ pub fn exact_page(
         sources,
         generation: store.relation_generation()?,
         incomplete: false,
+    })
+}
+
+/// Reads one raw reference and the pages citing it, paged.
+///
+/// A reference may be written with or without the raw directory prefix, and
+/// with or without a fragment; an absent raw is an empty answer, not an error.
+pub fn exact_source(
+    root: &Path,
+    cfg: &Config,
+    store: &Store,
+    reference: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<SourceView> {
+    let nodes = store.all_relation_nodes()?;
+    let by_key: BTreeMap<String, RelationNode> = nodes
+        .iter()
+        .map(|node| (node.page_key.clone(), node.clone()))
+        .collect();
+    let prefix = cfg.paths.raw.trim_end_matches('/');
+    let mut head = reference.split('#').next().unwrap_or(reference).trim();
+    while let Some(rest) = head.strip_prefix("./") {
+        head = rest;
+    }
+    let mut candidates = vec![String::from(head)];
+    if !head.starts_with(prefix) && !prefix.is_empty() {
+        candidates.push(format!("{prefix}/{head}"));
+    }
+
+    let mut keys: Vec<String> = Vec::new();
+    let mut raw_key = String::from(head);
+    let mut available = false;
+    for candidate in &candidates {
+        let present = root.join(candidate).is_file();
+        if present && !available {
+            raw_key = candidate.clone();
+        }
+        available |= present;
+        for key in store.pages_citing(candidate)? {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys.sort();
+
+    let mut items: Vec<RecallPage> = keys
+        .iter()
+        .filter_map(|key| by_key.get(key))
+        .map(|node| RecallPage {
+            page: node.page_key.clone(),
+            title: node.title.clone(),
+            summary: node.summary.clone(),
+            status: node.status.clone(),
+        })
+        .collect();
+    items.sort_by(|a, b| a.page.cmp(&b.page));
+    let limit = if limit == 0 {
+        RELATION_LIMIT_DEFAULT
+    } else {
+        limit.min(RELATION_LIMIT_MAX)
+    };
+    let total = items.len();
+    let start = offset.min(total);
+    let end = (start + limit).min(total);
+    let next_offset = if end < total { Some(end) } else { None };
+
+    Ok(SourceView {
+        raw: String::from(reference),
+        raw_key,
+        available,
+        citing: PageGroup {
+            total,
+            offset,
+            limit,
+            next_offset,
+            truncated: next_offset.is_some(),
+            items: items[start..end].to_vec(),
+            unresolved: Vec::new(),
+        },
+        generation: store.relation_generation()?,
     })
 }
 

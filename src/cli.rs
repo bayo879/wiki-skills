@@ -164,7 +164,7 @@ pub struct QueryArgs {
 pub enum RelationFlag {
     Outgoing,
     Incoming,
-    Both,
+    Sources,
     Citing,
 }
 
