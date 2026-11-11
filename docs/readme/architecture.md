@@ -77,8 +77,9 @@ agent 生成 ── task done --payload ──▶ .wiki/cache/staging/
 | `src/store.rs` | SQLite 账本、schema 迁移、FTS5；连接显式持有 5s busy_timeout |
 | `src/ledger.rs` | 账本唯一的写入口：登记转换、跟随改名、遗忘删除 |
 | `src/sync.rs` | 摄入一轮的执行体：`ingest` 调它跑 scan → convert → 来源待办交付，并收口消失的源（`on_missing`） |
-| `src/query.rs` | FTS5 索引与检索 |
-| `src/graph.rs` | `[[wikilink]]` 结构：出入度、边、孤立页、断链（`query --graph`） |
+| `src/relation.rs` | 唯一的 wikilink 与来源引用解析：别名解析、围栏过滤、raw 片段拆分 |
+| `src/query.rs` | FTS5 与关系索引的刷新、文本检索、`--page` / `--source` 精确读取 |
+| `src/graph.rs` | 从关系索引读 `[[wikilink]]` 结构：出入度、边、孤立页、断链（`query --graph`） |
 | `src/doctor.rs` | 各项健康检查、`--fix` 修复、`--only` 单跑 |
 | `src/hash.rs` | 全文 blake3 与有界固定输入读取 |
 | `src/worklist.rs` | 来源完成核对（四道哈希）、遗留来源线索导入 |
@@ -98,6 +99,7 @@ agent 生成 ── task done --payload ──▶ .wiki/cache/staging/
 - 忽略列表只有一个解释入口 `ignore::IgnoreList`：`ingest` 跳过，不许在调用点各自拼通配。`[scan].ignore` 只是目录名的粗过滤，两者不混用。（检查：tests/scan_signature.rs::an_entry_of_the_ignore_list_is_invisible_to_the_scan）
 - 源在任务期间漂移不得合并，`E_SOURCE_DRIFT` 保留待办、staging 与任务。（检查：tests/cli_task.rs::task_done_obeys_the_repository_lock）
 - 索引是派生状态，从正式页增量刷新；根收尾合并后立即刷。（检查：tests/cli_task.rs::the_last_leaf_merges_the_batch_and_clears_the_queue）
+- 关系索引（`page_nodes` / `page_links` / `page_source_refs`）同样只从 Markdown 重建：`query`、`graph`、`lint` 与 `task::affected_pages` 共用 `relation::Resolver` 和同一份反查，不各自扫页；`Store::apply_refresh` 在一个事务里写 FTS 与三张关系表。`generation` 只在关系真变化时递增。（检查：tests/query.rs::refresh_keeps_links_both_ways_and_survives_page_deletion）
 
 ## 机器守卫
 

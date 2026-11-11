@@ -101,7 +101,11 @@ fn a_page_read_lists_both_directions_and_dead_links() {
     f.page("concept/c.md", "c", "见 [[a]]");
 
     let out = f.query(&["--page", "concept/a", "--relation", "outgoing"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let body = json(&out);
     assert_eq!(body["data"]["page"], ".wiki/pages/concept/a.md");
     let outgoing = &body["data"]["outgoing"];
@@ -126,7 +130,12 @@ fn relation_groups_page_by_offset_and_limit() {
     f.page("concept/c.md", "c", "见 [[a]]");
 
     let out = f.query(&[
-        "--page", "concept/a", "--relation", "incoming", "--limit", "1",
+        "--page",
+        "concept/a",
+        "--relation",
+        "incoming",
+        "--limit",
+        "1",
     ]);
     let body = json(&out);
     let group = &body["data"]["incoming"];
@@ -136,7 +145,14 @@ fn relation_groups_page_by_offset_and_limit() {
     assert!(group["truncated"].as_bool().unwrap());
 
     let out = f.query(&[
-        "--page", "concept/a", "--relation", "incoming", "--limit", "1", "--offset", "1",
+        "--page",
+        "concept/a",
+        "--relation",
+        "incoming",
+        "--limit",
+        "1",
+        "--offset",
+        "1",
     ]);
     let group = &json(&out)["data"]["incoming"];
     assert_eq!(group["items"][0]["page"], ".wiki/pages/concept/c.md");
@@ -144,7 +160,12 @@ fn relation_groups_page_by_offset_and_limit() {
     assert!(!group["truncated"].as_bool().unwrap());
 
     let out = f.query(&[
-        "--page", "concept/a", "--relation", "incoming", "--offset", "9",
+        "--page",
+        "concept/a",
+        "--relation",
+        "incoming",
+        "--offset",
+        "9",
     ]);
     let group = &json(&out)["data"]["incoming"];
     assert!(group["items"].as_array().unwrap().is_empty());
@@ -195,7 +216,13 @@ fn human_output_names_the_next_offset() {
     let out = Command::cargo_bin("llm-wiki")
         .unwrap()
         .args([
-            "query", "--page", "concept/a", "--relation", "incoming", "--limit", "1",
+            "query",
+            "--page",
+            "concept/a",
+            "--relation",
+            "incoming",
+            "--limit",
+            "1",
         ])
         .current_dir(f.root())
         .output()
@@ -214,9 +241,13 @@ fn a_source_read_lists_the_pages_citing_it() {
     f.page_citing("concept/c.md", "c", &[".wiki/raw/s.md"]);
 
     let out = f.query(&["--source", ".wiki/raw/s.md"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let body = json(&out);
-    assert_eq!(body["data"]["raw_key"], ".wiki/raw/s.md");
+    assert_eq!(body["data"]["raw_key"], "s.md");
     assert!(body["data"]["available"].as_bool().unwrap());
     let citing = &body["data"]["citing"];
     assert_eq!(citing["total"], 2);

@@ -82,6 +82,8 @@ llm-wiki task done 1 --leaves leaves.json  # 拆解：提交叶清单
 llm-wiki task done 2 --payload page.json   # 生成：提交一页载荷
 llm-wiki query 熔断                        # 根收尾合并后即可检索
 llm-wiki query --graph
+llm-wiki query --page 熔断 --relation incoming   # 谁引用了这一页
+llm-wiki query --source .wiki/raw/notes/a.md    # 哪些页引用了这个源
 ```
 
 点名摄入或只看解析：
@@ -114,7 +116,7 @@ llm-wiki --version                         # 打印版本
 | `task done <ID> [--leaves <FILE>] [--payload <FILE>] [--accept] [--regenerate]` | 关闭当前任务：拆解交叶清单，生成交页面载荷，复核二选一；返回下一个任务 |
 | `task status` | 看任务树、当前任务、失败与阻塞的根 |
 | `task retry <ID>` | 人工重置失败任务；技能不教自动重试 |
-| `query [TEXT] [--no-archive] [--graph] [--limit <N>]` | FTS5 检索与链接图，无命中 exit 0 |
+| `query [TEXT] [--page <REF> \| --source <RAW>] [--relation <KIND>] [--offset <N>] [--limit <N>] [--no-archive] [--graph]` | FTS5 检索、链接图与精确关系读取；`KIND` 为 `outgoing`/`incoming`/`sources`/`citing`，精确读取分页并带 `generation`；无命中 exit 0 |
 | `ignore [--add <PATTERN>] [--remove <PATTERN>] [--check <KEY>]` | 查看、维护和检查忽略列表 |
 | `--version` | 打印工具软件版本，不是内容版本管理 |
 
@@ -149,4 +151,4 @@ llm-wiki --version                         # 打印版本
 - `.wiki/` 是单机事实源，不提供同步，不应搬移合并账本。工具不生成 git 配置，备份由用户另行安排；没有自动备份与工具内回退。
 - 没有工作租约：`.wiki/work.lock` 与其门禁随「批次锁」概念一并删除，取而代之的是 SQLite 里的任务树。`ingest` 与 `task done` 每次只交付一个 `next_task`，整棵树用 `task status` 看；转换只受稳定窗口与 `max_per_run` 限制。旧库留下的 `.wiki/work.lock` 不再被任何命令读取，可以直接删。
 - 仓库锁是一个固定 inode 上的 OS 文件锁：按占用判断，不按文件年龄判断；进程退出即释放，文件本身保留复用。`task done` 持这个锁；文件系统层的写页不持锁，任务外改动只能靠基线比对发现。数据库连接显式设 5s busy_timeout（不依赖驱动的默认值），并发短写排队而不是立即 `SQLITE_BUSY`。
-- 索引是派生状态，`query` 前增量刷新，根收尾合并后的页面可被检索；`doctor --fix` 可重建索引。
+- 索引是派生状态：FTS 与关系索引都在 `query` 前增量刷新，根收尾合并后的页面可被检索；关系读取分页返回 `generation`，两次读取的 `generation` 不同就说明页面关系变了。`doctor --fix` 可整体重建。

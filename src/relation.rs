@@ -241,7 +241,10 @@ mod tests {
             page(".wiki/pages/entity/b.md", "b", "entity/b"),
         ];
         let resolver = Resolver::new(&pages);
-        assert_eq!(resolver.resolve("b", ".wiki/pages"), (Resolution::Ambiguous, None));
+        assert_eq!(
+            resolver.resolve("b", ".wiki/pages"),
+            (Resolution::Ambiguous, None)
+        );
         assert_eq!(
             resolver.resolve("concept/b", ".wiki/pages"),
             (

@@ -427,27 +427,14 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         .iter()
         .map(|item| item.source_key.clone())
         .collect();
-    let wanted: std::collections::BTreeSet<_> = work_items
-        .iter()
-        .map(|item| item.raw_key.as_str())
-        .collect();
-    let mut affected_pages = Vec::new();
-    for entry in walkdir::WalkDir::new(root.join(&cfg.paths.wiki)).follow_links(false) {
-        let Ok(entry) = entry else { continue };
-        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
-            continue;
-        }
-        let Ok((front, _)) = page::read(entry.path()) else {
-            continue;
-        };
-        if source_refs::source_keys(&front.sources, &cfg.paths.raw)
-            .iter()
-            .any(|key| wanted.contains(key.as_str()))
-        {
-            affected_pages.push(paths::identity_key(root, entry.path())?);
-        }
-    }
-    affected_pages.sort();
+    let wanted: Vec<String> = work_items.iter().map(|item| item.raw_key.clone()).collect();
+    let affected_pages = if wanted.is_empty() {
+        Vec::new()
+    } else {
+        // `advance` just refreshed the index, so this is the same reverse
+        // lookup as `query --source`, not a second page scan.
+        task::affected_pages(store, &wanted)?
+    };
 
     // 5b. A page the round just handed to an agent is checked before the next
     //     round trusts it. Only L12/L13 — the two findings that mean "this page

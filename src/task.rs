@@ -232,6 +232,9 @@ pub fn ensure_root(
 pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Option<TaskRow>> {
     let stamp = now();
     reconcile_scan(root, cfg, store)?;
+    // Later steps read relations (affected pages, page quality); one refresh
+    // here keeps every caller of `advance` on the same snapshot.
+    query::refresh(root, cfg, store)?;
     for task in store.tasks()? {
         if (task.kind == "page" || task.kind == "reconcile") && task.status == "active" {
             store.set_task_status(task.id, "pending", &stamp)?;
@@ -356,7 +359,7 @@ pub fn close(
                     "a breakdown task needs --leaves <file> with the leaf list",
                 )
             })?;
-            close_breakdown(root, cfg, store, &task, leaves)?;
+            close_breakdown(cfg, store, &task, leaves)?;
         }
         "reconcile" => {
             close_reconcile(root, cfg, store, &task, verdict)?;
@@ -447,30 +450,17 @@ pub fn status(store: &mut Store) -> Result<TaskStatus> {
     })
 }
 
-/// The pages that already cite `raw_key`, sorted.
+/// The pages that already cite any of `raw_keys`, sorted.
 ///
-/// This is the incremental-writing guard: a breakdown must either give each of
-/// these pages a leaf or say explicitly why it leaves it alone.
-pub fn affected_pages(root: &Path, cfg: &Config, raw_key: &str) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(root.join(&cfg.paths.wiki)).follow_links(false) {
-        let Ok(entry) = entry else { continue };
-        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
-            continue;
-        }
-        let Ok((front, _)) = page::read(entry.path()) else {
-            continue;
-        };
-        if front
-            .sources
-            .iter()
-            .any(|reference| reference_key(&cfg.paths.raw, reference) == raw_key)
-        {
-            out.push(paths::identity_key(root, entry.path())?);
-        }
+/// Reads the relation index rather than walking the page tree: `advance`
+/// refreshes the index first, so this is the same reverse lookup `lint` and
+/// `query --source` use. A caller must not treat a stale index as truth.
+pub fn affected_pages(store: &Store, raw_keys: &[String]) -> Result<Vec<String>> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for raw_key in raw_keys {
+        out.extend(store.pages_citing(raw_key)?);
     }
-    out.sort();
-    Ok(out)
+    Ok(out.into_iter().collect())
 }
 
 /// Looks for authored pages that moved since the baseline.
@@ -719,7 +709,6 @@ fn close_page(
 }
 
 fn close_breakdown(
-    root: &Path,
     cfg: &Config,
     store: &mut Store,
     task: &TaskRow,
@@ -777,7 +766,7 @@ fn close_breakdown(
     }
 
     // Every page that already cites this raw must be a leaf or carry a reason.
-    let affected = affected_pages(root, cfg, &raw_key)?;
+    let affected = affected_pages(store, std::slice::from_ref(&raw_key))?;
     let mut unchanged: BTreeMap<String, String> = BTreeMap::new();
     for item in &doc.unchanged {
         if item.reason.trim().is_empty() {

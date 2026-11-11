@@ -372,7 +372,7 @@ fn sources_split_the_chunk_and_check_the_raw_file() {
     assert_eq!(hit.sources.total, 1);
     let source = &hit.sources.items[0];
     assert_eq!(source.raw, ".wiki/raw/a.md#p=12-40");
-    assert_eq!(source.raw_key, ".wiki/raw/a.md");
+    assert_eq!(source.raw_key, "a.md");
     assert_eq!(source.source.as_deref(), Some("a.pdf"));
     assert_eq!(source.fragment.as_deref(), Some("p=12-40"));
     assert!(source.raw_available);
@@ -393,7 +393,7 @@ fn a_missing_raw_is_reported_not_fatal() {
 
     let hit = fx.only("订单");
     assert_eq!(hit.sources.total, 1);
-    assert_eq!(hit.sources.items[0].raw_key, ".wiki/raw/missing.md");
+    assert_eq!(hit.sources.items[0].raw_key, "missing.md");
     assert_eq!(hit.sources.items[0].fragment.as_deref(), Some("p=1-2"));
     assert!(!hit.sources.items[0].raw_available);
     assert_eq!(hit.sources.items[0].source, None);
@@ -683,10 +683,10 @@ fn source_refs_are_indexed_and_reverse_lookup_works() {
     let a = ".wiki/pages/concept/a.md";
     let sources = f.store.relation_sources(a).unwrap();
     assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].raw_key, ".wiki/raw/notes.md");
+    assert_eq!(sources[0].raw_key, "notes.md");
     assert_eq!(sources[0].fragment.as_deref(), Some("p=1"));
     assert_eq!(
-        f.store.pages_citing(".wiki/raw/notes.md").unwrap(),
+        f.store.pages_citing("notes.md").unwrap(),
         vec![String::from(a)]
     );
 }

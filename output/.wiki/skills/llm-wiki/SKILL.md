@@ -23,7 +23,7 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 - `llm-wiki task done <ID> --leaves <FILE>` 关闭拆解任务，提交叶清单；`--payload <FILE>` 关闭页面任务，提交一页内容；`--accept` / `--regenerate` 关闭复核任务。关闭后返回下一个任务。
 - `llm-wiki task status` 看任务树、当前任务与失败任务；`llm-wiki task retry <ID>` 由人重置失败任务，不要自动重试。
 - `llm-wiki read <REF>` 读取内部文件；一次最多 2000 行，`--offset` 从第几行开始，`--limit` 改条数。
-- `llm-wiki query <词>` 检索；`--graph` 看链接图。
+- `llm-wiki query <词>` 检索；`--graph` 看链接图；`--page <页>` 看这一页的出入链与来源，`--source <raw>` 看哪些页引用了这个源（两者可分页）。
 - `llm-wiki ignore --add <PATTERN>` 维护忽略列表。
 - 需要机器可读输出时加 `--json`；不要靠解析人类输出。
 

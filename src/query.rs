@@ -307,7 +307,7 @@ pub fn reindex(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
         .map(|row| row.page_key)
         .collect();
     let fts_deletes = store.fts_page_ids()?;
-    let relations = relations(&cfg.paths.wiki, &pages);
+    let relations = relations(&cfg.paths.wiki, &cfg.paths.raw, &pages);
     store.apply_refresh(&RefreshWrite {
         fts_deletes,
         fts_upserts: rows,
@@ -449,7 +449,10 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
                 }
             }
         }
-        (Vec::new(), Some(relations(wiki_prefix, &all)))
+        (
+            Vec::new(),
+            Some(relations(wiki_prefix, &cfg.paths.raw, &all)),
+        )
     } else {
         let mut identities: BTreeMap<String, PageIdentity> = stored
             .iter()
@@ -460,7 +463,10 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
         }
         let ids: Vec<PageIdentity> = identities.into_values().collect();
         let resolver = Resolver::new(&ids);
-        (relations_with(wiki_prefix, &resolver, &changed), None)
+        (
+            relations_with(wiki_prefix, &cfg.paths.raw, &resolver, &changed),
+            None,
+        )
     };
 
     if upserts.is_empty()
@@ -492,18 +498,19 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
 }
 
 /// Relation rows for every page, with resolutions against the whole set.
-fn relations(wiki_prefix: &str, pages: &[IndexedPage]) -> Vec<PageRelations> {
+fn relations(wiki_prefix: &str, raw_prefix: &str, pages: &[IndexedPage]) -> Vec<PageRelations> {
     let ids: Vec<PageIdentity> = pages
         .iter()
         .map(|page| identity(wiki_prefix, page))
         .collect();
     let resolver = Resolver::new(&ids);
-    relations_with(wiki_prefix, &resolver, pages)
+    relations_with(wiki_prefix, raw_prefix, &resolver, pages)
 }
 
 /// Relation rows for `pages`, resolved against a caller-built alias table.
 fn relations_with(
     wiki_prefix: &str,
+    raw_prefix: &str,
     resolver: &Resolver,
     pages: &[IndexedPage],
 ) -> Vec<PageRelations> {
@@ -540,12 +547,15 @@ fn relations_with(
                 .front
                 .sources
                 .iter()
-                .filter_map(|entry| crate::relation::split_source_ref(entry))
-                .map(|parts| RelationSource {
-                    page_key: page.key.clone(),
-                    raw_ref: parts.raw_ref,
-                    raw_key: parts.raw_key,
-                    fragment: parts.fragment,
+                .filter_map(|entry| {
+                    let parts = crate::relation::split_source_ref(entry)?;
+                    let raw_key = crate::source_refs::source_key(&parts.raw_ref, raw_prefix)?;
+                    Some(RelationSource {
+                        page_key: page.key.clone(),
+                        raw_ref: parts.raw_ref,
+                        raw_key,
+                        fragment: parts.fragment,
+                    })
                 })
                 .collect();
             (node, links, sources)
@@ -646,7 +656,7 @@ pub fn exact_page(
     } else {
         PageGroup::default()
     };
-    let sources = source_group(root, &store.relation_sources(&key)?);
+    let sources = source_group(root, &cfg.paths.raw, &store.relation_sources(&key)?);
     Ok(RecallItem {
         page: node.page_key.clone(),
         title: node.title.clone(),
@@ -673,36 +683,23 @@ pub fn exact_source(
     offset: usize,
     limit: usize,
 ) -> Result<SourceView> {
+    let parts = crate::relation::split_source_ref(reference)
+        .ok_or_else(|| QueryError::BadRelation(String::from("source reference is empty")))?;
+    let raw_key = crate::source_refs::source_key(&parts.raw_ref, &cfg.paths.raw)
+        .ok_or_else(|| QueryError::BadRelation(format!("`{reference}` names no raw file")))?;
+    let raw_path = root.join(format!(
+        "{}/{}",
+        cfg.paths.raw.trim_end_matches('/'),
+        raw_key
+    ));
+    let available = raw_path.is_file();
+
     let nodes = store.all_relation_nodes()?;
     let by_key: BTreeMap<String, RelationNode> = nodes
         .iter()
         .map(|node| (node.page_key.clone(), node.clone()))
         .collect();
-    let prefix = cfg.paths.raw.trim_end_matches('/');
-    let mut head = reference.split('#').next().unwrap_or(reference).trim();
-    while let Some(rest) = head.strip_prefix("./") {
-        head = rest;
-    }
-    let mut candidates = vec![String::from(head)];
-    if !head.starts_with(prefix) && !prefix.is_empty() {
-        candidates.push(format!("{prefix}/{head}"));
-    }
-
-    let mut keys: Vec<String> = Vec::new();
-    let mut raw_key = String::from(head);
-    let mut available = false;
-    for candidate in &candidates {
-        let present = root.join(candidate).is_file();
-        if present && !available {
-            raw_key = candidate.clone();
-        }
-        available |= present;
-        for key in store.pages_citing(candidate)? {
-            if !keys.contains(&key) {
-                keys.push(key);
-            }
-        }
-    }
+    let mut keys = store.pages_citing(&raw_key)?;
     keys.sort();
 
     let mut items: Vec<RecallPage> = keys
@@ -794,11 +791,16 @@ fn page_group(
 }
 
 /// Joins indexed source references to the facts on disk.
-fn source_group(root: &Path, sources: &[RelationSource]) -> SourceGroup {
+fn source_group(root: &Path, raw_prefix: &str, sources: &[RelationSource]) -> SourceGroup {
     let items: Vec<RecallSource> = sources
         .iter()
         .map(|source| {
-            let path = root.join(&source.raw_key);
+            let raw_dir = raw_prefix.trim_end_matches('/');
+            let path = if raw_dir.is_empty() {
+                root.join(&source.raw_key)
+            } else {
+                root.join(raw_dir).join(&source.raw_key)
+            };
             let raw_available = path.is_file();
             let original = if raw_available {
                 raw_source(&path)
@@ -871,7 +873,11 @@ pub fn search(root: &Path, cfg: &Config, store: &Store, query: &SearchQuery) -> 
             RELATION_LIMIT_DEFAULT,
             false,
         );
-        let sources = source_group(root, &store.relation_sources(&node.page_key)?);
+        let sources = source_group(
+            root,
+            &cfg.paths.raw,
+            &store.relation_sources(&node.page_key)?,
+        );
         let expanded = if query.expand == 0 {
             Vec::new()
         } else {

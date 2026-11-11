@@ -197,7 +197,8 @@ fn replacing_a_page_rewires_its_edges_and_bumps_generation() {
     let b = ".wiki/pages/concept/b.md";
 
     let first = s.relation_generation().unwrap();
-    s.replace_page_relations(&node(b, "b", "concept"), &[], &[]).unwrap();
+    s.replace_page_relations(&node(b, "b", "concept"), &[], &[])
+        .unwrap();
     s.replace_page_relations(
         &node(a, "a", "concept"),
         &[link(a, "b", Some(b)), link(a, "gone", None)],
@@ -222,7 +223,10 @@ fn replacing_a_page_rewires_its_edges_and_bumps_generation() {
     assert_eq!(from[0].to_page.as_deref(), Some(b));
     assert_eq!(from[1].resolution, "missing");
     assert_eq!(s.relation_links_to(b).unwrap().len(), 1);
-    assert_eq!(s.pages_citing(".wiki/raw/s.md").unwrap(), vec![String::from(a)]);
+    assert_eq!(
+        s.pages_citing(".wiki/raw/s.md").unwrap(),
+        vec![String::from(a)]
+    );
 
     // Deleting b keeps a's claim, but it can no longer resolve.
     s.delete_page_relations(b).unwrap();
@@ -230,5 +234,9 @@ fn replacing_a_page_rewires_its_edges_and_bumps_generation() {
     assert_eq!(from[0].to_page, None);
     assert_eq!(from[0].resolution, "missing");
     assert!(s.relation_links_to(b).unwrap().is_empty());
-    assert!(s.all_relation_nodes().unwrap().iter().all(|n| n.page_key != b));
+    assert!(s
+        .all_relation_nodes()
+        .unwrap()
+        .iter()
+        .all(|n| n.page_key != b));
 }
