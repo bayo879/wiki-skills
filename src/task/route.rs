@@ -481,6 +481,28 @@ mod tests {
             .to_string()
     }
 
+    /// Validates one assignment (`"point":"p1",...` without the braces) in an
+    /// otherwise valid payload and returns the rejection.
+    fn reject(assignment: &str) -> crate::task::TaskError {
+        let json = format!(
+            r#"{{"points":[{{"id":"p1","finding":"f","evidence":"e"}}],
+                "assignments":[{{{assignment}}}],
+                "proposals":[{{"id":"n1","type":"concept","title":"N","summary":"s",
+                    "why_new":"n","why_not_existing":"e"}}]}}"#
+        );
+        let doc = parse(json.as_bytes()).unwrap();
+        validate_shape(&doc, &[], &types()).unwrap_err()
+    }
+
+    /// Asserts a rejection names the action and the offending field, and uses
+    /// the one payload error code.
+    fn assert_rejected(err: &crate::task::TaskError, action: &str, field: &str) {
+        let message = err.to_string();
+        assert!(message.contains(action), "{message}");
+        assert!(message.contains(field), "{message}");
+        assert_eq!(err.code(), "E_TASK_BAD_PAYLOAD", "{message}");
+    }
+
     #[test]
     fn a_point_without_an_assignment_is_rejected() {
         let doc = parse(br#"{"points":[{"id":"p1","finding":"f","evidence":"e"}]}"#).unwrap();
@@ -756,6 +778,64 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn nested_unknown_fields_are_rejected_by_the_parser() {
+        for json in [
+            r#"{"points":[{"id":"p1","finding":"f","evidence":"e","extra":1}]}"#,
+            r#"{"assignments":[{"point":"p1","action":"skip","reason":"r","extra":1}]}"#,
+        ] {
+            let err = parse(json.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("unknown field"), "{err}");
+            assert_eq!(err.code(), "E_TASK_BAD_PAYLOAD", "{err}");
+        }
+    }
+
+    #[test]
+    fn an_update_assignment_cannot_carry_another_actions_fields() {
+        let base = r#""point":"p1","action":"update","target":".wiki/pages/concept/a.md",
+            "change":"补一段","basis":"b""#;
+        for (field, value) in [
+            ("proposal", r#""n1""#),
+            ("reason", r#""已有""#),
+            ("covered_by", r#""...b.md""#),
+        ] {
+            let err = reject(&format!("{base},\"{field}\":{value}"));
+            assert_rejected(&err, "update", field);
+        }
+    }
+
+    #[test]
+    fn a_create_assignment_cannot_carry_another_actions_fields() {
+        let base = r#""point":"p1","action":"create","proposal":"n1""#;
+        for (field, value) in [
+            ("target", r#""...a.md""#),
+            ("change", r#""补一段""#),
+            ("basis", r#""b""#),
+            ("reason", r#""已有""#),
+            ("covered_by", r#""...b.md""#),
+        ] {
+            let err = reject(&format!("{base},\"{field}\":{value}"));
+            assert_rejected(&err, "create", field);
+        }
+    }
+
+    #[test]
+    fn a_skip_assignment_carries_only_reason_and_covered_by() {
+        for (field, value) in [
+            ("target", r#""...a.md""#),
+            ("change", r#""补一段""#),
+            ("basis", r#""b""#),
+            ("proposal", r#""n1""#),
+        ] {
+            let err = reject(&format!(
+                r#""point":"p1","action":"skip","reason":"已有","{field}":{value}"#
+            ));
+            assert_rejected(&err, "skip", field);
+        }
+        let err = reject(r#""point":"p1","action":"skip""#);
+        assert_rejected(&err, "skip", "reason");
     }
 
     #[test]
