@@ -615,3 +615,73 @@ fn the_human_readable_form_has_one_block_per_hit() {
     );
     assert!(text.contains("backlinks 0"), "stdout: {text}");
 }
+
+// ---------------------------------------------------------------------------
+// Relation index
+// ---------------------------------------------------------------------------
+
+#[test]
+fn refresh_keeps_links_both_ways_and_survives_page_deletion() {
+    let mut f = Fixture::new();
+    let a = ".wiki/pages/concept/a.md";
+    let b = ".wiki/pages/concept/b.md";
+    f.page("concept/a.md", "a", "A", "", "见 [[b]] 与 [[gone]]");
+    f.page("concept/b.md", "b", "B", "", "");
+    f.refresh();
+
+    let from = f.store.relation_links_from(a).unwrap();
+    assert_eq!(from.len(), 2);
+    assert_eq!(from[0].target_literal, "b");
+    assert_eq!(from[0].to_page.as_deref(), Some(b));
+    assert_eq!(from[1].resolution, "missing");
+    assert_eq!(f.store.relation_links_to(b).unwrap().len(), 1);
+
+    std::fs::remove_file(f.path("wiki", "concept/b.md")).unwrap();
+    f.refresh();
+    assert!(f.store.relation_links_to(b).unwrap().is_empty());
+    let from = f.store.relation_links_from(a).unwrap();
+    assert_eq!(from[0].to_page, None);
+    assert_eq!(from[0].resolution, "missing");
+}
+
+#[test]
+fn a_damaged_page_does_not_clear_other_pages() {
+    let mut f = Fixture::new();
+    let a = ".wiki/pages/concept/a.md";
+    f.page("concept/a.md", "a", "A", "", "见 [[b]]");
+    f.page("concept/b.md", "b", "B", "", "");
+    f.refresh();
+    let before = f.store.relation_generation().unwrap();
+
+    std::fs::write(f.path("wiki", "concept/b.md"), "not a page").unwrap();
+    f.refresh();
+
+    let from = f.store.relation_links_from(a).unwrap();
+    assert_eq!(from.len(), 1);
+    assert_eq!(from[0].target_literal, "b");
+    assert_eq!(from[0].resolution, "missing");
+    assert!(f.store.all_relation_nodes().unwrap().iter().all(|n| n.page_id != "b"));
+    assert!(f.store.relation_generation().unwrap() > before);
+}
+
+#[test]
+fn source_refs_are_indexed_and_reverse_lookup_works() {
+    let mut f = Fixture::new();
+    f.raw("notes.md", "notes.pdf");
+    f.page_with(
+        "concept/a.md",
+        "id: a\ntitle: A\ntype: concept\nsummary: x\nstatus: stable\nupdated: 2026-10-27\n\
+         sources:\n  - .wiki/raw/notes.md#p=1",
+        "",
+    );
+    f.refresh();
+    let a = ".wiki/pages/concept/a.md";
+    let sources = f.store.relation_sources(a).unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].raw_key, ".wiki/raw/notes.md");
+    assert_eq!(sources[0].fragment.as_deref(), Some("p=1"));
+    assert_eq!(
+        f.store.pages_citing(".wiki/raw/notes.md").unwrap(),
+        vec![String::from(a)]
+    );
+}

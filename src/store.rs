@@ -431,6 +431,21 @@ impl RelationLink {
     }
 }
 
+/// Everything one `query::refresh` wants to change, committed as one batch.
+#[derive(Debug, Default)]
+pub struct RefreshWrite {
+    pub fts_deletes: Vec<String>,
+    pub fts_upserts: Vec<(String, String, String)>,
+    pub meta_deletes: Vec<String>,
+    pub metas: Vec<PageMetaRow>,
+    /// Pages that lost their relation rows (deleted or unreadable).
+    pub relation_deletes: Vec<String>,
+    /// Pages whose relation rows are replaced in this batch.
+    pub relation_pages: Vec<(RelationNode, Vec<RelationLink>, Vec<RelationSource>)>,
+    /// Replaces the whole relation index when the page set or an alias changed.
+    pub full_relations: Option<Vec<(RelationNode, Vec<RelationLink>, Vec<RelationSource>)>>,
+}
+
 /// One row returned by [`Store::fts_search`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct FtsHit {
@@ -1279,17 +1294,58 @@ impl Store {
     /// see, and the page no longer answers an incoming query.
     pub fn delete_page_relations(&mut self, page_key: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
-        let node = Self::relation_node(&tx, page_key)?;
-        let links = Self::relation_links_from_tx(&tx, page_key)?;
-        let sources = Self::relation_sources_tx(&tx, page_key)?;
-        tx.execute("DELETE FROM page_links WHERE from_page = ?1", [page_key])?;
-        tx.execute("DELETE FROM page_source_refs WHERE page_key = ?1", [page_key])?;
-        tx.execute("DELETE FROM page_nodes WHERE page_key = ?1", [page_key])?;
-        let inbound = tx.execute(
-            "UPDATE page_links SET to_page = NULL, resolution = 'missing' WHERE to_page = ?1",
-            [page_key],
-        )?;
-        if node.is_some() || !links.is_empty() || !sources.is_empty() || inbound > 0 {
+        if Self::delete_page_relations_tx(&tx, page_key)? {
+            Self::bump_generation_tx(&tx)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Writes one refresh's FTS, `page_meta` and relation changes together.
+    ///
+    /// `refresh` collects everything first and commits once, so a failure leaves
+    /// the last good index in place instead of a half-updated one. A full
+    /// relation rebuild replaces all three tables; otherwise only the named
+    /// pages are rewritten.
+    pub fn apply_refresh(&mut self, write: &RefreshWrite) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for page_id in &write.fts_deletes {
+            tx.execute("DELETE FROM fts WHERE page_id = ?1", [page_id])?;
+        }
+        Self::fts_insert(&tx, &write.fts_upserts)?;
+        for page_key in &write.meta_deletes {
+            tx.execute("DELETE FROM page_meta WHERE page_key = ?1", [page_key])?;
+        }
+        for meta in &write.metas {
+            tx.execute(
+                "INSERT INTO page_meta(page_key, hash, updated) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(page_key) DO UPDATE SET \
+                     hash = excluded.hash, updated = excluded.updated",
+                params![meta.page_key, meta.hash, meta.updated],
+            )?;
+        }
+
+        let mut relation_changed = false;
+        match &write.full_relations {
+            Some(pages) => {
+                tx.execute("DELETE FROM page_links", [])?;
+                tx.execute("DELETE FROM page_source_refs", [])?;
+                tx.execute("DELETE FROM page_nodes", [])?;
+                for (node, links, sources) in pages {
+                    Self::write_page_relations(&tx, node, links, sources)?;
+                }
+                relation_changed = true;
+            }
+            None => {
+                for page_key in &write.relation_deletes {
+                    relation_changed |= Self::delete_page_relations_tx(&tx, page_key)?;
+                }
+                for (node, links, sources) in &write.relation_pages {
+                    relation_changed |= Self::write_page_relations(&tx, node, links, sources)?;
+                }
+            }
+        }
+        if relation_changed {
             Self::bump_generation_tx(&tx)?;
         }
         tx.commit()?;
@@ -1469,6 +1525,20 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn delete_page_relations_tx(tx: &rusqlite::Transaction<'_>, page_key: &str) -> Result<bool> {
+        let node = Self::relation_node(tx, page_key)?;
+        let links = Self::relation_links_from_tx(tx, page_key)?;
+        let sources = Self::relation_sources_tx(tx, page_key)?;
+        tx.execute("DELETE FROM page_links WHERE from_page = ?1", [page_key])?;
+        tx.execute("DELETE FROM page_source_refs WHERE page_key = ?1", [page_key])?;
+        tx.execute("DELETE FROM page_nodes WHERE page_key = ?1", [page_key])?;
+        let inbound = tx.execute(
+            "UPDATE page_links SET to_page = NULL, resolution = 'missing' WHERE to_page = ?1",
+            [page_key],
+        )?;
+        Ok(node.is_some() || !links.is_empty() || !sources.is_empty() || inbound > 0)
     }
 
     fn bump_generation_tx(tx: &rusqlite::Transaction<'_>) -> Result<i64> {

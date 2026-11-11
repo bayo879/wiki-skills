@@ -23,7 +23,11 @@ use crate::hash;
 use crate::page;
 use crate::paths;
 use crate::render;
-use crate::store::{FtsHit, FtsScope, PageMetaRow, Store, StoreError};
+use crate::relation::{PageIdentity, Resolver};
+use crate::store::{
+    FtsHit, FtsScope, PageMetaRow, RefreshWrite, RelationLink, RelationNode, RelationSource,
+    Store, StoreError,
+};
 
 /// How many neighbour summaries `--expand` may inline per hit.
 ///
@@ -152,14 +156,24 @@ impl QueryError {
     }
 }
 
+/// One page read once per refresh: the FTS fields and the relation input come
+/// from the same bytes, so a page is never parsed twice in one round.
+struct IndexedPage {
+    key: String,
+    digest: String,
+    front: page::FrontMatter,
+    body: String,
+}
+
 /// Rebuilds the whole index from `wiki/`, returning how many pages were indexed.
 ///
 /// A page whose frontmatter does not parse is skipped, not fatal: `lint` is
 /// where a broken page is reported, and a query command that refuses to answer
-/// because one page is malformed is worse than one that leaves it out. The
-/// index and its `page_meta` records are written together, so the next
-/// [`refresh`] agrees with what was indexed.
+/// because one page is malformed is worse than one that leaves it out. FTS,
+/// `page_meta` and the relation index are written in one transaction, so the
+/// three cannot disagree about which pages exist.
 pub fn reindex(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
+    let mut pages = Vec::new();
     let mut rows: Vec<(String, String, String)> = Vec::new();
     let mut metas: Vec<PageMetaRow> = Vec::new();
     for (key, path) in page_paths(root, cfg)? {
@@ -173,35 +187,51 @@ pub fn reindex(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
             index_body(&front, &body),
         ));
         metas.push(PageMetaRow {
-            page_key: key,
-            hash: digest,
+            page_key: key.clone(),
+            hash: digest.clone(),
             updated: front.updated.to_string(),
         });
+        pages.push(IndexedPage {
+            key,
+            digest,
+            front,
+            body,
+        });
     }
-    let pages = rows.len();
-    store.fts_replace_all(&rows)?;
+    let indexed = rows.len();
 
     // Records for pages that no longer exist must not outlive the rebuild, or
     // the next `refresh` would keep believing they are indexed.
     let current: BTreeSet<&str> = metas.iter().map(|meta| meta.page_key.as_str()).collect();
-    for row in store.all_page_metas()? {
-        if !current.contains(row.page_key.as_str()) {
-            store.delete_page_meta(&row.page_key)?;
-        }
-    }
-    for meta in &metas {
-        store.upsert_page_meta(meta)?;
-    }
-    Ok(pages)
+    let meta_deletes: Vec<String> = store
+        .all_page_metas()?
+        .into_iter()
+        .filter(|row| !current.contains(row.page_key.as_str()))
+        .map(|row| row.page_key)
+        .collect();
+    let fts_deletes = store.fts_page_ids()?;
+    let relations = relations(&cfg.paths.wiki, &pages);
+    store.apply_refresh(&RefreshWrite {
+        fts_deletes,
+        fts_upserts: rows,
+        meta_deletes,
+        metas,
+        relation_deletes: Vec::new(),
+        relation_pages: Vec::new(),
+        full_relations: Some(relations),
+    })?;
+    Ok(indexed)
 }
 
 /// Indexes the pages that changed since the last write, returning how many
 /// index rows changed.
 ///
-/// The `page_meta` digest from the last write is the change detector: an
-/// untouched page is hashed but not read, so a repeat run does no database
-/// write at all. Pages that disappeared from disk lose their index row (and
-/// their stale hits with it).
+/// The `page_meta` digest is the change detector for FTS; `page_nodes.content_hash`
+/// is the same detector for relations, so a database upgraded from a build
+/// without the relation index fills it in on the first run. A page whose id or
+/// type changed, or a page appearing/disappearing, invalidates every resolution
+/// (a bare id can become ambiguous), so those cases rebuild the whole relation
+/// index; an ordinary body edit only rewrites that page's rows.
 pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
     let pages = page_paths(root, cfg)?;
     let known: BTreeMap<String, PageMetaRow> = store
@@ -216,13 +246,29 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
     // also holds the page, or such a page would stay invisible until
     // a full rebuild.
     let indexed: BTreeSet<String> = store.fts_page_ids()?.into_iter().collect();
+    let stored: BTreeMap<String, RelationNode> = store
+        .all_relation_nodes()?
+        .into_iter()
+        .map(|node| (node.page_key.clone(), node))
+        .collect();
 
     let mut upserts: Vec<(String, String, String)> = Vec::new();
     let mut metas: Vec<PageMetaRow> = Vec::new();
     let mut deletes: BTreeSet<String> = BTreeSet::new();
+    let mut digests: BTreeMap<String, String> = BTreeMap::new();
+    let mut changed: Vec<IndexedPage> = Vec::new();
+    let mut unreadable: BTreeSet<String> = BTreeSet::new();
+    let mut bad: BTreeSet<String> = BTreeSet::new();
+    let mut alias_changed = false;
+
     for (key, path) in &pages {
         let digest = hash::hash_file(path, true)?;
-        if known.get(key).is_some_and(|row| row.hash == digest) && indexed.contains(key) {
+        digests.insert(key.clone(), digest.clone());
+        let meta_ok = known.get(key).is_some_and(|row| row.hash == digest) && indexed.contains(key);
+        let node_ok = stored
+            .get(key)
+            .is_some_and(|node| node.content_hash == digest);
+        if meta_ok && node_ok {
             continue;
         }
         let Ok((front, body)) = page::read(path) else {
@@ -232,8 +278,18 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
             if known.contains_key(key) || indexed.contains(key) {
                 deletes.insert(key.clone());
             }
+            bad.insert(key.clone());
+            if stored.contains_key(key) {
+                unreadable.insert(key.clone());
+            }
             continue;
         };
+        if stored
+            .get(key)
+            .is_some_and(|node| node.page_id != front.id || node.page_type != front.typ)
+        {
+            alias_changed = true;
+        }
         upserts.push((
             key.clone(),
             segment(&front.title),
@@ -241,8 +297,14 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
         ));
         metas.push(PageMetaRow {
             page_key: key.clone(),
-            hash: digest,
+            hash: digest.clone(),
             updated: front.updated.to_string(),
+        });
+        changed.push(IndexedPage {
+            key: key.clone(),
+            digest,
+            front,
+            body,
         });
     }
 
@@ -254,19 +316,172 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
             deletes.insert(page_id.clone());
         }
     }
-    let deletes: Vec<String> = deletes.into_iter().collect();
 
-    if upserts.is_empty() && deletes.is_empty() {
+    let stored_keys: BTreeSet<String> = stored.keys().cloned().collect();
+    let removed = stored_keys.difference(&current).next().is_some();
+    // A readable page with no node is new, or predates the relation index; both
+    // mean the alias table changed and every stored resolution may be stale.
+    // An unreadable page is not "new": the rebuild leaves it out on purpose, so
+    // treating it as new would rebuild the whole index on every round.
+    let missing_node = current
+        .iter()
+        .any(|key| !stored.contains_key(key) && !bad.contains(key));
+    let full = removed || missing_node || alias_changed || !unreadable.is_empty();
+    let wiki_prefix = &cfg.paths.wiki;
+    let (relation_pages, full_relations) = if full {
+        let mut all = changed;
+        let already: BTreeSet<String> = all.iter().map(|page| page.key.clone()).collect();
+        for (key, path) in &pages {
+            if already.contains(key) {
+                continue;
+            }
+            match page::read(path) {
+                Ok((front, body)) => {
+                    let digest = digests.get(key).cloned().unwrap_or_default();
+                    all.push(IndexedPage {
+                        key: key.clone(),
+                        digest,
+                        front,
+                        body,
+                    });
+                }
+                Err(_) => {
+                    if known.contains_key(key) || indexed.contains(key) {
+                        deletes.insert(key.clone());
+                    }
+                }
+            }
+        }
+        (Vec::new(), Some(relations(wiki_prefix, &all)))
+    } else {
+        let mut identities: BTreeMap<String, PageIdentity> = stored
+            .iter()
+            .map(|(key, node)| (key.clone(), identity_from_node(wiki_prefix, key, node)))
+            .collect();
+        for page in &changed {
+            identities.insert(page.key.clone(), identity(wiki_prefix, page));
+        }
+        let ids: Vec<PageIdentity> = identities.into_values().collect();
+        let resolver = Resolver::new(&ids);
+        (relations_with(wiki_prefix, &resolver, &changed), None)
+    };
+
+    if upserts.is_empty()
+        && deletes.is_empty()
+        && relation_pages.is_empty()
+        && full_relations.is_none()
+    {
         return Ok(0);
     }
-    store.fts_apply(&deletes, &upserts)?;
-    for key in &deletes {
-        store.delete_page_meta(key)?;
+
+    let relation_deletes: Vec<String> = if full {
+        Vec::new()
+    } else {
+        unreadable.into_iter().collect()
+    };
+    let changed_count = upserts.len()
+        + deletes.len()
+        + relation_pages.len()
+        + relation_deletes.len();
+    let deletes: Vec<String> = deletes.into_iter().collect();
+    store.apply_refresh(&RefreshWrite {
+        fts_deletes: deletes.clone(),
+        fts_upserts: upserts,
+        meta_deletes: deletes,
+        metas,
+        relation_deletes,
+        relation_pages,
+        full_relations,
+    })?;
+    Ok(changed_count)
+}
+
+/// Relation rows for every page, with resolutions against the whole set.
+fn relations(
+    wiki_prefix: &str,
+    pages: &[IndexedPage],
+) -> Vec<(RelationNode, Vec<RelationLink>, Vec<RelationSource>)> {
+    let ids: Vec<PageIdentity> = pages.iter().map(|page| identity(wiki_prefix, page)).collect();
+    let resolver = Resolver::new(&ids);
+    relations_with(wiki_prefix, &resolver, pages)
+}
+
+/// Relation rows for `pages`, resolved against a caller-built alias table.
+fn relations_with(
+    wiki_prefix: &str,
+    resolver: &Resolver,
+    pages: &[IndexedPage],
+) -> Vec<(RelationNode, Vec<RelationLink>, Vec<RelationSource>)> {
+    pages
+        .iter()
+        .map(|page| {
+            let node = RelationNode {
+                page_key: page.key.clone(),
+                page_id: page.front.id.clone(),
+                page_type: page.front.typ.clone(),
+                title: page.front.title.clone(),
+                summary: page.front.summary.clone(),
+                status: page.front.status.as_str().to_string(),
+                content_hash: page.digest.clone(),
+            };
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            let mut links = Vec::new();
+            for literal in crate::relation::extract_links(&page.body) {
+                if !seen.insert(literal.clone()) {
+                    continue;
+                }
+                let (resolution, to_page) = resolver.resolve(&literal, wiki_prefix);
+                if to_page.as_deref() == Some(page.key.as_str()) {
+                    continue;
+                }
+                links.push(RelationLink {
+                    from_page: page.key.clone(),
+                    target_literal: literal,
+                    to_page,
+                    resolution: resolution.as_str().to_string(),
+                });
+            }
+            let sources: Vec<RelationSource> = page
+                .front
+                .sources
+                .iter()
+                .filter_map(|entry| crate::relation::split_source_ref(entry))
+                .map(|parts| RelationSource {
+                    page_key: page.key.clone(),
+                    raw_ref: parts.raw_ref,
+                    raw_key: parts.raw_key,
+                    fragment: parts.fragment,
+                })
+                .collect();
+            (node, links, sources)
+        })
+        .collect()
+}
+
+fn identity(wiki_prefix: &str, page: &IndexedPage) -> PageIdentity {
+    PageIdentity {
+        key: page.key.clone(),
+        id: page.front.id.clone(),
+        wiki_rel: wiki_rel(&page.key, wiki_prefix),
     }
-    for meta in &metas {
-        store.upsert_page_meta(meta)?;
+}
+
+fn identity_from_node(wiki_prefix: &str, key: &str, node: &RelationNode) -> PageIdentity {
+    PageIdentity {
+        key: String::from(key),
+        id: node.page_id.clone(),
+        wiki_rel: wiki_rel(key, wiki_prefix),
     }
-    Ok(upserts.len() + deletes.len())
+}
+
+/// Path under the wiki directory without `.md`, e.g. `concept/orders`.
+fn wiki_rel(key: &str, wiki_prefix: &str) -> String {
+    let prefix = wiki_prefix.trim_end_matches('/');
+    key.strip_prefix(prefix)
+        .unwrap_or(key)
+        .trim_start_matches('/')
+        .trim_end_matches(".md")
+        .to_string()
 }
 
 /// Searches the index. Read-only: it never writes to the ledger.
