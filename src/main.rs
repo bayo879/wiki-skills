@@ -902,7 +902,11 @@ fn run_query(args: QueryArgs) -> ! {
     }
 
     if args.graph {
-        match graph::build(&root, &cfg) {
+        let mut store = open_store(cmd, &root, &cfg);
+        if let Err(err) = query::refresh(&root, &cfg, &mut store) {
+            fail_query(cmd, &err)
+        }
+        match graph::build(&store) {
             Ok(data) => report::emit_with(cmd, data, Exit::Ok, human_graph),
             Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
         }

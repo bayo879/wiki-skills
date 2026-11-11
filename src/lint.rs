@@ -33,7 +33,7 @@
 //!
 //! `L8` counts characters, not bytes, so a short Chinese page is still short.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -44,6 +44,7 @@ use crate::config::Config;
 use crate::hash;
 use crate::page::{self, PageError};
 use crate::paths;
+use crate::relation::{PageIdentity, Resolution, Resolver};
 use crate::render;
 use crate::scan::{self, RawLedger};
 use crate::source_refs;
@@ -373,29 +374,32 @@ fn check_required_fields(
 
 /// `L2`: every `[[wikilink]]` outside a code fence must name a page.
 fn check_dead_links(cfg: &Config, pages: &[PageInfo], found: &mut Vec<Finding>) {
-    let mut known: BTreeSet<String> = BTreeSet::new();
-    for info in pages {
-        known.insert(info.id.clone());
-        known.insert(info.rel.clone());
-        known.insert(info.key.clone());
-        known.insert(info.key.trim_end_matches(".md").to_string());
-        known.insert(format!("{}/{}", cfg.paths.wiki, info.rel));
-    }
+    let identities: Vec<PageIdentity> = pages
+        .iter()
+        .map(|info| PageIdentity {
+            key: info.key.clone(),
+            id: info.id.clone(),
+            wiki_rel: info.rel.clone(),
+        })
+        .collect();
+    let resolver = Resolver::new(&identities);
 
     for info in pages {
         for target in wikilinks(&info.body) {
-            let wanted = normalise_link(&target, &cfg.paths.wiki);
-            if wanted.is_empty() {
-                continue;
-            }
-            if !known.contains(&wanted) {
-                found.push(Finding::new(
-                    "L2",
-                    Level::Error,
-                    Some(info.key.clone()),
-                    format!("link `[[{target}]]` names no page"),
-                ));
-            }
+            let (resolution, _) = resolver.resolve(&target, &cfg.paths.wiki);
+            let message = match resolution {
+                Resolution::Resolved => continue,
+                Resolution::Missing => format!("link `[[{target}]]` names no page"),
+                Resolution::Ambiguous => {
+                    format!("link `[[{target}]]` is ambiguous; use the type-qualified name")
+                }
+            };
+            found.push(Finding::new(
+                "L2",
+                Level::Error,
+                Some(info.key.clone()),
+                message,
+            ));
         }
     }
 }
@@ -733,30 +737,6 @@ pub(crate) fn wikilinks(body: &str) -> Vec<String> {
         rest = &after[end + 2..];
     }
     out
-}
-
-/// A link target as the set of page names it may mean.
-pub(crate) fn normalise_link(target: &str, wiki_prefix: &str) -> String {
-    let mut text = target
-        .split_once('#')
-        .map_or(target, |(head, _)| head)
-        .trim();
-    loop {
-        let stripped = text.strip_prefix("./").unwrap_or(text);
-        if stripped == text {
-            break;
-        }
-        text = stripped;
-    }
-    let prefix = wiki_prefix.trim_start_matches("./").trim_end_matches('/');
-    if !prefix.is_empty() {
-        if let Some(rest) = text.strip_prefix(prefix) {
-            if let Some(rest) = rest.strip_prefix('/') {
-                text = rest;
-            }
-        }
-    }
-    text.trim_end_matches(".md").to_string()
 }
 
 /// Whether the frontmatter block of `text` has a top-level `name:` key.

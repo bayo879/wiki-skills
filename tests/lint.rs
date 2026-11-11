@@ -156,6 +156,20 @@ fn l2_reports_dead_link_wikilinks_only() {
 }
 
 #[test]
+fn l2_reports_a_bare_id_shared_by_two_types_as_ambiguous() {
+    let f = Fixture::new();
+    f.put_page("concept", "b", &page_text("b", "concept", BODY));
+    f.put_page("entity", "b", &page_text("b", "entity", BODY));
+    let body = format!("{BODY}\n\n见 [[b]]。");
+    f.put_page("concept", "a", &page_text("a", "concept", &body));
+
+    let findings = f.lint();
+    let l2 = only(&findings, "L2");
+    assert_eq!(l2.len(), 1, "{findings:?}");
+    assert!(l2[0].msg.contains("ambiguous"), "{:?}", l2[0]);
+}
+
+#[test]
 fn l2_ignores_links_inside_code_fences_and_markdown_links() {
     let f = Fixture::new();
     let body = format!("{BODY}\n\n```\n[[ghost]]\n```\n\n[doc](other.md) 见 [[a]]。");

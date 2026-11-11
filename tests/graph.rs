@@ -9,6 +9,8 @@ use std::path::Path;
 
 use llm_wiki::config::Config;
 use llm_wiki::graph;
+use llm_wiki::query;
+use llm_wiki::store::Store;
 use tempfile::tempdir;
 
 fn write_page(root: &Path, typ: &str, id: &str, body: &str) {
@@ -24,6 +26,14 @@ fn write_page(root: &Path, typ: &str, id: &str, body: &str) {
     .unwrap();
 }
 
+/// Builds the graph the way the CLI does: refresh the index, then read it.
+fn build(root: &Path) -> graph::Graph {
+    let mut store = Store::open(&root.join(".wiki/state.db")).unwrap();
+    store.migrate().unwrap();
+    query::refresh(root, &Config::default(), &mut store).unwrap();
+    graph::build(&store).unwrap()
+}
+
 #[test]
 fn counts_in_and_out_degrees() {
     let d = tempdir().unwrap();
@@ -32,7 +42,7 @@ fn counts_in_and_out_degrees() {
     write_page(root, "concept", "b", "没有链接");
     write_page(root, "entity", "c", "回到 [[a]]");
 
-    let g = graph::build(root, &Config::default()).unwrap();
+    let g = build(root);
 
     let by_page = |key: &str| g.nodes.iter().find(|n| n.page == key).cloned().unwrap();
     let a = by_page(".wiki/pages/concept/a.md");
@@ -51,7 +61,7 @@ fn edges_are_sorted_and_deduplicated() {
     write_page(root, "concept", "b", "");
     write_page(root, "concept", "c", "");
 
-    let g = graph::build(root, &Config::default()).unwrap();
+    let g = build(root);
 
     assert_eq!(
         g.edges,
@@ -71,7 +81,10 @@ fn edges_are_sorted_and_deduplicated() {
         .iter()
         .find(|n| n.page == ".wiki/pages/concept/a.md")
         .unwrap();
-    assert_eq!(a.out_degree, 3, "degrees count mentions, edges are unique");
+    assert_eq!(
+        a.out_degree, 2,
+        "a repeated mention is one edge, so one degree"
+    );
 }
 
 #[test]
@@ -82,7 +95,7 @@ fn orphan_pages_have_neither_in_nor_out_links() {
     write_page(root, "concept", "leaf", "");
     write_page(root, "concept", "lonely", "没有任何链接");
 
-    let g = graph::build(root, &Config::default()).unwrap();
+    let g = build(root);
 
     assert_eq!(
         g.orphans,
@@ -102,7 +115,7 @@ fn a_link_may_name_the_bare_id_or_the_engine_relative_path() {
     );
     write_page(root, "concept", "b", "");
 
-    let g = graph::build(root, &Config::default()).unwrap();
+    let g = build(root);
 
     assert_eq!(g.edges.len(), 1, "three spellings, one edge: {:?}", g.edges);
     assert!(g.broken.is_empty(), "{:?}", g.broken);
@@ -114,7 +127,7 @@ fn a_self_link_is_not_an_edge() {
     let root = d.path();
     write_page(root, "concept", "a", "[[a]] 自指");
 
-    let g = graph::build(root, &Config::default()).unwrap();
+    let g = build(root);
 
     assert!(g.edges.is_empty());
     assert_eq!(g.nodes[0].in_degree, 0);
@@ -127,7 +140,7 @@ fn broken_links_are_reported_not_dropped() {
     let root = d.path();
     write_page(root, "concept", "a", "[[nowhere]]");
 
-    let g = graph::build(root, &Config::default()).unwrap();
+    let g = build(root);
 
     assert_eq!(g.broken, vec![String::from("nowhere")]);
     assert!(g.edges.is_empty());
@@ -140,7 +153,7 @@ fn links_inside_fenced_code_are_ignored() {
     write_page(root, "concept", "a", "```\n[[b]]\n```\n\n正文");
     write_page(root, "concept", "b", "");
 
-    let g = graph::build(root, &Config::default()).unwrap();
+    let g = build(root);
 
     assert!(g.edges.is_empty());
 }
@@ -154,7 +167,7 @@ fn nodes_are_ordered_by_in_degree_then_path() {
     write_page(root, "concept", "b", "[[hub]]");
     write_page(root, "concept", "quiet", "");
 
-    let g = graph::build(root, &Config::default()).unwrap();
+    let g = build(root);
 
     let order: Vec<&str> = g.nodes.iter().map(|n| n.page.as_str()).collect();
     assert_eq!(
@@ -174,6 +187,6 @@ fn a_missing_type_directory_is_not_an_error() {
     let root = d.path();
     write_page(root, "concept", "a", "");
     // `entity/`, `source/` … do not exist at all.
-    let g = graph::build(root, &Config::default()).unwrap();
+    let g = build(root);
     assert_eq!(g.nodes.len(), 1);
 }

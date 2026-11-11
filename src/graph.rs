@@ -1,48 +1,33 @@
 //! `graph`: the `[[wikilink]]` structure of `wiki/`, as data rather than prose.
 //!
-//! `lint` already walks these links to report dead ones; this module exposes the
-//! same edges so an agent can ask "what is a hub, what is a leaf, what is not
-//! linked at all" without grepping bodies. It is deliberately read-only and
-//! cheap: one directory walk, no database, no cache.
+//! The edges come from the relation index, the same one `query --page` reads, so
+//! a caller can walk in-degrees and exact neighbours without the two commands
+//! ever disagreeing about whether a link resolves. `wiki/` is still the fact;
+//! this is a read of its derived view, refreshed by the caller.
 //!
 //! Dead links are not dropped silently — they are reported in `broken`, because
 //! a caller diffing in-degrees needs to know an edge went nowhere rather than
 //! vanished.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::Path;
 
 use serde::Serialize;
 
-use crate::config::Config;
-use crate::lint::{normalise_link, wikilinks};
-use crate::page;
-use crate::paths;
+use crate::store::{RelationLink, Store, StoreError};
 
-/// Failure while reading pages for the graph.
+/// Failure while reading the relation index.
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
-    /// A directory or page could not be read.
-    #[error("cannot access {}: {source}", path.display())]
-    Io {
-        /// Path that failed.
-        path: std::path::PathBuf,
-        /// Underlying OS error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// A page's frontmatter could not be parsed.
+    /// The ledger refused the read.
     #[error(transparent)]
-    Page(#[from] page::PageError),
+    Store(#[from] StoreError),
 }
 
 impl GraphError {
     /// Stable error code for the response envelope.
     pub fn code(&self) -> &'static str {
         match self {
-            GraphError::Io { .. } => "E_IO",
-            GraphError::Page(err) => err.code(),
+            GraphError::Store(_) => "E_DB",
         }
     }
 }
@@ -79,51 +64,44 @@ pub struct Graph {
     pub edges: Vec<Edge>,
     /// Pages with no inbound and no outbound link.
     pub orphans: Vec<String>,
-    /// Link targets that name no page (already reported by `lint` as dead links).
+    /// Link targets that name no page or name more than one (also `lint` L2).
     pub broken: Vec<String>,
 }
 
-/// Builds the link graph of `wiki/`.
-pub fn build(root: &Path, cfg: &Config) -> Result<Graph> {
-    let pages = read_pages(root, cfg)?;
-
-    // A link may name either the wiki-relative path (`concept/a`) or the bare id
-    // (`a`); ids are unique across types, or `lint` reports L3.
-    let mut by_name: BTreeMap<String, String> = BTreeMap::new();
-    for (key, rel, id, _) in &pages {
-        by_name.insert(rel.clone(), key.clone());
-        if !id.is_empty() {
-            by_name.insert(id.clone(), key.clone());
-        }
-    }
-
+/// Builds the link graph from the current relation index.
+///
+/// The index must already be current; the CLI refreshes before calling, and
+/// `doctor --fix` rebuilds it from scratch.
+pub fn build(store: &Store) -> Result<Graph> {
+    let pages = store.all_relation_nodes()?;
     let mut out_degree: BTreeMap<String, usize> = pages
         .iter()
-        .map(|(key, ..)| (key.clone(), 0usize))
+        .map(|node| (node.page_key.clone(), 0usize))
         .collect();
-    let mut in_degree: BTreeMap<String, usize> = out_degree.clone();
+    let mut in_degree = out_degree.clone();
     let mut edges: Vec<Edge> = Vec::new();
     let mut broken: BTreeSet<String> = BTreeSet::new();
 
-    for (key, _, _, body) in &pages {
-        for target in wikilinks(body) {
-            let wanted = normalise_link(&target, &cfg.paths.wiki);
-            if wanted.is_empty() {
-                continue;
-            }
-            let Some(to) = by_name.get(&wanted) else {
-                broken.insert(wanted);
+    for node in &pages {
+        for link in store.relation_links_from(&node.page_key)? {
+            let RelationLink {
+                target_literal,
+                to_page,
+                ..
+            } = link;
+            let Some(to) = to_page else {
+                broken.insert(target_literal);
                 continue;
             };
-            if to == key {
+            if to == node.page_key {
                 continue;
             }
             edges.push(Edge {
-                from: key.clone(),
+                from: node.page_key.clone(),
                 to: to.clone(),
             });
-            *out_degree.entry(key.clone()).or_default() += 1;
-            *in_degree.entry(to.clone()).or_default() += 1;
+            *out_degree.entry(node.page_key.clone()).or_default() += 1;
+            *in_degree.entry(to).or_default() += 1;
         }
     }
 
@@ -132,10 +110,10 @@ pub fn build(root: &Path, cfg: &Config) -> Result<Graph> {
 
     let mut nodes: Vec<Node> = pages
         .iter()
-        .map(|(key, ..)| Node {
-            page: key.clone(),
-            in_degree: in_degree.get(key).copied().unwrap_or(0),
-            out_degree: out_degree.get(key).copied().unwrap_or(0),
+        .map(|node| Node {
+            page: node.page_key.clone(),
+            in_degree: in_degree.get(&node.page_key).copied().unwrap_or(0),
+            out_degree: out_degree.get(&node.page_key).copied().unwrap_or(0),
         })
         .collect();
     nodes.sort_by(|a, b| {
@@ -156,43 +134,4 @@ pub fn build(root: &Path, cfg: &Config) -> Result<Graph> {
         orphans,
         broken: broken.into_iter().collect(),
     })
-}
-
-/// Pages as `(key, wiki-relative path without `.md`, id, body)`.
-fn read_pages(root: &Path, cfg: &Config) -> Result<Vec<(String, String, String, String)>> {
-    let wiki_dir = root.join(&cfg.paths.wiki);
-    let mut out = Vec::new();
-    for typ in &cfg.schema.types {
-        let dir = wiki_dir.join(typ);
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => return Err(GraphError::Io { path: dir, source }),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|source| GraphError::Io {
-                path: dir.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-                continue;
-            }
-            if !entry
-                .file_type()
-                .map(|kind| kind.is_file())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let (front, body) = page::read(&path)?;
-            let key = paths::identity_key(root, &path).map_err(|err| GraphError::Io {
-                path: path.clone(),
-                source: std::io::Error::other(err.to_string()),
-            })?;
-            out.push((key, format!("{typ}/{}", front.id), front.id, body));
-        }
-    }
-    out.sort();
-    Ok(out)
 }
