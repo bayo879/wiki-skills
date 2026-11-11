@@ -6,11 +6,16 @@
 //! cross-field rules the schema cannot express. Both report
 //! `E_TASK_BAD_PAYLOAD` and name the point, page or proposal at fault.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::Deserialize;
 
+use super::plan::{Origin, PlanPoint};
 use super::{bad, Result};
+use crate::config::Config;
+use crate::hash;
+use crate::page;
 
 /// One piece of information extracted from the source.
 #[derive(Debug, Clone, Deserialize)]
@@ -462,9 +467,374 @@ fn require_text(id: &str, field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// One target page and everything the route contributes to it.
+///
+/// `before` is the page hash at planning time, or `None` when the route creates
+/// the page. It is the snapshot the page task checks before writing, so a page
+/// edited by someone else after routing is not silently overwritten.
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedTarget {
+    /// Repository-relative path of the page.
+    pub path: String,
+    /// Page title: the existing page's title or the proposal's.
+    pub title: String,
+    /// Whether the page already existed.
+    pub origin: Origin,
+    /// Hash of the existing page; `None` for a created page.
+    pub before: Option<String>,
+    /// Points assigned to this page.
+    pub points: Vec<PlanPoint>,
+    /// What the page must add or change, one line per instruction.
+    pub change: String,
+}
+
+/// A target accumulated while assignments and maintenance are grouped.
+struct Group {
+    path: String,
+    title: String,
+    origin: Origin,
+    before: Option<String>,
+    /// Point and its position in the payload, so output follows point order.
+    points: Vec<(usize, PlanPoint)>,
+    /// Change instruction and the point it belongs to.
+    changes: Vec<(usize, String)>,
+    /// Fallback instruction when no assignment carried one: a proposal summary
+    /// for a created page or the maintenance reason for an existing one.
+    base_change: String,
+}
+
+impl Group {
+    fn add(&mut self, point_index: usize, point: &Point, change: Option<&str>) {
+        self.points.push((
+            point_index,
+            PlanPoint {
+                id: point.id.clone(),
+                finding: point.finding.clone(),
+                evidence: point.evidence.clone(),
+                boundary: point.boundary.clone(),
+            },
+        ));
+        if let Some(change) = change.filter(|text| !text.is_empty()) {
+            self.changes.push((point_index, change.to_string()));
+        }
+    }
+
+    fn finish(mut self) -> PlannedTarget {
+        self.points.sort_by_key(|(index, _)| *index);
+        self.changes.sort_by_key(|(index, _)| *index);
+        let change = if self.changes.is_empty() {
+            self.base_change
+        } else {
+            self.changes
+                .into_iter()
+                .map(|(_, change)| change)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        PlannedTarget {
+            path: self.path,
+            title: self.title,
+            origin: self.origin,
+            before: self.before,
+            points: self.points.into_iter().map(|(_, point)| point).collect(),
+            change,
+        }
+    }
+}
+
+/// Turns a validated route into one target per normalized page path.
+///
+/// Updates are grouped by path, creates by proposal, and a maintenance `update`
+/// with no assignment adds its page. A maintenance `unchanged` adds nothing.
+/// Targets are returned sorted by path; nothing is capped, because neither the
+/// plan nor the design defines a target limit.
+pub(crate) fn plan_targets(
+    root: &Path,
+    cfg: &Config,
+    doc: &RouteDoc,
+    affected: &[String],
+) -> Result<Vec<PlannedTarget>> {
+    let point_by_id: BTreeMap<&str, (usize, &Point)> = doc
+        .points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| (point.id.as_str(), (index, point)))
+        .collect();
+    let proposal_by_id: BTreeMap<&str, &Proposal> = doc
+        .proposals
+        .iter()
+        .map(|proposal| (proposal.id.as_str(), proposal))
+        .collect();
+
+    let mut groups: Vec<Group> = Vec::new();
+    let mut group_slot: BTreeMap<String, usize> = BTreeMap::new();
+    let mut taken: BTreeSet<String> = BTreeSet::new();
+
+    for assignment in &doc.assignments {
+        let Some((point_index, point)) = point_by_id.get(assignment.point.as_str()) else {
+            return Err(bad(
+                "E_TASK_BAD_PAYLOAD",
+                format!(
+                    "assignment refers to point '{}', which is not in points",
+                    assignment.point
+                ),
+            ));
+        };
+        match assignment.action.as_str() {
+            "update" => {
+                let target = assignment.target.as_deref().unwrap_or_default();
+                let path = checked_path(cfg, target)?;
+                let slot = match group_slot.get(&path) {
+                    Some(slot) => *slot,
+                    None => {
+                        let (title, before) = existing_page(root, &path)?;
+                        taken.insert(path.clone());
+                        groups.push(Group {
+                            path: path.clone(),
+                            title,
+                            origin: Origin::Existing,
+                            before: Some(before),
+                            points: Vec::new(),
+                            changes: Vec::new(),
+                            base_change: String::new(),
+                        });
+                        group_slot.insert(path, groups.len() - 1);
+                        groups.len() - 1
+                    }
+                };
+                groups[slot].add(*point_index, point, assignment.change.as_deref());
+            }
+            "create" => {
+                let proposal_id = assignment.proposal.as_deref().unwrap_or_default();
+                let Some(proposal) = proposal_by_id.get(proposal_id) else {
+                    return Err(bad(
+                        "E_TASK_BAD_PAYLOAD",
+                        format!(
+                            "assignment refers to proposal '{proposal_id}', which is not in proposals"
+                        ),
+                    ));
+                };
+                let key = format!("proposal:{}", proposal.id);
+                let slot = match group_slot.get(&key) {
+                    Some(slot) => *slot,
+                    None => {
+                        let path = allocate_path(root, cfg, proposal, &taken)?;
+                        taken.insert(path.clone());
+                        groups.push(Group {
+                            path,
+                            title: proposal.title.clone(),
+                            origin: Origin::Created,
+                            before: None,
+                            points: Vec::new(),
+                            changes: Vec::new(),
+                            base_change: proposal.summary.clone(),
+                        });
+                        group_slot.insert(key, groups.len() - 1);
+                        groups.len() - 1
+                    }
+                };
+                groups[slot].add(*point_index, point, None);
+            }
+            // `skip` writes nothing; `validate_shape` rejects any other action.
+            _ => {}
+        }
+    }
+
+    for item in &doc.maintenance {
+        if item.action != "update" {
+            continue;
+        }
+        if !affected.iter().any(|page| page == &item.page) {
+            return Err(bad(
+                "E_TASK_BAD_PAYLOAD",
+                format!(
+                    "maintenance names {}, which is not an affected page",
+                    item.page
+                ),
+            ));
+        }
+        let path = checked_path(cfg, &item.page)?;
+        if group_slot.contains_key(&path) {
+            continue;
+        }
+        let (title, before) = existing_page(root, &path)?;
+        taken.insert(path.clone());
+        groups.push(Group {
+            path: path.clone(),
+            title,
+            origin: Origin::Existing,
+            before: Some(before),
+            points: Vec::new(),
+            changes: Vec::new(),
+            base_change: item.reason.clone(),
+        });
+        group_slot.insert(path, groups.len() - 1);
+    }
+
+    let mut planned: Vec<PlannedTarget> = groups.into_iter().map(Group::finish).collect();
+    planned.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(planned)
+}
+
+/// Lowercase ASCII slug: runs of anything else become one `-`, trimmed; an
+/// all-non-ASCII title (Chinese, for example) falls back to `page`.
+pub(crate) fn slugify(title: &str) -> String {
+    let mut out = String::new();
+    let mut separator = false;
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            separator = false;
+        } else if !separator && !out.is_empty() {
+            out.push('-');
+            separator = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        String::from("page")
+    } else {
+        out
+    }
+}
+
+/// Reads the existing page: its frontmatter title and its current hash.
+fn existing_page(root: &Path, path: &str) -> Result<(String, String)> {
+    let full = root.join(path);
+    let (front, _body) = page::read(&full)?;
+    let before = hash::hash_file(&full, true)?;
+    Ok((front.title, before))
+}
+
+/// Allocates `<wiki>/<type>/<slug>.md`, adding `-2`, `-3`, ... until neither the
+/// filesystem nor this plan already holds the path.
+fn allocate_path(
+    root: &Path,
+    cfg: &Config,
+    proposal: &Proposal,
+    taken: &BTreeSet<String>,
+) -> Result<String> {
+    let slug = slugify(&proposal.title);
+    let wiki = cfg.paths.wiki.trim_end_matches('/');
+    let mut suffix = 1usize;
+    loop {
+        let stem = if suffix == 1 {
+            slug.clone()
+        } else {
+            format!("{slug}-{suffix}")
+        };
+        let path = checked_path(cfg, &format!("{wiki}/{}/{stem}.md", proposal.typ))?;
+        if !taken.contains(&path) && !root.join(&path).exists() {
+            return Ok(path);
+        }
+        suffix += 1;
+    }
+}
+
+/// Normalizes separators and `.` components, then enforces the page-path rule.
+fn checked_path(cfg: &Config, raw: &str) -> Result<String> {
+    let path = normalize_target(raw)?;
+    let wiki = cfg.paths.wiki.trim_end_matches('/');
+    let prefix = format!("{wiki}/");
+    let relative = path.strip_prefix(&prefix).ok_or_else(|| {
+        bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("target '{path}' must be under {wiki}/"),
+        )
+    })?;
+    if !relative.ends_with(".md") {
+        return Err(bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("target '{path}' must be a .md page"),
+        ));
+    }
+    if relative == "index.md" {
+        return Err(bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("target '{path}' is the generated index, not a content page"),
+        ));
+    }
+    if relative.starts_with("audit/") {
+        return Err(bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("target '{path}' is under the derived audit/ directory"),
+        ));
+    }
+    Ok(path)
+}
+
+/// Repository-relative, `/`-separated and free of `.`/`..` components.
+fn normalize_target(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(bad("E_TASK_BAD_PAYLOAD", "a target path is empty"));
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with('\\') {
+        return Err(bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("target '{raw}' must be repository-relative"),
+        ));
+    }
+    let mut parts = Vec::new();
+    for component in trimmed.split(['/', '\\']) {
+        match component {
+            "" | "." => continue,
+            ".." => {
+                return Err(bad(
+                    "E_TASK_BAD_PAYLOAD",
+                    format!("target '{raw}' contains a parent-directory component"),
+                ))
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        return Err(bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("target '{raw}' has no path components"),
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use tempfile::tempdir;
+
+    use crate::config::Config;
+
     use super::*;
+
+    fn test_config() -> Config {
+        Config::default()
+    }
+
+    /// Writes the smallest page the reader accepts, with `title` in its
+    /// frontmatter, so plans are checked against real page bytes.
+    fn write_page(root: &Path, rel: &str, title: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let id = path.file_stem().unwrap().to_string_lossy();
+        let typ = path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        fs::write(
+            &path,
+            format!(
+                "---\nid: {id}\ntitle: \"{title}\"\ntype: {typ}\nsummary: s\n\
+                 status: stable\nupdated: 2026-11-11\n---\n\nbody\n"
+            ),
+        )
+        .unwrap();
+    }
 
     fn types() -> Vec<String> {
         vec!["concept".to_string()]
@@ -859,5 +1229,273 @@ mod tests {
         )
         .unwrap();
         validate_shape(&doc, &[page()], &types()).unwrap();
+    }
+
+    #[test]
+    fn two_points_on_one_target_make_one_planned_target() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        write_page(d.path(), ".wiki/pages/concept/a.md", "A");
+        let doc = parse(
+            r#"{"points":[
+            {"id":"p1","finding":"一","evidence":"e1"},
+            {"id":"p2","finding":"二","evidence":"e2"}],
+            "assignments":[
+            {"point":"p1","action":"update","target":".wiki/pages/concept/a.md","change":"补一","basis":"b1"},
+            {"point":"p2","action":"update","target":".wiki/pages/concept/a.md","change":"补二","basis":"b2"}],
+            "maintenance":[{"page":".wiki/pages/concept/a.md","action":"update","reason":"有新增"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let out = plan_targets(d.path(), &cfg, &doc, &[".wiki/pages/concept/a.md".into()]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].points.len(), 2);
+    }
+
+    #[test]
+    fn a_chinese_title_gets_a_stable_fallback_slug() {
+        assert_eq!(slugify("知识库设计"), "page");
+        assert_eq!(slugify("A B"), "a-b");
+    }
+
+    #[test]
+    fn a_collision_adds_a_suffix_instead_of_overwriting() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        write_page(d.path(), ".wiki/pages/concept/alpha.md", "old");
+        let doc = parse(br#"{"points":[{"id":"p1","finding":"f","evidence":"e"}],
+            "proposals":[{"id":"n1","type":"concept","title":"Alpha","summary":"s","why_new":"n","why_not_existing":"e"}],
+            "assignments":[{"point":"p1","action":"create","proposal":"n1"}],
+            "maintenance":[]}"#).unwrap();
+        let out = plan_targets(d.path(), &cfg, &doc, &[]).unwrap();
+        assert_eq!(out[0].path, ".wiki/pages/concept/alpha-2.md");
+    }
+
+    fn update_assignment(target: &str, change: &str) -> String {
+        format!(
+            r#"{{"points":[{{"id":"p1","finding":"f","evidence":"e"}}],
+                "assignments":[{{"point":"p1","action":"update","target":"{target}",
+                    "change":"{change}","basis":"b"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn a_maintenance_update_without_an_assignment_plans_the_page() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        write_page(d.path(), ".wiki/pages/concept/a.md", "A");
+        let doc = parse(
+            r#"{"maintenance":[{"page":".wiki/pages/concept/a.md","action":"update",
+                "reason":"补充结论"}],"source_reason":"只有一条结论"}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let out = plan_targets(d.path(), &cfg, &doc, &[".wiki/pages/concept/a.md".into()]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].change, "补充结论");
+        assert!(out[0].points.is_empty());
+        assert_eq!(out[0].origin, Origin::Existing);
+        assert_eq!(out[0].title, "A");
+        assert!(out[0]
+            .before
+            .as_deref()
+            .is_some_and(|hash| !hash.is_empty()));
+    }
+
+    #[test]
+    fn a_maintenance_unchanged_plans_nothing() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        write_page(d.path(), ".wiki/pages/concept/a.md", "A");
+        let doc = parse(
+            r#"{"maintenance":[{"page":".wiki/pages/concept/a.md","action":"unchanged",
+                "reason":"看过，不改"}],"source_reason":"没有新增"}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let out = plan_targets(d.path(), &cfg, &doc, &[".wiki/pages/concept/a.md".into()]).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_missing_update_target_is_rejected() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        let doc =
+            parse(update_assignment(".wiki/pages/concept/missing.md", "补").as_bytes()).unwrap();
+        let err = plan_targets(d.path(), &cfg, &doc, &[]).unwrap_err();
+        assert_eq!(err.code(), "E_IO", "{err}");
+        assert!(err.to_string().contains("missing.md"), "{err}");
+    }
+
+    #[test]
+    fn derived_files_and_non_page_paths_are_rejected() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        for target in [
+            "index.md",
+            ".wiki/pages/index.md",
+            ".wiki/pages/audit/2026-11-11.md",
+            ".wiki/pages/concept/a.txt",
+            "notes/a.md",
+        ] {
+            let doc = parse(update_assignment(target, "补").as_bytes()).unwrap();
+            let err = plan_targets(d.path(), &cfg, &doc, &[]).unwrap_err();
+            assert_eq!(err.code(), "E_TASK_BAD_PAYLOAD", "{target}: {err}");
+            assert!(err.to_string().contains(target), "{target}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_created_page_under_the_audit_directory_is_rejected() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        let doc = parse(
+            r#"{"points":[{"id":"p1","finding":"f","evidence":"e"}],
+                "proposals":[{"id":"n1","type":"audit","title":"A","summary":"s",
+                    "why_new":"n","why_not_existing":"e"}],
+                "assignments":[{"point":"p1","action":"create","proposal":"n1"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let err = plan_targets(d.path(), &cfg, &doc, &[]).unwrap_err();
+        assert_eq!(err.code(), "E_TASK_BAD_PAYLOAD", "{err}");
+    }
+
+    #[test]
+    fn a_create_target_uses_the_proposal_and_has_no_before_hash() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        let doc = parse(
+            r#"{"points":[{"id":"p1","finding":"f","evidence":"e"}],
+                "proposals":[{"id":"n1","type":"concept","title":"Alpha Beta",
+                    "summary":"把结论写清楚","why_new":"n","why_not_existing":"e"}],
+                "assignments":[{"point":"p1","action":"create","proposal":"n1"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let out = plan_targets(d.path(), &cfg, &doc, &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, ".wiki/pages/concept/alpha-beta.md");
+        assert_eq!(out[0].title, "Alpha Beta");
+        assert_eq!(out[0].origin, Origin::Created);
+        assert_eq!(out[0].before, None);
+        assert_eq!(out[0].change, "把结论写清楚");
+    }
+
+    #[test]
+    fn two_creates_with_one_title_are_numbered() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        let doc = parse(
+            r#"{"points":[{"id":"p1","finding":"f","evidence":"e"},
+                {"id":"p2","finding":"g","evidence":"e"}],
+                "proposals":[
+                {"id":"n1","type":"concept","title":"Alpha","summary":"s1",
+                    "why_new":"n","why_not_existing":"e"},
+                {"id":"n2","type":"concept","title":"Alpha","summary":"s2",
+                    "why_new":"n","why_not_existing":"e"}],
+                "assignments":[{"point":"p1","action":"create","proposal":"n1"},
+                {"point":"p2","action":"create","proposal":"n2"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let out = plan_targets(d.path(), &cfg, &doc, &[]).unwrap();
+        assert_eq!(out.len(), 2);
+        let paths: BTreeSet<&str> = out.iter().map(|target| target.path.as_str()).collect();
+        assert!(paths.contains(".wiki/pages/concept/alpha.md"), "{paths:?}");
+        assert!(
+            paths.contains(".wiki/pages/concept/alpha-2.md"),
+            "{paths:?}"
+        );
+    }
+
+    #[test]
+    fn changes_and_points_follow_point_order() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        write_page(d.path(), ".wiki/pages/concept/a.md", "A");
+        let doc = parse(
+            r#"{"points":[
+                {"id":"p1","finding":"一","evidence":"e1"},
+                {"id":"p2","finding":"二","evidence":"e2"}],
+                "assignments":[
+                {"point":"p2","action":"update","target":".wiki/pages/concept/a.md",
+                    "change":"补二","basis":"b2"},
+                {"point":"p1","action":"update","target":".wiki/pages/concept/a.md",
+                    "change":"补一","basis":"b1"}],
+                "maintenance":[{"page":".wiki/pages/concept/a.md",
+                    "action":"update","reason":"有新增"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let out = plan_targets(d.path(), &cfg, &doc, &[".wiki/pages/concept/a.md".into()]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].change, "补一\n补二");
+        let ids: Vec<&str> = out[0]
+            .points
+            .iter()
+            .map(|point| point.id.as_str())
+            .collect();
+        assert_eq!(ids, ["p1", "p2"]);
+    }
+
+    #[test]
+    fn differently_spelled_targets_group_onto_one_path() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        write_page(d.path(), ".wiki/pages/concept/a.md", "A");
+        let doc = parse(
+            r#"{"points":[
+                {"id":"p1","finding":"一","evidence":"e1"},
+                {"id":"p2","finding":"二","evidence":"e2"}],
+                "assignments":[
+                {"point":"p1","action":"update","target":"./.wiki/pages/concept/a.md",
+                    "change":"补一","basis":"b1"},
+                {"point":"p2","action":"update","target":".wiki/pages/concept//a.md",
+                    "change":"补二","basis":"b2"}],
+                "maintenance":[{"page":".wiki/pages/concept/a.md",
+                    "action":"update","reason":"有新增"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let out = plan_targets(d.path(), &cfg, &doc, &[".wiki/pages/concept/a.md".into()]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, ".wiki/pages/concept/a.md");
+        assert_eq!(out[0].points.len(), 2);
+    }
+
+    #[test]
+    fn planned_targets_are_sorted_by_path() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        write_page(d.path(), ".wiki/pages/concept/a.md", "A");
+        let doc = parse(
+            r#"{"points":[{"id":"p1","finding":"f","evidence":"e"},
+                {"id":"p2","finding":"g","evidence":"e"}],
+                "proposals":[{"id":"n1","type":"concept","title":"Beta",
+                    "summary":"s","why_new":"n","why_not_existing":"e"}],
+                "assignments":[
+                {"point":"p1","action":"update","target":".wiki/pages/concept/a.md",
+                    "change":"补","basis":"b"},
+                {"point":"p2","action":"create","proposal":"n1"}],
+                "maintenance":[{"page":".wiki/pages/concept/a.md",
+                    "action":"update","reason":"有新增"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let out = plan_targets(d.path(), &cfg, &doc, &[".wiki/pages/concept/a.md".into()]).unwrap();
+        let paths: Vec<&str> = out.iter().map(|target| target.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [".wiki/pages/concept/a.md", ".wiki/pages/concept/beta.md"]
+        );
+    }
+
+    #[test]
+    fn slugify_collapses_and_trims_separators() {
+        assert_eq!(slugify("Hello,  World!"), "hello-world");
+        assert_eq!(slugify("---"), "page");
+        assert_eq!(slugify("  A  "), "a");
     }
 }
