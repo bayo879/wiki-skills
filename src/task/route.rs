@@ -635,8 +635,15 @@ pub(crate) fn plan_targets(
                 };
                 groups[slot].add(*point_index, point, None);
             }
-            // `skip` writes nothing; `validate_shape` rejects any other action.
-            _ => {}
+            // `skip` writes nothing; any other action is rejected here too, so a
+            // caller that skipped `validate_shape` cannot silently drop a write.
+            "skip" => {}
+            other => {
+                return Err(bad(
+                    "E_TASK_BAD_PAYLOAD",
+                    format!("unknown assignment action '{other}'"),
+                ))
+            }
         }
     }
 
@@ -701,9 +708,28 @@ pub(crate) fn slugify(title: &str) -> String {
 }
 
 /// Reads the existing page: its frontmatter title and its current hash.
+///
+/// A missing page is the agent's own path mistake, not an environment failure:
+/// it is reported as a bad payload naming the target, so the fix is to query
+/// again rather than to retry. A page that exists but cannot be parsed keeps its
+/// own code (`E_BAD_FRONTMATTER`, `E_NO_UPDATED`), because changing the path
+/// would not fix it.
 fn existing_page(root: &Path, path: &str) -> Result<(String, String)> {
     let full = root.join(path);
-    let (front, _body) = page::read(&full)?;
+    let (front, _body) = match page::read(&full) {
+        Ok(page) => page,
+        Err(page::PageError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Err(bad(
+                "E_TASK_BAD_PAYLOAD",
+                format!(
+                    "target '{path}' does not exist; query again and point at an existing page"
+                ),
+            ))
+        }
+        Err(other) => return Err(other.into()),
+    };
     let before = hash::hash_file(&full, true)?;
     Ok((front.title, before))
 }
@@ -1296,10 +1322,9 @@ mod tests {
         assert!(out[0].points.is_empty());
         assert_eq!(out[0].origin, Origin::Existing);
         assert_eq!(out[0].title, "A");
-        assert!(out[0]
-            .before
-            .as_deref()
-            .is_some_and(|hash| !hash.is_empty()));
+        let written = d.path().join(".wiki/pages/concept/a.md");
+        let before = hash::hash_file(&written, true).unwrap();
+        assert_eq!(out[0].before.as_deref(), Some(before.as_str()));
     }
 
     #[test]
@@ -1318,14 +1343,42 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_update_target_is_rejected() {
+    fn a_missing_update_target_is_a_bad_payload() {
         let d = tempdir().unwrap();
         let cfg = test_config();
         let doc =
             parse(update_assignment(".wiki/pages/concept/missing.md", "补").as_bytes()).unwrap();
         let err = plan_targets(d.path(), &cfg, &doc, &[]).unwrap_err();
-        assert_eq!(err.code(), "E_IO", "{err}");
+        assert_eq!(err.code(), "E_TASK_BAD_PAYLOAD", "{err}");
         assert!(err.to_string().contains("missing.md"), "{err}");
+    }
+
+    #[test]
+    fn an_existing_but_unreadable_update_target_keeps_its_own_error() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        let path = d.path().join(".wiki/pages/concept/a.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "no frontmatter here\n").unwrap();
+        let doc = parse(update_assignment(".wiki/pages/concept/a.md", "补").as_bytes()).unwrap();
+        let err = plan_targets(d.path(), &cfg, &doc, &[]).unwrap_err();
+        assert_eq!(err.code(), "E_BAD_FRONTMATTER", "{err}");
+    }
+
+    #[test]
+    fn an_unknown_assignment_action_is_rejected() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        let doc = parse(
+            r#"{"points":[{"id":"p1","finding":"f","evidence":"e"}],
+                "assignments":[{"point":"p1","action":"Update",
+                    "target":".wiki/pages/concept/a.md"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let err = plan_targets(d.path(), &cfg, &doc, &[]).unwrap_err();
+        assert_eq!(err.code(), "E_TASK_BAD_PAYLOAD", "{err}");
+        assert!(err.to_string().contains("Update"), "{err}");
     }
 
     #[test]
@@ -1339,6 +1392,18 @@ mod tests {
             ".wiki/pages/concept/a.txt",
             "notes/a.md",
         ] {
+            let doc = parse(update_assignment(target, "补").as_bytes()).unwrap();
+            let err = plan_targets(d.path(), &cfg, &doc, &[]).unwrap_err();
+            assert_eq!(err.code(), "E_TASK_BAD_PAYLOAD", "{target}: {err}");
+            assert!(err.to_string().contains(target), "{target}: {err}");
+        }
+    }
+
+    #[test]
+    fn parent_and_absolute_targets_are_rejected() {
+        let d = tempdir().unwrap();
+        let cfg = test_config();
+        for target in [".wiki/pages/../a.md", "/etc/passwd"] {
             let doc = parse(update_assignment(target, "补").as_bytes()).unwrap();
             let err = plan_targets(d.path(), &cfg, &doc, &[]).unwrap_err();
             assert_eq!(err.code(), "E_TASK_BAD_PAYLOAD", "{target}: {err}");
