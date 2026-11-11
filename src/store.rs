@@ -16,7 +16,48 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema version this build reads and writes.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
+
+/// The relation index: who points at whom, and which pages cite which raw.
+///
+/// Every row here is derived from page frontmatter and bodies; it is rebuilt by
+/// `query::refresh` and `doctor --fix` and never edited by hand. `page_links`
+/// keeps unresolved literals as rows with a NULL `to_page`, so a dent in the
+/// wiki is data, not a missing row. `relation_meta.generation` counts changes so
+/// a reader can tell whether the snapshot it saw is still current.
+const MIGRATION_11: &str = r#"
+CREATE TABLE relation_meta(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT INTO relation_meta(key, value) VALUES ('generation', '1');
+CREATE TABLE page_nodes(
+    page_key TEXT PRIMARY KEY,
+    page_id TEXT NOT NULL,
+    page_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    status TEXT NOT NULL,
+    content_hash TEXT NOT NULL
+);
+CREATE INDEX page_nodes_page_id ON page_nodes(page_id);
+CREATE TABLE page_links(
+    from_page TEXT NOT NULL,
+    target_literal TEXT NOT NULL,
+    to_page TEXT,
+    resolution TEXT NOT NULL CHECK(resolution IN ('resolved','missing','ambiguous')),
+    PRIMARY KEY(from_page, target_literal)
+);
+CREATE INDEX page_links_to_page ON page_links(to_page);
+CREATE TABLE page_source_refs(
+    page_key TEXT NOT NULL,
+    raw_ref TEXT NOT NULL,
+    raw_key TEXT NOT NULL,
+    fragment TEXT,
+    PRIMARY KEY(page_key, raw_ref)
+);
+CREATE INDEX page_source_refs_raw_key ON page_source_refs(raw_key);
+"#;
 
 /// The task tree: what the current ingest round still owes, and the page
 /// hashes the batch started from.
@@ -329,6 +370,67 @@ impl PageMetaRow {
     }
 }
 
+/// One indexed page: the facts a relation answer needs without rereading it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationNode {
+    pub page_key: String,
+    pub page_id: String,
+    pub page_type: String,
+    pub title: String,
+    pub summary: String,
+    pub status: String,
+    /// `page_meta.hash` at the time this row was written.
+    pub content_hash: String,
+}
+
+/// One outgoing link, resolved or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationLink {
+    pub from_page: String,
+    pub target_literal: String,
+    pub to_page: Option<String>,
+    /// `resolved`, `missing` or `ambiguous`; see [`crate::relation::Resolution`].
+    pub resolution: String,
+}
+
+/// One `sources:` entry, split into a raw file and an optional fragment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationSource {
+    pub page_key: String,
+    pub raw_ref: String,
+    pub raw_key: String,
+    pub fragment: Option<String>,
+}
+
+/// Column order shared by the `page_nodes` reader helpers.
+const RELATION_NODE_COLUMNS: &str =
+    "page_key, page_id, page_type, title, summary, status, content_hash";
+
+impl RelationNode {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RelationNode> {
+        Ok(RelationNode {
+            page_key: row.get(0)?,
+            page_id: row.get(1)?,
+            page_type: row.get(2)?,
+            title: row.get(3)?,
+            summary: row.get(4)?,
+            status: row.get(5)?,
+            content_hash: row.get(6)?,
+        })
+    }
+}
+
+impl RelationLink {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RelationLink> {
+        Ok(RelationLink {
+            from_page: row.get(0)?,
+            target_literal: row.get(1)?,
+            to_page: row.get(2)?,
+            resolution: row.get(3)?,
+        })
+    }
+}
+
 /// One row returned by [`Store::fts_search`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct FtsHit {
@@ -568,6 +670,9 @@ impl Store {
         }
         if version < 10 {
             self.apply_migration(MIGRATION_10, 10)?;
+        }
+        if version < 11 {
+            self.apply_migration(MIGRATION_11, 11)?;
         }
         Ok(())
     }
@@ -1145,6 +1250,239 @@ impl Store {
             params![row.page_key, row.hash, row.updated],
         )?;
         Ok(())
+    }
+
+    /// Replaces everything the index knows about one page.
+    ///
+    /// The node, its outgoing links and its source references are written in one
+    /// transaction, and `relation_meta.generation` advances only when the rows
+    /// actually changed. Dropping a link row is how a removed `[[...]]`
+    /// disappears; [`Store::delete_page_relations`] handles the page itself.
+    pub fn replace_page_relations(
+        &mut self,
+        node: &RelationNode,
+        links: &[RelationLink],
+        sources: &[RelationSource],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        if Self::write_page_relations(&tx, node, links, sources)? {
+            Self::bump_generation_tx(&tx)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Removes one page from the index and leaves its inbound links unresolved.
+    ///
+    /// The links are not deleted: they belong to other pages, which still claim
+    /// the relation. They become `missing`, which is what the reader needs to
+    /// see, and the page no longer answers an incoming query.
+    pub fn delete_page_relations(&mut self, page_key: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let node = Self::relation_node(&tx, page_key)?;
+        let links = Self::relation_links_from_tx(&tx, page_key)?;
+        let sources = Self::relation_sources_tx(&tx, page_key)?;
+        tx.execute("DELETE FROM page_links WHERE from_page = ?1", [page_key])?;
+        tx.execute("DELETE FROM page_source_refs WHERE page_key = ?1", [page_key])?;
+        tx.execute("DELETE FROM page_nodes WHERE page_key = ?1", [page_key])?;
+        let inbound = tx.execute(
+            "UPDATE page_links SET to_page = NULL, resolution = 'missing' WHERE to_page = ?1",
+            [page_key],
+        )?;
+        if node.is_some() || !links.is_empty() || !sources.is_empty() || inbound > 0 {
+            Self::bump_generation_tx(&tx)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every indexed page, ordered by key.
+    pub fn all_relation_nodes(&self) -> Result<Vec<RelationNode>> {
+        let sql = format!(
+            "SELECT {RELATION_NODE_COLUMNS} FROM page_nodes ORDER BY page_key"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], RelationNode::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Outgoing links of one page, ordered by literal.
+    pub fn relation_links_from(&self, page_key: &str) -> Result<Vec<RelationLink>> {
+        Self::relation_links_from_tx(&self.conn, page_key)
+    }
+
+    /// Incoming links of one page, ordered by source page.
+    pub fn relation_links_to(&self, page_key: &str) -> Result<Vec<RelationLink>> {
+        Self::relation_links_to_tx(&self.conn, page_key)
+    }
+
+    /// Source references of one page, ordered by raw reference.
+    pub fn relation_sources(&self, page_key: &str) -> Result<Vec<RelationSource>> {
+        Self::relation_sources_tx(&self.conn, page_key)
+    }
+
+    /// Pages citing `raw_key`, sorted and deduplicated.
+    pub fn pages_citing(&self, raw_key: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT page_key FROM page_source_refs WHERE raw_key = ?1 \
+             ORDER BY page_key",
+        )?;
+        let rows = stmt.query_map([raw_key], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    /// The current relation index generation.
+    pub fn relation_generation(&self) -> Result<i64> {
+        let value: String = self.conn.query_row(
+            "SELECT value FROM relation_meta WHERE key = 'generation'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(value.parse().unwrap_or(0))
+    }
+
+    /// Advances the relation generation and returns the new value.
+    pub fn bump_relation_generation(&mut self) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        let generation = Self::bump_generation_tx(&tx)?;
+        tx.commit()?;
+        Ok(generation)
+    }
+
+    /// Writes one page's rows; returns whether anything differed.
+    fn write_page_relations(
+        tx: &rusqlite::Transaction<'_>,
+        node: &RelationNode,
+        links: &[RelationLink],
+        sources: &[RelationSource],
+    ) -> Result<bool> {
+        let mut links = links.to_vec();
+        links.sort_by(|a, b| a.target_literal.cmp(&b.target_literal));
+        links.dedup_by(|a, b| a.target_literal == b.target_literal);
+        let mut sources = sources.to_vec();
+        sources.sort_by(|a, b| a.raw_ref.cmp(&b.raw_ref));
+        sources.dedup_by(|a, b| a.raw_ref == b.raw_ref);
+
+        let old_node = Self::relation_node(tx, &node.page_key)?;
+        let old_links = Self::relation_links_from_tx(tx, &node.page_key)?;
+        let old_sources = Self::relation_sources_tx(tx, &node.page_key)?;
+        if old_node.as_ref() == Some(node) && old_links == links && old_sources == sources {
+            return Ok(false);
+        }
+
+        tx.execute(
+            "DELETE FROM page_links WHERE from_page = ?1",
+            [&node.page_key],
+        )?;
+        tx.execute(
+            "DELETE FROM page_source_refs WHERE page_key = ?1",
+            [&node.page_key],
+        )?;
+        tx.execute(
+            "INSERT INTO page_nodes(page_key,page_id,page_type,title,summary,status,content_hash) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7) \
+             ON CONFLICT(page_key) DO UPDATE SET page_id=excluded.page_id, \
+             page_type=excluded.page_type, title=excluded.title, summary=excluded.summary, \
+             status=excluded.status, content_hash=excluded.content_hash",
+            params![
+                node.page_key,
+                node.page_id,
+                node.page_type,
+                node.title,
+                node.summary,
+                node.status,
+                node.content_hash
+            ],
+        )?;
+        for link in &links {
+            tx.execute(
+                "INSERT INTO page_links(from_page,target_literal,to_page,resolution) \
+                 VALUES(?1,?2,?3,?4)",
+                params![
+                    link.from_page,
+                    link.target_literal,
+                    link.to_page,
+                    link.resolution
+                ],
+            )?;
+        }
+        for source in &sources {
+            tx.execute(
+                "INSERT INTO page_source_refs(page_key,raw_ref,raw_key,fragment) \
+                 VALUES(?1,?2,?3,?4)",
+                params![source.page_key, source.raw_ref, source.raw_key, source.fragment],
+            )?;
+        }
+        Ok(true)
+    }
+
+    fn relation_node(
+        conn: &rusqlite::Connection,
+        page_key: &str,
+    ) -> Result<Option<RelationNode>> {
+        let sql = format!(
+            "SELECT {RELATION_NODE_COLUMNS} FROM page_nodes WHERE page_key = ?1"
+        );
+        Ok(conn
+            .query_row(&sql, [page_key], RelationNode::from_row)
+            .optional()?)
+    }
+
+    fn relation_links_from_tx(
+        conn: &rusqlite::Connection,
+        page_key: &str,
+    ) -> Result<Vec<RelationLink>> {
+        let mut stmt = conn.prepare(
+            "SELECT from_page,target_literal,to_page,resolution FROM page_links \
+             WHERE from_page = ?1 ORDER BY target_literal",
+        )?;
+        let rows = stmt.query_map([page_key], RelationLink::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn relation_links_to_tx(
+        conn: &rusqlite::Connection,
+        page_key: &str,
+    ) -> Result<Vec<RelationLink>> {
+        let mut stmt = conn.prepare(
+            "SELECT from_page,target_literal,to_page,resolution FROM page_links \
+             WHERE to_page = ?1 ORDER BY from_page, target_literal",
+        )?;
+        let rows = stmt.query_map([page_key], RelationLink::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn relation_sources_tx(
+        conn: &rusqlite::Connection,
+        page_key: &str,
+    ) -> Result<Vec<RelationSource>> {
+        let mut stmt = conn.prepare(
+            "SELECT page_key,raw_ref,raw_key,fragment FROM page_source_refs \
+             WHERE page_key = ?1 ORDER BY raw_ref",
+        )?;
+        let rows = stmt.query_map([page_key], |row| {
+            Ok(RelationSource {
+                page_key: row.get(0)?,
+                raw_ref: row.get(1)?,
+                raw_key: row.get(2)?,
+                fragment: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn bump_generation_tx(tx: &rusqlite::Transaction<'_>) -> Result<i64> {
+        tx.execute(
+            "UPDATE relation_meta SET value = CAST(value AS INTEGER) + 1 \
+             WHERE key = 'generation'",
+            [],
+        )?;
+        let value: String = tx.query_row(
+            "SELECT value FROM relation_meta WHERE key = 'generation'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(value.parse().unwrap_or(0))
     }
 
     /// Removes the raw row for `key`. Deleting an unknown key is a no-op.

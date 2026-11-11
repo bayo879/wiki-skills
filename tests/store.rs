@@ -147,3 +147,88 @@ fn a_second_writer_waits_for_the_lock_instead_of_failing() {
     let s = Store::open(&p).unwrap();
     assert!(s.get_source("a.md").unwrap().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Relation index
+// ---------------------------------------------------------------------------
+
+use llm_wiki::store::{RelationLink, RelationNode, RelationSource};
+
+fn node(key: &str, id: &str, page_type: &str) -> RelationNode {
+    RelationNode {
+        page_key: String::from(key),
+        page_id: String::from(id),
+        page_type: String::from(page_type),
+        title: String::from(id),
+        summary: String::new(),
+        status: String::from("stable"),
+        content_hash: String::from("blake3:00"),
+    }
+}
+
+fn link(from: &str, literal: &str, to: Option<&str>) -> RelationLink {
+    RelationLink {
+        from_page: String::from(from),
+        target_literal: String::from(literal),
+        to_page: to.map(String::from),
+        resolution: if to.is_some() {
+            String::from("resolved")
+        } else {
+            String::from("missing")
+        },
+    }
+}
+
+fn source(page: &str, raw: &str) -> RelationSource {
+    RelationSource {
+        page_key: String::from(page),
+        raw_ref: String::from(raw),
+        raw_key: String::from(raw.split('#').next().unwrap()),
+        fragment: raw.split_once('#').map(|(_, f)| String::from(f)),
+    }
+}
+
+#[test]
+fn replacing_a_page_rewires_its_edges_and_bumps_generation() {
+    let d = tempdir().unwrap();
+    let mut s = Store::open(&d.path().join("state.db")).unwrap();
+    s.migrate().unwrap();
+    let a = ".wiki/pages/concept/a.md";
+    let b = ".wiki/pages/concept/b.md";
+
+    let first = s.relation_generation().unwrap();
+    s.replace_page_relations(&node(b, "b", "concept"), &[], &[]).unwrap();
+    s.replace_page_relations(
+        &node(a, "a", "concept"),
+        &[link(a, "b", Some(b)), link(a, "gone", None)],
+        &[source(a, ".wiki/raw/s.md#p=1")],
+    )
+    .unwrap();
+    let after_write = s.relation_generation().unwrap();
+    assert_eq!(after_write, first + 2);
+
+    // An identical write changes nothing, so the generation stays put.
+    s.replace_page_relations(
+        &node(a, "a", "concept"),
+        &[link(a, "b", Some(b)), link(a, "gone", None)],
+        &[source(a, ".wiki/raw/s.md#p=1")],
+    )
+    .unwrap();
+    assert_eq!(s.relation_generation().unwrap(), after_write);
+
+    let from = s.relation_links_from(a).unwrap();
+    assert_eq!(from.len(), 2);
+    assert_eq!(from[0].target_literal, "b");
+    assert_eq!(from[0].to_page.as_deref(), Some(b));
+    assert_eq!(from[1].resolution, "missing");
+    assert_eq!(s.relation_links_to(b).unwrap().len(), 1);
+    assert_eq!(s.pages_citing(".wiki/raw/s.md").unwrap(), vec![String::from(a)]);
+
+    // Deleting b keeps a's claim, but it can no longer resolve.
+    s.delete_page_relations(b).unwrap();
+    let from = s.relation_links_from(a).unwrap();
+    assert_eq!(from[0].to_page, None);
+    assert_eq!(from[0].resolution, "missing");
+    assert!(s.relation_links_to(b).unwrap().is_empty());
+    assert!(s.all_relation_nodes().unwrap().iter().all(|n| n.page_key != b));
+}
