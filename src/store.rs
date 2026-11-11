@@ -43,6 +43,17 @@ CREATE TABLE tasks(
 );
 INSERT INTO tasks(id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at)
     SELECT id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at FROM tasks_v11;
+-- `RENAME` moved the old AUTOINCREMENT high-water mark to `tasks_v11`, and the
+-- copy above can only raise the new table's mark to `MAX(id)`. Restore the mark
+-- so a deleted task id is never handed out again (AGENTS.md 2.25).
+UPDATE sqlite_sequence
+   SET seq = MAX(seq, COALESCE((SELECT seq FROM sqlite_sequence WHERE name='tasks_v11'), 0))
+ WHERE name='tasks';
+INSERT INTO sqlite_sequence(name, seq)
+    SELECT 'tasks', MAX(seq, COALESCE((SELECT MAX(id) FROM tasks), 0))
+      FROM sqlite_sequence
+     WHERE name='tasks_v11'
+       AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='tasks');
 DROP TABLE tasks_v11;
 CREATE UNIQUE INDEX tasks_one_root_per_source ON tasks(source_key) WHERE kind='breakdown';
 CREATE UNIQUE INDEX tasks_one_convert_per_source ON tasks(source_key) WHERE kind='convert';
@@ -119,6 +130,16 @@ CREATE TABLE tasks(
 );
 INSERT INTO tasks(id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at)
     SELECT id,parent_id,kind,status,source_key,raw_hash,target_path,allowed_json,payload_json,attempts,last_error,created_at,updated_at FROM tasks_v9;
+-- Same as MIGRATION_12: the rename takes the old AUTOINCREMENT mark with it, so
+-- it has to be written back before the old table is dropped.
+UPDATE sqlite_sequence
+   SET seq = MAX(seq, COALESCE((SELECT seq FROM sqlite_sequence WHERE name='tasks_v9'), 0))
+ WHERE name='tasks';
+INSERT INTO sqlite_sequence(name, seq)
+    SELECT 'tasks', MAX(seq, COALESCE((SELECT MAX(id) FROM tasks), 0))
+      FROM sqlite_sequence
+     WHERE name='tasks_v9'
+       AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='tasks');
 DROP TABLE tasks_v9;
 CREATE UNIQUE INDEX tasks_one_root_per_source ON tasks(source_key) WHERE kind='breakdown';
 CREATE UNIQUE INDEX tasks_one_convert_per_source ON tasks(source_key) WHERE kind='convert';
@@ -1039,6 +1060,9 @@ impl Store {
     /// One transaction for all three steps, so a page row the schema rejects
     /// leaves the route in place and the payload unconsumed. Page tasks are
     /// parented to `root_id` regardless of what the caller passed.
+    ///
+    /// The route must be a `route` child of `root_id`: a stale id, or one that
+    /// belongs to another root, is an error and rolls the whole transition back.
     pub(crate) fn commit_route(
         &mut self,
         root_id: i64,
@@ -1048,10 +1072,11 @@ impl Store {
         now: &str,
     ) -> Result<Vec<i64>> {
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3",
+        let updated = tx.execute(
+            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3 AND kind='breakdown'",
             params![root_payload, now, root_id],
         )?;
+        require_one_row(updated)?;
         let mut page_ids = Vec::with_capacity(pages.len());
         for page in pages {
             let page = NewTask {
@@ -1060,12 +1085,19 @@ impl Store {
             };
             page_ids.push(Self::insert_task_row(&tx, &page)?);
         }
-        tx.execute("DELETE FROM tasks WHERE id=?1", [route_id])?;
+        let removed = tx.execute(
+            "DELETE FROM tasks WHERE id=?1 AND parent_id=?2 AND kind='route'",
+            params![route_id, root_id],
+        )?;
+        require_one_row(removed)?;
         tx.commit()?;
         Ok(page_ids)
     }
 
     /// Closes a `page`: saves the root plan and deletes the page in one transaction.
+    ///
+    /// The page must be a `page` child of `root_id`, so passing a root id or
+    /// another tree's leaf deletes nothing and reports an error instead.
     pub(crate) fn commit_page(
         &mut self,
         root_id: i64,
@@ -1074,11 +1106,16 @@ impl Store {
         now: &str,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3",
+        let updated = tx.execute(
+            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3 AND kind='breakdown'",
             params![root_payload, now, root_id],
         )?;
-        tx.execute("DELETE FROM tasks WHERE id=?1", [page_id])?;
+        require_one_row(updated)?;
+        let removed = tx.execute(
+            "DELETE FROM tasks WHERE id=?1 AND parent_id=?2 AND kind='page'",
+            params![page_id, root_id],
+        )?;
+        require_one_row(removed)?;
         tx.commit()?;
         Ok(())
     }
@@ -1087,6 +1124,9 @@ impl Store {
     ///
     /// Written pages stay where they are; only the task tree is rebuilt, which
     /// is why the page rows and their staging are not touched here.
+    ///
+    /// `root_id` must name a live `breakdown` task: a missing or non-root id is
+    /// an error and leaves the tree untouched.
     pub(crate) fn replan_root(
         &mut self,
         root_id: i64,
@@ -1095,10 +1135,11 @@ impl Store {
         now: &str,
     ) -> Result<i64> {
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3",
+        let updated = tx.execute(
+            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3 AND kind='breakdown'",
             params![root_payload, now, root_id],
         )?;
+        require_one_row(updated)?;
         tx.execute("DELETE FROM tasks WHERE parent_id=?1", [root_id])?;
         let route = NewTask {
             parent_id: Some(root_id),
@@ -1110,12 +1151,17 @@ impl Store {
     }
 
     /// Parks a task as `blocked`, counts the attempt and records why.
+    ///
+    /// A stale id is an error rather than a silent success: `rusqlite` reports
+    /// an update of nothing as `Ok`, which would let the caller believe the
+    /// task was parked.
     pub(crate) fn block_task(&mut self, id: i64, error: &str, now: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute(
+        let updated = tx.execute(
             "UPDATE tasks SET status='blocked',attempts=attempts+1,last_error=?1,updated_at=?2 WHERE id=?3",
             params![error, now, id],
         )?;
+        require_one_row(updated)?;
         tx.commit()?;
         Ok(())
     }
@@ -1858,6 +1904,23 @@ fn fts_hit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FtsHit> {
     })
 }
 
+/// Turns a write that matched the wrong number of rows into an error.
+///
+/// `rusqlite` reports deleting or updating nothing as `Ok(0)`, so a stale
+/// route, page or root id would otherwise look like a completed transition.
+// The only callers are the five store transitions, which are not wired into
+// `task::advance` yet and are themselves still `dead_code`.
+#[allow(dead_code)]
+fn require_one_row(changed: usize) -> Result<()> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StoreError::Sqlite(rusqlite::Error::StatementChangedRows(
+            changed,
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1877,6 +1940,57 @@ mod tests {
         .unwrap();
     }
 
+    /// A database at `version` (9 or 11) holding one root and four page tasks,
+    /// with the highest page id deleted so the sequence sits above `MAX(id)`.
+    ///
+    /// Returns every id the database ever handed out, including the deleted one.
+    fn write_used_task_database(path: &Path, version: i64) -> Vec<i64> {
+        let conn = Connection::open(path).unwrap();
+        let steps = [
+            (MIGRATION_1, 1),
+            (MIGRATION_2, 2),
+            (MIGRATION_3, 3),
+            (MIGRATION_4, 4),
+            (MIGRATION_5, 5),
+            (MIGRATION_6, 6),
+            (MIGRATION_7, 7),
+            (MIGRATION_8, 8),
+            (MIGRATION_9, 9),
+            (MIGRATION_10, 10),
+            (MIGRATION_11, 11),
+        ];
+        for (sql, step) in steps {
+            if step > version {
+                break;
+            }
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", version).unwrap();
+
+        let stamp = "2026-11-11T00:00:00Z";
+        conn.execute(
+            "INSERT INTO tasks(parent_id,kind,status,source_key,created_at,updated_at) \
+             VALUES(NULL,'breakdown','pending','a.md',?1,?1)",
+            [stamp],
+        )
+        .unwrap();
+        let root_id = conn.last_insert_rowid();
+        let mut ids = vec![root_id];
+        for i in 0..4 {
+            conn.execute(
+                "INSERT INTO tasks(parent_id,kind,status,target_path,created_at,updated_at) \
+                 VALUES(?1,'page','pending',?2,?3,?3)",
+                params![root_id, format!("a{i}.md"), stamp],
+            )
+            .unwrap();
+            ids.push(conn.last_insert_rowid());
+        }
+        let highest = *ids.last().unwrap();
+        conn.execute("DELETE FROM tasks WHERE id=?1", [highest])
+            .unwrap();
+        ids
+    }
+
     fn raw_row(key: &str, hash: &str) -> RawRow {
         RawRow {
             key: String::from(key),
@@ -1884,6 +1998,66 @@ mod tests {
             source_key: String::from("a.pdf"),
             converted_at: String::from("2026-10-27T10:00:00Z"),
         }
+    }
+
+    /// A root of `key` with its single route, as `create_root_with_route` builds it.
+    fn seeded_root(s: &mut Store, key: &str, now: &str) -> (i64, i64) {
+        let mut root = NewTask::pending("breakdown", now);
+        root.source_key = Some(String::from(key));
+        let mut route = NewTask::pending("route", now);
+        route.source_key = Some(String::from(key));
+        s.create_root_with_route(&root, &route).unwrap()
+    }
+
+    fn page_task(target: &str, now: &str) -> NewTask {
+        let mut page = NewTask::pending("page", now);
+        page.target_path = Some(String::from(target));
+        page
+    }
+
+    #[test]
+    fn a_v11_database_keeps_its_task_id_high_water_mark_across_migration_12() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("state.db");
+        let used = write_used_task_database(&p, 11);
+        let highest = *used.iter().max().unwrap();
+
+        let mut s = Store::open(&p).unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.task(used[0]).unwrap().unwrap().kind, "breakdown");
+        assert_eq!(
+            s.task(used[1]).unwrap().unwrap().parent_id,
+            Some(used[0]),
+            "migration 12 must copy the rows"
+        );
+
+        let new_id = s
+            .insert_task(&page_task("b.md", "2026-11-11T00:00:00Z"))
+            .unwrap();
+        assert!(
+            new_id > highest,
+            "a deleted task id must not be reused: got {new_id}, highest used {highest}"
+        );
+    }
+
+    #[test]
+    fn a_v9_database_keeps_its_task_id_high_water_mark_across_migration_10() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("state.db");
+        let used = write_used_task_database(&p, 9);
+        let highest = *used.iter().max().unwrap();
+
+        let mut s = Store::open(&p).unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.task(used[0]).unwrap().unwrap().kind, "breakdown");
+
+        let new_id = s
+            .insert_task(&page_task("b.md", "2026-11-11T00:00:00Z"))
+            .unwrap();
+        assert!(
+            new_id > highest,
+            "the v9 rebuild must not reuse a deleted task id: got {new_id}, highest used {highest}"
+        );
     }
 
     #[test]
@@ -2057,49 +2231,222 @@ mod tests {
         let mut s = Store::open(&d.path().join("state.db")).unwrap();
         s.migrate().unwrap();
         let now = "2026-11-11T00:00:00Z";
-        let mut root = NewTask::pending("breakdown", now);
-        root.source_key = Some("a.md".into());
-        let mut route = NewTask::pending("route", now);
-        route.source_key = Some("a.md".into());
-        let (_, route_id) = s.create_root_with_route(&root, &route).unwrap();
+        let (_, route_id) = seeded_root(&mut s, "a.md", now);
 
         let mut second = NewTask::pending("route", now);
         second.parent_id = s.task(route_id).unwrap().unwrap().parent_id;
         second.source_key = Some("a.md".into());
-        assert!(s.insert_task(&second).is_err());
+        match s.insert_task(&second) {
+            Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(err, Some(message)))) => {
+                assert_eq!(err.code, rusqlite::ErrorCode::ConstraintViolation);
+                assert!(
+                    message.contains("tasks.parent_id"),
+                    "the second route must trip the per-root index, got: {message}"
+                );
+            }
+            other => panic!("a second route under one root must be refused, got {other:?}"),
+        }
+
+        // The other half of the index: another root may own a route of its own.
+        let (other_root, other_route) = seeded_root(&mut s, "b.md", now);
+        assert_eq!(
+            s.task(other_route).unwrap().unwrap().parent_id,
+            Some(other_root)
+        );
     }
 
     #[test]
-    fn commit_route_rolls_back_when_a_page_row_is_invalid() {
+    fn commit_route_rolls_back_when_a_later_page_row_is_invalid() {
         let d = tempdir().unwrap();
         let mut s = Store::open(&d.path().join("state.db")).unwrap();
         s.migrate().unwrap();
         let now = "2026-11-11T00:00:00Z";
-        let mut root = NewTask::pending("breakdown", now);
-        root.source_key = Some("a.md".into());
-        let mut route = NewTask::pending("route", now);
-        route.source_key = Some("a.md".into());
-        let (root_id, route_id) = s.create_root_with_route(&root, &route).unwrap();
+        let later = "2026-11-12T00:00:00Z";
+        let (root_id, route_id) = seeded_root(&mut s, "a.md", now);
+        let before = s.tasks().unwrap().len();
 
-        let mut page = NewTask::pending("page", now);
-        page.status = "not-a-status".into();
+        let mut invalid = NewTask::pending("page", now);
+        invalid.status = "not-a-status".into();
         assert!(s
             .commit_route(
                 root_id,
                 "{\"schema\":\"root-plan-v1\"}",
-                &[page],
+                &[page_task("a.md", now), invalid],
                 route_id,
-                now
+                later
             )
             .is_err());
+        assert_eq!(
+            s.tasks().unwrap().len(),
+            before,
+            "a failed commit must not leave the valid first page behind"
+        );
+        assert!(
+            s.tasks().unwrap().iter().all(|task| task.kind != "page"),
+            "no page row may survive the rollback"
+        );
         assert!(
             s.task(route_id).unwrap().is_some(),
             "the route must survive a failed commit"
         );
+        let root = s.task(root_id).unwrap().unwrap();
         assert_eq!(
-            s.task(root_id).unwrap().unwrap().payload_json,
-            None,
+            root.payload_json, None,
             "the root payload must roll back with the failed commit"
+        );
+        assert_eq!(
+            root.updated_at, now,
+            "the root timestamp must roll back with the failed commit"
+        );
+    }
+
+    #[test]
+    fn commit_route_refuses_a_route_that_belongs_to_another_root() {
+        let d = tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("state.db")).unwrap();
+        s.migrate().unwrap();
+        let now = "2026-11-11T00:00:00Z";
+        let later = "2026-11-12T00:00:00Z";
+        let (root_id, route_id) = seeded_root(&mut s, "a.md", now);
+        let (_, foreign_route) = seeded_root(&mut s, "b.md", now);
+        let before = s.tasks().unwrap().len();
+
+        assert!(
+            s.commit_route(
+                root_id,
+                "{\"schema\":\"root-plan-v1\"}",
+                &[page_task("a.md", now)],
+                foreign_route,
+                later
+            )
+            .is_err(),
+            "a route under another root must not be closed by this one"
+        );
+        assert_eq!(s.tasks().unwrap().len(), before);
+        assert!(s.task(route_id).unwrap().is_some());
+        assert!(
+            s.task(foreign_route).unwrap().is_some(),
+            "the other root must keep its route"
+        );
+        assert_eq!(s.task(root_id).unwrap().unwrap().payload_json, None);
+    }
+
+    #[test]
+    fn commit_page_only_closes_a_page_under_its_own_root() {
+        let d = tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("state.db")).unwrap();
+        s.migrate().unwrap();
+        let now = "2026-11-11T00:00:00Z";
+        let later = "2026-11-12T00:00:00Z";
+        let (root_a, route_a) = seeded_root(&mut s, "a.md", now);
+        let pages_a = s
+            .commit_route(root_a, "plan-a", &[page_task("a1.md", now)], route_a, later)
+            .unwrap();
+        let (root_b, route_b) = seeded_root(&mut s, "b.md", now);
+        let pages_b = s
+            .commit_route(root_b, "plan-b", &[page_task("b1.md", now)], route_b, later)
+            .unwrap();
+
+        // A page under another root is not this root's to close.
+        assert!(s.commit_page(root_a, pages_b[0], "stolen", later).is_err());
+        assert!(s.task(pages_b[0]).unwrap().is_some());
+        assert_eq!(
+            s.task(root_b).unwrap().unwrap().payload_json.as_deref(),
+            Some("plan-b"),
+            "the other root's plan must be untouched"
+        );
+
+        // Passing the root id must not delete the whole subtree.
+        let before = s.tasks().unwrap().len();
+        assert!(s
+            .commit_page(root_a, root_a, "root-as-page", later)
+            .is_err());
+        assert_eq!(s.tasks().unwrap().len(), before);
+        assert!(s.task(root_a).unwrap().is_some());
+
+        // The real page closes and saves the root plan.
+        s.commit_page(root_a, pages_a[0], "plan-a2", later).unwrap();
+        assert!(s.task(pages_a[0]).unwrap().is_none());
+        assert_eq!(
+            s.task(root_a).unwrap().unwrap().payload_json.as_deref(),
+            Some("plan-a2")
+        );
+    }
+
+    #[test]
+    fn replan_root_rebuilds_the_tree_and_refuses_a_missing_root() {
+        let d = tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("state.db")).unwrap();
+        s.migrate().unwrap();
+        let now = "2026-11-11T00:00:00Z";
+        let later = "2026-11-12T00:00:00Z";
+        let (root_id, route_id) = seeded_root(&mut s, "a.md", now);
+        let pages = s
+            .commit_route(
+                root_id,
+                "plan-1",
+                &[page_task("a1.md", now), page_task("a2.md", now)],
+                route_id,
+                later,
+            )
+            .unwrap();
+
+        let new_route = s
+            .replan_root(root_id, "plan-2", &NewTask::pending("route", later), later)
+            .unwrap();
+        for page in &pages {
+            assert!(
+                s.task(*page).unwrap().is_none(),
+                "a replan must drop every old child"
+            );
+        }
+        assert_eq!(s.task(new_route).unwrap().unwrap().parent_id, Some(root_id));
+        assert_eq!(
+            s.task(root_id).unwrap().unwrap().payload_json.as_deref(),
+            Some("plan-2")
+        );
+        let after_replan = s.tasks().unwrap().len();
+        assert_eq!(after_replan, 2, "one root plus one fresh route");
+
+        // A missing root cannot be replanned.
+        assert!(s
+            .replan_root(9999, "plan-3", &NewTask::pending("route", later), later)
+            .is_err());
+        assert_eq!(s.tasks().unwrap().len(), after_replan);
+
+        // The new route is a child, not a root: it has no children of its own.
+        assert!(s
+            .replan_root(
+                new_route,
+                "plan-4",
+                &NewTask::pending("route", later),
+                later
+            )
+            .is_err());
+        assert!(s.task(new_route).unwrap().is_some());
+    }
+
+    #[test]
+    fn block_task_records_the_failure_and_refuses_a_missing_id() {
+        let d = tempdir().unwrap();
+        let mut s = Store::open(&d.path().join("state.db")).unwrap();
+        s.migrate().unwrap();
+        let now = "2026-11-11T00:00:00Z";
+        let later = "2026-11-12T00:00:00Z";
+        let (_, route_id) = seeded_root(&mut s, "a.md", now);
+
+        s.block_task(route_id, "E_TASK_BAD_PAYLOAD: nope", later)
+            .unwrap();
+        let task = s.task(route_id).unwrap().unwrap();
+        assert_eq!(task.status, "blocked");
+        assert_eq!(task.attempts, 1);
+        assert_eq!(task.last_error.as_deref(), Some("E_TASK_BAD_PAYLOAD: nope"));
+        assert_eq!(task.updated_at, later);
+
+        assert!(
+            s.block_task(9999, "E_TASK_BAD_PAYLOAD: gone", later)
+                .is_err(),
+            "blocking a task that no longer exists must not report success"
         );
     }
 
