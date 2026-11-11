@@ -19,6 +19,8 @@
 //! - **The tool owns the page structure.** `id`, `type`, `sources`, `updated`
 //!   and the frontmatter syntax come from the task, not from the payload.
 
+mod plan;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
