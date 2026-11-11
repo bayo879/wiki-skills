@@ -26,6 +26,7 @@ pub mod query;
 pub mod read;
 pub mod render;
 pub mod report;
+pub mod runtime_root;
 pub mod scan;
 pub mod source_refs;
 pub mod store;

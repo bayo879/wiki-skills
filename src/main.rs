@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use llm_wiki::chunk;
 use llm_wiki::cli::{Cli, Command, DoctorOnly, TaskAction};
-use llm_wiki::config::{Config, ConfigError, CONFIG_FILE, ENGINE_DIR};
+use llm_wiki::config::{Config, ConfigError, CONFIG_FILE};
 use llm_wiki::doctor::{self, Check, Level};
 use llm_wiki::graph;
 use llm_wiki::hash;
@@ -95,7 +95,27 @@ fn dispatch(cli: Cli) -> ! {
 /// Failing to read it is an environment error (exit 2), never a finding.
 fn wiki_root(cmd: &str) -> PathBuf {
     match std::env::current_dir() {
-        Ok(root) => root,
+        Ok(cwd) => {
+            let executable = std::env::current_exe().unwrap_or_else(|err| {
+                report::fail(
+                    cmd,
+                    Exit::Usage,
+                    "E_IO",
+                    &format!("cannot locate executable: {err}"),
+                )
+            });
+            let root = llm_wiki::runtime_root::resolve_root(&executable, &cwd);
+            // Relative source, leaves and payload paths share the same root.
+            if let Err(err) = std::env::set_current_dir(&root) {
+                report::fail(
+                    cmd,
+                    Exit::Usage,
+                    "E_IO",
+                    &format!("cannot enter distribution root: {err}"),
+                );
+            }
+            root
+        }
         Err(err) => report::fail(
             cmd,
             Exit::Usage,
@@ -105,17 +125,28 @@ fn wiki_root(cmd: &str) -> PathBuf {
     }
 }
 
+fn fresh_install(cmd: &str, root: &Path) -> bool {
+    precondition::is_fresh_install(root).unwrap_or_else(|err| {
+        report::fail(
+            cmd,
+            Exit::Usage,
+            "E_IO",
+            &format!("cannot inspect engine: {err}"),
+        )
+    })
+}
+
 /// Opens the repository for a command: initialises a fresh directory, provisions
 /// the derived directories, then loads the contract.
 ///
-/// A directory with no `.wiki/` is a first run, not an error: the default
+/// No `.wiki/`, or only installation resources, is a first run: the default
 /// contract is created without printing anything and the command continues.
 /// A damaged repository (`.wiki/` exists but a contract or the page tree is
 /// missing) still refuses with `E_NOT_INITIALISED`, so `doctor` can diagnose it
 /// instead of silently recreating the product.
 fn open_repo(cmd: &str, root: &Path) -> Config {
     if let Err(missing) = precondition::check(root) {
-        if root.join(ENGINE_DIR).exists() {
+        if !fresh_install(cmd, root) {
             report::fail_detail(
                 cmd,
                 Exit::Usage,
@@ -219,7 +250,7 @@ fn store_error_message(err: &StoreError) -> String {
 /// healthy result instead of asking for a separate initialisation step.
 fn run_doctor(fix: bool, only: Option<DoctorOnly>, key: Option<String>) -> ! {
     let root = wiki_root("doctor");
-    if !root.join(ENGINE_DIR).exists() {
+    if fresh_install("doctor", &root) {
         if let Err(err) = init::run(&root, false) {
             report::fail(
                 "doctor",

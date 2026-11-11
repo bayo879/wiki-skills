@@ -13,6 +13,8 @@
 - 交互目标是「少交互、尽量无感」：能由规则直接判定的事就由工具自己处置，不要再让用户下一条命令。典型是源文件被删——raw、页面对它的引用、只靠它的孤儿页、账本行都应在下一轮摄入里自动收口，而不是等作者手工删页或跑额外命令。需要人判断的（正文冲突、结论取舍）仍然问。
 - [未决问题](docs/issues/) 是整个项目的长期问题收集目录，后续优化以此为准，不限于摄入流程。一个未完成的设计或待判别的问题一个文件，写清影响、证据、候选方案与验收条件；未确认方案不得视为定案，解决后删除文件，断点留在 git 与提交信息里。每个文件头标 `优先级：P1`–`P4`：P1 正在丢数据，或流程卡死且没有出口；P2 用户会真实踩到，已有明确修法或只差一个决定；P3 低频路径的边界与设计缺口；P4 测试、评估与文档澄清，不改变当前行为。被问「issues 情况」时按优先级分组回答，P1 在前；该级没有条目就直接说没有，不硬凑。
 
+- 对外分发以整个 `output/` 为根：CLI 放在 `.wiki/cli/`，两个技能放在 `.wiki/skills/`，安装引导放在 `.wiki/readme.md`。包内 CLI 从可执行文件位置定位根，不依赖调用目录；安装时以包内版本为准，替换旧 PATH 入口。分发空工具包不代表支持已有知识库跨机同步。
+
 ## 2. 特有问题与解决方案
 
 ### 2.1 账本写入只有一个入口
@@ -30,7 +32,7 @@
 
 ### 2.3 技能不复述 CLI 的输出形状
 
-`skills/llm-wiki/` 只写流程与判断；JSON 字段路径、必填字段、正式页位置、报错码含义都由 CLI 现打（`ingest` 给 `write_to`、`types` 与 `next_task`，`task done` 在源漂移时点名哈希不符），技能里不再有枚举表、字段表、错误码表和 `data.*` 路径。
+`output/.wiki/skills/llm-wiki/` 只写流程与判断；JSON 字段路径、必填字段、正式页位置、报错码含义都由 CLI 现打（`ingest` 给 `write_to`、`types` 与 `next_task`，`task done` 在源漂移时点名哈希不符），技能里不再有枚举表、字段表、错误码表和 `data.*` 路径。
 `tests/docs_contract.rs::the_skill_states_no_json_field_paths` 禁止技能文件出现 `data.*`（只放过 `error.code`/`error.message`/`error.detail`）；`tests/snapshots/cli-keys.json` 仍锁每条命令的输出形状（`LLM_WIKI_UPDATE_SNAPSHOTS=1` 重生成）。改输出形状时改快照即可，不需要同步技能。
 
 ### 2.4 schema 迁移必须与全新库同构
@@ -59,8 +61,8 @@
 
 ### 2.7 一个技能，四份文件
 
-`skills/llm-wiki/SKILL.md` 是 wiki 本身的入口（边界、命令入口、最小序列、来源确认、触发入口、退出码）；`init.md` 写「首次接入」（持久化记忆与定时任务两件 agent 侧的事，不写 CLI 初始化流程）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、冲突与覆盖风险、忽略、叫人）。
-`skills/llm-wiki-session/` 是第二个技能：会话蒸馏，写进 `[ingest].session_dir` 指向的源目录（默认 `sessions`），原始会话不存。一个会话一个文件，不按时间切。
+`output/.wiki/skills/llm-wiki/SKILL.md` 是 wiki 本身的入口（边界、命令入口、最小序列、来源确认、触发入口、退出码）；`init.md` 写「首次接入」（持久化记忆与定时任务两件 agent 侧的事，不写 CLI 初始化流程）；`content.md` 写「写什么」（建页判断、新源怎么处理、切片、前后矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、冲突与覆盖风险、忽略、叫人）。
+`output/.wiki/skills/llm-wiki-session/` 是第二个技能：会话蒸馏，写进 `[ingest].session_dir` 指向的源目录（默认 `sessions`），原始会话不存。一个会话一个文件，不按时间切。
 拆分只为了让 agent 按需只读一份，不是新的契约；`tests/skills_pack.rs` 断言只发这两个技能、正文行数不超限。
 
 ### 2.8 技能的价值在流程纪律，不在用法说明
@@ -126,16 +128,16 @@ flag 与字段的解释与 `--help`、`init.rs` 生成的 `SCHEMA.md` 高度重�
 
 ### 2.17 初始化是自动的，不是开场仪式
 
-初始化已经内化到 `open_repo` 与 `run_doctor`：目录里没有 `.wiki/` 时，第一条命令（包括 `doctor`）会静默建默认契约与目录，然后继续。技能不再提 CLI 初始化流程，也不再有 CLI 侧的后续提示；`init.md` 只保留 agent 侧的两件事。
+初始化已经内化到 `open_repo` 与 `run_doctor`：没有 `.wiki/` 或其中仅有安装资源（`cli/`、`skills/`、`readme.md`，且非空）时，第一条命令（包括 `doctor`）会静默建默认契约与目录，然后继续。技能不再提 CLI 初始化流程，也不再有 CLI 侧的后续提示；`init.md` 只保留 agent 侧的两件事。
 首次接入只保留两件 agent 侧的事：把「工作区为 wiki，咨询问题默认调用 wiki」写进持久化记忆，以及问用户是否把「wiki自动摄入」设为定时任务；具体实现由各 agent 自己的记忆与调度能力完成，CLI 和技能都不假定实现方式。
-只有 `.wiki/` 已存在但契约或产品目录缺失时才报 `E_NOT_INITIALISED`，让 `doctor` 诊断、`doctor --fix` 修；这条路径是损坏仓库的出口，不是首次使用的入口。
+除上述纯安装资源目录外，`.wiki/` 已存在但契约或产品目录缺失时才报 `E_NOT_INITIALISED`，让 `doctor` 诊断、`doctor --fix` 修；这条路径是损坏仓库的出口，不是首次使用的入口。
 `tests/precondition.rs::every_repository_command_bootstraps_an_empty_directory` 钉住空目录直接可用，`a_missing_product_directory_is_refused_even_when_the_contract_exists` 钉住损坏仓库仍拒绝。
 
 ### 2.18 删命令前先和 spec 做一次差集
 
 命令面收窄过三轮：22 → 6 删了 `version`，直接写页那一轮又删了 `submit` 与整套版本管理，任务树这一轮把 `done` 换成 `task done/status/retry`。两次都出现过文档还在教旧入口的情况（`README.md` 曾写着「submit 建版本」，而代码明确不建）。
 删之前先回答「删掉以后坏了怎么办」：`.wiki/` 是唯一内容所在，而且通常不进 git（2.12），所以没有回退就等于没有出口——现在答案只能是仓库外的独立备份，文档必须这么写，不能假装还有内置退路。
-删任何一条命令或 flag 前，`grep` 一遍 `README.md`、`docs/readme/`、`docs/issues/`、`skills/`、`src/init.rs`（`SCHEMA.md`），差集里没处理干净的要么补实现、要么改文档。旧命令现在由 clap 返回 `E_USAGE` exit 2，`tests/cli_submit.rs::submit_is_rejected_without_touching_legacy_candidates` 与 `tests/cli_version.rs::version_subcommands_are_rejected_and_preserve_legacy_bytes` 钉住「拒绝且不动旧字节」。
+删任何一条命令或 flag 前，`grep` 一遍 `README.md`、`docs/readme/`、`docs/issues/`、`output/.wiki/skills/`、`src/init.rs`（`SCHEMA.md`），差集里没处理干净的要么补实现、要么改文档。旧命令现在由 clap 返回 `E_USAGE` exit 2，`tests/cli_submit.rs::submit_is_rejected_without_touching_legacy_candidates` 与 `tests/cli_version.rs::version_subcommands_are_rejected_and_preserve_legacy_bytes` 钉住「拒绝且不动旧字节」。
 
 ### 2.19 防抖只认 mtime，不记轮次
 

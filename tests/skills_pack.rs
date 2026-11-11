@@ -15,7 +15,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-const SKILLS_DIR: &str = "skills";
+const SKILLS_DIR: &str = "output/.wiki/skills";
 
 /// Splits a `SKILL.md` into its frontmatter map and its body.
 fn parse_frontmatter(text: &str) -> (BTreeMap<String, String>, &str) {

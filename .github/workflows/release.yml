@@ -1,12 +1,6 @@
 name: Release
 
-# Publishes the CLI itself: one static-ish executable per platform, attached to
-# the tagged release. The skills are plain files and travel with the repository,
-# so there is nothing to package around them.
-#
-#   git tag v0.1.0 && git push origin v0.1.0
-#
-# or run this workflow by hand from the Actions page.
+# Publish the complete standalone output directory for each native platform.
 on:
   push:
     tags: ['v*']
@@ -32,38 +26,34 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # The artifact *is* the binary, so the shipped profile has to be the one
-      # that passes the suite. No packaging step follows that could mask it.
       - name: Test the release profile
         run: cargo test --release --locked
 
       - name: Build
-        run: cargo build --release --locked
+        run: bash scripts/build-output.sh
 
       # Strip the debug-looking tail off unix builds; Windows has no `strip`
       # for PE binaries in the runner image, and its symbols are already small.
       - name: Shrink (unix)
         if: runner.os != 'Windows'
-        run: strip -x target/release/llm-wiki
+        run: strip -x output/.wiki/cli/llm-wiki
 
-      - name: Name the asset
-        id: asset
+      - name: Archive (unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          set -eu
           triple=$(rustc -vV | sed -n 's/^host: //p')
-          name="llm-wiki-${triple}"
           mkdir -p dist
-          if [ -f target/release/llm-wiki.exe ]; then
-            name="${name}.exe"
-            cp target/release/llm-wiki.exe "dist/${name}"
-          else
-            cp target/release/llm-wiki "dist/${name}"
-          fi
-          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          tar -czf "dist/llm-wiki-${triple}.tar.gz" output
 
-      # `path: dist/` keeps the file's own name inside the artifact, so the
-      # published asset is `llm-wiki-<triple>` and nothing else.
+      - name: Archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $triple = ((rustc -vV | Select-String '^host: ') -replace '^host: ', '')
+          New-Item -ItemType Directory -Force dist | Out-Null
+          tar -a -cf "dist/llm-wiki-$triple.zip" output
+
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.os }}
@@ -82,30 +72,6 @@ jobs:
 
       - name: List the assets
         run: ls -l dist
-
-      # Earlier releases carried a tarball per platform. The CLI is published as
-      # a bare binary now, so anything that is not one gets dropped instead of
-      # piling up beside it.
-      - name: Drop assets from the packaged era
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -eu
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            exit 0
-          fi
-          # The assets this workflow produces are bare binaries; the bundled
-          # tarballs of the earlier design match `llm-wiki-*` too, so they are
-          # matched by shape rather than by prefix.
-          gh release view "$TAG" --json assets --jq '.assets[].name' |
-            while read -r name; do
-              case "$name" in
-                *skills*|*.tar.gz|*.tgz|*.zip)
-                  echo "deleting $name"
-                  gh release delete-asset "$TAG" "$name" --yes ;;
-              esac
-            done
 
       - uses: softprops/action-gh-release@v2
         with:

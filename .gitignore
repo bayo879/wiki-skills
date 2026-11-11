@@ -14,7 +14,7 @@ superpowers/
 .DS_Store
 
 # 随 Release 分发的 CLI 二进制，不进仓库
-skills/llm-wiki/cli/
+output/.wiki/cli/
 
 # 发布产物（本地构建或 CI 生成）
 dist/

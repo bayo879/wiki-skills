@@ -15,7 +15,7 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 
 ## 命令
 
-在仓库根执行，命令是 `llm-wiki`。先看 PATH 里有没有；没有就用 `cli/llm-wiki`（相对本文件所在目录，二进制随技能目录一起分发）。下面只列常用入口。
+先确认用户要操作的工作区根，使用其 `.wiki/cli/llm-wiki` 的绝对路径（Windows 为 `llm-wiki.exe`）；下文 `llm-wiki` 均指这一份，不用 PATH 中的其他版本。CLI 从自身位置定位工作区根，源、叶清单和载荷的相对路径也以该根为准。技能复制到 agent 目录后，不能从技能所在位置推断工作区；根不明确就问用户。首次安装引导见目标工作区 `.wiki/readme.md`，首次接入见 init.md。下面只列常用入口。
 
 - `llm-wiki doctor` 体检；`llm-wiki doctor --fix` 修可修的机械缺陷与索引；失败任务与原因也在这里看。
 - `llm-wiki ingest` 摄入并交付下一个任务；`--dry-run` 先看计划；`ingest <KEY>...` 只处理点名源。

@@ -45,6 +45,30 @@ pub const HINT: &str = "run `llm-wiki doctor --fix` in the repository root, then
 /// The contract every command loads; `init` is the only thing that writes it.
 const REQUIRED_FILES: [&str; 1] = [".wiki/wiki.toml"];
 
+/// Only installation resources may precede a first initialisation. Unknown
+/// state is deliberately treated as an existing, potentially damaged library.
+pub fn is_fresh_install(root: &Path) -> std::io::Result<bool> {
+    let entries = match std::fs::read_dir(root.join(".wiki")) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(err) => return Err(err),
+    };
+    let mut has_resources = false;
+    for entry in entries {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let name = entry.file_name();
+        if !((kind.is_dir() && (name == "cli" || name == "skills"))
+            || (kind.is_file() && name == "readme.md"))
+        {
+            return Ok(false);
+        }
+        has_resources = true;
+    }
+    // An empty existing engine remains a damaged repository, as before.
+    Ok(has_resources)
+}
+
 /// The first authored path that is missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {

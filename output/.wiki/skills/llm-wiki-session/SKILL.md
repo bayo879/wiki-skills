@@ -47,6 +47,8 @@ description: 当一段对话结束时要把其中的判断、决策与踩坑留�
 
 ## 流程
 
+先确认目标工作区根，使用该根 `.wiki/cli/llm-wiki` 的绝对路径（Windows 为 `llm-wiki.exe`），不使用 PATH 旧版；根不明确就问用户，不能从已复制的技能目录或当前目录猜测。下面的命令与 `[ingest].session_dir` 都以该工作区根为准；写素材时也使用该根下的绝对路径。首次接入请阅读目标根 `.wiki/readme.md`。
+
 1. 先 `query` 搜同主题，有页就并进那页，不新建。
 2. 把页面落到 `[ingest].session_dir` 下的路径（例如 `sessions/2026-10-29-cli-reshape.md`）。
 3. `ingest` 登记这份材料，实际读取 raw 并保存对应哈希；按交付的 `next_task` 提交载荷：拆解交叶清单，生成交标题、摘要、标签、状态与正文；frontmatter 由工具渲染。

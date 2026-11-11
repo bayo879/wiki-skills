@@ -191,11 +191,11 @@ fn direct_page_workflow_is_the_only_shipped_workflow() {
     let root = workspace();
     for relative in [
         "README.md",
-        "skills/llm-wiki/SKILL.md",
-        "skills/llm-wiki/content.md",
-        "skills/llm-wiki/ops.md",
-        "skills/llm-wiki/init.md",
-        "skills/llm-wiki-session/SKILL.md",
+        "output/.wiki/skills/llm-wiki/SKILL.md",
+        "output/.wiki/skills/llm-wiki/content.md",
+        "output/.wiki/skills/llm-wiki/ops.md",
+        "output/.wiki/skills/llm-wiki/init.md",
+        "output/.wiki/skills/llm-wiki-session/SKILL.md",
     ] {
         let text = fs::read_to_string(root.join(relative)).unwrap();
         for retired in [
@@ -211,7 +211,7 @@ fn direct_page_workflow_is_the_only_shipped_workflow() {
             );
         }
     }
-    let skill = fs::read_to_string(root.join("skills/llm-wiki/SKILL.md")).unwrap();
+    let skill = fs::read_to_string(root.join("output/.wiki/skills/llm-wiki/SKILL.md")).unwrap();
     for required in ["task done", "staging", "raw", "并发", "备份"] {
         assert!(
             skill.contains(required),
@@ -223,7 +223,7 @@ fn direct_page_workflow_is_the_only_shipped_workflow() {
 #[test]
 fn the_skill_ships_the_command_sheet_and_the_scheduled_phrase() {
     let root = workspace();
-    let skill = fs::read_to_string(root.join("skills/llm-wiki/SKILL.md")).unwrap();
+    let skill = fs::read_to_string(root.join("output/.wiki/skills/llm-wiki/SKILL.md")).unwrap();
     for required in [
         "wiki自动摄入",
         "init.md",
@@ -248,7 +248,7 @@ fn the_skill_ships_the_command_sheet_and_the_scheduled_phrase() {
             "SKILL.md: must not expose the initialisation flow: {forbidden}"
         );
     }
-    let init = fs::read_to_string(root.join("skills/llm-wiki/init.md")).unwrap();
+    let init = fs::read_to_string(root.join("output/.wiki/skills/llm-wiki/init.md")).unwrap();
     for required in ["工作区为 wiki", "持久化记忆", "wiki自动摄入", "01:00"] {
         assert!(init.contains(required), "init.md: missing {required}");
     }
@@ -294,7 +294,7 @@ fn the_json_shape_of_each_command_matches_the_snapshot() {
 #[test]
 fn the_skill_states_no_json_field_paths() {
     let allowed = ["error.code", "error.message", "error.detail"];
-    let skills = workspace().join("skills");
+    let skills = workspace().join("output/.wiki/skills");
     let mut found = Vec::new();
     for (path, text) in shipped_markdown() {
         if !path.starts_with(&skills) {
@@ -372,7 +372,7 @@ fn known_flags() -> BTreeSet<String> {
 fn shipped_markdown() -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     let mut stack = vec![
-        workspace().join("skills"),
+        workspace().join("output/.wiki/skills"),
         workspace().join("docs").join("readme"),
     ];
     while let Some(dir) = stack.pop() {

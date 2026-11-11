@@ -34,106 +34,40 @@
 
 ## 服务部署操作
 
-依赖只有 Rust stable（`rusqlite` 用 `bundled` 特性自带 SQLite，无需系统库），构建不联网的机器请预置好依赖缓存。
+分发单位是整个 `output/`，无需源码或 Rust。下载对应操作系统与架构的 Release 压缩包，解压后保留 `.wiki/` 隐藏目录。根目录可改名；资料放在该根下。首次接入请让 agent 阅读 [安装指南](output/.wiki/readme.md)。
+
+包内 CLI 固定在 `output/.wiki/cli/llm-wiki`（Windows 为 `llm-wiki.exe`），两个技能在 `output/.wiki/skills/`。使用包内 CLI 的绝对路径，不选 PATH 旧版；从其他目录执行时仍以包根为根，源文件、叶清单、载荷的相对路径也相同。PATH 入口只能链接或启动包内 CLI，不把二进制另行复制；覆盖旧入口的核实与授权要求见安装指南。
+
+### 构建与发布
+
+开发依赖 Rust stable（SQLite bundled，无需系统库）。本仓库预置离线依赖缓存：
 
 ```bash
-# 安装
-cargo build --release --locked
-install -m 0755 target/release/llm-wiki ~/.local/bin/llm-wiki
-llm-wiki --version
-```
-
-本仓库自带离线依赖目录，开发与测试一律这样跑：
-
-```bash
-CARGO_HOME=$PWD/.cargo-home CARGO_NET_OFFLINE=true cargo build
 CARGO_HOME=$PWD/.cargo-home CARGO_NET_OFFLINE=true cargo test
-CARGO_HOME=$PWD/.cargo-home CARGO_NET_OFFLINE=true cargo test --release --locked
 CARGO_HOME=$PWD/.cargo-home CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_HOME=$PWD/.cargo-home CARGO_NET_OFFLINE=true cargo clippy --all-targets -- -D warnings
+CARGO_HOME=$PWD/.cargo-home CARGO_NET_OFFLINE=true bash scripts/build-output.sh
 ```
 
-在任意仓库根目录直接运行并自检：
+构建脚本先完成 release 构建，再把当前平台二进制放进 `output/.wiki/cli/`。不改变 Rust 构建规则，不清理用户数据；发现 output 混有运行状态时拒绝分发。不要在源码的 output 上运行仓库命令，验证请复制到隔离目录。
 
-```bash
-llm-wiki doctor            # 各项健康检查，有 Fail 则退出码 1
-llm-wiki doctor --json     # 机器可读：{"ok":true,"cmd":"doctor","data":{"checks":[...]}}
-```
-
-`doctor --fix` 修可修的机械缺陷与索引，从不删文件、不改源；日常不需要先跑它。
-
-`.wiki/` 里是本地引擎（契约、页面、账本），工具不生成也不修改任何 git 配置。用 git 的仓库请把 `.wiki/` 加进仓库根的 `.gitignore`；没有 git 的环境不需要这一步。CI 在 Ubuntu / macOS / Windows 三平台跑 `build`、`test`、`test --release`、`fmt --check`、`clippy -D warnings`，不安装 poppler/pandoc（PDF 测试用模板现造）。
+Release workflow 在 Ubuntu / macOS / Windows 原生 runner 上测试并打包，资产名为 `llm-wiki-<host triple>.tar.gz`（Windows 为 `.zip`），每包都包含完整 `output/`。具体架构由 runner 的 Rust host 决定，不宣称提供未构建的架构。推送版本 tag 或手动运行 Release workflow 即可发布，不删除历史资产。
 
 ### Agent skills 安装
 
-两个 skill 是给 Claude Code 用的薄指令层，所有簿记与判定逻辑都在 `llm-wiki` 里。
+两个技能是薄指令层，所有簿记与判定逻辑都在 CLI 里。按 agent 实际加载规则复制或注册它们，并保存目标工作区根及包内 CLI 绝对路径；不从复制后的技能位置推测知识库根。
 
-`skills/llm-wiki/` 维护 wiki 本身：`SKILL.md` 是入口（边界、命令、最小序列、门禁、退出码）；`init.md` 写「首次接入」（持久化记忆与定时任务两件 agent 侧的事）；`content.md` 写「写什么」（建页判断、新源、切片、矛盾、去重）；`ops.md` 写「出了问题怎么看」（体检、判断层、冲突与覆盖风险、忽略、叫人）。
-`skills/llm-wiki-session/` 写会话蒸馏：从一段对话里抽出值得留给项目的判断，产物写进 `[ingest].session_dir`（默认 `sessions`），原始会话不存。一个会话一个文件，不按时间切。
+- [llm-wiki](output/.wiki/skills/llm-wiki/SKILL.md)：边界、命令、最小序列、来源确认、退出码。
+- [首次接入](output/.wiki/skills/llm-wiki/init.md)：持久化记忆与定时任务（agent 侧，实现随 agent 而异）。
+- [内容](output/.wiki/skills/llm-wiki/content.md)：建页判断、新源、切片、矛盾、去重。
+- [运维](output/.wiki/skills/llm-wiki/ops.md)：体检、冲突、忽略、叫人。
+- [会话蒸馏](output/.wiki/skills/llm-wiki-session/SKILL.md)：结论写入 `[ingest].session_dir`（默认 `sessions`），原始会话不存。
 
-字段名、正式页位置、schema、待办与报错含义由 CLI 现打，技能不复述。skill 本身是 markdown；CLI 是可执行文件，可以放 PATH，也可以直接放进 skill 目录随技能一起复制。
-
-```bash
-# CLI：编译一次，放到 PATH 上
-cargo build --release --locked
-install -m 0755 target/release/llm-wiki ~/.local/bin/llm-wiki
-llm-wiki --version
-
-# skill：复制进 agent 的技能根目录
-cp -R skills/* ~/.claude/skills/
-```
-
-不装 Rust 的机器从 Release 页取对应平台的二进制，放到同一位置即可。
-
-#### CLI 的两种放法
-
-| 放法 | 调用 | 适合 |
-|---|---|---|
-| PATH 上的目录（如 `~/.local/bin/llm-wiki`） | `llm-wiki ...` | 一个人维护多个 wiki 仓库 |
-| 仓库根的 `.wiki/llm-wiki` | `.wiki/llm-wiki ...` | 单个仓库自带工具，随仓库走 |
-| skill 目录（`skills/llm-wiki/cli/llm-wiki`） | `llm-wiki ...`（PATH 没有时用这个） | 只把 skill 复制给别人，CLI 跟着走 |
-
-`.wiki/llm-wiki` 在 `.wiki/` 下；如果仓库用 git，记得把 `.wiki/` 加进根 `.gitignore`，否则它会被当成未跟踪文件。
-三种放法都要求在**仓库根目录**执行；CLI 不向上查找根。
-
-#### 把 skill 同步给别人
-
-`skills/` 整个复制进对方的技能根目录即可，不需要本仓库、不需要 Rust。把对应平台的 `llm-wiki` 二进制放进 `skills/llm-wiki/cli/`，对方的 agent 在 PATH 里找不到命令时会直接用这一份。
-二进制从 Release 页按平台取：
-
-| 平台 | 资产 |
-|---|---|
-| macOS（Apple Silicon） | `llm-wiki-aarch64-apple-darwin` |
-| macOS（Intel） | `llm-wiki-x86_64-apple-darwin` |
-| Linux x86_64 | `llm-wiki-x86_64-unknown-linux-gnu` |
-| Linux ARM64 | `llm-wiki-aarch64-unknown-linux-gnu` |
-| Windows x86_64 | `llm-wiki-x86_64-pc-windows-msvc.exe` |
-
-#### 发布
-
-本机打不出 Linux / Windows 的二进制（缺目标平台的 C 工具链，`libsqlite3-sys` 是 bundled C）。
-推一个 tag，`Release` workflow 在三个原生 runner 上各跑一遍 `cargo test --release`，
-产出对应平台的一个二进制并挂到 Release 页：
-
-```bash
-git tag v0.2.0 && git push origin v0.2.0
-```
-
-没有 tag 时也可以去 Actions 页面手动跑 `Release`（`workflow_dispatch`）。
-
-| 文件 | 管什么 |
-|---|---|
-| `skills/llm-wiki/SKILL.md` | 入口：边界、命令、最小序列、来源确认、退出码 |
-| `skills/llm-wiki/init.md` | 首次接入：持久化记忆与定时任务（agent 侧，实现随 agent 而异） |
-| `skills/llm-wiki/content.md` | 写什么：一页一事、新源怎么处理、切片、前后矛盾、重复 |
-| `skills/llm-wiki/ops.md` | 坏了怎么办：体检、判断层、冲突与覆盖风险、忽略、叫人 |
-| `skills/llm-wiki-session/SKILL.md` | 会话蒸馏：抽什么、写到哪、怎么去重 |
-
-装完在目标仓库根目录跑 `llm-wiki doctor` 自检。
+`.wiki/` 是本地引擎，工具不生成或修改 git 配置。使用 git 时自行安排忽略与备份。独立开发二进制（不在 `.wiki/cli/`）仍以当前目录为根；外部分发只使用完整 output 包。
 
 ## 服务操作说明
 
-直接运行命令即可；`.wiki/` 由工具按需创建，不需要单独的初始化步骤。只有 `.wiki/` 已存在但契约或产品目录缺失时才会报 `E_NOT_INITIALISED`，由 `doctor` 诊断、`doctor --fix` 修。
+直接运行包内命令即可；`.wiki/` 不存在或仅含安装资源（`cli/`、`skills/`、`readme.md`，且非空）时自动建库，不需要单独的初始化步骤。其他 `.wiki/` 已存在但契约或产品目录缺失时才会报 `E_NOT_INITIALISED`，由 `doctor` 诊断、`doctor --fix` 修。
 
 日常整理：
 
