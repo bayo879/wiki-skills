@@ -1049,7 +1049,11 @@ fn human_source(view: &query::SourceView) -> String {
         return out;
     }
     let citing = &view.citing;
-    let first = if citing.items.is_empty() { 0 } else { citing.offset + 1 };
+    let first = if citing.items.is_empty() {
+        0
+    } else {
+        citing.offset + 1
+    };
     out.push_str(&format!(
         "\nciting ({}-{} of {})\n",
         first,
@@ -1057,7 +1061,10 @@ fn human_source(view: &query::SourceView) -> String {
         citing.total
     ));
     for page in &citing.items {
-        out.push_str(&format!("  {}  {}  {}\n", page.page, page.title, page.summary));
+        out.push_str(&format!(
+            "  {}  {}  {}\n",
+            page.page, page.title, page.summary
+        ));
     }
     if let Some(next) = citing.next_offset {
         out.push_str(&format!("  next: --offset {next}\n"));
@@ -1081,7 +1088,10 @@ fn recall_group(out: &mut String, label: &str, group: &query::PageGroup) {
         group.total
     ));
     for page in &group.items {
-        out.push_str(&format!("  {}  {}  {}\n", page.page, page.title, page.summary));
+        out.push_str(&format!(
+            "  {}  {}  {}\n",
+            page.page, page.title, page.summary
+        ));
     }
     for unresolved in &group.unresolved {
         out.push_str(&format!(
@@ -1195,19 +1205,21 @@ fn human_query(data: &QueryHitsData) -> String {
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        let links = if hit.links.is_empty() {
+        let links = if hit.outgoing.total == 0 {
             String::from("-")
         } else {
-            hit.links
+            hit.outgoing
+                .items
                 .iter()
                 .map(|link| link.title.clone())
                 .collect::<Vec<_>>()
                 .join(" | ")
         };
-        let sources = if hit.sources.is_empty() {
+        let sources = if hit.sources.total == 0 {
             String::from("-")
         } else {
             hit.sources
+                .items
                 .iter()
                 .map(|source| {
                     format!(
@@ -1224,15 +1236,15 @@ fn human_query(data: &QueryHitsData) -> String {
                 .join(" | ")
         };
         let mut block = format!(
-            "{}. {} [{}] {}\n   {}\n   → links: {} | sources: {} | backlinks {}",
+            "{}. {} [{}] {}\n   {}\n   → out: {} | in: {} | sources: {}",
             index + 1,
             hit.title,
             hit.status,
             hit.page,
             excerpt,
             links,
-            sources,
-            hit.backlinks
+            hit.incoming.total,
+            sources
         );
         for expanded in &hit.expanded {
             block.push_str(&format!(

@@ -22,10 +22,10 @@ use crate::config::Config;
 use crate::hash;
 use crate::page;
 use crate::paths;
-use crate::render;
 use crate::relation::{PageIdentity, Resolver};
+use crate::render;
 use crate::store::{
-    FtsHit, FtsScope, PageMetaRow, RefreshWrite, RelationLink, RelationNode, RelationSource,
+    FtsScope, PageMetaRow, PageRelations, RefreshWrite, RelationLink, RelationNode, RelationSource,
     Store, StoreError,
 };
 
@@ -52,39 +52,15 @@ pub struct Hit {
     pub score: f64,
     /// Body excerpt around the match, already un-segmented.
     pub snippet: String,
-    /// Neighbour pages the body links to, with their titles.
-    pub links: Vec<LinkRef>,
+    /// Pages this page links to, paged from the relation index.
+    pub outgoing: PageGroup,
+    /// Pages linking to this one, paged from the relation index.
+    pub incoming: PageGroup,
     /// Source references from the frontmatter, with the chunk split out.
-    pub sources: Vec<SourceRef>,
-    /// How many other pages link to this one.
-    pub backlinks: usize,
+    pub sources: SourceGroup,
     /// One-hop neighbour summaries, only filled when `--expand` is at least 1.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub expanded: Vec<ExpandedRef>,
-}
-
-/// One neighbour linked from a hit's body.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct LinkRef {
-    /// Repository-relative path of the neighbour page.
-    pub to: String,
-    /// The neighbour's title.
-    pub title: String,
-}
-
-/// One `raw/...` reference from a hit's frontmatter.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct SourceRef {
-    /// Repository-relative raw path, such as `raw/订单系统设计.md`.
-    pub raw: String,
-    /// The original source the raw file was converted from, if recorded.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    /// The fragment of the reference, such as `p=12-40`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chunk: Option<String>,
-    /// Whether the raw file exists on disk right now.
-    pub raw_available: bool,
 }
 
 /// One neighbour summary inlined by `--expand`.
@@ -145,8 +121,7 @@ pub struct PageGroup {
     pub total: usize,
     pub offset: usize,
     pub limit: usize,
-    /// Offset for the next page, `None` at the end.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Offset for the next page, `null` at the end.
     pub next_offset: Option<usize>,
     pub truncated: bool,
     pub items: Vec<RecallPage>,
@@ -501,10 +476,8 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
     } else {
         unreadable.into_iter().collect()
     };
-    let changed_count = upserts.len()
-        + deletes.len()
-        + relation_pages.len()
-        + relation_deletes.len();
+    let changed_count =
+        upserts.len() + deletes.len() + relation_pages.len() + relation_deletes.len();
     let deletes: Vec<String> = deletes.into_iter().collect();
     store.apply_refresh(&RefreshWrite {
         fts_deletes: deletes.clone(),
@@ -519,11 +492,11 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
 }
 
 /// Relation rows for every page, with resolutions against the whole set.
-fn relations(
-    wiki_prefix: &str,
-    pages: &[IndexedPage],
-) -> Vec<(RelationNode, Vec<RelationLink>, Vec<RelationSource>)> {
-    let ids: Vec<PageIdentity> = pages.iter().map(|page| identity(wiki_prefix, page)).collect();
+fn relations(wiki_prefix: &str, pages: &[IndexedPage]) -> Vec<PageRelations> {
+    let ids: Vec<PageIdentity> = pages
+        .iter()
+        .map(|page| identity(wiki_prefix, page))
+        .collect();
     let resolver = Resolver::new(&ids);
     relations_with(wiki_prefix, &resolver, pages)
 }
@@ -533,7 +506,7 @@ fn relations_with(
     wiki_prefix: &str,
     resolver: &Resolver,
     pages: &[IndexedPage],
-) -> Vec<(RelationNode, Vec<RelationLink>, Vec<RelationSource>)> {
+) -> Vec<PageRelations> {
     pages
         .iter()
         .map(|page| {
@@ -874,11 +847,59 @@ pub fn search(root: &Path, cfg: &Config, store: &Store, query: &SearchQuery) -> 
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let index = PageIndex::scan(root, cfg)?;
-    Ok(rows
-        .into_iter()
-        .map(|row| index.hit(root, row, query.expand))
-        .collect())
+    let nodes = store.all_relation_nodes()?;
+    let by_key: BTreeMap<String, RelationNode> = nodes
+        .iter()
+        .map(|node| (node.page_key.clone(), node.clone()))
+        .collect();
+    let mut hits = Vec::new();
+    for row in rows {
+        let Some(node) = by_key.get(&row.page_id) else {
+            continue;
+        };
+        let outgoing = page_group(
+            &store.relation_links_from(&node.page_key)?,
+            &by_key,
+            0,
+            RELATION_LIMIT_DEFAULT,
+            true,
+        );
+        let incoming = page_group(
+            &store.relation_links_to(&node.page_key)?,
+            &by_key,
+            0,
+            RELATION_LIMIT_DEFAULT,
+            false,
+        );
+        let sources = source_group(root, &store.relation_sources(&node.page_key)?);
+        let expanded = if query.expand == 0 {
+            Vec::new()
+        } else {
+            outgoing
+                .items
+                .iter()
+                .take(EXPANDED_LIMIT)
+                .map(|page| ExpandedRef {
+                    page: page.page.clone(),
+                    title: page.title.clone(),
+                    summary: page.summary.clone(),
+                })
+                .collect()
+        };
+        hits.push(Hit {
+            page: node.page_key.clone(),
+            title: node.title.clone(),
+            summary: node.summary.clone(),
+            status: node.status.clone(),
+            score: row.score,
+            snippet: unsegment(row.snippet.trim()),
+            outgoing,
+            incoming,
+            sources,
+            expanded,
+        });
+    }
+    Ok(hits)
 }
 
 /// Every page the index covers: `wiki/**/*.md`, bookkeeping excluded, archived
@@ -1011,254 +1032,6 @@ fn match_expr(text: &str) -> Option<String> {
     } else {
         Some(terms.join(" AND "))
     }
-}
-
-// ---------------------------------------------------------------------------
-// Page scan: links, backlinks, titles
-// ---------------------------------------------------------------------------
-
-/// Every page on disk, read once per search.
-///
-/// The index knows the matched page; it does not know which pages link to it or
-/// what their titles are, and it never will — those are relations between
-/// files. One scan of `wiki/` turns them into real paths, and a dead `[[link]]`
-/// simply does not resolve, so it never leaves the library.
-struct PageIndex {
-    /// Pages by repository-relative key.
-    pages: BTreeMap<String, PageInfo>,
-    /// Fan-in: how many pages link to each key.
-    backlinks: BTreeMap<String, usize>,
-}
-
-/// The parts of a page a hit needs beyond the index.
-struct PageInfo {
-    /// Frontmatter `title`.
-    title: String,
-    /// Frontmatter `summary`.
-    summary: String,
-    /// Frontmatter `status`, as a string.
-    status: String,
-    /// Why the page is here, in case someone asks.
-    sources: Vec<String>,
-    /// Resolved outgoing links, deduplicated, in body order.
-    links: Vec<String>,
-}
-
-impl PageIndex {
-    /// Reads `wiki/` and resolves every link between its pages.
-    fn scan(root: &Path, cfg: &Config) -> Result<PageIndex> {
-        let mut pages: BTreeMap<String, PageInfo> = BTreeMap::new();
-        let mut aliases: BTreeMap<String, String> = BTreeMap::new();
-        let mut targets: Vec<(String, Vec<String>)> = Vec::new();
-        let wiki_prefix = format!("{}/", cfg.paths.wiki.trim_end_matches('/'));
-
-        for (key, path) in page_paths(root, cfg)? {
-            let rel = key.strip_prefix(&wiki_prefix).unwrap_or(&key).to_string();
-            let stem = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or_default();
-            for alias in [
-                key.clone(),
-                key.trim_end_matches(".md").to_string(),
-                rel.clone(),
-                rel.trim_end_matches(".md").to_string(),
-                String::from(stem),
-            ] {
-                if !alias.is_empty() {
-                    aliases.insert(alias, key.clone());
-                }
-            }
-
-            let Ok((front, body)) = page::read(&path) else {
-                continue;
-            };
-            // The frontmatter id is the canonical name, even when it drifted
-            // away from the file stem.
-            if !front.id.is_empty() {
-                aliases.insert(front.id.clone(), key.clone());
-            }
-            targets.push((key.clone(), wikilinks(&body)));
-            pages.insert(
-                key,
-                PageInfo {
-                    title: front.title,
-                    summary: front.summary,
-                    status: front.status.as_str().to_string(),
-                    sources: front.sources,
-                    links: Vec::new(),
-                },
-            );
-        }
-
-        // Resolve after the scan: a link may point at a page read later.
-        let mut backlinks: BTreeMap<String, usize> = BTreeMap::new();
-        for (key, raw_targets) in &targets {
-            let mut seen: BTreeSet<String> = BTreeSet::new();
-            let mut links: Vec<String> = Vec::new();
-            for target in raw_targets {
-                let Some(to) = resolve(&aliases, &wiki_prefix, target) else {
-                    continue;
-                };
-                if !pages.contains_key(&to) || !seen.insert(to.clone()) {
-                    continue;
-                }
-                links.push(to);
-            }
-            if let Some(page) = pages.get_mut(key) {
-                page.links = links.clone();
-            }
-            for to in links {
-                *backlinks.entry(to).or_insert(0) += 1;
-            }
-        }
-
-        Ok(PageIndex { pages, backlinks })
-    }
-
-    /// Completes one index row into a [`Hit`].
-    fn hit(&self, root: &Path, row: FtsHit, expand: usize) -> Hit {
-        let page = self.pages.get(&row.page_id);
-        let mut links: Vec<LinkRef> = Vec::new();
-        let mut expanded: Vec<ExpandedRef> = Vec::new();
-        if let Some(page) = page {
-            for to in &page.links {
-                let Some(neighbour) = self.pages.get(to) else {
-                    continue;
-                };
-                links.push(LinkRef {
-                    to: to.clone(),
-                    title: neighbour.title.clone(),
-                });
-                if expand >= 1 && expanded.len() < EXPANDED_LIMIT {
-                    expanded.push(ExpandedRef {
-                        page: to.clone(),
-                        title: neighbour.title.clone(),
-                        summary: neighbour.summary.clone(),
-                    });
-                }
-            }
-        }
-
-        let sources: &[String] = page.map(|page| page.sources.as_slice()).unwrap_or_default();
-        let (title, summary, status) = match page {
-            Some(page) => (
-                page.title.clone(),
-                page.summary.clone(),
-                page.status.clone(),
-            ),
-            // The index row outlived its file: report what the index knows
-            // rather than dropping a hit the user can still act on.
-            None => (row.title.clone(), String::new(), String::from("draft")),
-        };
-
-        Hit {
-            page: row.page_id.clone(),
-            title,
-            summary,
-            status,
-            score: row.score,
-            snippet: unsegment(row.snippet.trim()),
-            links,
-            sources: source_refs(root, sources),
-            backlinks: self.backlinks.get(&row.page_id).copied().unwrap_or(0),
-            expanded,
-        }
-    }
-}
-
-/// Resolves one `[[target]]` to a page key, if the page exists.
-fn resolve(aliases: &BTreeMap<String, String>, wiki_prefix: &str, target: &str) -> Option<String> {
-    let target = target.split('#').next().unwrap_or_default().trim();
-    let target = target.strip_prefix("./").unwrap_or(target);
-    let target = target.strip_prefix(wiki_prefix).unwrap_or(target);
-    let target = target.trim_end_matches(".md");
-    if target.is_empty() {
-        return None;
-    }
-    aliases.get(target).cloned()
-}
-
-/// Every `[[target]]` in a body, in order, with fenced code blocks ignored.
-fn wikilinks(body: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut fence: Option<&str> = None;
-    for line in body.lines() {
-        let trimmed = line.trim_start();
-        if let Some(marker) = fence {
-            if trimmed.starts_with(marker) {
-                fence = None;
-            }
-            continue;
-        }
-        if let Some(marker) = fence_marker(trimmed) {
-            fence = Some(marker);
-            continue;
-        }
-        let mut rest = line;
-        while let Some(open) = rest.find("[[") {
-            let after = &rest[open + 2..];
-            let Some(close) = after.find("]]") else {
-                break;
-            };
-            let target = after[..close].trim();
-            if !target.is_empty() {
-                out.push(String::from(target));
-            }
-            rest = &after[close + 2..];
-        }
-    }
-    out
-}
-
-/// The fence marker a line opens, if it opens one.
-fn fence_marker(trimmed: &str) -> Option<&'static str> {
-    if trimmed.starts_with("```") {
-        Some("```")
-    } else if trimmed.starts_with("~~~") {
-        Some("~~~")
-    } else {
-        None
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Sources
-// ---------------------------------------------------------------------------
-
-/// Splits the frontmatter `sources` entries into raw path and chunk, and stats
-/// each raw file.
-///
-/// A missing raw is a fact, not an error: `.wiki/` is not shared between
-/// machines, so a raw another checkout has may be absent here, and the hit is
-/// still worth returning with `raw_available: false`.
-fn source_refs(root: &Path, sources: &[String]) -> Vec<SourceRef> {
-    sources
-        .iter()
-        .map(|entry| {
-            let entry = entry.trim();
-            let (raw, chunk) = match entry.split_once('#') {
-                Some((raw, chunk)) => (
-                    raw.trim(),
-                    Some(String::from(chunk.trim())).filter(|chunk| !chunk.is_empty()),
-                ),
-                None => (entry, None),
-            };
-            let path = root.join(raw);
-            let raw_available = path.is_file();
-            let source = if raw_available {
-                raw_source(&path)
-            } else {
-                None
-            };
-            SourceRef {
-                raw: String::from(raw),
-                source,
-                chunk,
-                raw_available,
-            }
-        })
-        .collect()
 }
 
 /// Reads the `source:` field out of a raw file's frontmatter.

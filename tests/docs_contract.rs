@@ -168,6 +168,16 @@ fn shapes() -> BTreeMap<String, BTreeSet<String>> {
     capture(&mut out, "query-graph", &["query", "--graph"]);
     capture(
         &mut out,
+        "query-page",
+        &["query", "--page", "concept/retry"],
+    );
+    capture(
+        &mut out,
+        "query-source",
+        &["query", "--source", ".wiki/raw/a.md"],
+    );
+    capture(
+        &mut out,
         "read",
         &["read", "page:concept/retry.md", "--limit", "2"],
     );

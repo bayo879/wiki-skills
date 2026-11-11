@@ -441,9 +441,9 @@ pub struct RefreshWrite {
     /// Pages that lost their relation rows (deleted or unreadable).
     pub relation_deletes: Vec<String>,
     /// Pages whose relation rows are replaced in this batch.
-    pub relation_pages: Vec<(RelationNode, Vec<RelationLink>, Vec<RelationSource>)>,
+    pub relation_pages: Vec<PageRelations>,
     /// Replaces the whole relation index when the page set or an alias changed.
-    pub full_relations: Option<Vec<(RelationNode, Vec<RelationLink>, Vec<RelationSource>)>>,
+    pub full_relations: Option<Vec<PageRelations>>,
 }
 
 /// One row returned by [`Store::fts_search`].
@@ -476,6 +476,9 @@ pub enum FtsScope<'a> {
     /// pass both.
     NotLike(&'a [&'a str]),
 }
+
+/// One page's relation rows: the node, its outgoing links and its sources.
+pub type PageRelations = (RelationNode, Vec<RelationLink>, Vec<RelationSource>);
 
 /// One row of the `sources` ledger: a file that exists under `source/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1354,9 +1357,7 @@ impl Store {
 
     /// Every indexed page, ordered by key.
     pub fn all_relation_nodes(&self) -> Result<Vec<RelationNode>> {
-        let sql = format!(
-            "SELECT {RELATION_NODE_COLUMNS} FROM page_nodes ORDER BY page_key"
-        );
+        let sql = format!("SELECT {RELATION_NODE_COLUMNS} FROM page_nodes ORDER BY page_key");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], RelationNode::from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1466,19 +1467,19 @@ impl Store {
             tx.execute(
                 "INSERT INTO page_source_refs(page_key,raw_ref,raw_key,fragment) \
                  VALUES(?1,?2,?3,?4)",
-                params![source.page_key, source.raw_ref, source.raw_key, source.fragment],
+                params![
+                    source.page_key,
+                    source.raw_ref,
+                    source.raw_key,
+                    source.fragment
+                ],
             )?;
         }
         Ok(true)
     }
 
-    fn relation_node(
-        conn: &rusqlite::Connection,
-        page_key: &str,
-    ) -> Result<Option<RelationNode>> {
-        let sql = format!(
-            "SELECT {RELATION_NODE_COLUMNS} FROM page_nodes WHERE page_key = ?1"
-        );
+    fn relation_node(conn: &rusqlite::Connection, page_key: &str) -> Result<Option<RelationNode>> {
+        let sql = format!("SELECT {RELATION_NODE_COLUMNS} FROM page_nodes WHERE page_key = ?1");
         Ok(conn
             .query_row(&sql, [page_key], RelationNode::from_row)
             .optional()?)
@@ -1532,7 +1533,10 @@ impl Store {
         let links = Self::relation_links_from_tx(tx, page_key)?;
         let sources = Self::relation_sources_tx(tx, page_key)?;
         tx.execute("DELETE FROM page_links WHERE from_page = ?1", [page_key])?;
-        tx.execute("DELETE FROM page_source_refs WHERE page_key = ?1", [page_key])?;
+        tx.execute(
+            "DELETE FROM page_source_refs WHERE page_key = ?1",
+            [page_key],
+        )?;
         tx.execute("DELETE FROM page_nodes WHERE page_key = ?1", [page_key])?;
         let inbound = tx.execute(
             "UPDATE page_links SET to_page = NULL, resolution = 'missing' WHERE to_page = ?1",

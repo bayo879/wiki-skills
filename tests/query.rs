@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use llm_wiki::config::Config;
 use llm_wiki::init;
-use llm_wiki::query::{self, ExpandedRef, Hit, LinkRef, Scope, SearchQuery, SourceRef};
+use llm_wiki::query::{self, ExpandedRef, Hit, Scope, SearchQuery};
 use llm_wiki::store::Store;
 use tempfile::{tempdir, TempDir};
 
@@ -339,13 +339,9 @@ fn links_resolve_to_page_paths_and_titles() {
     fx.reindex();
 
     let hit = fx.only("订单");
-    assert_eq!(
-        hit.links,
-        vec![LinkRef {
-            to: String::from(".wiki/pages/concept/b.md"),
-            title: String::from("乙页"),
-        }]
-    );
+    assert_eq!(hit.outgoing.total, 1);
+    assert_eq!(hit.outgoing.items[0].page, ".wiki/pages/concept/b.md");
+    assert_eq!(hit.outgoing.items[0].title, "乙页");
 }
 
 #[test]
@@ -354,7 +350,10 @@ fn dead_links_are_dropped_not_returned() {
     fx.page("concept/a.md", "a", "甲页", "甲", "订单见 [[不存在的页]]。");
     fx.reindex();
 
-    assert!(fx.only("订单").links.is_empty());
+    let hit = fx.only("订单");
+    assert!(hit.outgoing.items.is_empty());
+    assert_eq!(hit.outgoing.unresolved[0].literal, "不存在的页");
+    assert_eq!(hit.outgoing.unresolved[0].resolution, "missing");
 }
 
 #[test]
@@ -370,15 +369,13 @@ fn sources_split_the_chunk_and_check_the_raw_file() {
     fx.reindex();
 
     let hit = fx.only("订单");
-    assert_eq!(
-        hit.sources,
-        vec![SourceRef {
-            raw: String::from(".wiki/raw/a.md"),
-            source: Some(String::from("a.pdf")),
-            chunk: Some(String::from("p=12-40")),
-            raw_available: true,
-        }]
-    );
+    assert_eq!(hit.sources.total, 1);
+    let source = &hit.sources.items[0];
+    assert_eq!(source.raw, ".wiki/raw/a.md#p=12-40");
+    assert_eq!(source.raw_key, ".wiki/raw/a.md");
+    assert_eq!(source.source.as_deref(), Some("a.pdf"));
+    assert_eq!(source.fragment.as_deref(), Some("p=12-40"));
+    assert!(source.raw_available);
 }
 
 #[test]
@@ -395,11 +392,11 @@ fn a_missing_raw_is_reported_not_fatal() {
     fx.reindex();
 
     let hit = fx.only("订单");
-    assert_eq!(hit.sources.len(), 1);
-    assert_eq!(hit.sources[0].raw, ".wiki/raw/missing.md");
-    assert_eq!(hit.sources[0].chunk.as_deref(), Some("p=1-2"));
-    assert!(!hit.sources[0].raw_available);
-    assert_eq!(hit.sources[0].source, None);
+    assert_eq!(hit.sources.total, 1);
+    assert_eq!(hit.sources.items[0].raw_key, ".wiki/raw/missing.md");
+    assert_eq!(hit.sources.items[0].fragment.as_deref(), Some("p=1-2"));
+    assert!(!hit.sources.items[0].raw_available);
+    assert_eq!(hit.sources.items[0].source, None);
 }
 
 #[test]
@@ -414,9 +411,12 @@ fn backlinks_count_the_pages_that_point_here() {
     }
     fx.reindex();
 
-    assert_eq!(fx.only("订单").backlinks, 2);
+    let hit = fx.only("订单");
+    assert_eq!(hit.incoming.total, 2);
+    assert_eq!(hit.incoming.items[0].title, "甲");
+    assert_eq!(hit.incoming.items[1].title, "乙");
     // A page nobody links to has zero.
-    assert_eq!(fx.only("同步").backlinks, 0);
+    assert_eq!(fx.only("同步").incoming.total, 0);
 }
 
 #[test]
@@ -608,12 +608,12 @@ fn the_human_readable_form_has_one_block_per_hit() {
         text.contains("订单超过三十分钟未支付时关闭"),
         "stdout: {text}"
     );
-    assert!(text.contains("→ links:"), "stdout: {text}");
+    assert!(text.contains("→ out:"), "stdout: {text}");
     assert!(
         text.contains("sources: .wiki/raw/a.md (ok)"),
         "stdout: {text}"
     );
-    assert!(text.contains("backlinks 0"), "stdout: {text}");
+    assert!(text.contains("in: 0"), "stdout: {text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -660,7 +660,12 @@ fn a_damaged_page_does_not_clear_other_pages() {
     assert_eq!(from.len(), 1);
     assert_eq!(from[0].target_literal, "b");
     assert_eq!(from[0].resolution, "missing");
-    assert!(f.store.all_relation_nodes().unwrap().iter().all(|n| n.page_id != "b"));
+    assert!(f
+        .store
+        .all_relation_nodes()
+        .unwrap()
+        .iter()
+        .all(|n| n.page_id != "b"));
     assert!(f.store.relation_generation().unwrap() > before);
 }
 
