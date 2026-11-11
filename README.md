@@ -116,7 +116,7 @@ cp -R skills/* ~/.claude/skills/
 产出对应平台的一个二进制并挂到 Release 页：
 
 ```bash
-git tag v0.1.1 && git push origin v0.1.1
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 没有 tag 时也可以去 Actions 页面手动跑 `Release`（`workflow_dispatch`）。
