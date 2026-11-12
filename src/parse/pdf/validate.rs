@@ -149,6 +149,10 @@ pub struct PageInfo {
     /// fails the document; a page that only draws blanks may legitimately
     /// extract to nothing.
     pub has_nonblank_text: bool,
+    /// Whether the page uses the `'` or `"` operators, which show text after
+    /// moving to the next line. `pdf-extract` ignores both, so any visible
+    /// string they draw is lost; the document is refused instead.
+    pub has_quoted_text: bool,
 }
 
 /// Reads `bytes` strictly; the returned document is safe to hand to `pdf-extract`.
@@ -167,12 +171,13 @@ pub fn load_and_validate(bytes: &[u8]) -> std::result::Result<Validated, Failure
     let checker = Checker { doc: &document };
     let mut infos = Vec::with_capacity(pages.len());
     for (index, page) in pages.into_iter().enumerate() {
-        let (has_text, has_nonblank_text) = checker.page_has_text(&page, index as u32 + 1)?;
+        let found = checker.page_has_text(&page, index as u32 + 1)?;
         infos.push(PageInfo {
             id: page.id,
             resources: page.resources,
-            has_text,
-            has_nonblank_text,
+            has_text: found.any,
+            has_nonblank_text: found.nonblank,
+            has_quoted_text: found.quoted,
         });
     }
     let has_text = infos.iter().any(|page| page.has_text);
@@ -405,6 +410,7 @@ fn collect_node(
 struct TextFound {
     any: bool,
     nonblank: bool,
+    quoted: bool,
 }
 
 struct Checker<'a> {
@@ -417,7 +423,7 @@ impl Checker<'_> {
         &self,
         page: &PageEntry,
         number: u32,
-    ) -> std::result::Result<(bool, bool), Failure> {
+    ) -> std::result::Result<TextFound, Failure> {
         let dict = self
             .doc
             .get_object(page.id)
@@ -435,6 +441,7 @@ impl Checker<'_> {
             let scan = scan_content(&data, number)?;
             found.any |= scan.has_text;
             found.nonblank |= scan.has_nonblank_text;
+            found.quoted |= scan.has_quoted_text;
             self.check_fonts(&scan.fonts, resources, number)?;
             self.follow_draws(
                 &scan.draws,
@@ -445,7 +452,7 @@ impl Checker<'_> {
                 &mut found,
             )?;
         }
-        Ok((found.any, found.nonblank))
+        Ok(found)
     }
 
     /// Follows the `Do` operators of one content stream into the forms it draws.
@@ -531,6 +538,7 @@ impl Checker<'_> {
                 .or(resources);
             found.any |= scan.has_text;
             found.nonblank |= scan.has_nonblank_text;
+            found.quoted |= scan.has_quoted_text;
             self.check_fonts(&scan.fonts, form_resources, number)?;
             self.follow_draws(
                 &scan.draws,
@@ -886,6 +894,7 @@ fn ascii85(data: &[u8]) -> std::result::Result<Vec<u8>, Failure> {
 struct Scan {
     has_text: bool,
     has_nonblank_text: bool,
+    has_quoted_text: bool,
     draws: Vec<Vec<u8>>,
     fonts: Vec<Vec<u8>>,
 }
@@ -1087,7 +1096,7 @@ fn hex_is_solid(raw: &[u8]) -> bool {
 /// Records what one operator says about text, draws and fonts.
 fn record_operator(token: &[u8], operands: &[Operand], scan: &mut Scan) {
     match token {
-        b"Tj" | b"TJ" | b"'" | b"\"" => {
+        b"Tj" | b"TJ" => {
             scan.has_text = true;
             // Every string in a `TJ` array is drawn, so any solid one makes
             // the page carry visible text; looking only at the last string let
@@ -1095,6 +1104,16 @@ fn record_operator(token: &[u8], operands: &[Operand], scan: &mut Scan) {
             scan.has_nonblank_text |= operands
                 .iter()
                 .any(|operand| matches!(operand, Operand::Text { solid: true }));
+        }
+        b"'" | b"\"" => {
+            scan.has_text = true;
+            let solid = operands
+                .iter()
+                .any(|operand| matches!(operand, Operand::Text { solid: true }));
+            scan.has_nonblank_text |= solid;
+            // These operators also move to the next line, and the extractor
+            // ignores them entirely, so their visible text would be lost.
+            scan.has_quoted_text |= solid;
         }
         b"Do" => {
             if let Some(Operand::Name(name)) = operands.last() {

@@ -462,3 +462,24 @@ fn a_tj_array_cannot_hide_visible_text_behind_a_blank_string() {
         assert_eq!(page, Some(1), "tail_blank={tail_blank}");
     }
 }
+
+/// `pdf-extract` ignores the `'` and `"` operators, which both move to the
+/// next line and then draw. A page mixing them with `Tj` would publish the
+/// `Tj` part and silently drop the rest, so the document is refused.
+#[test]
+fn text_drawn_with_a_quote_operator_is_refused() {
+    for dquote in [false, true] {
+        let bytes = common::make_pdf_with_quoted_text_bytes(dquote);
+        let (reason, page) = unavailable(&bytes);
+        assert_eq!(reason, "lossy_decode", "dquote={dquote}");
+        assert_eq!(page, Some(1), "dquote={dquote}");
+    }
+}
+
+/// A quote operator that only draws blanks loses nothing.
+#[test]
+fn a_quote_operator_that_draws_only_blanks_is_not_a_failure() {
+    let bytes = common::make_pdf_with_blank_quote_bytes();
+    let out = parse_bytes(&bytes).expect("blank quote is harmless");
+    assert!(out.markdown.contains("Hello"));
+}

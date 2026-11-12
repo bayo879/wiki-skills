@@ -188,6 +188,20 @@ pub fn make_scanned_pdf_with_text_in_strings_bytes() -> Vec<u8> {
 }
 
 /// The PDF bytes of a six-page document whose fifth page is the only text page.
+/// A page that draws one word with `Tj` and another with `'` or `"`; the
+/// extractor only renders the `Tj` part, so this must not be published.
+pub fn make_pdf_with_quoted_text_bytes(dquote: bool) -> Vec<u8> {
+    const SQUOTE: &[u8] = b"BT\n/F1 12 Tf\n100 700 Td\n(Hello) Tj\n(World) '\nET\n";
+    const DQUOTE: &[u8] = b"BT\n/F1 12 Tf\n100 700 Td\n(Hello) Tj\n0 0 (World) \"\nET\n";
+    build(&[Page::Raw(if dquote { DQUOTE } else { SQUOTE })])
+}
+
+/// A page whose `'` operand draws only a blank: nothing is lost.
+pub fn make_pdf_with_blank_quote_bytes() -> Vec<u8> {
+    const BLANK: &[u8] = b"BT\n/F1 12 Tf\n100 700 Td\n(Hello) Tj\n( ) '\nET\n";
+    build(&[Page::Raw(BLANK)])
+}
+
 pub fn make_mixed_pdf_bytes() -> Vec<u8> {
     let mut pages: Vec<Page> = Vec::new();
     for index in 0..6 {
@@ -372,12 +386,24 @@ pub fn make_pdf_with_text_on_fourth_page_bytes() -> Vec<u8> {
 /// non-blank string, the extractor can only produce blank text. Publishing the
 /// rest of the document would drop the page silently.
 pub fn make_pdf_with_blank_mapping_bytes() -> Vec<u8> {
-    make_pdf_with_tj_blank_mapping_bytes(false)
+    make_pdf_with_blank_mapping(b"BT\n/F1 12 Tf\n100 700 Td\n<0001> Tj\nET\n".to_vec())
 }
 
 /// The same blank-mapped text inside a `TJ` array, with the blank string last
 /// (`tail_blank`) or first: both draw the solid string and both must fail.
 pub fn make_pdf_with_tj_blank_mapping_bytes(tail_blank: bool) -> Vec<u8> {
+    let content = if tail_blank {
+        b"BT\n/F1 12 Tf\n100 700 Td\n[<0001> -120 <0020>] TJ\nET\n".to_vec()
+    } else {
+        b"BT\n/F1 12 Tf\n100 700 Td\n[<0020> -120 <0001>] TJ\nET\n".to_vec()
+    };
+    make_pdf_with_blank_mapping(content)
+}
+
+/// Builds one page in a Type0 font whose `ToUnicode` maps the drawn code to a
+/// space: the walk sees a non-blank string, the extractor can only produce
+/// blank text. Publishing the rest of the document would drop the page.
+fn make_pdf_with_blank_mapping(content: Vec<u8>) -> Vec<u8> {
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();
 
@@ -418,11 +444,6 @@ pub fn make_pdf_with_tj_blank_mapping_bytes(tail_blank: bool) -> Vec<u8> {
     });
     let resources = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
 
-    let content = if tail_blank {
-        b"BT\n/F1 12 Tf\n100 700 Td\n[<0001> -120 <0020>] TJ\nET\n".to_vec()
-    } else {
-        b"BT\n/F1 12 Tf\n100 700 Td\n[<0020> -120 <0001>] TJ\nET\n".to_vec()
-    };
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
     let page_id = page(
         &mut doc,

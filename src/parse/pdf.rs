@@ -110,6 +110,17 @@ impl Parser for PdfParser {
             let bytes = serialise_page(&document, page, &input.key)?;
             let text = extract(&bytes, &input.key)?;
             let blank = !text.chars().any(|c| !c.is_whitespace());
+            if page.has_quoted_text {
+                // The page draws visible text with `'` or `"`, which the
+                // extractor does not render; publishing the rest would drop it
+                // without a trace, so the whole document is refused.
+                return Err(ParseError::Unavailable {
+                    key: String::from(&input.key),
+                    backend: String::from(ID),
+                    reason: UnavailableReason::LossyDecode,
+                    page: Some(number),
+                });
+            }
             if page.has_nonblank_text && blank {
                 // The walk found visible text and the extractor produced none
                 // of it. Publishing the rest would hand the merge a body with

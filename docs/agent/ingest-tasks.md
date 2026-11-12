@@ -78,7 +78,7 @@
 
 解析结果必须过一道统一闸门（`parse::validate_extracted`）：去空白后非空、且不是资源链接占位。此前 PDF 抽样探测的假阴性会把有字文档写成附件链接并登记成功，图片后端也靠 `asset` 标志绕过阈值；现在这类结果统一报 `E_BAD_SOURCE`（`text_unavailable` / `partial_extraction` / `lossy_decode`），不进 `raws`、不建根，按既有失败记录让位并在收尾逐份点名。扫描件与图片没有 OCR，属于未处理，不能汇报成已取得正文。
 
-PDF 后端（`src/parse/pdf.rs` + `src/parse/pdf/validate.rs`）只负责“读全、读准、把失败说清楚”：手工遍历页树、逐页严格解压 `Contents` 与 Form XObject、空口令加密自动解密、只重写能精确映射的 Unicode CMap；提取按页进行（每页一个单页副本），页号由循环给出而不是靠分隔符；某页画了可见文字（`Tj`/`TJ` 的非空白字符串）却提取为空时，整份报 `partial_extraction` 并点名页号；只画空白字符串的页不算失败，正常空白页也不算失败。任一页明确失败则整份不提交。扩展名没有后端的文件不进待办、不算失败，每轮以 `unsupported:` 点名。
+PDF 后端（`src/parse/pdf.rs` + `src/parse/pdf/validate.rs`）只负责“读全、读准、把失败说清楚”：手工遍历页树、逐页严格解压 `Contents` 与 Form XObject、空口令加密自动解密、只重写能精确映射的 Unicode CMap；提取按页进行（每页一个单页副本），页号由循环给出而不是靠分隔符；某页画了可见文字（`Tj`/`TJ` 的非空白字符串）却提取为空时，整份报 `partial_extraction` 并点名页号；`'`/`"` 绘制非空白字符串时报 `lossy_decode`（提取器不实现这两个操作符，混合页会静默丢字）；只画空白字符串的页不算失败，正常空白页也不算失败。任一页明确失败则整份不提交。扩展名没有后端的文件不进待办、不算失败，每轮以 `unsupported:` 点名。
 
 ### 2.27 重转是显式入口，保护写在提交路径上
 
