@@ -4,6 +4,9 @@
 pub fn source_key(source: &str, raw_prefix: &str) -> Option<String> {
     let prefix = raw_prefix.trim_start_matches("./").trim_end_matches('/');
     let mut text = source.split_once('#').map_or(source, |(head, _)| head);
+    // `raw:` is a reading convenience, not part of the stored key: pages may
+    // cite either form, and both must reach the same ledger row.
+    text = text.strip_prefix("raw:").unwrap_or(text);
     while let Some(rest) = text.strip_prefix("./") {
         text = rest;
     }

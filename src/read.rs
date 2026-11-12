@@ -159,9 +159,10 @@ pub struct Page {
 
 /// Selects `[offset, offset + limit)` (1-based) from `text`.
 ///
-/// `offset` past the end yields empty content and `line_start == total + 1`; a
-/// caller can detect that without a second error case. The limit is clamped by
-/// the caller, not here, so this stays a pure slice function.
+/// An empty window — empty file, or `offset` past the last line — reports
+/// `line_start == line_end == 0` rather than an inverted range; the caller
+/// carries the requested offset in its payload. The limit is clamped by the
+/// caller, not here, so this stays a pure slice function.
 pub fn page(text: &str, offset: usize, limit: usize) -> Page {
     let lines: Vec<&str> = if text.is_empty() {
         Vec::new()
@@ -172,10 +173,14 @@ pub fn page(text: &str, offset: usize, limit: usize) -> Page {
     let start = offset.saturating_sub(1).min(total_lines);
     let end = start.saturating_add(limit).min(total_lines);
     let content = lines[start..end].concat();
+    // An empty window (empty file, or an offset past the last line) reports
+    // `0-0` rather than an inverted range; the requested offset lives in the
+    // CLI payload, so no information is lost.
+    let empty = start >= total_lines;
     Page {
         content,
-        line_start: if total_lines == 0 { 0 } else { start + 1 },
-        line_end: if total_lines == 0 { 0 } else { end },
+        line_start: if empty { 0 } else { start + 1 },
+        line_end: if empty { 0 } else { end },
         total_lines,
         truncated: end < total_lines,
     }
@@ -276,7 +281,7 @@ mod tests {
 
         let past = page(text, 9, 10);
         assert_eq!(past.content, "");
-        assert_eq!((past.line_start, past.line_end), (5, 4));
+        assert_eq!((past.line_start, past.line_end), (0, 0));
         assert!(!past.truncated);
 
         let empty = page("", 1, 10);

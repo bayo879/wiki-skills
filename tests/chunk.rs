@@ -270,9 +270,11 @@ fn cli_small_source_stays_whole() {
     );
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let value = json_of(&out);
-    assert_eq!(value["data"]["mode"], "full");
+    assert_eq!(value["data"]["mode"], "head");
     assert_eq!(value["data"]["backend"], "builtin-text");
     assert_eq!(value["data"]["chars"], 5);
+    assert_eq!(value["data"]["returned_chars"], 5);
+    assert_eq!(value["data"]["truncated"], false);
     assert_eq!(value["data"]["markdown_head"], "hello");
     assert!(value["data"]["warnings"].is_array());
     // The engine directory itself is provisioned by every command, so the
@@ -349,6 +351,7 @@ fn cli_chunk_flag_materializes_on_demand() {
     let markdown = value["data"]["markdown"].as_str().unwrap();
     assert_eq!(markdown, fs::read_to_string(&file).unwrap());
     assert_eq!(value["data"]["chars"], markdown.chars().count());
+    assert!(value["data"]["total_chars"].as_u64().unwrap() >= markdown.chars().count() as u64);
 }
 
 #[test]

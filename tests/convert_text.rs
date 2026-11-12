@@ -525,6 +525,8 @@ fn cli_parse_does_not_write_raw_or_ledger() {
     assert_eq!(value["cmd"], "ingest");
     assert_eq!(value["data"]["backend"], "builtin-text");
     assert_eq!(value["data"]["chars"], 250);
+    assert_eq!(value["data"]["returned_chars"], 200);
+    assert_eq!(value["data"]["truncated"], true);
     // `markdown_head` is the first 200 characters, so it is a prefix of the body.
     let head = value["data"]["markdown_head"].as_str().unwrap();
     assert_eq!(head.chars().count(), 200);

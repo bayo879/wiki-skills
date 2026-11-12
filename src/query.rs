@@ -117,12 +117,18 @@ pub struct RecallItem {
 /// One paginated page group.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct PageGroup {
+    /// Whether the caller asked for this relation. A group that was not
+    /// requested is empty for that reason, not because no page matched.
+    pub requested: bool,
     /// Resolved items in the group, before pagination.
     pub total: usize,
     pub offset: usize,
     pub limit: usize,
     /// Offset for the next page, `null` at the end.
     pub next_offset: Option<usize>,
+    /// Command that reads the next page, `null` at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
     pub truncated: bool,
     pub items: Vec<RecallPage>,
     /// Link literals that do not resolve, never paginated.
@@ -150,6 +156,8 @@ pub struct Unresolved {
 /// returned whole rather than paginated.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SourceGroup {
+    /// Whether the caller asked for sources; false means "not requested".
+    pub requested: bool,
     pub total: usize,
     pub items: Vec<RecallSource>,
 }
@@ -166,6 +174,10 @@ pub struct RecallSource {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
     pub raw_available: bool,
+    /// Read command for the raw file. `read` never understands `#fragment`,
+    /// so this command drops it and starts at line 1; it still returns a line
+    /// window rather than every line of a long file.
+    pub read_command: String,
 }
 
 /// Exact reverse lookup: one raw reference and the pages citing it.
@@ -635,28 +647,44 @@ pub fn exact_page(
     };
 
     let outgoing = if matches!(kind, RelationKind::Outgoing | RelationKind::All) {
-        page_group(
-            &store.relation_links_from(&key)?,
-            &by_key,
-            offset,
-            limit,
-            true,
+        attach_next(
+            page_group(
+                &store.relation_links_from(&key)?,
+                &by_key,
+                offset,
+                limit,
+                true,
+            ),
+            &format!(
+                "llm-wiki query --page {} --relation outgoing",
+                crate::output_context::shell_quote(reference)
+            ),
         )
     } else {
         PageGroup::default()
     };
     let incoming = if matches!(kind, RelationKind::Incoming | RelationKind::All) {
-        page_group(
-            &store.relation_links_to(&key)?,
-            &by_key,
-            offset,
-            limit,
-            false,
+        attach_next(
+            page_group(
+                &store.relation_links_to(&key)?,
+                &by_key,
+                offset,
+                limit,
+                false,
+            ),
+            &format!(
+                "llm-wiki query --page {} --relation incoming",
+                crate::output_context::shell_quote(reference)
+            ),
         )
     } else {
         PageGroup::default()
     };
-    let sources = source_group(root, &cfg.paths.raw, &store.relation_sources(&key)?);
+    let sources = if matches!(kind, RelationKind::Sources | RelationKind::All) {
+        source_group(root, &cfg.paths.raw, &store.relation_sources(&key)?)
+    } else {
+        SourceGroup::default()
+    };
     Ok(RecallItem {
         page: node.page_key.clone(),
         title: node.title.clone(),
@@ -727,15 +755,23 @@ pub fn exact_source(
         raw: String::from(reference),
         raw_key,
         available,
-        citing: PageGroup {
-            total,
-            offset,
-            limit,
-            next_offset,
-            truncated: next_offset.is_some(),
-            items: items[start..end].to_vec(),
-            unresolved: Vec::new(),
-        },
+        citing: attach_next(
+            PageGroup {
+                requested: true,
+                total,
+                offset,
+                limit,
+                next_offset,
+                next_command: None,
+                truncated: next_offset.is_some(),
+                items: items[start..end].to_vec(),
+                unresolved: Vec::new(),
+            },
+            &format!(
+                "llm-wiki query --source {} --relation citing",
+                crate::output_context::shell_quote(reference)
+            ),
+        ),
         generation: store.relation_generation()?,
     })
 }
@@ -780,14 +816,25 @@ fn page_group(
     let end = (start + limit).min(total);
     let next_offset = if end < total { Some(end) } else { None };
     PageGroup {
+        requested: true,
         total,
         offset,
         limit,
         next_offset,
+        next_command: None,
         truncated: next_offset.is_some(),
         items: items[start..end].to_vec(),
         unresolved,
     }
+}
+
+/// Fills `next_command` from `next_offset`; `prefix` is the command without the
+/// offset, already quoted.
+fn attach_next(mut group: PageGroup, prefix: &str) -> PageGroup {
+    group.next_command = group
+        .next_offset
+        .map(|next| format!("{prefix} --offset {next}"));
+    group
 }
 
 /// Joins indexed source references to the facts on disk.
@@ -808,6 +855,10 @@ fn source_group(root: &Path, raw_prefix: &str, sources: &[RelationSource]) -> So
                 None
             };
             RecallSource {
+                read_command: format!(
+                    "llm-wiki read {} --offset 1 --limit 200",
+                    crate::output_context::shell_quote(&format!("raw:{}", source.raw_key))
+                ),
                 raw: source.raw_ref.clone(),
                 raw_key: source.raw_key.clone(),
                 source: original,
@@ -817,6 +868,7 @@ fn source_group(root: &Path, raw_prefix: &str, sources: &[RelationSource]) -> So
         })
         .collect();
     SourceGroup {
+        requested: true,
         total: items.len(),
         items,
     }
@@ -859,19 +911,31 @@ pub fn search(root: &Path, cfg: &Config, store: &Store, query: &SearchQuery) -> 
         let Some(node) = by_key.get(&row.page_id) else {
             continue;
         };
-        let outgoing = page_group(
-            &store.relation_links_from(&node.page_key)?,
-            &by_key,
-            0,
-            RELATION_LIMIT_DEFAULT,
-            true,
+        let outgoing = attach_next(
+            page_group(
+                &store.relation_links_from(&node.page_key)?,
+                &by_key,
+                0,
+                RELATION_LIMIT_DEFAULT,
+                true,
+            ),
+            &format!(
+                "llm-wiki query --page {} --relation outgoing",
+                crate::output_context::shell_quote(&node.page_key)
+            ),
         );
-        let incoming = page_group(
-            &store.relation_links_to(&node.page_key)?,
-            &by_key,
-            0,
-            RELATION_LIMIT_DEFAULT,
-            false,
+        let incoming = attach_next(
+            page_group(
+                &store.relation_links_to(&node.page_key)?,
+                &by_key,
+                0,
+                RELATION_LIMIT_DEFAULT,
+                false,
+            ),
+            &format!(
+                "llm-wiki query --page {} --relation incoming",
+                crate::output_context::shell_quote(&node.page_key)
+            ),
         );
         let sources = source_group(
             root,

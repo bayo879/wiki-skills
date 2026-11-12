@@ -28,6 +28,8 @@ use llm_wiki::store::{Store, StoreError};
 use llm_wiki::sync;
 use llm_wiki::task;
 
+mod command_context;
+
 /// Characters of parsed markdown echoed by `parse`.
 const HEAD_CHARS: usize = 200;
 
@@ -260,7 +262,25 @@ fn run_doctor(fix: bool, only: Option<DoctorOnly>, key: Option<String>) -> ! {
     let checks = doctor::run(&root, cfg.as_ref(), &opts);
     let failed = checks.iter().any(|check| check.level == Level::Fail);
     let exit = if failed { Exit::Error } else { Exit::Ok };
-    report::emit_with("doctor", DoctorData { checks }, exit, human_doctor)
+    let count = |level: Level| checks.iter().filter(|check| check.level == level).count();
+    let scope = match (&opts.only, fix) {
+        (Some(only), true) => format!(
+            "repair of shared engine state first, then checks limited to the {only:?} family"
+        ),
+        (Some(only), false) => format!("only the {only:?} family"),
+        (None, _) => match &opts.key {
+            Some(key) => format!("all families, with source-specific checks limited to `{key}`"),
+            None => String::from("all check families"),
+        },
+    };
+    let context = command_context::doctor(
+        count(Level::Ok),
+        count(Level::Warn),
+        count(Level::Fail),
+        fix,
+        &scope,
+    );
+    report::emit_context("doctor", DoctorData { checks }, exit, context, human_doctor)
 }
 
 /// Human rendering of the checks: the result when everything passed, otherwise
@@ -347,22 +367,42 @@ fn parse_preview(
         Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
     };
 
-    if delivery == parse::Delivery::Whole && chunk_wanted.is_none() && range.is_none() {
-        report::emit(
-            cmd,
-            ParseData::Full {
-                backend,
-                chars: extracted.markdown.chars().count(),
-                warnings: extracted.warnings,
-                markdown_head: extracted.markdown.chars().take(HEAD_CHARS).collect(),
-            },
-        );
-    }
-
     let target = match delivery {
         parse::Delivery::Chunked { target } => target,
         parse::Delivery::Whole => cfg.parse.chunk_target as usize,
     };
+
+    if delivery == parse::Delivery::Whole && chunk_wanted.is_none() && range.is_none() {
+        let total_chars = extracted.markdown.chars().count();
+        let head: String = extracted.markdown.chars().take(HEAD_CHARS).collect();
+        let returned_chars = head.chars().count();
+        let truncated = returned_chars < total_chars;
+        let planned_chunks = chunk::split(&extracted.markdown, target.max(1)).len();
+        let context = command_context::preview_head(
+            &key,
+            &backend,
+            total_chars,
+            returned_chars,
+            truncated,
+            planned_chunks,
+        );
+        report::emit_context(
+            cmd,
+            ParseData::Head {
+                backend,
+                chars: total_chars,
+                returned_chars,
+                truncated,
+                warnings: extracted.warnings,
+                markdown_head: head,
+                chunks: planned_chunks,
+            },
+            Exit::Ok,
+            context,
+            human_parse,
+        );
+    }
+
     let digest = hash::hash_bytes(extracted.markdown.as_bytes());
     let hash = digest.strip_prefix("blake3:").unwrap_or(&digest);
     let cache_root = root.join(&cfg.paths.engine).join("cache");
@@ -371,6 +411,7 @@ fn parse_preview(
         Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
     };
     let count = chunks.len();
+    let total_chars = extracted.markdown.chars().count();
     let chunks_rel = paths::to_slash(&Path::new(&cfg.paths.engine).join("cache").join(hash));
 
     if let Some(number) = chunk_wanted {
@@ -378,16 +419,29 @@ fn parse_preview(
             Ok(text) => text,
             Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
         };
-        report::emit(
+        let returned_chars = text.chars().count();
+        let context = command_context::preview_chunk(
+            &key,
+            &backend,
+            number,
+            count,
+            returned_chars,
+            total_chars,
+        );
+        report::emit_context(
             cmd,
             ParseData::Chunk {
                 backend,
-                chars: text.chars().count(),
+                chars: returned_chars,
+                total_chars,
                 warnings: extracted.warnings,
                 chunks: count,
                 chunk: number,
                 markdown: text,
             },
+            Exit::Ok,
+            context,
+            human_parse,
         );
     }
 
@@ -400,30 +454,48 @@ fn parse_preview(
             Ok(text) => text,
             Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
         };
-        report::emit(
+        let returned_chars = text.chars().count();
+        let context = command_context::preview_range(
+            &key,
+            &backend,
+            from,
+            to,
+            count,
+            returned_chars,
+            total_chars,
+        );
+        report::emit_context(
             cmd,
             ParseData::Range {
                 backend,
-                chars: text.chars().count(),
+                chars: returned_chars,
+                total_chars,
                 warnings: extracted.warnings,
                 chunks: count,
                 from,
                 to,
                 markdown: text,
             },
+            Exit::Ok,
+            context,
+            human_parse,
         );
     }
 
-    report::emit(
+    let context = command_context::preview_chunked(&key, &backend, total_chars, count, &chunks_rel);
+    report::emit_context(
         cmd,
         ParseData::Chunked {
             backend,
-            chars: extracted.markdown.chars().count(),
+            chars: total_chars,
             warnings: extracted.warnings,
             chunks: count,
             chunks_dir: chunks_rel,
         },
-    );
+        Exit::Ok,
+        context,
+        human_parse,
+    )
 }
 
 /// Parses a `A-B` chunk range into 1-based inclusive bounds.
@@ -519,7 +591,22 @@ fn run_ingest(options: IngestOptions) -> ! {
                 Exit::Ok
             };
             let data = IngestData::from_report(report, &cfg, counts, task_view);
-            report::emit_with(cmd, data, exit, human_ingest)
+            let facts = command_context::IngestFacts {
+                mode: if dry_run { "dry_run" } else { "round" },
+                converted: data.converted,
+                queued: data.queued,
+                waiting: data.waiting.len(),
+                failures: data.failures,
+                merged_pages: data.effects.merged_pages.len(),
+                confirmed_sources: data.effects.confirmed_sources.len(),
+                removed_pages: data.effects.removed_pages.len(),
+                actionable: data.remaining.actionable,
+                failed: data.remaining.failed,
+                blocked: data.remaining.blocked,
+                has_task: data.next_task.is_some(),
+            };
+            let context = command_context::ingest(&facts);
+            report::emit_context(cmd, data, exit, context, human_ingest)
         }
         Err(err) => {
             let message = match &err {
@@ -603,6 +690,7 @@ struct IngestData {
     run_id: String,
     outcome: String,
     changes: Vec<llm_wiki::scan::Change>,
+    stale_pages: Vec<String>,
     converted: usize,
     ingested: Vec<String>,
     queued: usize,
@@ -636,6 +724,7 @@ impl IngestData {
             run_id: report.run_id,
             outcome,
             changes: report.changes,
+            stale_pages: report.stale_pages,
             converted: report.converted,
             ingested: report.ingested,
             queued: report.queued,
@@ -656,20 +745,39 @@ impl IngestData {
 
 fn human_ingest(data: &IngestData) -> String {
     let mut out = format!(
-        "run_id: {}\noutcome: {}\nconverted: {}\nqueued: {}\nactionable: {}\nwaiting: {}\nfailed: {}\nblocked: {}\nwrite_to: {}\nschema: {}",
+        "Ingest round {} ({}). Converted {} source(s); {} queued for later; {} conversion failure(s).\nwork: {} actionable, {} failed, {} blocked, {} waiting\nwrite_to: {}\nschema: {}",
         data.run_id,
         data.outcome,
         data.converted,
         data.queued,
+        data.failures,
         data.remaining.actionable,
-        data.remaining.waiting,
         data.remaining.failed,
         data.remaining.blocked,
+        data.remaining.waiting,
         data.write_to,
         data.schema
     );
     out.push_str(&human_effects(&data.effects));
     out.push_str(&human_task_view(data.next_task.as_ref()));
+    if !data.changes.is_empty() {
+        out.push_str("\nchanges:");
+        for change in &data.changes {
+            out.push_str(&format!("\n  - {:?} {}", change.kind, change.key));
+        }
+    }
+    if !data.ingested.is_empty() {
+        out.push_str("\nsources that produced work:");
+        for key in &data.ingested {
+            out.push_str(&format!("\n  - {key}"));
+        }
+    }
+    if !data.stale_pages.is_empty() {
+        out.push_str("\nstale pages (a cited source vanished):");
+        for key in &data.stale_pages {
+            out.push_str(&format!("\n  - {key}"));
+        }
+    }
     for key in &data.waiting {
         out.push_str(&format!("\nwaiting: {key}"));
     }
@@ -685,23 +793,122 @@ fn human_ingest(data: &IngestData) -> String {
     out
 }
 
+/// Human rendering of a parse preview: what was returned, out of how much, and
+/// where the rest lives.
+fn human_parse(data: &ParseData) -> String {
+    let mut out = match data {
+        ParseData::Head {
+            backend,
+            chars,
+            returned_chars,
+            truncated,
+            warnings,
+            markdown_head,
+            chunks,
+        } => {
+            let mut out = format!(
+                "parsed: {backend}, {returned_chars} of {chars} characters in markdown_head{}",
+                if *truncated {
+                    format!(" (truncated; {chunks} chunk(s) available with --range 1-{chunks})")
+                } else {
+                    String::from(" (complete)")
+                }
+            );
+            for warning in warnings {
+                out.push_str(&format!(
+                    "\nwarning: {} ({})",
+                    warning.code, warning.message
+                ));
+            }
+            out.push('\n');
+            out.push_str(markdown_head);
+            out
+        }
+        ParseData::Chunked {
+            backend,
+            chars,
+            warnings,
+            chunks,
+            chunks_dir,
+        } => {
+            let mut out = format!(
+                "parsed: {backend}, {chars} characters, {chunks} chunk(s) under {chunks_dir}"
+            );
+            for warning in warnings {
+                out.push_str(&format!(
+                    "\nwarning: {} ({})",
+                    warning.code, warning.message
+                ));
+            }
+            out
+        }
+        ParseData::Chunk {
+            backend,
+            chars,
+            total_chars,
+            warnings,
+            chunks,
+            chunk,
+            markdown,
+        } => {
+            let mut out = format!(
+                "parsed: {backend}, chunk {chunk} of {chunks}, {chars} of {total_chars} characters"
+            );
+            for warning in warnings {
+                out.push_str(&format!(
+                    "\nwarning: {} ({})",
+                    warning.code, warning.message
+                ));
+            }
+            out.push('\n');
+            out.push_str(markdown);
+            out
+        }
+        ParseData::Range {
+            backend,
+            chars,
+            total_chars,
+            warnings,
+            chunks,
+            from,
+            to,
+            markdown,
+        } => {
+            let mut out = format!(
+                "parsed: {backend}, chunks {from}-{to} of {chunks}, {chars} of {total_chars} characters"
+            );
+            for warning in warnings {
+                out.push_str(&format!(
+                    "\nwarning: {} ({})",
+                    warning.code, warning.message
+                ));
+            }
+            out.push('\n');
+            out.push_str(markdown);
+            out
+        }
+    };
+    out.push('\n');
+    out
+}
+
 fn human_effects(effects: &Effects) -> String {
     let mut out = String::new();
     if !effects.merged_pages.is_empty() {
         out.push_str(&format!(
-            "\nmerged_pages: {}",
+            "\nmerged pages: {}",
             effects.merged_pages.join(", ")
         ));
     }
     if !effects.confirmed_sources.is_empty() {
         out.push_str(&format!(
-            "\nconfirmed_sources: {}",
+            "\nsettled sources: {}",
             effects.confirmed_sources.join(", ")
         ));
     }
     if !effects.removed_pages.is_empty() {
         out.push_str(&format!(
-            "\nremoved_pages: {}",
+            "\nremoved pages: {}",
             effects.removed_pages.join(", ")
         ));
     }
@@ -792,18 +999,30 @@ fn run_read(reference: String, offset: usize, limit: usize) -> ! {
     let page = read::page(&text, offset, limit);
     let data = ReadData {
         reference,
+        offset,
         content: page.content,
         line_start: page.line_start,
         line_end: page.line_end,
         total_lines: page.total_lines,
         truncated: page.truncated,
     };
-    report::emit_with(cmd, data, Exit::Ok, human_read)
+    let context = command_context::read_window(
+        &data.reference,
+        data.offset,
+        data.line_end,
+        data.total_lines,
+        data.truncated,
+        limit,
+    );
+    report::emit_context(cmd, data, Exit::Ok, context, human_read)
 }
 
 #[derive(Serialize)]
 struct ReadData {
     reference: String,
+    /// The requested 1-based first line; kept apart from the returned window so
+    /// an out-of-range read stays explainable.
+    offset: usize,
     content: String,
     line_start: usize,
     line_end: usize,
@@ -813,8 +1032,8 @@ struct ReadData {
 
 fn human_read(data: &ReadData) -> String {
     let mut out = format!(
-        "reference: {}\nlines: {}-{} of {}",
-        data.reference, data.line_start, data.line_end, data.total_lines
+        "reference: {}\noffset: {}\nlines: {}-{} of {}",
+        data.reference, data.offset, data.line_start, data.line_end, data.total_lines
     );
     if data.truncated {
         out.push_str(&format!(" (next --offset {})", data.line_end + 1));
@@ -839,7 +1058,9 @@ fn run_ignore(add: &[String], remove: &[String], check: Option<&str>) -> ! {
             ignored: list.is_ignored(key, false),
             pattern: list.deciding_pattern(key, false),
         };
-        report::emit_with(cmd, data, Exit::Ok, human_ignore_check);
+        let context =
+            command_context::ignore_check(&data.key, data.ignored, data.pattern.as_deref());
+        report::emit_context(cmd, data, Exit::Ok, context, human_ignore_check);
     }
     if !add.is_empty() || !remove.is_empty() {
         let (added, removed) = if !add.is_empty() {
@@ -863,7 +1084,9 @@ fn run_ignore(add: &[String], remove: &[String], check: Option<&str>) -> ! {
             count: patterns.len(),
             patterns,
         };
-        report::emit_with(cmd, data, Exit::Ok, human_ignore_change);
+        let context =
+            command_context::ignore_change(data.added.len(), data.removed.len(), data.count);
+        report::emit_context(cmd, data, Exit::Ok, context, human_ignore_change);
     }
     let patterns = match ignore::IgnoreList::load(&root) {
         Ok(list) => list.patterns(),
@@ -873,7 +1096,8 @@ fn run_ignore(add: &[String], remove: &[String], check: Option<&str>) -> ! {
         count: patterns.len(),
         patterns,
     };
-    report::emit_with(cmd, data, Exit::Ok, human_ignore_list)
+    let context = command_context::ignore_list(data.count);
+    report::emit_context(cmd, data, Exit::Ok, context, human_ignore_list)
 }
 
 fn fail_ignore(cmd: &str, err: &ignore::IgnoreError) -> ! {
@@ -932,25 +1156,39 @@ fn run_task(action: TaskAction) -> ! {
                     let counts = remaining(&store, 0);
                     let outcome = outcome(task_view.is_some(), &effects, &counts, &settled.issues)
                         .to_string();
-                    report::emit_with(
-                        cmd,
-                        TaskDoneData {
-                            closed: id,
-                            outcome,
-                            effects,
-                            remaining: counts,
-                            issues: settled.issues,
-                            next_task: task_view,
-                        },
-                        Exit::Ok,
-                        human_task_done,
-                    )
+                    let data = TaskDoneData {
+                        closed: id,
+                        outcome,
+                        effects,
+                        remaining: counts,
+                        issues: settled.issues,
+                        next_task: task_view,
+                    };
+                    let context = command_context::task_done(&command_context::DoneFacts {
+                        closed: data.closed,
+                        outcome: &data.outcome,
+                        merged: data.effects.merged_pages.len(),
+                        confirmed: data.effects.confirmed_sources.len(),
+                        removed: data.effects.removed_pages.len(),
+                        failed: data.remaining.failed,
+                        blocked: data.remaining.blocked,
+                        next: data.next_task.as_ref().map(|task| task.id),
+                    });
+                    report::emit_context(cmd, data, Exit::Ok, context, human_task_done)
                 }
                 Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
             }
         }
         TaskAction::Status => match task::status(&root, &cfg, &mut store) {
-            Ok(status) => report::emit_with(cmd, status, Exit::Ok, human_task_status),
+            Ok(status) => {
+                let context = command_context::task_status(
+                    status.roots.len(),
+                    status.current.as_ref().map(|task| task.id),
+                    status.failed.len(),
+                    status.blocked.len(),
+                );
+                report::emit_context(cmd, status, Exit::Ok, context, human_task_status)
+            }
             Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
         },
         TaskAction::Retry { id, replan } => {
@@ -972,7 +1210,11 @@ fn run_task(action: TaskAction) -> ! {
                 drop(guard);
                 match result {
                     Ok(()) => match store.task(id) {
-                        Ok(Some(task)) => report::emit_with(cmd, task, Exit::Ok, human_task_replan),
+                        Ok(Some(task)) => {
+                            let context =
+                                command_context::task_replan(task.id, &task.status.to_string());
+                            report::emit_context(cmd, task, Exit::Ok, context, human_task_replan)
+                        }
                         Ok(None) => report::fail(
                             cmd,
                             Exit::Error,
@@ -985,7 +1227,14 @@ fn run_task(action: TaskAction) -> ! {
                 }
             } else {
                 match task::retry(&mut store, id) {
-                    Ok(task) => report::emit_with(cmd, task, Exit::Ok, human_task_retry),
+                    Ok(task) => {
+                        let context = command_context::task_retry(
+                            &task.kind,
+                            task.id,
+                            &task.status.to_string(),
+                        );
+                        report::emit_context(cmd, task, Exit::Ok, context, human_task_retry)
+                    }
                     Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
                 }
             }
@@ -1005,7 +1254,7 @@ struct TaskDoneData {
 
 fn human_task_done(data: &TaskDoneData) -> String {
     let mut out = format!(
-        "closed: {}\noutcome: {}\nactionable: {}\nwaiting: {}\nfailed: {}\nblocked: {}",
+        "Closed task {} with outcome `{}`. {} actionable, {} waiting, {} failed, {} blocked task(s) remain.",
         data.closed,
         data.outcome,
         data.remaining.actionable,
@@ -1106,7 +1355,14 @@ fn run_query(args: QueryArgs) -> ! {
             fail_query(cmd, &err)
         }
         match graph::build(&store) {
-            Ok(data) => report::emit_with(cmd, data, Exit::Ok, human_graph),
+            Ok(data) => {
+                let context = command_context::query_graph(
+                    data.nodes.len(),
+                    data.orphans.len(),
+                    data.broken.len(),
+                );
+                report::emit_context(cmd, data, Exit::Ok, context, human_graph)
+            }
             Err(err) => report::fail(cmd, Exit::Usage, err.code(), &err.to_string()),
         }
     }
@@ -1137,7 +1393,16 @@ fn run_query(args: QueryArgs) -> ! {
             args.offset,
             args.limit.unwrap_or(0),
         ) {
-            Ok(item) => report::emit_with(cmd, item, Exit::Ok, human_recall),
+            Ok(item) => {
+                let context = command_context::query_page(
+                    &item.page,
+                    &command_context::GroupFacts::page(&item.outgoing),
+                    &command_context::GroupFacts::page(&item.incoming),
+                    &command_context::GroupFacts::sources(&item.sources),
+                    item.incomplete,
+                );
+                report::emit_context(cmd, item, Exit::Ok, context, human_recall)
+            }
             Err(err) => fail_query(cmd, &err),
         }
     }
@@ -1164,13 +1429,28 @@ fn run_query(args: QueryArgs) -> ! {
             args.offset,
             args.limit.unwrap_or(0),
         ) {
-            Ok(view) => report::emit_with(cmd, view, Exit::Ok, human_source),
+            Ok(view) => {
+                let context = command_context::query_source(
+                    &view.raw_key,
+                    view.available,
+                    &command_context::GroupFacts::page(&view.citing),
+                );
+                report::emit_context(cmd, view, Exit::Ok, context, human_source)
+            }
             Err(err) => fail_query(cmd, &err),
         }
     }
 
     let mut store = open_store(cmd, &root, &cfg);
     let text = args.text.unwrap_or_default();
+    if args.offset != 0 {
+        report::fail(
+            cmd,
+            Exit::Usage,
+            "E_USAGE",
+            "--offset is only valid with --page or --source; text hits are not paginated",
+        )
+    }
     if text.trim().is_empty() {
         report::fail(
             cmd,
@@ -1199,7 +1479,16 @@ fn run_query(args: QueryArgs) -> ! {
                 count: hits.len(),
                 hits,
             };
-            report::emit_with(cmd, data, Exit::Ok, human_query)
+            let context = command_context::query_text(
+                data.count,
+                args.limit.unwrap_or(10),
+                if args.no_archive {
+                    "excluding sessions"
+                } else {
+                    "all pages"
+                },
+            );
+            report::emit_context(cmd, data, Exit::Ok, context, human_query)
         }
         Err(err) => fail_query(cmd, &err),
     }
@@ -1221,7 +1510,9 @@ fn human_recall(item: &query::RecallItem) -> String {
     }
     recall_group(&mut out, "outgoing", &item.outgoing);
     recall_group(&mut out, "incoming", &item.incoming);
-    if item.sources.total > 0 {
+    if !item.sources.requested {
+        out.push_str("\nsources (not requested)\n");
+    } else if item.sources.total > 0 {
         out.push_str(&format!("\nsources ({})\n", item.sources.total));
         for source in &item.sources.items {
             let availability = if source.raw_available {
@@ -1276,7 +1567,12 @@ fn human_source(view: &query::SourceView) -> String {
 }
 
 fn recall_group(out: &mut String, label: &str, group: &query::PageGroup) {
+    if !group.requested {
+        out.push_str(&format!("\n{label} (not requested)\n"));
+        return;
+    }
     if group.total == 0 && group.unresolved.is_empty() {
+        out.push_str(&format!("\n{label} (0 of 0)\n"));
         return;
     }
     let first = if group.items.is_empty() {
@@ -1309,7 +1605,14 @@ fn recall_group(out: &mut String, label: &str, group: &query::PageGroup) {
 
 /// One line per page with its degrees, then the orphans and the broken links.
 fn human_graph(data: &graph::Graph) -> String {
-    let mut out = String::new();
+    let mut out = format!(
+        "pages {}  links {}\n{:>3} {:>3}  {}\n",
+        data.nodes.len(),
+        data.edges.len(),
+        "in",
+        "out",
+        "page"
+    );
     for node in &data.nodes {
         out.push_str(&format!(
             "{:>3} {:>3}  {}\n",
@@ -1382,9 +1685,14 @@ struct IgnoreCheckData {
 }
 
 fn human_ignore_check(data: &IgnoreCheckData) -> String {
-    match &data.pattern {
-        Some(pattern) => format!("{} is ignored by `{pattern}`", data.key),
-        None => format!("{} is not ignored", data.key),
+    match (&data.ignored, &data.pattern) {
+        (true, Some(pattern)) => format!("{} is ignored by `{pattern}`", data.key),
+        (true, None) => format!("{} is ignored (no deciding rule recorded)", data.key),
+        (false, Some(pattern)) => format!(
+            "{} is not ignored; the `!` rule `{pattern}` brings it back",
+            data.key
+        ),
+        (false, None) => format!("{} is not ignored", data.key),
     }
 }
 
@@ -1449,6 +1757,22 @@ fn human_query(data: &QueryHitsData) -> String {
             hit.incoming.total,
             sources
         );
+        if hit.outgoing.truncated {
+            if let Some(command) = &hit.outgoing.next_command {
+                block.push_str(&format!("\n   next out: {command}"));
+            }
+        }
+        if hit.incoming.truncated {
+            if let Some(command) = &hit.incoming.next_command {
+                block.push_str(&format!("\n   next in: {command}"));
+            }
+        }
+        for unresolved in &hit.outgoing.unresolved {
+            block.push_str(&format!(
+                "\n   unresolved: {} ({})",
+                unresolved.literal, unresolved.resolution
+            ));
+        }
         for expanded in &hit.expanded {
             block.push_str(&format!(
                 "\n   ↳ {} ({}): {}",
@@ -1464,12 +1788,15 @@ fn human_query(data: &QueryHitsData) -> String {
 #[derive(Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 enum ParseData {
-    /// A source small enough to return whole.
-    Full {
+    /// The leading characters of the parsed text, labelled as a head.
+    Head {
         backend: String,
         chars: usize,
+        returned_chars: usize,
+        truncated: bool,
         warnings: Vec<Warning>,
         markdown_head: String,
+        chunks: usize,
     },
     /// A chunked source: where the chunks live, one file per range.
     Chunked {
@@ -1483,6 +1810,7 @@ enum ParseData {
     Chunk {
         backend: String,
         chars: usize,
+        total_chars: usize,
         warnings: Vec<Warning>,
         chunks: usize,
         chunk: usize,
@@ -1492,6 +1820,7 @@ enum ParseData {
     Range {
         backend: String,
         chars: usize,
+        total_chars: usize,
         warnings: Vec<Warning>,
         chunks: usize,
         from: usize,
