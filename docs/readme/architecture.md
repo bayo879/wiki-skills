@@ -68,7 +68,9 @@ agent 写页 ── task done --payload ──▶ .wiki/cache/staging/
 | `src/layout.rs` | 引擎目录布局的唯一一张表：路径 + `authored`，`init`、闸门、补建共用 |
 | `src/paths.rs` | 路径归一（`identity_key`）与安全拼接 |
 | `src/scan.rs` | 两层对账（仓库根、`.wiki/raw/` ↔ 账本）；唯一分类引擎与「账本认不认识这个 raw」的唯一答案 |
-| `src/convert.rs` | 转换的 `prepare`（并行读源、解析）与 `commit`（串行写 raw 与账本） |
+| `src/convert.rs` | 转换编排：`prepare`（并行读源、解析、记录输入基线）、`preflight`（只做保护检查）、`commit`（重读校验后串行写 raw 与账本）；错误码含 `E_RAW_COLLISION` |
+| `src/convert/protection.rs` | 保护判定：来源摘要、raw 当前摘要、账本 raw 摘要、归属与 pin；缺账本或摘要不符一律冲突 |
+| `src/convert/commit.rs` | 文件先行、账本随后；登记失败回写旧字节或删除新文件，恢复失败留下 `.*.recovery` 材料 |
 | `src/parse/` | 解析后端与 `auto` 回退（`text`/`html`/`asset`/`pdf`/`external`） |
 | `src/chunk.rs` | 大文件的按需分块 |
 | `src/page.rs` | 页面 frontmatter 的读写、校验与渲染（`render` 是工具生成 frontmatter 的唯一路径） |

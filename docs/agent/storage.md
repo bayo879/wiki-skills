@@ -30,7 +30,9 @@ schema 12 重建 `tasks`：`kind` 增加 `route`，`id` 与 `AUTOINCREMENT` 高�
 
 `.wiki/pages/` 就是页面的唯一副本。内容经 `task done` 提交载荷后由工具写进 staging，根收尾时整批合并；没有候选审核、没有 `submit`、没有 manifest/objects 版本，也没有 `restore` 回退；工具不自动备份，恢复只能靠仓库外的独立备份（通常是 git，但 `.wiki/` 未必进 git）。
 代价必须说清：工具侧没有撤销入口，同一页被两个人同时写会互相覆盖——CLI 锁只约束工具命令，不约束文件系统层的写页。
-工具自己写回内容文件时一律原子替换（`src/render.rs::write_atomic`、`src/convert.rs::write_atomic`：同目录临时文件再 rename），不得就地截断：作者可能正在读，而并发覆盖已经是既有限制，别再把它扩大到半个文件。
+工具自己写回内容文件时一律原子替换（`src/render.rs::write_atomic`、`src/convert/commit.rs::write_atomic`：同目录临时文件再 rename），不得就地截断：作者可能正在读，而并发覆盖已经是既有限制，别再把它扩大到半个文件。
+
+raw 的写入比页面多一步补偿：`commit::apply` 先原子写文件、再调 `Ledger::record_conversion_input`；登记失败要回写旧字节或删除新文件，且回写前比对当前摘要——文件已被别人改过就不覆盖，只把旧内容存成 `.*.recovery` 并报 `E_IO`。这不是新的事务机制，只是承认文件与 SQLite 无法同一事务，失败必须暴露可恢复状态，不能吸收成成功。
 
 ### 2.12 同步在 CLI 之外
 
