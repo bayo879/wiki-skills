@@ -1300,7 +1300,15 @@ fn finish_root(root: &Path, cfg: &Config, store: &mut Store, task: &TaskRow) -> 
         }
     }
     store.delete_task(task.id)?;
-    let _ = std::fs::remove_dir_all(staging_root(root, cfg, &source_key));
+    let staging = staging_root(root, cfg, &source_key);
+    if let Err(err) = std::fs::remove_dir_all(&staging) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            out.issues.push(format!(
+                "source {source_key} settled, but its staging at {} could not be discarded ({err}); remove it before the next conversion of this source",
+                staging.display()
+            ));
+        }
+    }
     out.confirmed_sources.push(source_key);
     Ok(out)
 }

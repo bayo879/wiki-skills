@@ -368,6 +368,61 @@ pub fn make_pdf_with_text_on_fourth_page_bytes() -> Vec<u8> {
 ///
 /// `encoding` names the CMap (`UniGB-UTF16-H` is the real-world case); the drawn
 /// codes are UTF-16BE, which is what that CMap means.
+/// A font whose `ToUnicode` maps the drawn code to a space: the walk sees a
+/// non-blank string, the extractor can only produce blank text. Publishing the
+/// rest of the document would drop the page silently.
+pub fn make_pdf_with_blank_mapping_bytes() -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+
+    let descriptor = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => "SimSun",
+        "Flags" => 4i64,
+        "FontBBox" => vec![0.into(), 0.into(), 1000.into(), 1000.into()],
+        "ItalicAngle" => 0i64,
+        "Ascent" => 880i64,
+        "Descent" => -120i64,
+        "CapHeight" => 880i64,
+        "StemV" => 80i64,
+    });
+    let descendant = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => "SimSun",
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0i64,
+        },
+        "FontDescriptor" => descriptor,
+        "DW" => 1000i64,
+    });
+    let to_unicode = doc.add_object(Stream::new(
+        dictionary! {},
+        b"1 beginbfrange\n<0001> <0001> <0020>\nendbfrange\n".to_vec(),
+    ));
+    let font = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => "SimSun",
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![Object::Reference(descendant)],
+        "ToUnicode" => Object::Reference(to_unicode),
+    });
+    let resources = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
+
+    let content = b"BT\n/F1 12 Tf\n100 700 Td\n<0001> Tj\nET\n".to_vec();
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+    let page_id = page(
+        &mut doc,
+        pages_id,
+        Object::Reference(resources),
+        Some(Object::Reference(content_id)),
+    );
+    finish(doc, pages_id, vec![page_id], false)
+}
+
 pub fn make_pdf_with_unicode_cmap_bytes(encoding: &str) -> Vec<u8> {
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();

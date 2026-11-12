@@ -109,11 +109,21 @@ impl Parser for PdfParser {
             let number = index as u32 + 1;
             let bytes = serialise_page(&document, page, &input.key)?;
             let text = extract(&bytes, &input.key)?;
-            // The walk saw a text operator and the extractor returned nothing.
-            // It may be a page that only draws blank strings, so this is a
-            // named nonfatal warning rather than a refusal — but it travels in
-            // the raw frontmatter, so a dropped page cannot go unnoticed.
-            if page.has_text && !text.chars().any(|c| !c.is_whitespace()) {
+            let blank = !text.chars().any(|c| !c.is_whitespace());
+            if page.has_nonblank_text && blank {
+                // The walk found visible text and the extractor produced none
+                // of it. Publishing the rest would hand the merge a body with
+                // a page silently missing, so the whole document fails.
+                return Err(ParseError::Unavailable {
+                    key: String::from(&input.key),
+                    backend: String::from(ID),
+                    reason: UnavailableReason::PartialExtraction,
+                    page: Some(number),
+                });
+            }
+            // Blank strings may legitimately extract to nothing; the warning
+            // travels in the raw frontmatter so the page is still visible.
+            if page.has_text && blank {
                 missing.push(number);
             }
             texts.push(text);
@@ -284,9 +294,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 ///
 /// The page boundaries are exact — they come from the loop that extracted one
 /// page at a time — so pages are joined by one blank line and there is no
-/// "page split unknown" warning any more. A page the walk saw text on but the
-/// extractor returned nothing for is named by number; a document whose pages are
-/// all blank still gets `empty`.
+/// "page split unknown" warning any more. A page that draws only blank strings
+/// and therefore extracts to nothing is named by number; a document whose pages
+/// are all blank still gets `empty`.
 fn into_markdown(texts: &[String], missing: &[u32], key: &str) -> Extracted {
     let mut warnings = Vec::new();
     if !missing.is_empty() {
@@ -296,10 +306,8 @@ fn into_markdown(texts: &[String], missing: &[u32], key: &str) -> Extracted {
             .collect::<Vec<_>>()
             .join(", ");
         warnings.push(Warning::new(
-            "page_text_missing",
-            format!(
-                "{key}: page(s) {pages} draw text but the extractor returned none; the body may be incomplete"
-            ),
+            "page_text_blank",
+            format!("{key}: page(s) {pages} draw only blank strings, so they contribute no text"),
         ));
     }
     let markdown = texts

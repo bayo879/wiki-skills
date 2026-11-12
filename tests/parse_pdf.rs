@@ -231,7 +231,7 @@ fn a_multi_page_pdf_keeps_its_page_boundaries() {
         out.warnings
     );
     assert!(
-        !out.warnings.iter().any(|w| w.code == "page_text_missing"),
+        !out.warnings.iter().any(|w| w.code == "page_text_blank"),
         "every page carried its text: {:?}",
         out.warnings
     );
@@ -439,4 +439,14 @@ fn a_page_without_content_is_not_a_failure() {
         "{:?}",
         out.markdown
     );
+}
+
+/// A page with visible text the extractor can only render as blank is not a
+/// blank page: the body would silently lose it, so the document fails.
+#[test]
+fn text_the_extractor_cannot_produce_fails_the_whole_document() {
+    let bytes = common::make_pdf_with_blank_mapping_bytes();
+    let (reason, page) = unavailable(&bytes);
+    assert_eq!(reason, "partial_extraction");
+    assert_eq!(page, Some(1));
 }

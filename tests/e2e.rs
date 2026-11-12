@@ -54,6 +54,24 @@ fn ok_call(dir: &Path, args: &[&str]) -> Value {
     json["data"].clone()
 }
 
+/// Runs one `ingest` that must parse and report, tolerating exit 1 from a
+/// source no backend can turn into text: the rest of the round still happens.
+fn round_call(dir: &Path, args: &[&str]) -> Value {
+    let (code, json) = call(dir, args);
+    assert!(
+        code == 0 || code == 1,
+        "`{}` exited {code}: {json}",
+        args.join(" ")
+    );
+    assert_eq!(
+        json["ok"],
+        Value::Bool(true),
+        "`{}`: {json}",
+        args.join(" ")
+    );
+    json["data"].clone()
+}
+
 fn write(dir: &Path, rel: &str, body: impl AsRef<[u8]>) {
     let path = dir.join(rel);
     fs::create_dir_all(path.parent().unwrap()).expect("parent dir");
@@ -152,6 +170,7 @@ fn doctor_ingest_direct_page_query_round_trip() {
     write(root, "img/diagram.png", PNG);
     settle(root, "notes/retry.md");
     settle(root, "notes/page.html");
+    settle(root, "img/diagram.png");
 
     // The sources are the user's files: the whole pipeline below must leave
     // every byte outside `.wiki/` untouched.
@@ -159,7 +178,11 @@ fn doctor_ingest_direct_page_query_round_trip() {
 
     // ---------------------------------------------------------- ingest
     // One round: select, convert, and report the durable source work queue.
-    let ingest = ok_call(root, &["ingest"]);
+    // One source cannot become text, so the round exits 1 while the other two
+    // still convert and are handed out.
+    let (code, ingest_json) = call(root, &["ingest"]);
+    assert_eq!(code, 1, "a refused source is a failed round: {ingest_json}");
+    let ingest = ingest_json["data"].clone();
     let ingested = ingest["ingested"].as_array().expect("ingested array");
     assert!(
         ingested.iter().any(|key| key == "notes/retry.md"),
@@ -185,10 +208,14 @@ fn doctor_ingest_direct_page_query_round_trip() {
     assert!(
         ingest["warnings"]
             .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| warning
-                .as_str()
-                .is_some_and(|text| text.contains("img/diagram.png")))),
-        "the round names the refused image: {ingest}"
+            .is_some_and(
+                |warnings| warnings
+                    .iter()
+                    .any(|warning| warning.as_str().is_some_and(|text| {
+                        text.contains("img/diagram.png") && text.contains("E_BAD_SOURCE")
+                    }))
+            ),
+        "the round names the image and says why it was refused: {ingest}"
     );
     assert!(
         !root.join(".wiki/raw/img/diagram.png").exists(),
@@ -284,7 +311,7 @@ fn doctor_ingest_direct_page_query_round_trip() {
         "a merged page is searchable: {query}"
     );
     // ------------------------------------------------------------ done
-    let again = ok_call(root, &["ingest"]);
+    let again = round_call(root, &["ingest"]);
     assert_ne!(
         again["next_task"]["source"]["key"].as_str(),
         Some("notes/retry.md"),

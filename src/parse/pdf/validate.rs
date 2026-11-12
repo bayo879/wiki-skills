@@ -144,6 +144,11 @@ pub struct PageInfo {
     pub resources: Option<Dictionary>,
     /// Whether the strict walk found text drawing on this page.
     pub has_text: bool,
+    /// Whether any of that text draws a visible character, not just empty or
+    /// blank strings. A page whose visible text the extractor cannot produce
+    /// fails the document; a page that only draws blanks may legitimately
+    /// extract to nothing.
+    pub has_nonblank_text: bool,
 }
 
 /// Reads `bytes` strictly; the returned document is safe to hand to `pdf-extract`.
@@ -162,11 +167,12 @@ pub fn load_and_validate(bytes: &[u8]) -> std::result::Result<Validated, Failure
     let checker = Checker { doc: &document };
     let mut infos = Vec::with_capacity(pages.len());
     for (index, page) in pages.into_iter().enumerate() {
-        let has_text = checker.page_has_text(&page, index as u32 + 1)?;
+        let (has_text, has_nonblank_text) = checker.page_has_text(&page, index as u32 + 1)?;
         infos.push(PageInfo {
             id: page.id,
             resources: page.resources,
             has_text,
+            has_nonblank_text,
         });
     }
     let has_text = infos.iter().any(|page| page.has_text);
@@ -394,13 +400,24 @@ fn collect_node(
 
 // ------------------------------------------------------------------ checks
 
+/// What one page's content says about text, gathered across its streams and forms.
+#[derive(Default)]
+struct TextFound {
+    any: bool,
+    nonblank: bool,
+}
+
 struct Checker<'a> {
     doc: &'a Document,
 }
 
 impl Checker<'_> {
     /// Whether this page draws text, after checking everything it draws with.
-    fn page_has_text(&self, page: &PageEntry, number: u32) -> std::result::Result<bool, Failure> {
+    fn page_has_text(
+        &self,
+        page: &PageEntry,
+        number: u32,
+    ) -> std::result::Result<(bool, bool), Failure> {
         let dict = self
             .doc
             .get_object(page.id)
@@ -410,13 +427,14 @@ impl Checker<'_> {
 
         let contents = content_ids(dict, number)?;
         let resources = page.resources.as_ref();
-        let mut has_text = false;
+        let mut found = TextFound::default();
         let mut active_forms = HashSet::new();
         for id in contents {
             let stream = self.stream(id, number, "content stream")?;
             let data = decode_stream(stream).map_err(|failure| failure.on_page(number))?;
             let scan = scan_content(&data, number)?;
-            has_text |= scan.has_text;
+            found.any |= scan.has_text;
+            found.nonblank |= scan.has_nonblank_text;
             self.check_fonts(&scan.fonts, resources, number)?;
             self.follow_draws(
                 &scan.draws,
@@ -424,10 +442,10 @@ impl Checker<'_> {
                 number,
                 &mut active_forms,
                 0,
-                &mut has_text,
+                &mut found,
             )?;
         }
-        Ok(has_text)
+        Ok((found.any, found.nonblank))
     }
 
     /// Follows the `Do` operators of one content stream into the forms it draws.
@@ -438,7 +456,7 @@ impl Checker<'_> {
         number: u32,
         active: &mut HashSet<ObjectId>,
         depth: usize,
-        has_text: &mut bool,
+        found: &mut TextFound,
     ) -> std::result::Result<(), Failure> {
         if draws.is_empty() {
             return Ok(());
@@ -511,7 +529,8 @@ impl Checker<'_> {
                 .map(|object| deref(self.doc, object))
                 .and_then(|object| object.as_dict().ok())
                 .or(resources);
-            *has_text |= scan.has_text;
+            found.any |= scan.has_text;
+            found.nonblank |= scan.has_nonblank_text;
             self.check_fonts(&scan.fonts, form_resources, number)?;
             self.follow_draws(
                 &scan.draws,
@@ -519,7 +538,7 @@ impl Checker<'_> {
                 number,
                 active,
                 depth + 1,
-                has_text,
+                found,
             )?;
 
             if let Some(id) = id {
@@ -866,6 +885,7 @@ fn ascii85(data: &[u8]) -> std::result::Result<Vec<u8>, Failure> {
 #[derive(Default)]
 struct Scan {
     has_text: bool,
+    has_nonblank_text: bool,
     draws: Vec<Vec<u8>>,
     fonts: Vec<Vec<u8>>,
 }
@@ -873,6 +893,10 @@ struct Scan {
 /// One operand the tokeniser kept: only names matter to the checks above.
 enum Operand {
     Name(Vec<u8>),
+    /// A string operand; `solid` is false when it draws only blanks.
+    Text {
+        solid: bool,
+    },
     Other,
 }
 
@@ -888,14 +912,16 @@ fn scan_content(content: &[u8], page: u32) -> std::result::Result<Scan, Failure>
         match content[index] {
             b'%' => index = skip_comment(content, index + 1),
             b'(' => {
-                index = literal_string_end(content, index + 1).ok_or_else(|| {
+                let end = literal_string_end(content, index + 1).ok_or_else(|| {
                     Failure::new(
                         FailureKind::ContentDecode,
                         "a content stream ends inside a literal string",
                     )
                     .on_page(page)
                 })?;
-                operands.push(Operand::Other);
+                let solid = literal_is_solid(&content[index + 1..end - 1]);
+                operands.push(Operand::Text { solid });
+                index = end;
             }
             b'<' if content.get(index + 1) == Some(&b'<') => {
                 dict_depth += 1;
@@ -913,14 +939,16 @@ fn scan_content(content: &[u8], page: u32) -> std::result::Result<Scan, Failure>
                 index += 2;
             }
             b'<' => {
-                index = hex_string_end(content, index + 1).ok_or_else(|| {
+                let end = hex_string_end(content, index + 1).ok_or_else(|| {
                     Failure::new(
                         FailureKind::ContentDecode,
                         "a content stream ends inside a hex string",
                     )
                     .on_page(page)
                 })?;
-                operands.push(Operand::Other);
+                let solid = hex_is_solid(&content[index + 1..end - 1]);
+                operands.push(Operand::Text { solid });
+                index = end;
             }
             b'>' => {
                 return Err(Failure::new(
@@ -995,10 +1023,81 @@ fn scan_content(content: &[u8], page: u32) -> std::result::Result<Scan, Failure>
     Ok(scan)
 }
 
+/// Whether a literal string's body draws a non-blank character.
+fn literal_is_solid(raw: &[u8]) -> bool {
+    let mut index = 0;
+    while index < raw.len() {
+        let byte = raw[index];
+        if byte == b'\\' {
+            let Some(&next) = raw.get(index + 1) else {
+                break;
+            };
+            match next {
+                b'n' | b'r' | b't' | b'b' | b'f' => index += 2,
+                b'0'..=b'7' => {
+                    let mut value = 0u32;
+                    let mut used = 0;
+                    while used < 3 {
+                        match raw.get(index + 1 + used) {
+                            Some(digit @ b'0'..=b'7') => {
+                                value = value * 8 + u32::from(digit - b'0');
+                                used += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    if value != 0 && value != 0x20 {
+                        return true;
+                    }
+                    index += 1 + used;
+                }
+                b'\n' | b'\r' => index += 2,
+                _ => return next != b' ',
+            }
+            continue;
+        }
+        if !is_space(byte) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Whether a hex string draws a non-blank character.
+fn hex_is_solid(raw: &[u8]) -> bool {
+    let mut pending: Option<u8> = None;
+    for &byte in raw {
+        let Some(digit) = (byte as char).to_digit(16).map(|digit| digit as u8) else {
+            continue;
+        };
+        match pending.take() {
+            None => pending = Some(digit),
+            Some(high) => {
+                let value = (high << 4) | digit;
+                if value != 0 && value != 0x20 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Records what one operator says about text, draws and fonts.
 fn record_operator(token: &[u8], operands: &[Operand], scan: &mut Scan) {
     match token {
-        b"Tj" | b"TJ" | b"'" | b"\"" => scan.has_text = true,
+        b"Tj" | b"TJ" | b"'" | b"\"" => {
+            scan.has_text = true;
+            scan.has_nonblank_text |= operands
+                .iter()
+                .rev()
+                .find_map(|operand| match operand {
+                    Operand::Text { solid } => Some(*solid),
+                    _ => None,
+                })
+                .unwrap_or(false);
+        }
         b"Do" => {
             if let Some(Operand::Name(name)) = operands.last() {
                 scan.draws.push(name.clone());
