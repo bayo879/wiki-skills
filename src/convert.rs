@@ -16,9 +16,17 @@
 //!   only gains `raw_key` / `converted_at`, and the `raws` row records the digest
 //!   of the bytes actually written, so `scan_raw` does not report the conversion
 //!   as pending work.
+//!
+//! Those three rules leave one window: the file is renamed into place before the
+//! ledger writes, so a database failure would leave the two disagreeing. The
+//! commit half therefore re-checks the source, the raw file and the ledger rows
+//! right before writing, and puts the previous raw back when registration fails.
+//! See `protection.rs` for the checks and `commit.rs` for the compensation.
+
+mod commit;
+mod protection;
 
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -27,7 +35,6 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::hash;
-use crate::ledger::Ledger;
 use crate::parse::{self, Extracted, Source, Warning};
 use crate::paths;
 use crate::store::{RawRow, SourceRow, Store, StoreError};
@@ -71,6 +78,20 @@ pub enum ConvertError {
         existing: String,
         key: String,
     },
+    /// The baseline moved between preparing and committing the conversion.
+    #[error("{raw_path}: {reason}; nothing was written")]
+    RawConflict { raw_path: String, reason: String },
+    /// The ledger refused the conversion and the previous raw could not be put back.
+    #[error(
+        "{raw_path}: the conversion was not recorded ({cause}) and the previous file \
+         could not be restored ({rollback}); {material}"
+    )]
+    RollbackFailed {
+        raw_path: String,
+        cause: String,
+        rollback: String,
+        material: String,
+    },
     /// No backend claimed the extension.
     #[error(transparent)]
     Parse(#[from] parse::ParseError),
@@ -88,8 +109,10 @@ impl ConvertError {
         match self {
             ConvertError::Io { .. } => "E_IO",
             ConvertError::RawCollision { .. } => "E_RAW_COLLISION",
+            ConvertError::RawConflict { .. } => "E_RAW_COLLISION",
             ConvertError::Parse(err) => err.code(),
             ConvertError::Hash(_) => "E_HASH",
+            ConvertError::RollbackFailed { .. } => "E_IO",
             ConvertError::Store(_) => "E_DB",
         }
     }
@@ -130,13 +153,22 @@ pub struct Prepared {
 }
 
 /// The write half of a conversion: the rendered document and its ledger rows.
+///
+/// Everything the commit needs to re-check is captured here, because `prepare`
+/// and `commit` can run minutes apart and on different threads: the source file
+/// re-reads must use the same size limit, and the raw comparison must use the
+/// bytes seen at prepare, not whatever is on disk now.
 #[derive(Debug)]
 pub struct Ready {
     raw_path: PathBuf,
     document: String,
     source_row: SourceRow,
+    source_path: PathBuf,
+    source_ref: String,
     raw_row: RawRow,
     mtime_ns: Option<i64>,
+    max_source_bytes: u64,
+    baseline: protection::Baseline,
 }
 
 /// Reads, parses and renders one source. No file is written and no ledger row
@@ -153,29 +185,29 @@ pub fn prepare(root: &Path, cfg: &Config, key: &str) -> Result<Prepared> {
     let raw_path = paths::join_key(root, &raw_key);
     let source_ref = slash_join(&cfg.paths.source, key);
 
-    match inspect_raw(&raw_path, &source_ref)? {
-        RawState::Absent | RawState::Overwritable => {}
-        RawState::Pinned { parser } => {
-            return Ok(Prepared {
-                outcome: ConvertOutcome {
-                    raw_path: raw_key,
-                    chars: 0,
-                    backend: parser.unwrap_or_default(),
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    warnings: Vec::new(),
-                    skipped: true,
-                    skip_reason: Some(String::from("pinned")),
-                },
-                write: None,
-            });
-        }
-        RawState::Foreign { source } => {
-            return Err(ConvertError::RawCollision {
+    // The raw file is read once and kept: the commit compares against these
+    // bytes, so a file edited in between is a conflict instead of a lost edit.
+    let baseline = protection::inspect(&raw_path, &source_ref)?;
+    if let Some(parser) = baseline.pinned_parser() {
+        return Ok(Prepared {
+            outcome: ConvertOutcome {
                 raw_path: raw_key,
-                existing: source,
-                key: source_ref,
-            });
-        }
+                chars: 0,
+                backend: parser,
+                duration_ms: started.elapsed().as_millis() as u64,
+                warnings: Vec::new(),
+                skipped: true,
+                skip_reason: Some(String::from("pinned")),
+            },
+            write: None,
+        });
+    }
+    if let Some(existing) = baseline.foreign_source() {
+        return Err(ConvertError::RawCollision {
+            raw_path: raw_key,
+            existing: String::from(existing),
+            key: source_ref,
+        });
     }
 
     let (extracted, backend) = parse::parse_with(cfg, &Source::inline(key, bytes))?;
@@ -221,8 +253,12 @@ pub fn prepare(root: &Path, cfg: &Config, key: &str) -> Result<Prepared> {
             raw_path,
             document,
             source_row,
+            source_path,
+            source_ref,
             raw_row,
             mtime_ns: input.mtime_ns,
+            max_source_bytes: cfg.parse.max_source_bytes,
+            baseline,
         }),
     })
 }
@@ -233,13 +269,20 @@ pub fn commit(store: &mut Store, prepared: Prepared) -> Result<ConvertOutcome> {
     let Some(ready) = prepared.write else {
         return Ok(prepared.outcome);
     };
-    write_atomic(&ready.raw_path, ready.document.as_bytes())?;
-    Ledger::new(store).record_conversion_input(
-        &ready.source_row,
-        &ready.raw_row,
-        ready.mtime_ns,
-    )?;
+    protection::recheck(store, &ready)?;
+    commit::apply(store, &ready)?;
     Ok(prepared.outcome)
+}
+
+/// Reports whether a conversion of `key` would be refused, without doing it.
+///
+/// Dry runs need the answer a real run would give for a pinned, foreign or stale
+/// raw file, but they must not parse, fetch or write: this reads the source to
+/// digest it, reads the raw frontmatter, and compares both with the ledger. A
+/// pinned raw is not an error — the real run reports it as a skip — while a
+/// foreign raw is, because no run would overwrite it.
+pub fn preflight(root: &Path, cfg: &Config, store: &Store, key: &str) -> Result<()> {
+    protection::preflight(root, cfg, store, key)
 }
 
 /// The raw file name for `key`: the same relative path with a `.md` extension.
@@ -248,106 +291,13 @@ pub(crate) fn raw_key_for(key: &str) -> String {
 }
 
 /// Joins two `/`-separated repository paths, tolerating an empty base.
-fn slash_join(base: &str, rel: &str) -> String {
+pub(crate) fn slash_join(base: &str, rel: &str) -> String {
     let base = base.trim_matches('/');
     if base.is_empty() {
         String::from(rel)
     } else {
         format!("{base}/{rel}")
     }
-}
-
-/// What already sits at the raw path, judged by its own frontmatter.
-enum RawState {
-    /// Nothing has been written there yet.
-    Absent,
-    /// Ours, and not pinned: safe to replace.
-    Overwritable,
-    /// Ours, but pinned: hand-maintained, so leave it alone.
-    Pinned { parser: Option<String> },
-    /// Another source's file, or one that cannot prove it is ours.
-    Foreign { source: String },
-}
-
-/// Reads the raw file's ownership and pin state, if it exists.
-///
-/// The file is the authority on where it came from, not the ledger: a raw file
-/// with no readable `source` cannot prove it is ours, so it counts as foreign
-/// and is never overwritten.
-fn inspect_raw(raw_path: &Path, source_ref: &str) -> Result<RawState> {
-    if !raw_path.exists() {
-        return Ok(RawState::Absent);
-    }
-    let bytes = std::fs::read(raw_path).map_err(|source| ConvertError::Io {
-        path: raw_path.to_path_buf(),
-        source,
-    })?;
-    let text = String::from_utf8_lossy(&bytes);
-
-    match frontmatter_field(&text, SOURCE_FIELD) {
-        Some(found) if found == source_ref => {
-            if is_pinned(&text) {
-                Ok(RawState::Pinned {
-                    parser: frontmatter_field(&text, "parser"),
-                })
-            } else {
-                Ok(RawState::Overwritable)
-            }
-        }
-        Some(found) => Ok(RawState::Foreign { source: found }),
-        None => Ok(RawState::Foreign {
-            source: String::from("an unknown source (no `source` field)"),
-        }),
-    }
-}
-
-/// Whether the raw file's `pin` field is `true`.
-fn is_pinned(text: &str) -> bool {
-    frontmatter_field(text, "pin").is_some_and(|value| value.eq_ignore_ascii_case("true"))
-}
-
-/// Frontmatter key that records the source path.
-const SOURCE_FIELD: &str = "source";
-
-/// Writes `body` to `path` through a temporary sibling plus a rename.
-///
-/// A rename is atomic on the same filesystem, so readers (and `ingest`) never
-/// observe a partially written document. The temporary name is dot-prefixed and
-/// process-tagged so a leftover from a killed run is invisible to the walkers.
-fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    std::fs::create_dir_all(&parent).map_err(|source| ConvertError::Io {
-        path: parent.clone(),
-        source,
-    })?;
-
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| String::from("raw.md"));
-    let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
-
-    let written = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(body)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if let Err(source) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(ConvertError::Io { path: tmp, source });
-    }
-    if let Err(source) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(ConvertError::Io {
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    Ok(())
 }
 
 /// Renders the raw document: fixed-order frontmatter, then the markdown body.
@@ -446,61 +396,9 @@ fn looks_like_another_type(value: &str) -> bool {
     value.parse::<f64>().is_ok()
 }
 
-/// The value of `name` in the first frontmatter block of `text`.
-///
-/// Only top-level `key: value` lines are understood, which is all this module
-/// writes; anything else (indented children, block scalars, single quotes) is
-/// reported as absent, and [`inspect_raw`] treats that as "owner unknown".
-fn frontmatter_field(text: &str, name: &str) -> Option<String> {
-    let body = text.strip_prefix("---\n")?;
-    for line in body.split_inclusive('\n') {
-        let line = line.trim_end_matches('\n');
-        if line.trim_end() == "---" {
-            return None;
-        }
-        let Some(rest) = line
-            .strip_prefix(name)
-            .and_then(|rest| rest.strip_prefix(':'))
-        else {
-            continue;
-        };
-        return Some(unquote(rest.trim()));
-    }
-    None
-}
-
-/// Undoes the double-quote escaping of [`yaml_scalar`].
-fn unquote(value: &str) -> String {
-    let bytes = value.as_bytes();
-    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
-        return String::from(value);
-    }
-    let inner = &value[1..value.len() - 1];
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('"') => out.push('"'),
-            Some('\\') => out.push('\\'),
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
+    use super::protection as protect;
     use super::*;
 
     fn extracted(asset: bool, no_text_layer: bool) -> Extracted {
@@ -582,7 +480,11 @@ mod tests {
             "? question",
         ] {
             let rendered = yaml_scalar(value);
-            assert_eq!(unquote(&rendered), value, "rendered as {rendered:?}");
+            assert_eq!(
+                protect::unquote(&rendered),
+                value,
+                "rendered as {rendered:?}"
+            );
         }
     }
 
@@ -596,18 +498,18 @@ mod tests {
             &extracted(false, false),
         );
         assert_eq!(
-            frontmatter_field(&document, "source").as_deref(),
+            protect::frontmatter_field(&document, "source").as_deref(),
             Some("source/a b.md")
         );
         assert_eq!(
-            frontmatter_field(&document, "source_hash").as_deref(),
+            protect::frontmatter_field(&document, "source_hash").as_deref(),
             Some("blake3:abc")
         );
         assert_eq!(
-            frontmatter_field(&document, "pin").as_deref(),
+            protect::frontmatter_field(&document, "pin").as_deref(),
             Some("false")
         );
-        assert_eq!(frontmatter_field(&document, "asset"), None);
+        assert_eq!(protect::frontmatter_field(&document, "asset"), None);
     }
 
     fn frontmatter(document: &str) -> serde_yaml::Value {
@@ -674,11 +576,14 @@ mod tests {
     fn a_raw_predating_the_warnings_field_still_reads() {
         let old = "---\nsource: source/a.md\nsource_hash: blake3:abc\nparser: builtin-text\nconverted_at: t\npin: false\n---\n正文\n";
         assert_eq!(
-            frontmatter_field(old, "source").as_deref(),
+            protect::frontmatter_field(old, "source").as_deref(),
             Some("source/a.md")
         );
-        assert_eq!(frontmatter_field(old, "pin").as_deref(), Some("false"));
-        assert_eq!(frontmatter_field(old, "warnings"), None);
+        assert_eq!(
+            protect::frontmatter_field(old, "pin").as_deref(),
+            Some("false")
+        );
+        assert_eq!(protect::frontmatter_field(old, "warnings"), None);
     }
 
     #[test]
