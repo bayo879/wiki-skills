@@ -18,6 +18,8 @@ pub mod ledger;
 pub mod lint;
 pub mod lock;
 pub mod moves;
+pub mod output_context;
+pub mod output_help;
 pub mod page;
 pub mod parse;
 pub mod paths;

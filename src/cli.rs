@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
     name = "llm-wiki",
     about = "Maintain a Karpathy-style LLM wiki",
     version,
+    after_help = crate::output_help::ROOT,
     // `help` is clap's subcommand; the engine keeps no verb of its own for it.
     disable_help_subcommand = false
 )]
@@ -32,6 +33,7 @@ pub enum Command {
     /// and rebuilds the search index before reporting.
     ///
     /// Examples: `llm-wiki doctor`, `llm-wiki doctor --fix`.
+    #[command(after_help = crate::output_help::DOCTOR)]
     Doctor {
         /// Repair what has one obvious correction; never rewrites content.
         #[arg(long)]
@@ -45,7 +47,8 @@ pub enum Command {
     },
     /// Convert sources and return unfinished work for direct writing to live pages.
     ///
-    /// `--dry-run` previews changes; `--key` previews parsed source content.
+    /// `--dry-run` previews changes; `--key` previews one source's parsed text.
+    #[command(after_help = crate::output_help::INGEST)]
     Ingest {
         /// Repo-relative source keys; empty means every pending change.
         keys: Vec<String>,
@@ -56,15 +59,14 @@ pub enum Command {
         /// Report what a round would do and write nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Convert and ingest exactly this source, converted before or not.
+        /// Preview exactly this source's parsed text; nothing is converted.
         #[arg(long)]
         key: Option<String>,
-        /// Preview one chunk of the source named by `--key`.
+        /// Preview one chunk of the source named by `--key` (1-based).
         #[arg(long, conflicts_with = "range")]
         chunk: Option<usize>,
-        /// Print one slice of the source named by `--key`: `0` the head, `N`
-        /// the N-th following chunk.
-        #[arg(long, value_name = "INDEX", conflicts_with = "chunk")]
+        /// Print chunks `A-B` of the source named by `--key`: 1-based inclusive.
+        #[arg(long, value_name = "A-B", conflicts_with = "chunk")]
         range: Option<String>,
         /// Legacy preview flag; never bypasses `parse.max_source_bytes`.
         #[arg(long)]
@@ -82,6 +84,7 @@ pub enum Command {
     ///
     /// Examples: `llm-wiki read schema`, `llm-wiki read .wiki/pages/x.md`,
     /// `llm-wiki read .wiki/raw/a.md --offset 201`.
+    #[command(after_help = crate::output_help::READ)]
     Read {
         /// Internal reference returned by ingest, or `schema`/`index`.
         reference: String,
@@ -97,6 +100,7 @@ pub enum Command {
     /// `done` closes the task you were handed and prints the next one;
     /// `status` shows the tree without advancing it; `retry` is the human-only
     /// exit for a failed or blocked task.
+    #[command(after_help = crate::output_help::TASK)]
     Task {
         #[command(subcommand)]
         action: TaskAction,
@@ -107,6 +111,7 @@ pub enum Command {
     /// file; `--check` explains one source key without changing anything.
     /// Examples: `llm-wiki ignore`, `llm-wiki ignore --add drafts/**`,
     /// `llm-wiki ignore --check drafts/a.md`.
+    #[command(after_help = crate::output_help::IGNORE)]
     Ignore {
         /// Add these glob patterns.
         #[arg(long, value_name = "PATTERN", num_args = 1.., conflicts_with_all = ["remove", "check"])]
@@ -125,6 +130,7 @@ pub enum Command {
     /// `[ingest] session_dir`. With no `TEXT`, `--graph` is the only useful
     /// form. Examples: `llm-wiki query 订单超时`,
     /// `llm-wiki query 订单超时 --no-archive`, `llm-wiki query --graph`.
+    #[command(after_help = crate::output_help::QUERY)]
     Query(QueryArgs),
 }
 
@@ -175,6 +181,7 @@ pub enum TaskAction {
     ///
     /// A `route` or `page` task needs `--payload <file>`; a `reconcile` task
     /// needs exactly one of `--accept` or `--regenerate`.
+    #[command(after_help = crate::output_help::TASK_DONE)]
     Done {
         /// Task id from `next_task` or `task status`.
         id: i64,
@@ -189,8 +196,10 @@ pub enum TaskAction {
         regenerate: bool,
     },
     /// Show the tree without advancing it.
+    #[command(after_help = crate::output_help::TASK_STATUS)]
     Status,
     /// Reset a failed or blocked task to pending (human-only).
+    #[command(after_help = crate::output_help::TASK_RETRY)]
     Retry {
         /// Task id to reset.
         id: i64,

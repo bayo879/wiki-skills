@@ -1569,6 +1569,33 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
     }
 
+    /// The source-key version the relation rows were built with.
+    ///
+    /// Absent on an index written before the version was recorded. `refresh`
+    /// reads this to force one rebuild when the stored form of a source key
+    /// changed without the page bytes changing; otherwise an old row keyed
+    /// `raw:note.md` would keep answering `--source note.md` with zero pages.
+    pub fn relation_key_version(&self) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM relation_meta WHERE key = 'key_version'")?;
+        let mut rows = stmt.query([])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Records that the relation rows now use the current source-key form.
+    pub fn set_relation_key_version(&mut self, version: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO relation_meta(key, value) VALUES ('key_version', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [version],
+        )?;
+        Ok(())
+    }
+
     /// The current relation index generation.
     pub fn relation_generation(&self) -> Result<i64> {
         let value: String = self.conn.query_row(

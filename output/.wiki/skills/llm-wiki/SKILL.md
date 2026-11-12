@@ -23,9 +23,19 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 - `llm-wiki task done <ID> --payload <FILE>` 关闭 route 任务（提交 route-v1 归属）或 page 任务（提交一页完整正文）；`--accept` / `--regenerate` 关闭复核任务。关闭后返回下一个任务。
 - `llm-wiki task status` 看任务树、当前任务与失败任务；`llm-wiki task retry <ID>` 由人重置失败任务，不要自动重试。
 - `llm-wiki read <REF>` 读取内部文件；一次最多 2000 行，`--offset` 从第几行开始，`--limit` 改条数。
-- `llm-wiki query <词>` 检索；`--graph` 看链接图；`--page <页>` 看这一页的出入链与来源，`--source <raw>` 看哪些页引用了这个源（两者可分页）。
+- `llm-wiki query <词>` 检索；`--graph` 看链接图；`--page <页>` 看这一页的出入链与来源，`--source <raw>` 看哪些页引用了这个源（两者可分页）。检索结果只是候选，链接不是结论；多跳方法见 relations.md。
 - `llm-wiki ignore --add <PATTERN>` 维护忽略列表。
 - 需要机器可读输出时加 `--json`；不要靠解析人类输出。
+
+## 读结果
+
+每次调用先返回 `context`（人类模式先打印一段说明），再是 `data`；先读它，再解释结果：
+
+- `context.mode` 是入口与模式，同一命令不同模式事实不同；`context.summary` 是本次范围与边界，汇报不能与它相反；`context.help` 指向该模式的字段释义；`context.continuations` 是可直接执行的后续命令。
+- `data` 里出现不确定的字段、空值、`requested`、截断或分页时，先运行 `context.help` 指的那份说明，不要按字段名猜；平常不必每次通读 help。
+- 人类输出与 `--json` 是同一事实的两种渲染，不要一边说一套、一边写一套。
+
+`ok=true` 只表示这次调用完成，不等于业务全部成功：退出码 1 仍是成功信封，`effects` 里页面已合并而来源未确认就是部分成功。`ok=false` 也不证明没有副作用：先看 `error.meaning`、`error.next`、`error.state` 与 `error.detail`。判断收敛看任务关闭、页面合并、来源确认三件事实；`next_task` 为空只说明当前没有下一个任务。
 
 ## 用与不用
 
@@ -72,6 +82,7 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 
 ## 按需阅读
 
+- relations.md：多跳检索、出链/入链/同源反查与链接的语义边界。
 - content.md：建页、证据与改写。
 - ops.md：体检、漂移、覆盖风险、忽略与叫人。
 - init.md：首次接入时由 agent 完成的两件事（持久化记忆与定时任务）。

@@ -376,7 +376,14 @@ fn the_json_shape_of_each_command_matches_the_snapshot() {
 /// keys survive in prose, because they are how a failure is read at all.
 #[test]
 fn the_skill_states_no_json_field_paths() {
-    let allowed = ["error.code", "error.message", "error.detail"];
+    let allowed = [
+        "error.code",
+        "error.message",
+        "error.detail",
+        "error.meaning",
+        "error.next",
+        "error.state",
+    ];
     let skills = workspace().join("output/.wiki/skills");
     let mut found = Vec::new();
     for (path, text) in shipped_markdown() {

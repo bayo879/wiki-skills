@@ -167,7 +167,8 @@ fn human_output_shows_the_window_and_next_offset() {
         .unwrap();
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
-    assert!(text.starts_with("reference: page:concept/a.md\n"));
+    assert!(text.contains("Read `page:concept/a.md`: line window 1-2 of 3; more lines remain."));
+    assert!(text.contains("reference: page:concept/a.md\n"));
     assert!(text.contains("lines: 1-2 of 3 (next --offset 3)"));
     assert!(text.contains("one\ntwo\n"));
 }

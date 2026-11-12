@@ -185,3 +185,28 @@ fn every_skill_names_its_cli_entry_point() {
         );
     }
 }
+
+/// On-demand documents are reached by name from the skill's own list, so a
+/// dangling name means the agent is told to read a file that does not ship.
+#[test]
+fn every_on_demand_document_named_by_a_skill_exists() {
+    for (dir, text) in skills() {
+        let base = PathBuf::from(SKILLS_DIR).join(&dir);
+        for line in text.lines() {
+            let Some(rest) = line.strip_prefix("- ") else {
+                continue;
+            };
+            let Some((name, _)) = rest.split_once("：") else {
+                continue;
+            };
+            let name = name.trim();
+            if !name.ends_with(".md") || name.contains('/') {
+                continue;
+            }
+            assert!(
+                base.join(name).is_file(),
+                "{dir}: names on-demand document `{name}` that is not shipped"
+            );
+        }
+    }
+}

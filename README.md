@@ -91,7 +91,8 @@ llm-wiki query --source .wiki/raw/notes/a.md    # 哪些页引用了这个源
 ```bash
 llm-wiki ingest notes/a.md docs/b.pdf
 llm-wiki ingest --key docs/a.pdf
-llm-wiki ingest --key docs/a.pdf --chunk 2000 --range 0-4000
+llm-wiki ingest --key docs/a.pdf --chunk 1
+llm-wiki ingest --key docs/a.pdf --range 1-2
 ```
 
 用户输入「wiki自动摄入」时运行 `llm-wiki ingest --auto`：只跑默认一轮，不能和手动参数组合；之后按技能的最小序列读 raw、路由、逐页提交并用 `task done` 推进。定时任务的 prompt 就写这句话；安排周期先问用户，无人值守时遇到结论冲突、删页或大改结构应停下并写进汇报。
@@ -123,9 +124,13 @@ llm-wiki --version                         # 打印版本
 机器可读输出：任意命令加全局 `--json`，stdout 只有一行 JSON。
 
 ```json
-{"ok":true,"cmd":"ingest","data":{...}}
-{"ok":false,"cmd":"query","error":{"code":"E_NO_WIKI","message":"..."}}
+{"ok":true,"cmd":"ingest","context":{"mode":"ingest.round","help":"llm-wiki ingest --help","summary":"...","continuations":[...]},"data":{...}}
+{"ok":false,"cmd":"query","error":{"code":"E_USAGE","message":"...","exit":2,"meaning":"...","next":"...","state":"..."}}
 ```
+
+`context` 是每次成功调用自带的说明：`mode` 是哪一种模式，`summary` 是本次范围与不能从结果推出的结论，`help` 指向该模式的字段释义，`continuations` 是可直接执行的后续命令。`data` 里出现不确定的字段、空值、`requested`、截断或分页时，先读 `help`。人类输出先打印这份说明，再打印 `data`，两边是同一事实。
+
+`ok=true` 只表示这次调用完成，不等于业务全部成功：退出码 1 仍是成功信封，部分成功要看 `data` 的效果字段（如页面已合并而来源未确认）。`ok=false` 也不证明没有副作用：先读 `error.meaning`、`error.next`、`error.state` 与 `error.detail`，再决定是否重试。
 
 退出码：
 
