@@ -483,3 +483,12 @@ fn a_quote_operator_that_draws_only_blanks_is_not_a_failure() {
     let out = parse_bytes(&bytes).expect("blank quote is harmless");
     assert!(out.markdown.contains("Hello"));
 }
+
+/// The quote operators are tracked through Form XObjects as well.
+#[test]
+fn a_quote_operator_inside_a_form_is_refused() {
+    let bytes = common::make_pdf_with_form_quote_text_bytes();
+    let (reason, page) = unavailable(&bytes);
+    assert_eq!(reason, "lossy_decode");
+    assert_eq!(page, Some(1));
+}

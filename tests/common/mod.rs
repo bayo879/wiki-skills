@@ -536,6 +536,16 @@ pub fn make_pdf_with_corrupt_second_page_bytes() -> Vec<u8> {
 
 /// The PDF bytes of a page whose only text lives inside a Form XObject.
 pub fn make_pdf_with_form_text_bytes() -> Vec<u8> {
+    make_pdf_with_form_body(text_content("text inside a form"))
+}
+
+/// A form whose only text is drawn with `'`: the extractor ignores the
+/// operator, so the page must be refused rather than published empty.
+pub fn make_pdf_with_form_quote_text_bytes() -> Vec<u8> {
+    make_pdf_with_form_body(b"BT\n/F1 12 Tf\n100 700 Td\n(World) '\nET\n".to_vec())
+}
+
+fn make_pdf_with_form_body(form_body: Vec<u8>) -> Vec<u8> {
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();
     let font_id = helvetica(&mut doc);
@@ -548,7 +558,7 @@ pub fn make_pdf_with_form_text_bytes() -> Vec<u8> {
             "BBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
         },
-        text_content("text inside a form"),
+        form_body,
     );
     doc.objects.insert(form_id, Object::Stream(form));
 
