@@ -30,6 +30,8 @@
 - `task done` 报 `E_SOURCE_DRIFT` 时，待办与未合并的 staging 都保留；重读 raw 核对已写结论，必要时让根走 `task retry <根> --replan`，按当前 raw 重建 route，已写页保留。
 - 根收尾合并即生效；确认失败不撤销已写入页面，也不证明正文有错或没错。
 - `E_PAGE_CONFLICT` 表示规划后目标页被改过或新建：先让人确认那些改动，再让来源重新路由（`task retry <根> --replan` 或重跑 `ingest`），不要手工改正式页绕过。
+- 显式重转（`ingest --reconvert <KEY>...`）成功后，该源的活动根会在同一事务里被标成 blocked、保留 payload/子任务/staging。`task retry <根> --replan` 会在校验已写页后丢弃旧子任务与 staging 再重建 route；执行前把丢弃范围告知用户，不要自动 replan。
+- pin 的 raw 不会被重转或普通转换覆盖，输出 `skipped (pinned)`；要重转先由用户去掉 pin。raw 缺账本记录或摘要对不上时报 `E_RAW_COLLISION`，不按文本形似猜测。
 - 没有工具内版本、回退和自动备份。写错时依据已读证据修正；恢复旧字节必须有用户自己的独立备份，不擅自删旧库遗留数据。
 - CLI 锁不保护作者写页；并发改同一页可能覆盖，指定单一作者并在写前重读。
 - 内容冲突先问；作者判断该删的页，要用户同意才删。

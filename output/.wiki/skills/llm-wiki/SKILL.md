@@ -19,6 +19,7 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 
 - `llm-wiki doctor` 体检；`llm-wiki doctor --fix` 修可修的机械缺陷与索引。摄入与关闭任务已自带机械自检，不需要每轮先跑它。
 - `llm-wiki ingest` 摄入并交付下一个任务；`--dry-run` 先看计划；`ingest <KEY>...` 只处理点名源。
+- 旧版本留下的坏 raw（例如扫描版 PDF 曾被写成附件链接）用 `llm-wiki ingest --reconvert <KEY>...` 显式重转；只处理列出的来源，受 pin、手改与缺失账本记录保护。活动根会被同一事务阻塞，须由用户确认后 `task retry <根> --replan`。
 - 用户输入 `wiki自动摄入` 时运行 `llm-wiki ingest --auto`：只跑默认一轮，不能和手动参数组合。
 - `llm-wiki task done <ID> --payload <FILE>` 关闭 route 任务（提交 route-v1 归属）或 page 任务（提交一页完整正文）；`--accept` / `--regenerate` 关闭复核任务。关闭后返回下一个任务。
 - `llm-wiki task status` 看任务树、当前任务与失败任务；`llm-wiki task retry <ID>` 由人重置失败任务，不要自动重试。
@@ -51,6 +52,8 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 - 结论冲突、需要删页或大改结构：问用户，不静默覆盖。
 - `error.code` 分类，`error.message` 指下一步；有 `error.detail` 时以具体证据为准。
 - `E_PAGE_CONFLICT`：目标页在规划后被改过或新建。不要绕过校验直接写；先看这页现状，让来源重新路由（重跑 `ingest`，或让根走 `task retry <根> --replan`，已写页保留）。
+- 转换失败或没有可用正文（扫描版 PDF、只有资源链接、全篇空白）是未处理，不是已整理：收尾逐份点名文件与 `error.code`，不要把「没有下一个任务」当成这些源已经有正文。
+- `unsupported:` 点名的文件没有后端读取，未处理；不要为它们手写 raw。`E_RAW_COLLISION` 表示 raw 无法证明是机器产物（缺账本记录、摘要不符或正文被改），保留文件并请用户决定是否删除后重转。
 
 ## 任务外改动的复核
 
