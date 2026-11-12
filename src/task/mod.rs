@@ -266,7 +266,6 @@ pub fn view(root: &Path, cfg: &Config, store: &Store, task: &TaskRow) -> Result<
     let (stage, suffix, schema) = match task.kind.as_str() {
         "page" => (Some("writing"), "--payload <FILE>", "page-content-v1"),
         "route" => (Some("routing"), "--payload <FILE>", "route-v1"),
-        "breakdown" => (None, "--leaves <FILE>", "leaf-list-v1"),
         "reconcile" => (Some("reconcile"), "--accept | --regenerate", "reconcile-v1"),
         _ => (None, "", ""),
     };
@@ -439,23 +438,15 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
 /// A `route` needs `payload` (the route document) and settles the source; a
 /// `page` needs `payload` (the page content) and must still match the snapshot
 /// the route took of its own target; a `reconcile` needs exactly one of `accept`
-/// or `regenerate`. `--leaves` no longer belongs to any task: breakdowns are
-/// gone.
+/// or `regenerate`.
 pub fn close(
     root: &Path,
     cfg: &Config,
     store: &mut Store,
     id: i64,
     payload: Option<&Path>,
-    leaves: Option<&Path>,
     verdict: Option<Verdict>,
 ) -> Result<Advance> {
-    if leaves.is_some() {
-        return Err(bad(
-            "E_TASK_BAD_PAYLOAD",
-            "no task takes --leaves any more; close the route with --payload <file>",
-        ));
-    }
     let task = store.task(id)?.ok_or(TaskError::Unknown(id))?;
     match task.kind.as_str() {
         "route" if verdict.is_some() => {
@@ -832,7 +823,7 @@ fn reconcile_scan(root: &Path, cfg: &Config, store: &mut Store) -> Result<()> {
 /// Settles one page that changed outside the tree.
 ///
 /// `--accept` absorbs the edit; `--regenerate` re-queues every source the page
-/// cites, so the normal breakdown/leaf path replaces it. Both advance the
+/// cites, so the normal route/page path replaces it. Both advance the
 /// baseline past the current bytes: an accepted edit must not be reported
 /// again, and a page about to be replaced must not race its own review.
 fn close_reconcile(
@@ -1825,7 +1816,6 @@ mod tests {
             &f.cfg,
             &mut f.store,
             reconcile_id,
-            None,
             None,
             Some(Verdict::Regenerate),
         )

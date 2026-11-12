@@ -225,15 +225,15 @@ fn reconcile_guide() -> Guide {
 
 fn uncovered_guide(kind: &str) -> Guide {
     // Only `convert` is advanced by the tool. Other kinds that reach the
-    // fallback (e.g. `breakdown`) do have a submission path; pretending they
-    // have none would be a lie, so they get "no contract here, read the task".
+    // fallback (e.g. the `breakdown` root) are not closed with `task done`, so
+    // they get "no contract here, read the task" instead of a fake one.
     if kind == "convert" {
         return Guide {
             goal: "convert 任务没有提交载荷：它由工具推进（来源转换成功或失败都会更新这一行），不要用 task done 关闭它。".into(),
             must_read: Vec::new(),
             must_decide: Vec::new(),
             forbidden: vec![
-                "不得对 convert 任务提交 --payload、--leaves 或裁决；task done 会以 E_TASK_BAD_PAYLOAD 拒绝。".into(),
+                "不得对 convert 任务提交 --payload 或裁决；task done 会以 E_TASK_BAD_PAYLOAD 拒绝。".into(),
             ],
             done_when: vec!["任务由工具推进时，按 task status 看它下一步变成什么。".into()],
             human_escalation: "任务长时间不动或反复失败时，用 task status 看原因，必要时 task retry 或问用户。".into(),
@@ -649,10 +649,10 @@ fn page_contract() -> Contract {
             title: "完整正文：在已有页上补两段，提交整页".into(),
             payload: serde_json::json!({
                 "title": "任务树",
-                "summary": "来源、根任务、子叶与全局基线的推进规则",
+                "summary": "来源、route、page 与全局基线的推进规则",
                 "tags": ["ingest", "task"],
                 "status": "stable",
-                "body": "# 任务树\n\n一个来源一棵根任务：根拆成子叶，子叶逐个交付、逐个关闭；全部关闭后根收尾合并，并清除来源待办。\n\n## 基线\n\n基线是全局一份，不是每棵树各一份：先收敛的树合并出的页，必须被后收敛的树当成正常状态。\n\n## 复核\n\n任务外的改动不会被静默吸收。有来源的页进入 reconcile 任务，由作者裁决接受（accept）还是按来源重新生成（regenerate）。\n"
+                "body": "# 任务树\n\n一个来源一棵根任务：根下先有唯一的 route，route 关闭后才按归属建 page，page 逐个交付、逐个关闭；全部关闭后根收尾合并，并清除来源待办。\n\n## 基线\n\n基线是全局一份，不是每棵树各一份：先收敛的树合并出的页，必须被后收敛的树当成正常状态。\n\n## 复核\n\n任务外的改动不会被静默吸收。有来源的页进入 reconcile 任务，由作者裁决接受（accept）还是按来源重新生成（regenerate）。\n"
             }),
         }],
         failure_fixes: vec![
@@ -1166,7 +1166,7 @@ mod tests {
         let breakdown = guide("breakdown");
         assert!(
             !breakdown.goal.contains("由工具推进"),
-            "breakdown is closed with --leaves, so it is not tool-advanced"
+            "the breakdown root is advanced by its route child, not by the tool"
         );
         assert!(
             breakdown.goal.contains("没有定义") && breakdown.goal.contains("task status"),
@@ -1177,7 +1177,7 @@ mod tests {
                 .forbidden
                 .iter()
                 .all(|item| !item.contains("--leaves")),
-            "the fallback still claims breakdown cannot be closed with --leaves"
+            "the fallback still names the retired leaf flag"
         );
         let c = contract("mystery-v1", &["concept".into()]);
         assert!(c.fields.is_empty());

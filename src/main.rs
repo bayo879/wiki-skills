@@ -100,7 +100,7 @@ fn wiki_root(cmd: &str) -> PathBuf {
                 )
             });
             let root = llm_wiki::runtime_root::resolve_root(&executable, &cwd);
-            // Relative source, leaves and payload paths share the same root.
+            // Relative source and payload paths share the same root.
             if let Err(err) = std::env::set_current_dir(&root) {
                 report::fail(
                     cmd,
@@ -890,7 +890,6 @@ fn run_task(action: TaskAction) -> ! {
         TaskAction::Done {
             id,
             payload,
-            leaves,
             accept,
             regenerate,
         } => {
@@ -912,15 +911,7 @@ fn run_task(action: TaskAction) -> ! {
                 (false, true) => Some(task::Verdict::Regenerate),
                 _ => None,
             };
-            let result = task::close(
-                &root,
-                &cfg,
-                &mut store,
-                id,
-                payload.as_deref(),
-                leaves.as_deref(),
-                verdict,
-            );
+            let result = task::close(&root, &cfg, &mut store, id, payload.as_deref(), verdict);
             drop(guard);
             match result {
                 Ok(settled) => {

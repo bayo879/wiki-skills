@@ -173,23 +173,19 @@ pub enum RelationFlag {
 pub enum TaskAction {
     /// Close one task and print the next one.
     ///
-    /// A `page` task needs `--payload <file>` with the page content; a
-    /// `breakdown` task needs `--leaves <file>` with the leaf list; a
-    /// `reconcile` task needs exactly one of `--accept` or `--regenerate`.
+    /// A `route` or `page` task needs `--payload <file>`; a `reconcile` task
+    /// needs exactly one of `--accept` or `--regenerate`.
     Done {
         /// Task id from `next_task` or `task status`.
         id: i64,
-        /// Page content JSON for a `page` task.
+        /// Route document (`route-v1`) or page content (`page-content-v1`).
         #[arg(long, value_name = "FILE")]
         payload: Option<std::path::PathBuf>,
-        /// Leaf list JSON for a `breakdown` task.
-        #[arg(long, value_name = "FILE")]
-        leaves: Option<std::path::PathBuf>,
         /// Keep a page edited outside the tree as it is and advance the baseline.
-        #[arg(long, conflicts_with_all = ["payload", "leaves", "regenerate"])]
+        #[arg(long, conflicts_with_all = ["payload", "regenerate"])]
         accept: bool,
         /// Re-queue the sources behind that page so the normal path replaces it.
-        #[arg(long, conflicts_with_all = ["payload", "leaves", "accept"])]
+        #[arg(long, conflicts_with_all = ["payload", "accept"])]
         regenerate: bool,
     },
     /// Show the tree without advancing it.

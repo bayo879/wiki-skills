@@ -51,7 +51,7 @@ description: 当一段对话结束时要把其中的判断、决策与踩坑留�
 
 1. 先 `query` 搜同主题，有页就并进那页，不新建。
 2. 把页面落到 `[ingest].session_dir` 下的路径（例如 `sessions/2026-10-29-cli-reshape.md`）。
-3. `ingest` 登记这份材料并保存 raw 哈希；按交付的任务视图提交载荷：拆解交叶清单，生成交标题、摘要、标签、状态与正文；frontmatter、sources、updated 由工具渲染。
+3. `ingest` 登记这份材料并保存 raw 哈希；按交付的任务视图提交载荷：route 交信息点与归属，page 交标题、摘要、标签、状态与完整正文；frontmatter、sources、updated 由工具渲染。
 4. 按返回的 `outcome` 与 `remaining` 推进；根收尾核对四道哈希，漂移则重读、重试，不会撤销已合并的页。
 5. 向用户报一句话：留下了哪些判断，写在哪一页，是否仍有未确认来源。
 

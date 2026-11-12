@@ -558,23 +558,30 @@ fn an_unknown_task_is_reported() {
 }
 
 #[test]
-fn leaves_is_rejected_and_a_route_needs_a_payload() {
+fn leaves_is_gone() {
     let dir = repo();
     let route = next_task(&dir);
     let id = task_id(&route);
-    let leaves = temp_json(
-        &dir,
-        "leaves.json",
-        &json!({"leaves":[{"type":"concept","id":"alpha","title":"Alpha","brief":"写结论"}]})
-            .to_string(),
-    );
     let (code, body) = run(
         &dir,
-        &["task", "done", &id.to_string(), "--leaves", &leaves],
+        &["task", "done", &id.to_string(), "--leaves", "x.json"],
     );
-    assert_eq!(code, 1, "{body}");
-    assert_eq!(body["error"]["code"], "E_TASK_BAD_PAYLOAD");
+    assert_eq!(code, 2, "{body}");
+    assert_eq!(body["error"]["code"], "E_USAGE");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--leaves"),
+        "the usage error names the retired flag: {body}"
+    );
+}
 
+#[test]
+fn a_route_needs_a_payload() {
+    let dir = repo();
+    let route = next_task(&dir);
+    let id = task_id(&route);
     let (code, body) = run(&dir, &["task", "done", &id.to_string()]);
     assert_eq!(code, 1, "{body}");
     assert_eq!(body["error"]["code"], "E_TASK_BAD_PAYLOAD");

@@ -25,29 +25,31 @@
                      │ 登记转换、来源待办与根任务
                      ▼
                   state.db（tasks / work_items）
-                     │ 交付 next_task：待拆叶的根，或一片子叶
+                     │ 交付 next_task：一个 route，或一个 page
                      ▼
-agent 拆解 ── task done --leaves ──▶ 子叶任务
-                     │
-agent 生成 ── task done --payload ──▶ .wiki/cache/staging/
+agent 路由 ── task done --payload ──▶ route-v1（points / assignments /
+                     │                 maintenance / proposals / searches）
+                     │ CLI 按归属建 page 任务；零写页直接结算
+                     ▼
+agent 写页 ── task done --payload ──▶ .wiki/cache/staging/
                      │
                      ▼
-根收尾：校验 + 基线比对 ──▶ .wiki/pages/ ── query：增量索引
+根收尾：按 before/expected 校验 ──▶ .wiki/pages/ ── query：增量索引
                      │
                      └── worklist::complete：核对四道哈希，只清对应来源待办
 ```
 
 `ingest` 保留稳定窗口，`--force` 可跳过等待并强制全文复核，不能越 `parse.max_source_bytes`。扫描以大小和修改时间缓存全文摘要：可漏检元数据保持的改动，不能宣称每轮重读所有源。转换对同一份受限固定字节计算摘要并解析，读取期间检测到变化则拒绝交付。超限源不进待办、不失败，但每轮以 `oversize:` warning 点名键名与上限——静默跳过会被读成「已经整理过」。
 
-来源待办独立于页面：转换登记时持久化，重跑交付未完成来源；作者可以更新已有页，不要求每源新建。`affected_pages` 是现有引用关系得到的提示，不保证语义影响完整。任务树以它做增量补写的下限：每个受影响的现有页必须落成一片叶，或显式标 `unchanged` 并写理由。
+来源待办独立于页面：转换登记时持久化，重跑交付未完成来源；作者可以更新已有页，不要求每源新建。`affected_pages` 是现有引用关系得到的提示，不保证语义影响完整，也不是候选全集。任务树以它做维护下限：每个已引用这个来源的现有页必须在 `maintenance` 里得到 `update` 或 `unchanged` 的处置并写理由。
 
-`task done` 关闭一片叶时只校验载荷与全局基线，把渲染后的页面写进 staging；关闭 `reconcile` 时用 `--accept` 把该页当前哈希写进基线，或用 `--regenerate` 把来源重新入队：已有根走重规划，保留已合并页、丢弃旧子任务与 staging，再按当前 raw 重建路由；只有没有根时才新建。根收尾时才整批合并进 `.wiki/pages/`，并用四道哈希核对来源：源文件当前摘要、`raws` 行、待办记录、根任务登记的 raw 哈希。漂移退出 1，保留待办；已合并页不回滚，根阻塞后由人用 `task retry <根> --replan` 恢复。它不验证正文，不发布或恢复页面；没有候选发布、自动内容版本或内置回退，也没有自动备份。CLI 锁不能保护文件系统层的写页，任务外改动在关闭时以 `E_PAGE_CONFLICT` 列出。独立备份是否存在由用户负责。
+`task done` 关闭 `route` 时校验来源基线、载荷引用与归属：每个信息点有去向（`update`/`create`/`skip`），空信息点有 `source_reason`，`create` 指向的提案带类型与两条理由；关闭后 CLI 只为 `update`/`create` 的目标建 `page` 任务（每根每目标一个），没有目标就置 `settling` 直接结算（零写页）。关闭 `page` 时校验来源与目标快照：规划时记下的 `before` 哈希必须与当前页一致，新页则必须仍不存在，否则 `E_PAGE_CONFLICT`；载荷是融合后的完整正文，渲染后写进 staging 并记下 `expected`。关闭 `reconcile` 时用 `--accept` 把该页当前哈希写进基线，或用 `--regenerate` 把来源重新入队：已有根走 `--replan`，保留已写页、丢弃旧 route/page 与 staging，再按当前 raw 重建 route；只有没有根时才新建。根收尾时才整批合并进 `.wiki/pages/`，逐目标比较当前哈希：等于 `before`（新页则文件仍不存在）就原子写入，等于 `expected` 说明上次已写、只补基线，出现第三种哈希则拒绝合并并阻塞根。随后用四道哈希核对来源：源文件当前摘要、`raws` 行、待办记录、根任务登记的 raw 哈希。漂移退出 1，保留待办；已写页不回滚，根阻塞后由人用 `task retry <根> --replan` 恢复。它不验证正文，不发布或恢复页面；没有候选发布、自动内容版本或内置回退，也没有自动备份。CLI 锁不能保护文件系统层的写页，规划后被改动的目标页在关闭时以 `E_PAGE_CONFLICT` 拒绝。独立备份是否存在由用户负责。
 
 页面与全局基线的比对发生在 `advance` 开头（`task::reconcile_scan`）：有 `sources` 的差异页建 `reconcile` 任务，没 `sources` 的直接写进基线，基线里已不存在的页按接受的删除删掉对应行。基线不再在空闲轮无条件刷新，否则任务外的改动会被静默吸收。
 
-转换与确认之间没有批次门禁，取代它的是 SQLite 里的任务树：一个来源一棵 `breakdown` 根，agent 拆出的 `page` 子叶逐个交付、逐个关闭，全部关闭后根收尾。`task::advance` 是唯一决定下一个任务的函数，`ingest` 与 `task done` 都调它：有 `pending` 子叶先交付子叶；没有子叶时先交付 `reconcile`（任务外改动待复核）；再取最早一棵待拆叶的根。
+转换与确认之间没有批次门禁，取代它的是 SQLite 里的任务树：一个来源一棵 `breakdown` 根，根下先交付唯一的 `route`；route 关闭后才有 `page` 任务，逐个交付、逐个关闭，全部关闭后根收尾。`task::advance` 是唯一决定下一个任务的函数，`ingest` 与 `task done` 都调它：有 `pending` page 先交付 page；没有 page 时先交付 `reconcile`（任务外改动待复核）；再取最早一棵待路由的根。route 完成前不存在 page 任务。
 
-`ingest` 与 `task done` 交付同一种 `task::view` 结果：`source.read_ref` 是要读的 raw，`target` 带目标页、是否存在与叶子标题/要点，`submit` 给关闭命令与载荷 schema，`affected_pages` 只含本任务根自己的页；不再把 `TaskRow` 的数据库列暴露给 agent。推进后的公共结果用 `outcome`（`complete`/`in_progress`/`waiting`/`needs_attention`/`partial`）、`effects`（`merged_pages`/`confirmed_sources`/`removed_pages`）、`remaining`（`actionable`/`waiting`/`failed`/`blocked`）与 `issues` 表达：页面合并、来源确认、页面删除是三种独立事实。正常改名进 `events`，碰撞、超限、失败进 `warnings` 或 `failures`。根收尾在 `query::refresh` 后自检新页是否进了关系索引，缺失写进 `issues`，不要求 agent 再跑一次 `query` 证明索引可用。`.wiki/work.lock` 工作租约随「一次只开放一批」一起删除——它服务的是锁人，而任务树只做结算。`moves::apply` 与消失源收口因此每轮都跑。`src/lock.rs` 的仓库锁仍在，只罩 `ingest` 与 `task done`。
+`ingest` 与 `task done` 交付同一种 `task::view` 结果：`source.read_ref` 是要读的 raw，`target`（有目标页时）带目标页、是否存在、标题/要点与 `before` 哈希，`submit` 给关闭命令与载荷 schema，`stage` 标 `routing`/`writing`/`reconcile`，`guide` 是这一步该做什么，`contract` 是载荷字段语义、约束与真实示例。route 视图里的 `affected_pages` 是已引用该来源的页，只是维护下限；不再把 `TaskRow` 的数据库列暴露给 agent。推进后的公共结果用 `outcome`（`complete`/`in_progress`/`waiting`/`needs_attention`/`partial`）、`effects`（`merged_pages`/`confirmed_sources`/`removed_pages`）、`remaining`（`actionable`/`waiting`/`failed`/`blocked`）与 `issues` 表达：页面合并、来源确认、页面删除是三种独立事实。正常改名进 `events`，碰撞、超限、失败进 `warnings` 或 `failures`。根收尾在 `query::refresh` 后自检新页是否进了关系索引，缺失写进 `issues`，不要求 agent 再跑一次 `query` 证明索引可用。`.wiki/work.lock` 工作租约随「一次只开放一批」一起删除——它服务的是锁人，而任务树只做结算。`moves::apply` 与消失源收口因此每轮都跑。`src/lock.rs` 的仓库锁仍在，只罩 `ingest` 与 `task done`。
 
 转换预算按队列顺序取前 `[ingest].max_per_run` 条，而队列顺序里带着一条让位规则：`source_attempts` 记下每个源最近一次转换失败的时间与错误，上一轮失败的源排在从未尝试过的文件之后，最近失败的沉到队尾。这样坏文件不会每轮占住一个名额把健康文件堵在后面，同时也不会被永久排除——队列里只剩它时照样会被取到。转换成功或源被遗忘时这条记录随同一次事务删除；文件悄悄消失时由下一轮 `ingest` 按「键还有没有对应文件」清掉——从未转换成功的源没有 `sources` 行，消失源收口看不见它。本轮超出预算的源以 `waiting:` 逐条列出，不只是一个数字。
 
@@ -70,13 +72,13 @@ agent 生成 ── task done --payload ──▶ .wiki/cache/staging/
 | `src/parse/` | 解析后端与 `auto` 回退（`text`/`html`/`asset`/`pdf`/`external`） |
 | `src/chunk.rs` | 大文件的按需分块 |
 | `src/page.rs` | 页面 frontmatter 的读写、校验与渲染（`render` 是工具生成 frontmatter 的唯一路径） |
-| `src/task.rs` | 任务树：`ensure_root`、`advance`、`close`（拆解/生成校验）、`finish_root`（整批合并）、全局基线 |
+| `src/task/` | 任务树：`ensure_root`、`advance`、`close`（route/page/reconcile 校验）、`finish_root`（整批合并）、`plan`（根与页载荷）、`route`（`route-v1` 解析与建任务）、`contract`（TaskView 的说明与契约）；全局基线 |
 | `src/read.rs` | 内部引用解析与按行窗口读取；`read` 命令的唯一入口 |
 | `src/render.rs` | `index.md` 与人类可读渲染 |
 | `src/lint.rs` | 十三条规则，由 doctor 的 `lint` 检查与 `--fix` 使用；`page_quality`（L12/L13）也给 `sync` 复用 |
 | `src/ignore.rs` | `.wiki/ignore` 的解析与增删；`ingest` 共用的唯一判定 |
 | `src/lock.rs` | 仓库锁（固定 inode + OS 文件锁，不按年龄回收） |
-| `src/store.rs` | SQLite 账本、schema 迁移、FTS5；连接显式持有 5s busy_timeout |
+| `src/store.rs` | SQLite 账本、schema 迁移（v12 的 `route` 任务与三个唯一索引）、FTS5；连接显式持有 5s busy_timeout |
 | `src/ledger.rs` | 账本唯一的写入口：登记转换、跟随改名、遗忘删除 |
 | `src/sync.rs` | 摄入一轮的执行体：`ingest` 调它跑 scan → convert → 来源待办交付，并收口消失的源（`on_missing`） |
 | `src/relation.rs` | 唯一的 wikilink 与来源引用解析：别名解析、围栏过滤、raw 片段拆分 |
@@ -94,12 +96,12 @@ agent 生成 ── task done --payload ──▶ .wiki/cache/staging/
 - 账本表只有 `src/store.rs` 能执行 SQL，业务写入只有 `src/ledger.rs` 一个入口：`ingest` 登记、`moves` 改键都表达成 `ledger::Ledger` 的一次调用，顺序与失败语义写在 `ledger.rs` 的注释里。想加意图，加 `Ledger` 的方法，不要绕回 `store`。（检查：tests/invariants.rs::only_ledger_writes_the_ledger）
 - 转换一次只有一个事务：`Store::register_conversion` 在同一个事务里写 `sources`、`raws`、`work_items`、`source_facts` 四张表，raw 文件先落盘、字节与摘要来自同一次读取。半路失败整笔回滚，不会留下「转换成功、待办丢失」的中间态。事务只覆盖账本，不覆盖文件：落在盘的 raw 与账本之间仍可能因断电不一致，由 `doctor` 的 `scan`（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露。（检查：tests/worklist.rs::failed_enqueue_rolls_back_conversion_baseline_and_can_retry）
 - 对账只有一个答案：`scan::classify`（仓库根）与 `scan::classify_raw`（`.wiki/raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan` 输出的 `layer` 字段与 `lint` `L7` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这两处必须同答。（检查：tests/reconcile.rs::an_unledgered_raw_is_reported_the_same_way_by_both）
-- 页面 frontmatter 由 `task done --payload` 的载荷驱动，`sources` 由根任务的 raw 键写入，`updated` 由合并当天的日期写入；同一页已有引用时追加而非替换。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
+- 页面 frontmatter 由 page 任务 `--payload` 的载荷驱动，`sources` 由根任务的 raw 键写入，`updated` 由合并当天的日期写入；同一页已有引用时追加而非替换。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 页面必须有 frontmatter 七字段：`id`、`title`、`type`、`summary`、`sources`、`status`、`updated`；`type` 取自 `[schema].types`。（检查：tests/lint.rs::l1_reports_each_missing_required_field）
-- 子叶只写 staging，正式页只在根收尾时整批出现；合并前检索不到这一批。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
+- page 只写 staging，正式页只在根收尾时整批出现；合并前检索不到这一批。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 根收尾只清这一棵根的来源待办，重复收尾是幂等空操作。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 忽略列表只有一个解释入口 `ignore::IgnoreList`：`ingest` 跳过，不许在调用点各自拼通配。`[scan].ignore` 只是目录名的粗过滤，两者不混用。（检查：tests/scan_signature.rs::an_entry_of_the_ignore_list_is_invisible_to_the_scan）
-- 源在任务期间漂移不得合并，`E_SOURCE_DRIFT` 保留待办与任务；已合并页不回滚，恢复走 `task retry <根> --replan`。（检查：tests/cli_task.rs::task_done_obeys_the_repository_lock）
+- 源在任务期间漂移不得合并，`E_SOURCE_DRIFT` 保留待办与任务；已写页不回滚，恢复走 `task retry <根> --replan`。（检查：tests/cli_task.rs::a_changed_raw_is_refused_before_staging）
 - 索引是派生状态，从正式页增量刷新；根收尾合并后立即刷。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 关系索引（`page_nodes` / `page_links` / `page_source_refs`）同样只从 Markdown 重建：`query`、`graph`、`lint` 与 `task::affected_pages` 共用 `relation::Resolver` 和同一份反查，不各自扫页；`Store::apply_refresh` 在一个事务里写 FTS 与三张关系表。`generation` 只在关系真变化时递增。（检查：tests/query.rs::refresh_keeps_links_both_ways_and_survives_page_deletion）
 

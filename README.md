@@ -1,6 +1,6 @@
 # llm-wiki
 
-维护一份 Karpathy 式 LLM wiki 的命令行工具：仓库里的任意文件都是源，解析成 `.wiki/raw/` 里的 markdown，由 agent 逐任务写成 `.wiki/pages/` 页面，并以来源待办支持中断后继续。工具只往 `.wiki/` 里写，源文件永远只读。
+维护一份 Karpathy 式 LLM wiki 的命令行工具：仓库里的任意文件都是源，解析成 `.wiki/raw/` 里的 markdown，由 agent 先路由再逐页写成 `.wiki/pages/` 页面，并以来源待办支持中断后继续。工具只往 `.wiki/` 里写，源文件永远只读。
 
 ## 服务说明
 
@@ -16,19 +16,19 @@
 
 写入边界是结构性的：契约、页面、账本全在 `.wiki/` 里，手写 `[paths]` 也移不出去。
 
-对外只有六条命令（外加 `--version`）：`doctor`、`ingest`、`read`、`task`、`query`、`ignore`。工具转换资料并维护来源待办；agent 用 `read` 读 raw、逐任务提交页面载荷，工具负责落盘，不再有候选发布或工具内版本管理。
+对外只有六条命令（外加 `--version`）：`doctor`、`ingest`、`read`、`task`、`query`、`ignore`。工具转换资料并维护来源待办；agent 先完成 `route` 任务，读 raw 与已有页决定归属，再逐页提交完整正文，工具负责落盘，不再有候选发布或工具内版本管理。
 
 一条源文件的生命周期：
 
 1. **看**：`doctor` 体检，`doctor --fix` 修机械缺陷；`ingest --dry-run` 演练转换计划，不写盘。
 2. **摄入**：`ingest` 扫描、转换并登记 `.wiki/raw/`，持久化未整理来源，输出正式页目录、页面类型、schema、待办 raw 哈希和受影响页面。刚改过的源等 `[ingest].settle_seconds`（默认 300 秒），`--force` 跳过等待并全文复核。每轮转换按队列顺序取前 `max_per_run` 条；上一轮转换失败的源排在从未尝试过的文件之后，本轮超出预算的源以 `waiting:` 逐条列出。
-3. **拆解**：`ingest` 给出一棵待拆叶的根任务（`breakdown`）。agent 读 raw 与受影响页面清单，把这一批拆成一页一片的子叶，用 `task done <id> --leaves <文件>` 提交；每个现有受影响页要么落成一片叶，要么显式标 `unchanged` 并写理由。
-4. **逐叶生成**：`task done` 返回下一页叶子任务。agent 读该页正文与拆解要点，提交载荷（`title`/`summary`/`tags`/`status`/正文），用 `task done <id> --payload <文件>` 关闭；工具渲染 frontmatter、写 `.wiki/cache/staging/`，不碰正式页。
-5. **合并**：最后一片叶关闭后，根任务收尾：全批硬校验、与全局基线比对、逐页原子写入 `.wiki/pages/`、刷索引、核对四道哈希并清待办。源在期间变了就 `E_SOURCE_DRIFT`：已合并的页不回滚，根阻塞；等源与 raw 重新稳定后，人用 `task retry <根> --replan` 按当前 raw 重规划。`query` 默认含会话蒸馏，`--no-archive` 排除它们。
-6. **复核**：任务外被改过的页面会先变成 `reconcile` 任务，任务视图的 `target.reference` 是那页，源键写在任务视图里。agent 读页与关联源后二选一：`task done <id> --accept` 承认改动并推进基线；`--regenerate` 把来源重新入队：已有根按重规划保留已写页、重建路由，没有根才新建，然后走正常拆解与生成覆盖它。没有 `sources` 的页没有可对照的源，直接吸收进基线。
+3. **路由**：`ingest` 给出来源根任务下的 `route` 任务。agent 用 `read` 读 raw 全文、逐个 `read` 打开 `affected_pages` 里的页面，用 `query` 检索候选，然后提交 `route-v1`：每个信息点一条 `points` 和它的一条 `assignments` 去向（`update`/`create`/`skip`），每个已引用页在 `maintenance` 里给 `update` 或 `unchanged` 并写理由，新页先写 `proposals`，检索记录放 `searches`。来源没有信息点时用 `source_reason` 说明为什么不需要页面。route 关闭前不会出现任何写页任务。
+4. **写页**：`route` 关闭后，CLI 只为真正要新增或修订的页面建 `page` 任务；没有写页目标的来源直接结算（零写页）。page 任务给出目标页、`target.before` 哈希和本页要承接的点；agent 读目标页当前完整正文与 raw，提交融合后的完整正文（`title`/`summary`/`tags`/`status`/正文），用 `task done <id> --payload <文件>` 关闭。工具渲染 frontmatter、写 `.wiki/cache/staging/`，不碰正式页。
+5. **合并**：最后一个 page 关闭后，根任务收尾：按目标核对 `before`/`expected` 哈希、逐页原子写入 `.wiki/pages/`、刷索引、核对四道哈希并清待办。目标页在规划后被改过就以 `E_PAGE_CONFLICT` 拒绝写入，不会覆盖；源在期间变了就 `E_SOURCE_DRIFT`：已写页不回滚，根阻塞；等源与 raw 重新稳定后，人用 `task retry <根> --replan` 按当前 raw 重建 route，已写页保留。`query` 默认含会话蒸馏，`--no-archive` 排除它们。
+6. **复核**：任务外被改过的页面会先变成 `reconcile` 任务，任务视图的 `target.reference` 是那页，源键写在任务视图里。agent 读页与关联源后二选一：`task done <id> --accept` 承认改动并推进基线；`--regenerate` 把来源重新入队：已有根按 `--replan` 保留已写页、重建 route，没有根才新建，然后走正常的路由与写页覆盖它。没有 `sources` 的页没有可对照的源，直接吸收进基线。
 7. **删源**：源文件被删后不用另外下命令，下一轮 `ingest` 按 `[ingest].on_missing` 自动收口（默认 `forget`）：页面对它的引用去掉、转 `stale`，一条来源不剩的页整页删除，raw 文件与账本行（含待办）一并清掉，轮次警告以 `vanished:` 开头。收口是自动的、可重试的，失败只报 finding 并把账本行留到下一轮；删除本身不可撤销，只能靠你自己的备份。
 
-**写页没有发布门。** 根收尾不验证正文质量，也不回滚已合并页面；工具不自动备份，没有内置历史恢复。CLI 锁只约束工具命令，不能阻止文件系统层的写页；任务外改动会在关闭时以 `E_PAGE_CONFLICT` 列出。需要恢复必须有独立备份。
+**写页没有发布门。** 根收尾不验证正文质量，也不回滚已合并页面；工具不自动备份，没有内置历史恢复。CLI 锁只约束工具命令，不能阻止文件系统层的写页；规划后被改动的目标页会在关闭时以 `E_PAGE_CONFLICT` 拒绝。需要恢复必须有独立备份。
 
 解析层是可替换的后端集合：文本、HTML、图片、PDF 各有一个内置后端，另有一个可选的 `external-http` 后端把扫描件之类「内置读不出字」的文档交给外部 HTTP 服务。分层、数据流、模块表与不变量见 [架构与模块](docs/readme/architecture.md)，skill 与 CLI 的分工及设计原则见 [设计与边界](docs/readme/design-principles.md)，后端选择与回退规则见 [解析后端与 auto 回退](docs/readme/parse/external.md)。未完成的设计与待判别问题按日期一问题一文件归档在 [docs/issues/](docs/issues/)，目录只放还没结论的事。
 
@@ -36,7 +36,7 @@
 
 分发单位是整个 `output/`，无需源码或 Rust。下载对应操作系统与架构的 Release 压缩包，解压后保留 `.wiki/` 隐藏目录。根目录可改名；资料放在该根下。首次接入请让 agent 阅读 [安装指南](output/.wiki/readme.md)。
 
-包内 CLI 固定在 `output/.wiki/cli/llm-wiki`（Windows 为 `llm-wiki.exe`），两个技能在 `output/.wiki/skills/`。使用包内 CLI 的绝对路径，不选 PATH 旧版；从其他目录执行时仍以包根为根，源文件、叶清单、载荷的相对路径也相同。PATH 入口只能链接或启动包内 CLI，不把二进制另行复制；覆盖旧入口的核实与授权要求见安装指南。
+包内 CLI 固定在 `output/.wiki/cli/llm-wiki`（Windows 为 `llm-wiki.exe`），两个技能在 `output/.wiki/skills/`。使用包内 CLI 的绝对路径，不选 PATH 旧版；从其他目录执行时仍以包根为根，源文件、载荷的相对路径也相同。PATH 入口只能链接或启动包内 CLI，不把二进制另行复制；覆盖旧入口的核实与授权要求见安装指南。
 
 ### 构建与发布
 
@@ -78,8 +78,8 @@ llm-wiki ingest                            # 转换并交付未完成来源
 llm-wiki ingest --auto                     # 「wiki自动摄入」的固定入口：只跑默认一轮
 llm-wiki read .wiki/raw/notes/a.md         # 读 raw；长文用 --offset / --limit
 llm-wiki task status                       # 看整棵树与当前任务
-llm-wiki task done 1 --leaves leaves.json  # 拆解：提交叶清单
-llm-wiki task done 2 --payload page.json   # 生成：提交一页载荷
+llm-wiki task done 1 --payload route.json  # 路由：提交归属与处置
+llm-wiki task done 2 --payload page.json   # 写页：提交融合后的完整正文
 llm-wiki query 熔断                        # 根收尾合并后即可检索
 llm-wiki query --graph
 llm-wiki query --page 熔断 --relation incoming   # 谁引用了这一页
@@ -94,7 +94,7 @@ llm-wiki ingest --key docs/a.pdf
 llm-wiki ingest --key docs/a.pdf --chunk 2000 --range 0-4000
 ```
 
-用户输入「wiki自动摄入」时运行 `llm-wiki ingest --auto`：只跑默认一轮，不能和手动参数组合；之后按技能的最小序列读 raw、拆解、逐叶提交并用 `task done` 推进。定时任务的 prompt 就写这句话；安排周期先问用户，无人值守时遇到结论冲突、删页或大改结构应停下并写进汇报。
+用户输入「wiki自动摄入」时运行 `llm-wiki ingest --auto`：只跑默认一轮，不能和手动参数组合；之后按技能的最小序列读 raw、路由、逐页提交并用 `task done` 推进。定时任务的 prompt 就写这句话；安排周期先问用户，无人值守时遇到结论冲突、删页或大改结构应停下并写进汇报。
 
 其余的小工具：
 
@@ -113,9 +113,9 @@ llm-wiki --version                         # 打印版本
 | `doctor [--fix] [--only scan\|convert\|session] [--key <KEY>]` | 体检；补建目录、契约与索引 |
 | `ingest [<KEY>...] [--dry-run] [--key <KEY>] [--chunk <N>] [--range <A-B>] [--force-large] [--force]` | 扫描、转换、登记及交付来源待办；`--key` 只预览，`--force` 强制复核并跳过等待；保留的 `--force-large` 不绕体积上限 |
 | `read <REF> [--offset <N>] [--limit <N>]` | 读取 wiki 内部文件；`REF` 用 ingest 返回的路径或 `schema`/`index`，单次最多 2000 行 |
-| `task done <ID> [--leaves <FILE>] [--payload <FILE>] [--accept] [--regenerate]` | 关闭当前任务：拆解交叶清单，生成交页面载荷，复核二选一；返回下一个任务 |
+| `task done <ID> [--payload <FILE>] [--accept] [--regenerate]` | 关闭当前任务：路由/写页交载荷，复核二选一；返回下一个任务 |
 | `task status` | 看任务树、当前任务、失败与阻塞的根 |
-| `task retry <ID> [--replan]` | 人工重置失败任务；`--replan` 只接受根，保留已合并页，按当前 raw 重建路由 |
+| `task retry <ID> [--replan]` | 人工重置失败任务；`--replan` 只接受根，保留已写页，按当前 raw 重建 route |
 | `query [TEXT] [--page <REF> \| --source <RAW>] [--relation <KIND>] [--offset <N>] [--limit <N>] [--no-archive] [--graph]` | FTS5 检索、链接图与精确关系读取；`KIND` 为 `outgoing`/`incoming`/`sources`/`citing`，精确读取分页并带 `generation`；无命中 exit 0 |
 | `ignore [--add <PATTERN>] [--remove <PATTERN>] [--check <KEY>]` | 查看、维护和检查忽略列表 |
 | `--version` | 打印工具软件版本，不是内容版本管理 |
@@ -140,7 +140,7 @@ llm-wiki --version                         # 打印版本
 
 - 配置只有 `.wiki/wiki.toml`，页面契约在 `.wiki/SCHEMA.md`。新配置不再生成版本保留与发布页数预算；旧 `[versions].keep`、`[ingest].max_pages_per_slice`、`[ingest].max_new_pages_per_run` 只为兼容读取，在当前 CLI 不生效。未知键仍报错。`[paths]` 固定在 `.wiki/` 内，手写也不能迁出。
 - 哈希口径统一为全文：先以大小和修改时间初筛，元数据未变时可能复用已记录摘要，因此可能漏掉保留元数据的改动。`--force` 强制全文复核；它与 `--force-large` 都不能越过 `parse.max_source_bytes`（默认 100MB）；超限源不转换、不进待办，每轮 `ingest` 以 warning 点名，需改上限或加忽略。读取受限且对同一份固定字节哈希、解析；稳定窗口仍保留。详见 [parse 配置](docs/readme/config/parse.md)。
-- `task done` 关闭叶子时校验载荷、路径与全局基线；根收尾时核对四道哈希，不根据页面内容判断完成。正文正确性、引用真实性与覆盖风险仍由作者核对。
+- `task done` 关闭 route 时校验载荷、来源基线与页面目标；关闭 page 时校验目标快照与正文；根收尾时核对四道哈希，不根据页面内容判断完成。正文正确性、引用真实性与覆盖风险仍由作者核对。
 - 任务外改动不再被静默吸收：`advance` 先把当前页面与全局基线比对，有 sources 的差异页变成 `reconcile` 任务，由 agent 判定保留（`--accept`）还是按源重生成（`--regenerate`）；没有 sources 的页才直接吸收。
 - 源文件消失由 `[ingest].on_missing` 一次决定：`forget`（默认）清引用与 raw、删空壳页、删账本行；`mark_stale` 只把页转 `stale`；`ignore` 全部留给作者。这也适用于被 `.wiki/ignore` 挡住的源——忽略只挡新摄入，不挡收口。
 - 页面质量有两道自动闸门：`lint` 的 `L12`（页面不引用任何来源）与 `L13`（正文留着 `TODO`/`FIXME`/`待补`/`占位`），都是 warning；`ingest` 对受影响的页复跑这两条，直接写进轮次 warning，不等 `doctor`。

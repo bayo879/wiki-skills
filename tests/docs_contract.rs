@@ -230,6 +230,79 @@ fn direct_page_workflow_is_the_only_shipped_workflow() {
     }
 }
 
+/// The markdown the operator reads, plus the development notes under
+/// `docs/agent/`: every one of them describes the shipped protocol.
+fn project_markdown() -> Vec<(PathBuf, String)> {
+    let mut out = vec![(
+        workspace().join("README.md"),
+        fs::read_to_string(workspace().join("README.md")).unwrap(),
+    )];
+    out.extend(shipped_markdown());
+    let mut stack = vec![workspace().join("docs").join("agent")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                let text = fs::read_to_string(&path).unwrap();
+                out.push((path, text));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A route reads the source and the pages that already cite it before any page
+/// task exists. The old "breakdown" step claimed the opposite.
+#[test]
+fn the_skill_does_not_say_breakdown_skips_reading_pages() {
+    let root = workspace();
+    let skill = fs::read_to_string(root.join("output/.wiki/skills/llm-wiki/SKILL.md")).unwrap();
+    for retired in ["这一步不读页正文", "leaf-list-v1", "--leaves"] {
+        assert!(
+            !skill.contains(retired),
+            "SKILL.md: the retired leaf protocol survives: {retired}"
+        );
+    }
+    for required in ["source_reason", "route", "零写页"] {
+        assert!(
+            skill.contains(required),
+            "SKILL.md: missing the routing protocol: {required}"
+        );
+    }
+}
+
+/// No shipped document may still ask for a leaf list or describe the breakdown
+/// protocol; the README states the routing flow in its own words.
+#[test]
+fn the_shipped_docs_describe_routes_not_leaves() {
+    let readme = fs::read_to_string(workspace().join("README.md")).unwrap();
+    for required in ["source_reason", "route", "零写页"] {
+        assert!(
+            readme.contains(required),
+            "README.md: missing the routing protocol: {required}"
+        );
+    }
+    let mut offenders = Vec::new();
+    for (path, text) in project_markdown() {
+        for retired in ["--leaves", "这一步不读页正文", "leaf-list-v1"] {
+            if text.contains(retired) {
+                offenders.push(format!("{}: {retired}", path.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the leaf protocol is retired; rewrite these lines:\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn the_skill_ships_the_command_sheet_and_the_scheduled_phrase() {
     let root = workspace();

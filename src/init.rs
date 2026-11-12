@@ -162,7 +162,7 @@ const SCHEMA_MD: &str = r#"# Page schema
 
 必填字段与字段类型是固定的；CLI 的校验器不会为了省事而放松。
 内容经 `task done` 提交：工具填 `id`、`type`、`sources` 与 `updated`，agent 只给标题、摘要、标签、状态与正文。
-最后一次子叶关闭后根任务整批合并；`task status` 看进度，`task retry <id>` 重置失败任务。不发布、不回退正文。
+最后一次 page 任务关闭后根任务整批合并；`task status` 看进度，`task retry <id>` 重置失败任务。不发布、不回退正文。
 
 ## type 枚举
 
