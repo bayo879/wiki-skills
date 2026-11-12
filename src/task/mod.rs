@@ -574,12 +574,26 @@ pub fn replan(root: &Path, cfg: &Config, store: &mut Store, id: i64) -> Result<(
     for target in &plan.targets {
         let current = current_target_hash(root, &target.path)?;
         let expected = target.expected.as_deref();
-        if target.status == WriteStatus::Written
-            || expected.is_some_and(|expected| current.as_deref() == Some(expected))
-        {
-            if let Some(digest) = expected.or(current.as_deref()) {
-                baselines.push((target.path.clone(), digest.to_string()));
+        if target.status == WriteStatus::Written {
+            // A written page is preserved, but only while it still holds the
+            // bytes this root recorded. Anything else is another edit, and a
+            // replan must not quietly move the baseline to a hash the page no
+            // longer has (a deleted page would leave a ghost baseline row).
+            if expected.is_some_and(|expected| current.as_deref() == Some(expected)) {
+                baselines.push((target.path.clone(), expected.unwrap().to_string()));
+                continue;
             }
+            let message = format!(
+                "{} was written as {} but hashes to {} now; a replan does not absorb another edit and the root is blocked",
+                target.path,
+                expected.unwrap_or("<no expected hash>"),
+                current.as_deref().unwrap_or("<missing>"),
+            );
+            store.block_task(id, &format!("E_PAGE_CONFLICT: {message}"), &now())?;
+            return Err(bad("E_PAGE_CONFLICT", message));
+        }
+        if expected.is_some_and(|expected| current.as_deref() == Some(expected)) {
+            baselines.push((target.path.clone(), expected.unwrap().to_string()));
             continue;
         }
         let unchanged = match (&target.before, &current) {
@@ -614,8 +628,10 @@ pub fn replan(root: &Path, cfg: &Config, store: &mut Store, id: i64) -> Result<(
     let mut route = NewTask::pending("route", &stamp);
     route.source_key = Some(source_key.clone());
     route.allowed_json = Some("route-v1".to_string());
-    let _ = std::fs::remove_dir_all(staging_root(root, cfg, &source_key));
     store.replan_root(id, &fresh.json()?, &route, &stamp)?;
+    // Only after the tree is committed: if the transaction fails, the drafts
+    // are still the only copies of work the old plan points at.
+    let _ = std::fs::remove_dir_all(staging_root(root, cfg, &source_key));
     Ok(())
 }
 
@@ -1690,6 +1706,21 @@ mod tests {
                     .next()
                     .is_none(),
             "the old round's staging is discarded"
+        );
+    }
+
+    #[test]
+    fn replan_refuses_a_written_page_changed_after_the_crash() {
+        let mut f = Fixture::partially_written();
+        f.write_target("changed after the write");
+        let err = replan(f.dir.path(), &f.cfg, &mut f.store, f.root_id).unwrap_err();
+        assert_eq!(err.code(), "E_PAGE_CONFLICT");
+        assert!(f.root_is_blocked());
+        assert_eq!(f.target_bytes(), b"changed after the write");
+        assert_eq!(f.baseline(&f.target), None);
+        assert!(
+            f.staging_root().exists(),
+            "a refused replan keeps the drafts the old plan points at"
         );
     }
 
