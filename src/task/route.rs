@@ -93,8 +93,10 @@ pub(crate) struct Proposal {
 pub(crate) struct Search {
     /// Query terms considered.
     pub query: String,
-    /// Pages the query surfaced.
+    /// Pages the query surfaced. Accepted for the record; scheduling never
+    /// re-runs the search, so nothing reads it after deserialization.
     #[serde(default)]
+    #[allow(dead_code)]
     pub candidates: Vec<String>,
     /// Why the candidates did or did not fit.
     pub reason: String,

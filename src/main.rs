@@ -1037,12 +1037,13 @@ fn human_task_status(status: &task::TaskStatus) -> String {
             root.stage.as_deref().unwrap_or("-"),
             root.open_children
         ));
-        for leaf in &root.leaves {
+        for child in &root.leaves {
             out.push_str(&format!(
-                "\n  leaf {} {} ({})",
-                leaf.id,
-                leaf.target_path.as_deref().unwrap_or("-"),
-                leaf.status
+                "\n  {} {} {} ({})",
+                child.kind,
+                child.id,
+                child.target_path.as_deref().unwrap_or("-"),
+                child.status
             ));
         }
     }

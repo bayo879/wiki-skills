@@ -257,12 +257,11 @@ pub fn view(root: &Path, cfg: &Config, store: &Store, task: &TaskRow) -> Result<
         brief: target_brief,
         before: target_before,
     });
-    let affected_pages =
-        if matches!(task.kind.as_str(), "breakdown" | "route") && !raw_key.is_empty() {
-            affected_pages(store, std::slice::from_ref(&raw_key))?
-        } else {
-            Vec::new()
-        };
+    let affected_pages = if task.kind == "route" && !raw_key.is_empty() {
+        affected_pages(store, std::slice::from_ref(&raw_key))?
+    } else {
+        Vec::new()
+    };
     let (stage, suffix, schema) = match task.kind.as_str() {
         "page" => (Some("writing"), "--payload <FILE>", "page-content-v1"),
         "route" => (Some("routing"), "--payload <FILE>", "route-v1"),

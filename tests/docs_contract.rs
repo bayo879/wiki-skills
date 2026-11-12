@@ -290,7 +290,7 @@ fn the_shipped_docs_describe_routes_not_leaves() {
     }
     let mut offenders = Vec::new();
     for (path, text) in project_markdown() {
-        for retired in ["--leaves", "这一步不读页正文", "leaf-list-v1"] {
+        for retired in ["--leaves", "叶清单", "这一步不读页正文", "leaf-list-v1"] {
             if text.contains(retired) {
                 offenders.push(format!("{}: {retired}", path.display()));
             }

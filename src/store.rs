@@ -1201,21 +1201,6 @@ impl Store {
         Ok(())
     }
 
-    /// Re-anchors a root to the source's current raw digest and counts a replan.
-    pub(crate) fn update_task_source(
-        &mut self,
-        id: i64,
-        raw_hash: Option<&str>,
-        attempts: i64,
-        now: &str,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE tasks SET raw_hash=?1,attempts=?2,updated_at=?3 WHERE id=?4",
-            params![raw_hash, attempts, now, id],
-        )?;
-        Ok(())
-    }
-
     /// Stores the payload a leaf was closed with, and the page set it was allowed.
     pub(crate) fn set_task_payload(
         &mut self,
