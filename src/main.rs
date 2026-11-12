@@ -24,6 +24,7 @@ use llm_wiki::precondition;
 use llm_wiki::query::{self, Scope as QueryScope};
 use llm_wiki::read::{self, MAX_LINES};
 use llm_wiki::report::{self, Exit};
+use llm_wiki::scan;
 use llm_wiki::store::{Store, StoreError};
 use llm_wiki::sync;
 use llm_wiki::task;
@@ -743,6 +744,19 @@ impl IngestData {
     }
 }
 
+/// One scan change as a word a reader can act on, not a Rust variant name.
+fn change_word(kind: scan::ChangeKind) -> &'static str {
+    match kind {
+        scan::ChangeKind::New => "new",
+        scan::ChangeKind::Changed => "changed",
+        scan::ChangeKind::Moved => "moved",
+        scan::ChangeKind::Missing => "missing",
+        scan::ChangeKind::Duplicate => "duplicate",
+        scan::ChangeKind::Ignored => "ignored",
+        scan::ChangeKind::Oversize => "oversize",
+    }
+}
+
 fn human_ingest(data: &IngestData) -> String {
     let mut out = format!(
         "Ingest round {} ({}). Converted {} source(s); {} queued for later; {} conversion failure(s).\nwork: {} actionable, {} failed, {} blocked, {} waiting\nwrite_to: {}\nschema: {}",
@@ -763,7 +777,11 @@ fn human_ingest(data: &IngestData) -> String {
     if !data.changes.is_empty() {
         out.push_str("\nchanges:");
         for change in &data.changes {
-            out.push_str(&format!("\n  - {:?} {}", change.kind, change.key));
+            out.push_str(&format!(
+                "\n  - {} {}",
+                change_word(change.kind),
+                change.key
+            ));
         }
     }
     if !data.ingested.is_empty() {
@@ -1757,6 +1775,16 @@ fn human_query(data: &QueryHitsData) -> String {
             hit.incoming.total,
             sources
         );
+        if !hit.incoming.items.is_empty() {
+            let titles = hit
+                .incoming
+                .items
+                .iter()
+                .map(|page| page.title.clone())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            block.push_str(&format!("\n   in pages: {titles}"));
+        }
         if hit.outgoing.truncated {
             if let Some(command) = &hit.outgoing.next_command {
                 block.push_str(&format!("\n   next out: {command}"));

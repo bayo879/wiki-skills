@@ -36,6 +36,13 @@ use crate::store::{
 /// caller should be indexing their own notes instead of reading more of ours.
 const EXPANDED_LIMIT: usize = 5;
 
+/// Version of the stored relation keys, bumped when normalization changes.
+///
+/// `refresh` only re-reads pages whose digest changed. A normalization change
+/// leaves the bytes identical but makes every old row unreachable, so the
+/// marker forces one full relation rebuild and is written back afterwards.
+const RELATION_KEY_VERSION: &str = "2";
+
 /// One search hit: the page identity plus the three kinds of next step that
 /// make it worth opening (neighbours, sources, fan-in).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -329,6 +336,7 @@ pub fn reindex(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
         relation_pages: Vec::new(),
         full_relations: Some(relations),
     })?;
+    store.set_relation_key_version(RELATION_KEY_VERSION)?;
     Ok(indexed)
 }
 
@@ -368,7 +376,8 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
     let mut changed: Vec<IndexedPage> = Vec::new();
     let mut unreadable: BTreeSet<String> = BTreeSet::new();
     let mut bad: BTreeSet<String> = BTreeSet::new();
-    let mut alias_changed = false;
+    let key_version_stale = store.relation_key_version()?.as_deref() != Some(RELATION_KEY_VERSION);
+    let mut alias_changed = key_version_stale;
 
     for (key, path) in &pages {
         let digest = hash::hash_file(path, true)?;
@@ -506,6 +515,9 @@ pub fn refresh(root: &Path, cfg: &Config, store: &mut Store) -> Result<usize> {
         relation_pages,
         full_relations,
     })?;
+    if key_version_stale {
+        store.set_relation_key_version(RELATION_KEY_VERSION)?;
+    }
     Ok(changed_count)
 }
 

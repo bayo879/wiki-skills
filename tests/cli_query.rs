@@ -8,6 +8,7 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
+use llm_wiki::store::{RelationSource, Store};
 use tempfile::{tempdir, TempDir};
 
 struct Fixture {
@@ -302,4 +303,53 @@ fn the_sources_kind_lists_only_the_raw_files() {
     assert_eq!(body["data"]["incoming"]["total"], 0);
     assert_eq!(body["data"]["sources"]["total"], 1);
     assert_eq!(body["data"]["sources"]["items"][0]["fragment"], "p=1");
+}
+
+#[test]
+fn an_index_written_before_source_keys_were_normalized_still_answers() {
+    let f = Fixture::new();
+    f.raw("s.md");
+    f.page_citing("concept/b.md", "b", &["raw:s.md"]);
+    let out = f.query(&["--source", "s.md"]);
+    assert_eq!(json(&out)["data"]["citing"]["total"], 1);
+
+    // Reproduce an index written by a build that kept `raw:` in the stored
+    // key. The page bytes and their digest are unchanged, so nothing but the
+    // key version tells `refresh` that every relation row must be rebuilt.
+    let mut store = Store::open(&f.root().join(".wiki/state.db")).unwrap();
+    store.migrate().unwrap();
+    let node = store
+        .all_relation_nodes()
+        .unwrap()
+        .into_iter()
+        .find(|node| node.page_key == ".wiki/pages/concept/b.md")
+        .unwrap();
+    store
+        .replace_page_relations(
+            &node,
+            &[],
+            &[RelationSource {
+                page_key: node.page_key.clone(),
+                raw_ref: String::from("raw:s.md"),
+                raw_key: String::from("raw:s.md"),
+                fragment: None,
+            }],
+        )
+        .unwrap();
+    store.set_relation_key_version("1").unwrap();
+    drop(store);
+
+    let out = f.query(&["--source", "s.md"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = json(&out);
+    assert_eq!(body["data"]["raw_key"], "s.md");
+    assert_eq!(body["data"]["citing"]["total"], 1);
+    assert_eq!(
+        body["data"]["citing"]["items"][0]["page"],
+        ".wiki/pages/concept/b.md"
+    );
 }
