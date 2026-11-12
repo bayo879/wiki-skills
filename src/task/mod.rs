@@ -375,7 +375,15 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
                     let message = format!("{}: {err}", err.code());
                     out.issues
                         .push(format!("source {source_key} could not settle: {message}"));
-                    store.fail_task(root_task.id, &message, &stamp)?;
+                    // `finish_root` parks a page conflict or a drift on the
+                    // root itself. Failing it here would overwrite `blocked`
+                    // and hide the replan affordance.
+                    let blocked = store
+                        .task(root_task.id)?
+                        .is_some_and(|row| row.status == "blocked");
+                    if !blocked {
+                        store.fail_task(root_task.id, &message, &stamp)?;
+                    }
                     continue;
                 }
             }
@@ -877,21 +885,6 @@ fn close_page(
     // rejected now, not discovered by `lint` later.
     page::parse(&rendered)?;
 
-    let staging = staging_path(
-        root,
-        cfg,
-        task.source_key.as_deref().unwrap_or_default(),
-        &typ,
-        &id,
-    );
-    if let Some(parent) = staging.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| TaskError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    render::write_atomic(&staging, &rendered)?;
-
     let root_task = store
         .task(plan.root)?
         .ok_or(TaskError::Unknown(plan.root))?;
@@ -908,12 +901,29 @@ fn close_page(
         })?;
     slot.status = WriteStatus::Staged;
     slot.expected = Some(hash::hash_bytes(&rendered));
+
+    // Stage only after the root plan accepted this target: a page task that
+    // cannot be recorded leaves no orphan bytes behind.
+    let staging = staging_path(root, cfg, &source_key, &typ, &id);
+    if let Some(parent) = staging.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| TaskError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    render::write_atomic(&staging, &rendered)?;
+
     store.commit_page(plan.root, task.id, &root_plan.json()?, &now())?;
     Ok(())
 }
 
 /// Merges one settled root: write every staged page atomically, record its
 /// expected hash in the baseline, then clear the work item and the tree.
+///
+/// Settlement is per target, not per batch: a page already on disk with the
+/// expected bytes only gets its baseline, a page still at `before` is merged,
+/// and any third hash blocks the root instead of overwriting an edit. The plan
+/// is saved after every page, so a crash resumes at the next target.
 fn finish_root(root: &Path, cfg: &Config, store: &mut Store, task: &TaskRow) -> Result<Advance> {
     let mut out = Advance::default();
     let source_key = task
@@ -922,7 +932,14 @@ fn finish_root(root: &Path, cfg: &Config, store: &mut Store, task: &TaskRow) -> 
         .ok_or_else(|| bad("E_TASK_BAD_PAYLOAD", "root has no source"))?;
     let mut plan = RootPlan::parse(task)?;
 
-    for target in &mut plan.targets {
+    // Persist the stage before touching a page: a crash after any merge is
+    // recovered as a settle, not as a root still waiting for page tasks.
+    let stamp = now();
+    plan.stage = Stage::Settling;
+    store.set_task_payload(task.id, &plan.json()?, None, &stamp)?;
+
+    for index in 0..plan.targets.len() {
+        let target = &mut plan.targets[index];
         match target.status {
             WriteStatus::Written => {}
             WriteStatus::Staged => {
@@ -934,14 +951,101 @@ fn finish_root(root: &Path, cfg: &Config, store: &mut Store, task: &TaskRow) -> 
                 })?;
                 let (typ, id) = split_target(cfg, &target.path)?;
                 let staging = staging_path(root, cfg, &source_key, &typ, &id);
-                let bytes = std::fs::read(&staging).map_err(|source| TaskError::Io {
-                    path: staging.clone(),
-                    source,
-                })?;
-                render::write_atomic(&root.join(&target.path), &bytes)?;
-                store.set_baseline(GLOBAL_BASELINE, &target.path, &expected)?;
+                let bytes = match std::fs::read(&staging) {
+                    Ok(bytes) => bytes,
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                        let message = format!(
+                            "staging file {} for {} is missing; this page was not written and the root is blocked",
+                            staging.display(),
+                            target.path
+                        );
+                        store.block_task(
+                            task.id,
+                            &format!("E_PAGE_CONFLICT: {message}"),
+                            &now(),
+                        )?;
+                        return Err(bad("E_PAGE_CONFLICT", message));
+                    }
+                    Err(source) => {
+                        return Err(TaskError::Io {
+                            path: staging,
+                            source,
+                        })
+                    }
+                };
+
+                // The staged bytes must be the bytes the page task recorded;
+                // otherwise the baseline would name content that never landed.
+                let staged_hash = hash::hash_bytes(&bytes);
+                if staged_hash != expected {
+                    let message = format!(
+                        "staging file {} for {} hashes to {staged_hash}, expected {expected}; this page was not written and the root is blocked",
+                        staging.display(),
+                        target.path
+                    );
+                    store.block_task(task.id, &format!("E_PAGE_CONFLICT: {message}"), &now())?;
+                    return Err(bad("E_PAGE_CONFLICT", message));
+                }
+
+                let full = root.join(&target.path);
+                let current = match hash::hash_file(&full, true) {
+                    Ok(digest) => Some(digest),
+                    Err(hash::HashError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        None
+                    }
+                    Err(err) => return Err(TaskError::Hash(err)),
+                };
+
+                if current.as_deref() == Some(expected.as_str()) {
+                    // A previous run already merged this page (the plan save or
+                    // the root delete did not happen): only the baseline is owed.
+                    store.set_baseline(GLOBAL_BASELINE, &target.path, &expected)?;
+                } else {
+                    let unchanged = match (&target.before, &current) {
+                        (Some(before), Some(now)) => now == before,
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if !unchanged {
+                        let message = format!(
+                            "{} hashes to {} now, but this root planned {} and staged {expected}; this page was not written and the root is blocked",
+                            target.path,
+                            current.as_deref().unwrap_or("<missing>"),
+                            target
+                                .before
+                                .as_deref()
+                                .unwrap_or("<the page did not exist>"),
+                        );
+                        store.block_task(
+                            task.id,
+                            &format!("E_PAGE_CONFLICT: {message}"),
+                            &now(),
+                        )?;
+                        return Err(bad("E_PAGE_CONFLICT", message));
+                    }
+                    // Only bytes that survive a parse may land. An already
+                    // written page skips this: it is not re-parsed because it
+                    // is not written again.
+                    if let Err(err) = page::parse(&bytes) {
+                        let message = format!(
+                            "staging file {} for {} cannot be parsed ({err}); this page was not written and the root is blocked",
+                            staging.display(),
+                            target.path
+                        );
+                        store.block_task(
+                            task.id,
+                            &format!("E_PAGE_CONFLICT: {message}"),
+                            &now(),
+                        )?;
+                        return Err(bad("E_PAGE_CONFLICT", message));
+                    }
+                    render::write_atomic(&full, &bytes)?;
+                    store.set_baseline(GLOBAL_BASELINE, &target.path, &expected)?;
+                    out.merged_pages.push(target.path.clone());
+                }
                 target.status = WriteStatus::Written;
-                out.merged_pages.push(target.path.clone());
             }
             WriteStatus::Planned => {
                 return Err(bad(
@@ -950,26 +1054,26 @@ fn finish_root(root: &Path, cfg: &Config, store: &mut Store, task: &TaskRow) -> 
                 ))
             }
         }
+        // Save after every page: a crash between two targets resumes at the
+        // second one, and never re-writes the first.
+        store.set_task_payload(task.id, &plan.json()?, None, &now())?;
     }
 
-    let stamp = now();
-    if !plan.targets.is_empty() {
-        store.set_task_payload(task.id, &plan.json()?, None, &stamp)?;
-    }
     query::refresh(root, cfg, store)?;
 
     if !plan.raw_key.is_empty() {
-        // The same four-way hash check the route ran: a source that drifted
-        // while the batch was being written keeps its queue entry and the root
-        // stays open with its staging intact.
-        crate::worklist::complete(root, cfg, store, &source_key, &plan.raw_hash).map_err(
-            |err| {
-                bad(
-                    "E_SOURCE_DRIFT",
-                    format!("{err}; the batch stays in staging"),
-                )
-            },
-        )?;
+        // The same four-way hash check the route ran. Pages already merged and
+        // baselines already advanced are not rolled back; only the queue entry
+        // is kept, and the root is blocked so a replan, not a blind retry, is
+        // the way back.
+        if let Err(err) = crate::worklist::complete(root, cfg, store, &source_key, &plan.raw_hash) {
+            let message = format!(
+                "{err}; merged pages and advanced baselines are not rolled back; when the source and raw settle again, run `task retry {} --replan`",
+                task.id
+            );
+            store.block_task(task.id, &format!("E_SOURCE_DRIFT: {message}"), &now())?;
+            return Err(bad("E_SOURCE_DRIFT", message));
+        }
     }
     store.delete_task(task.id)?;
     let _ = std::fs::remove_dir_all(staging_root(root, cfg, &source_key));
@@ -1024,28 +1128,6 @@ fn page_hashes(root: &Path, cfg: &Config) -> Result<BTreeMap<String, String>> {
         out.insert(key, hash::hash_file(entry.path(), true)?);
     }
     Ok(out)
-}
-
-/// Paths added, changed or removed since the baseline. Empty means untouched.
-fn baseline_diff(
-    current: &BTreeMap<String, String>,
-    baseline: &BTreeMap<String, String>,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    for (key, digest) in current {
-        match baseline.get(key) {
-            Some(old) if old == digest => {}
-            Some(_) => out.push(format!("{key} (changed)")),
-            None => out.push(format!("{key} (added)")),
-        }
-    }
-    for key in baseline.keys() {
-        if !current.contains_key(key) {
-            out.push(format!("{key} (deleted)"));
-        }
-    }
-    out.sort();
-    out
 }
 
 fn read_page(root: &Path, _cfg: &Config, target: &str) -> Result<Option<FrontMatter>> {
@@ -1121,4 +1203,263 @@ fn reference_key(raw_dir: &str, reference: &str) -> String {
         .into_iter()
         .next()
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use super::plan::{Origin, RootPlan, TargetPlan, WriteStatus};
+    use super::{finish_root, staging_path, Advance, GLOBAL_BASELINE};
+    use crate::config::Config;
+    use crate::hash;
+    use crate::store::Store;
+    use crate::sync::{self, SyncArgs};
+
+    /// One repository with a converted source and a root whose one target is
+    /// already staged, ready for settlement.
+    ///
+    /// The target page is *not* written: a test writes it (or does not) to
+    /// choose between the settled, conflicting and pending branches.
+    struct Fixture {
+        store: Store,
+        dir: TempDir,
+        cfg: Config,
+        root_id: i64,
+        source_key: String,
+        target: String,
+    }
+
+    impl Fixture {
+        fn settling(target: &str, before: Option<&str>, staged: &str) -> Fixture {
+            let dir = tempfile::tempdir().unwrap();
+            crate::init::run(dir.path(), false).unwrap();
+            std::fs::write(dir.path().join("a.md"), "# A\n\nEvidence A\n").unwrap();
+            let cfg = Config::load(dir.path()).unwrap();
+            let db = dir.path().join(&cfg.paths.engine).join("state.db");
+            let mut store = Store::open(&db).unwrap();
+            store.migrate().unwrap();
+            sync::run(
+                dir.path(),
+                &cfg,
+                &mut store,
+                &SyncArgs {
+                    limit: cfg.ingest.max_per_run,
+                    dry_run: false,
+                    force: true,
+                    only: Vec::new(),
+                },
+            )
+            .unwrap();
+
+            let root = store
+                .tasks()
+                .unwrap()
+                .into_iter()
+                .find(|task| task.kind == "breakdown")
+                .expect("ingest creates one root");
+            let source_key = root.source_key.clone().unwrap();
+            let mut plan = RootPlan::parse(&root).unwrap();
+            plan.stage = super::Stage::Settling;
+            plan.source_key = source_key.clone();
+            plan.targets = vec![TargetPlan {
+                path: target.to_string(),
+                title: "A".to_string(),
+                origin: if before.is_some() {
+                    Origin::Existing
+                } else {
+                    Origin::Created
+                },
+                before: before.map(|bytes| hash::hash_bytes(bytes.as_bytes())),
+                expected: Some(hash::hash_bytes(staged.as_bytes())),
+                status: WriteStatus::Staged,
+                points: Vec::new(),
+                change: "test".to_string(),
+            }];
+            store
+                .set_task_payload(root.id, &plan.json().unwrap(), None, &super::now())
+                .unwrap();
+            store
+                .set_task_status(root.id, "active", &super::now())
+                .unwrap();
+
+            let fixture = Fixture {
+                store,
+                dir,
+                cfg,
+                root_id: root.id,
+                source_key,
+                target: target.to_string(),
+            };
+            fixture.write_staging(staged);
+            fixture
+        }
+
+        fn staging(&self) -> PathBuf {
+            let (typ, id) = super::split_target(&self.cfg, &self.target).unwrap();
+            staging_path(self.dir.path(), &self.cfg, &self.source_key, &typ, &id)
+        }
+
+        fn write_target(&self, text: &str) {
+            let path = self.dir.path().join(&self.target);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+
+        fn write_staging(&self, text: &str) {
+            let path = self.staging();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+
+        fn target_bytes(&self) -> Vec<u8> {
+            std::fs::read(self.dir.path().join(&self.target)).unwrap()
+        }
+
+        fn target_bytes_or_missing(&self) -> Option<Vec<u8>> {
+            std::fs::read(self.dir.path().join(&self.target)).ok()
+        }
+
+        fn baseline(&self, path: &str) -> Option<String> {
+            self.store
+                .baseline(GLOBAL_BASELINE)
+                .unwrap()
+                .into_iter()
+                .find(|(key, _)| key == path)
+                .map(|(_, digest)| digest)
+        }
+
+        fn root_is_gone(&self) -> bool {
+            self.store.task(self.root_id).unwrap().is_none()
+        }
+
+        fn root_is_blocked(&self) -> bool {
+            self.store
+                .task(self.root_id)
+                .unwrap()
+                .is_some_and(|task| task.status == "blocked")
+        }
+
+        fn staging_exists(&self) -> bool {
+            self.staging().exists()
+        }
+
+        fn advance(&mut self) -> super::Result<Advance> {
+            let task = self.store.task(self.root_id).unwrap().expect("root exists");
+            finish_root(self.dir.path(), &self.cfg, &mut self.store, &task)
+        }
+
+        /// Leaves the root as `advance` would find it: owed a settlement and
+        /// with no child task to deliver first.
+        fn settle_directly(&mut self) {
+            let children: Vec<i64> = self
+                .store
+                .tasks()
+                .unwrap()
+                .into_iter()
+                .filter(|task| task.parent_id == Some(self.root_id))
+                .map(|task| task.id)
+                .collect();
+            for id in children {
+                self.store.delete_task(id).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn an_already_written_page_is_not_written_twice() {
+        let mut f = Fixture::settling(".wiki/pages/concept/a.md", Some("before"), "expected");
+        f.write_target("expected");
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(f.dir.path().join(&f.target))
+                .unwrap()
+                .ino()
+        };
+        f.advance().unwrap();
+        assert_eq!(f.target_bytes(), b"expected");
+        #[cfg(unix)]
+        assert_eq!(
+            {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(f.dir.path().join(&f.target))
+                    .unwrap()
+                    .ino()
+            },
+            inode,
+            "a page that already has the expected bytes is not rewritten"
+        );
+        assert_eq!(
+            f.baseline(".wiki/pages/concept/a.md"),
+            Some(hash::hash_bytes(b"expected"))
+        );
+        assert!(f.root_is_gone());
+    }
+
+    #[test]
+    fn a_third_hash_blocks_the_root_and_keeps_staging() {
+        let mut f = Fixture::settling(".wiki/pages/concept/a.md", Some("before"), "expected");
+        f.write_target("third");
+        let err = f.advance().unwrap_err();
+        assert_eq!(err.code(), "E_PAGE_CONFLICT");
+        assert!(f.staging_exists());
+        assert!(f.root_is_blocked());
+    }
+
+    #[test]
+    fn a_tampered_staging_file_blocks_instead_of_merging() {
+        let mut f = Fixture::settling(".wiki/pages/concept/a.md", Some("before"), "expected");
+        f.write_staging("tampered");
+        f.advance().unwrap_err();
+        assert_eq!(f.target_bytes_or_missing(), None);
+        assert!(f.root_is_blocked());
+    }
+
+    #[test]
+    fn advance_does_not_fail_a_root_that_settlement_blocked() {
+        let mut f = Fixture::settling(".wiki/pages/concept/a.md", Some("before"), "expected");
+        f.write_target("third");
+        // Reach settlement through `advance` itself, which used to rewrite the
+        // root's `blocked` status to `failed` and erase the replan affordance.
+        f.settle_directly();
+        super::advance(f.dir.path(), &f.cfg, &mut f.store).unwrap();
+        assert!(f.root_is_blocked());
+        let row = f.store.task(f.root_id).unwrap().expect("root remains");
+        assert!(
+            row.last_error
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("E_PAGE_CONFLICT"),
+            "unexpected last_error: {:?}",
+            row.last_error
+        );
+        assert!(f.staging_exists());
+    }
+
+    #[test]
+    fn a_source_that_drifts_after_the_merge_blocks_with_a_replan_hint() {
+        let page = "---\nid: a\ntitle: A\ntype: concept\nsummary: s\ntags: []\nsources: []\nstatus: stable\nupdated: 2026-01-01\n---\nbody\n";
+        let mut f = Fixture::settling(".wiki/pages/concept/a.md", None, page);
+        // The batch merges first; only then does the raw stop matching the
+        // ledger, so `worklist::complete` is what fails.
+        let raw = f.dir.path().join(&f.cfg.paths.raw).join(&f.source_key);
+        std::fs::write(&raw, "# changed after the merge\n").unwrap();
+        let err = f.advance().unwrap_err();
+        assert_eq!(err.code(), "E_SOURCE_DRIFT");
+        assert!(f.root_is_blocked());
+        assert!(f.staging_exists());
+        assert_eq!(f.target_bytes(), page.as_bytes());
+        assert_eq!(
+            f.baseline(".wiki/pages/concept/a.md"),
+            Some(hash::hash_bytes(page.as_bytes()))
+        );
+        let row = f.store.task(f.root_id).unwrap().expect("root remains");
+        let message = row.last_error.unwrap_or_default();
+        assert!(message.starts_with("E_SOURCE_DRIFT"), "{message}");
+        assert!(message.contains("--replan"), "{message}");
+        assert!(!message.contains("batch stays in staging"), "{message}");
+    }
 }
