@@ -411,10 +411,13 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
             return Ok(out);
         }
 
-        // 4. Only now, the earliest root waiting for its route.
+        // 4. Only now, the earliest root waiting for its route. A route under a
+        //    root that is blocked or failed is not delivered: the root's plan
+        //    is stale until a replan settles it.
         if let Some(task) = tasks
             .iter()
             .filter(|t| t.kind == "route" && t.status == "pending")
+            .filter(|t| route_parent_is_open(&tasks, t))
             .min_by_key(|t| t.id)
         {
             if let Some(parent) = task.parent_id {
@@ -518,6 +521,104 @@ pub fn retry(store: &mut Store, id: i64) -> Result<TaskRow> {
     store.task(id)?.ok_or(TaskError::Unknown(id))
 }
 
+/// Rebuilds a root's route without reverting pages the last round already
+/// merged.
+///
+/// A root can stop with stale task rows in three ways: a crash after a page
+/// landed but before its baseline, a drift that kept the queue entry, or a page
+/// conflict. The first pass makes disk and baseline agree again; only then is
+/// the old tree discarded. A target that is neither at its planned `before`
+/// bytes nor at the bytes this root wrote is someone else's edit: the root is
+/// blocked and nothing is deleted.
+pub fn replan(root: &Path, cfg: &Config, store: &mut Store, id: i64) -> Result<()> {
+    let task = store.task(id)?.ok_or(TaskError::Unknown(id))?;
+    // Only a root has a plan to rebuild. A page or route id is not a task a
+    // human can replan, and `E_NO_TASK` is the same answer `retry` gives.
+    if task.kind != "breakdown" {
+        return Err(TaskError::Unknown(id));
+    }
+    let source_key = task.source_key.clone().ok_or_else(|| {
+        bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("root {} has no source", task.id),
+        )
+    })?;
+    let plan = RootPlan::parse(&task)?;
+
+    // Route the raw that is pending now, not the one the old plan froze. The
+    // queue entry must still agree with the source and the raw file; otherwise
+    // `ingest` has to convert the source again before a replan is meaningful.
+    let item = store
+        .work_items()?
+        .into_iter()
+        .find(|item| item.source_key == source_key)
+        .ok_or_else(|| {
+            bad(
+                "E_SOURCE_DRIFT",
+                format!(
+                    "source {source_key} has no pending raw; run `ingest` to convert it before replanning"
+                ),
+            )
+        })?;
+    crate::worklist::verify(root, cfg, store, &source_key, &item.raw_hash).map_err(|err| {
+        bad(
+            "E_SOURCE_DRIFT",
+            format!("{err}; run `ingest` to convert the source again before replanning"),
+        )
+    })?;
+
+    // Recovery is a dry pass: a third hash on any target blocks the root before
+    // a single baseline moves, so putting the page back lets the same replan
+    // run again.
+    let mut baselines = Vec::new();
+    for target in &plan.targets {
+        let current = current_target_hash(root, &target.path)?;
+        let expected = target.expected.as_deref();
+        if target.status == WriteStatus::Written
+            || expected.is_some_and(|expected| current.as_deref() == Some(expected))
+        {
+            if let Some(digest) = expected.or(current.as_deref()) {
+                baselines.push((target.path.clone(), digest.to_string()));
+            }
+            continue;
+        }
+        let unchanged = match (&target.before, &current) {
+            (Some(before), Some(current_digest)) => current_digest == before,
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            continue;
+        }
+        let message = format!(
+            "{} hashes to {} now, but this root planned {}; a replan does not overwrite another edit and the root is blocked",
+            target.path,
+            current.as_deref().unwrap_or("<missing>"),
+            target
+                .before
+                .as_deref()
+                .unwrap_or("<the page did not exist>"),
+        );
+        store.block_task(id, &format!("E_PAGE_CONFLICT: {message}"), &now())?;
+        return Err(bad("E_PAGE_CONFLICT", message));
+    }
+    for (path, digest) in baselines {
+        store.set_baseline(GLOBAL_BASELINE, &path, &digest)?;
+    }
+
+    // The old children and this round's staging are both discarded; the pages
+    // themselves are not touched. `replan_root` drops the children and inserts
+    // the fresh route in one transaction.
+    let fresh = RootPlan::new_routing(&item.raw_key, &item.raw_hash);
+    let stamp = now();
+    let mut route = NewTask::pending("route", &stamp);
+    route.source_key = Some(source_key.clone());
+    route.allowed_json = Some("route-v1".to_string());
+    let _ = std::fs::remove_dir_all(staging_root(root, cfg, &source_key));
+    store.replan_root(id, &fresh.json()?, &route, &stamp)?;
+    Ok(())
+}
+
 /// Reads the tree without advancing it.
 ///
 /// The selection order is `advance`'s: a page, then a reconcile, then a route.
@@ -556,7 +657,7 @@ pub fn status(root: &Path, cfg: &Config, store: &mut Store) -> Result<TaskStatus
     } else {
         pick_task(&tasks, "page")
             .or_else(|| pick_task(&tasks, "reconcile"))
-            .or_else(|| pick_task(&tasks, "route"))
+            .or_else(|| pick_route(&tasks))
     };
     let current = match current {
         Some(task) => Some(view(root, cfg, store, task)?),
@@ -594,14 +695,32 @@ fn pick_task<'a>(tasks: &'a [TaskRow], kind: &str) -> Option<&'a TaskRow> {
         .min_by_key(|t| t.id)
 }
 
+/// A route is only as good as the root it belongs to: a blocked or failed root
+/// has a stale plan, so its route must not be handed to an agent.
+fn route_parent_is_open(tasks: &[TaskRow], route: &TaskRow) -> bool {
+    route
+        .parent_id
+        .and_then(|id| tasks.iter().find(|task| task.id == id))
+        .is_some_and(|parent| !matches!(parent.status.as_str(), "blocked" | "failed"))
+}
+
+fn pick_route(tasks: &[TaskRow]) -> Option<&TaskRow> {
+    tasks
+        .iter()
+        .filter(|t| t.kind == "route" && matches!(t.status.as_str(), "pending" | "active"))
+        .filter(|t| route_parent_is_open(tasks, t))
+        .min_by_key(|t| t.id)
+}
+
 /// Whether the tool, not the agent, owes this root the next step.
 ///
 /// One predicate for both surfaces: `advance` settles the root first and
 /// `status` refuses to call it current, so the two cannot disagree about what
-/// comes next.
+/// comes next. A pending root counts too: an ordinary retry parks a failed or
+/// blocked settle as pending, and the next round must finish it.
 fn owes_settlement(tasks: &[TaskRow], task: &TaskRow) -> bool {
     task.kind == "breakdown"
-        && task.status == "active"
+        && matches!(task.status.as_str(), "active" | "pending")
         && !tasks.iter().any(|child| child.parent_id == Some(task.id))
         && RootPlan::parse(task)
             .map(|plan| matches!(plan.stage, Stage::Writing | Stage::Settling))
@@ -739,13 +858,25 @@ fn close_reconcile(
             let Some(raw) = store.get_raw(raw_key)? else {
                 continue;
             };
-            let item = WorkItem {
-                source_key: raw.source_key.clone(),
-                raw_key: raw.key.clone(),
-                raw_hash: raw.hash.clone(),
-            };
-            Ledger::new(store).import_work_item(&item)?;
-            ensure_root(root, cfg, store, &item, &now())?;
+            let source_key = raw.source_key.clone();
+            // A root that is still open keeps its identity: replan it rather
+            // than creating a second tree for the same source. The replan path
+            // preserves every page that already landed and discards only the
+            // stale plan. If it fails, this reconcile task is not deleted.
+            let existing = store.tasks()?.into_iter().find(|task| {
+                task.kind == "breakdown" && task.source_key.as_deref() == Some(source_key.as_str())
+            });
+            if let Some(root_task) = existing {
+                replan(root, cfg, store, root_task.id)?;
+            } else {
+                let item = WorkItem {
+                    source_key,
+                    raw_key: raw.key.clone(),
+                    raw_hash: raw.hash.clone(),
+                };
+                Ledger::new(store).import_work_item(&item)?;
+                ensure_root(root, cfg, store, &item, &now())?;
+            }
             requeued += 1;
         }
         if requeued == 0 {
@@ -1139,6 +1270,18 @@ fn read_page(root: &Path, _cfg: &Config, target: &str) -> Result<Option<FrontMat
     Ok(Some(front))
 }
 
+fn current_target_hash(root: &Path, target: &str) -> Result<Option<String>> {
+    match hash::hash_file(&root.join(target), true) {
+        Ok(digest) => Ok(Some(digest)),
+        Err(hash::HashError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(TaskError::Hash(err)),
+    }
+}
+
 fn work_item_raw_key(store: &Store, source_key: Option<&str>) -> Result<String> {
     let Some(source_key) = source_key else {
         return Ok(String::new());
@@ -1212,11 +1355,20 @@ mod tests {
     use tempfile::TempDir;
 
     use super::plan::{Origin, RootPlan, TargetPlan, WriteStatus};
-    use super::{finish_root, staging_path, Advance, GLOBAL_BASELINE};
+    use super::{
+        finish_root, replan, retry, staging_path, staging_root, Advance, Verdict, GLOBAL_BASELINE,
+    };
     use crate::config::Config;
     use crate::hash;
-    use crate::store::Store;
+    use crate::store::{NewTask, Store};
     use crate::sync::{self, SyncArgs};
+
+    fn test_page(id: &str, title: &str) -> String {
+        format!(
+            "---\nid: {id}\ntitle: {title}\ntype: concept\nsummary: s\ntags: []\n\
+             sources: []\nstatus: draft\nupdated: 2026-01-01\n---\n\n{title} body\n"
+        )
+    }
 
     /// One repository with a converted source and a root whose one target is
     /// already staged, ready for settlement.
@@ -1297,9 +1449,51 @@ mod tests {
             fixture
         }
 
+        /// A blocked root whose first target already landed and whose second
+        /// target is only staged: exactly the state a replan must recover.
+        fn partially_written() -> Fixture {
+            let page_a = test_page("a", "A");
+            let page_b = test_page("b", "B");
+            let b_target = ".wiki/pages/concept/b.md";
+            let mut fixture = Fixture::settling(".wiki/pages/concept/a.md", None, &page_a);
+            fixture.write_target(&page_a);
+
+            let root = fixture.store.task(fixture.root_id).unwrap().unwrap();
+            let mut plan = RootPlan::parse(&root).unwrap();
+            plan.targets[0].status = WriteStatus::Written;
+            plan.targets.push(TargetPlan {
+                path: b_target.to_string(),
+                title: "B".to_string(),
+                origin: Origin::Created,
+                before: None,
+                expected: Some(hash::hash_bytes(page_b.as_bytes())),
+                status: WriteStatus::Staged,
+                points: Vec::new(),
+                change: "test".to_string(),
+            });
+            fixture
+                .store
+                .set_task_payload(fixture.root_id, &plan.json().unwrap(), None, &super::now())
+                .unwrap();
+            fixture.write_staging_at(b_target, &page_b);
+            fixture
+                .store
+                .block_task(fixture.root_id, "E_PAGE_CONFLICT: test", &super::now())
+                .unwrap();
+            fixture
+        }
+
         fn staging(&self) -> PathBuf {
-            let (typ, id) = super::split_target(&self.cfg, &self.target).unwrap();
+            self.staging_for(&self.target)
+        }
+
+        fn staging_for(&self, target: &str) -> PathBuf {
+            let (typ, id) = super::split_target(&self.cfg, target).unwrap();
             staging_path(self.dir.path(), &self.cfg, &self.source_key, &typ, &id)
+        }
+
+        fn staging_root(&self) -> PathBuf {
+            staging_root(self.dir.path(), &self.cfg, &self.source_key)
         }
 
         fn write_target(&self, text: &str) {
@@ -1309,7 +1503,11 @@ mod tests {
         }
 
         fn write_staging(&self, text: &str) {
-            let path = self.staging();
+            self.write_staging_at(&self.target, text);
+        }
+
+        fn write_staging_at(&self, target: &str, text: &str) {
+            let path = self.staging_for(target);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
         }
@@ -1405,6 +1603,8 @@ mod tests {
         f.write_target("third");
         let err = f.advance().unwrap_err();
         assert_eq!(err.code(), "E_PAGE_CONFLICT");
+        assert_eq!(f.target_bytes(), b"third");
+        assert_eq!(f.baseline(".wiki/pages/concept/a.md"), None);
         assert!(f.staging_exists());
         assert!(f.root_is_blocked());
     }
@@ -1415,6 +1615,7 @@ mod tests {
         f.write_staging("tampered");
         f.advance().unwrap_err();
         assert_eq!(f.target_bytes_or_missing(), None);
+        assert_eq!(f.baseline(".wiki/pages/concept/a.md"), None);
         assert!(f.root_is_blocked());
     }
 
@@ -1437,6 +1638,184 @@ mod tests {
             row.last_error
         );
         assert!(f.staging_exists());
+    }
+
+    #[test]
+    fn a_staging_file_that_cannot_be_parsed_blocks_without_writing() {
+        let mut f = Fixture::settling(".wiki/pages/concept/a.md", Some("before"), "not a page");
+        f.write_target("before");
+        let err = f.advance().unwrap_err();
+        assert_eq!(err.code(), "E_PAGE_CONFLICT");
+        assert_eq!(f.target_bytes(), b"before");
+        assert_eq!(f.baseline(".wiki/pages/concept/a.md"), None);
+        assert!(f.staging_exists());
+        assert!(f.root_is_blocked());
+    }
+
+    #[test]
+    fn replan_keeps_written_pages_and_rebuilds_the_route() {
+        let mut f = Fixture::partially_written();
+        let written = f.target_bytes();
+        assert_eq!(f.baseline(&f.target), None);
+        let item = f
+            .store
+            .work_items()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.source_key == f.source_key)
+            .expect("the source still has a pending raw");
+
+        replan(f.dir.path(), &f.cfg, &mut f.store, f.root_id).unwrap();
+
+        assert_eq!(f.target_bytes(), written, "a written page is not reverted");
+        assert_eq!(
+            f.baseline(&f.target),
+            Some(hash::hash_bytes(&written)),
+            "recovery records the baseline the crash missed"
+        );
+        let tasks = f.store.tasks().unwrap();
+        let kinds: Vec<&str> = tasks.iter().map(|task| task.kind.as_str()).collect();
+        assert_eq!(kinds, ["breakdown", "route"]);
+        assert_eq!(tasks[0].status, "active");
+        assert_eq!(tasks[0].last_error, None);
+        let plan = RootPlan::parse(&tasks[0]).unwrap();
+        assert_eq!(plan.stage, super::Stage::Routing);
+        assert!(plan.targets.is_empty());
+        assert_eq!(plan.raw_key, item.raw_key);
+        assert_eq!(plan.raw_hash, item.raw_hash);
+        assert!(
+            !f.staging_root().exists()
+                || std::fs::read_dir(f.staging_root())
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "the old round's staging is discarded"
+        );
+    }
+
+    #[test]
+    fn replan_refuses_a_non_root_task() {
+        let mut f = Fixture::partially_written();
+        let mut page = NewTask::pending("page", &super::now());
+        page.parent_id = Some(f.root_id);
+        let page_id = f.store.insert_task(&page).unwrap();
+        let err = replan(f.dir.path(), &f.cfg, &mut f.store, page_id).unwrap_err();
+        assert_eq!(err.code(), "E_NO_TASK");
+    }
+
+    #[test]
+    fn a_pending_root_settles_after_an_ordinary_retry() {
+        let page = test_page("a", "A");
+        let mut f = Fixture::settling(".wiki/pages/concept/a.md", Some("before"), &page);
+        f.settle_directly();
+        f.write_target("third");
+        f.advance().unwrap_err();
+        assert!(f.root_is_blocked());
+
+        f.write_target("before");
+        retry(&mut f.store, f.root_id).unwrap();
+        assert_eq!(f.store.task(f.root_id).unwrap().unwrap().status, "pending");
+
+        super::advance(f.dir.path(), &f.cfg, &mut f.store).unwrap();
+        assert!(f.root_is_gone(), "the pending root settles without a child");
+        assert_eq!(f.target_bytes(), page.as_bytes());
+        assert_eq!(
+            f.baseline(".wiki/pages/concept/a.md"),
+            Some(hash::hash_bytes(page.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn a_route_under_a_blocked_or_failed_root_is_not_delivered() {
+        let mut f = Fixture::settling(".wiki/pages/concept/a.md", None, "expected");
+        let route_id = f
+            .store
+            .tasks()
+            .unwrap()
+            .into_iter()
+            .find(|task| task.kind == "route" && task.parent_id == Some(f.root_id))
+            .expect("the fixture root owns a route")
+            .id;
+        f.store
+            .block_task(f.root_id, "E_PAGE_CONFLICT: test", &super::now())
+            .unwrap();
+        assert!(
+            super::advance(f.dir.path(), &f.cfg, &mut f.store)
+                .unwrap()
+                .task
+                .is_none(),
+            "a blocked root's route is not exposed"
+        );
+        assert!(super::status(f.dir.path(), &f.cfg, &mut f.store)
+            .unwrap()
+            .current
+            .is_none());
+
+        f.store
+            .set_task_status(f.root_id, "failed", &super::now())
+            .unwrap();
+        assert!(
+            super::advance(f.dir.path(), &f.cfg, &mut f.store)
+                .unwrap()
+                .task
+                .is_none(),
+            "a failed root's route is not exposed"
+        );
+        assert_eq!(
+            f.store.task(route_id).unwrap().unwrap().status,
+            "pending",
+            "the route stays queued for a replan"
+        );
+    }
+
+    #[test]
+    fn regenerating_a_review_replans_an_existing_blocked_root() {
+        let mut f = Fixture::partially_written();
+        let page = f.target_bytes();
+        let raw_key = f
+            .store
+            .all_raws()
+            .unwrap()
+            .into_iter()
+            .find(|raw| raw.source_key == f.source_key)
+            .unwrap()
+            .key;
+        let payload = serde_json::json!({
+            "page_hash": hash::hash_bytes(&page),
+            "raw_keys": [raw_key],
+        });
+        let mut reconcile = NewTask::pending("reconcile", &super::now());
+        reconcile.target_path = Some(f.target.clone());
+        reconcile.payload_json = Some(payload.to_string());
+        let reconcile_id = f.store.insert_task(&reconcile).unwrap();
+
+        super::close(
+            f.dir.path(),
+            &f.cfg,
+            &mut f.store,
+            reconcile_id,
+            None,
+            None,
+            Some(Verdict::Regenerate),
+        )
+        .unwrap();
+
+        assert!(f.store.task(reconcile_id).unwrap().is_none());
+        assert_eq!(f.target_bytes(), page, "the written page is preserved");
+        let root = f.store.task(f.root_id).unwrap().expect("root remains");
+        assert_eq!(root.status, "active");
+        assert_eq!(root.last_error, None);
+        let tasks = f.store.tasks().unwrap();
+        let kinds: Vec<&str> = tasks.iter().map(|task| task.kind.as_str()).collect();
+        assert_eq!(kinds, ["breakdown", "route"]);
+        assert!(
+            !f.staging_root().exists()
+                || std::fs::read_dir(f.staging_root())
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "replanning through a review also drops the old staging"
+        );
     }
 
     #[test]

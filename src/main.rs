@@ -962,10 +962,43 @@ fn run_task(action: TaskAction) -> ! {
             Ok(status) => report::emit_with(cmd, status, Exit::Ok, human_task_status),
             Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
         },
-        TaskAction::Retry { id } => match task::retry(&mut store, id) {
-            Ok(task) => report::emit_with(cmd, task, Exit::Ok, human_task_retry),
-            Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
-        },
+        TaskAction::Retry { id, replan } => {
+            if replan {
+                let guard = match lock::acquire(&root) {
+                    Ok(guard) => guard,
+                    Err(err) => report::fail(
+                        cmd,
+                        if err.code() == "E_LOCKED" {
+                            Exit::Busy
+                        } else {
+                            Exit::Usage
+                        },
+                        err.code(),
+                        &err.hint(),
+                    ),
+                };
+                let result = task::replan(&root, &cfg, &mut store, id);
+                drop(guard);
+                match result {
+                    Ok(()) => match store.task(id) {
+                        Ok(Some(task)) => report::emit_with(cmd, task, Exit::Ok, human_task_replan),
+                        Ok(None) => report::fail(
+                            cmd,
+                            Exit::Error,
+                            "E_NO_TASK",
+                            &format!("no open task with id {id}"),
+                        ),
+                        Err(err) => report::fail(cmd, Exit::Error, "E_DB", &err.to_string()),
+                    },
+                    Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
+                }
+            } else {
+                match task::retry(&mut store, id) {
+                    Ok(task) => report::emit_with(cmd, task, Exit::Ok, human_task_retry),
+                    Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
+                }
+            }
+        }
     }
 }
 
@@ -1053,6 +1086,10 @@ fn human_task_status(status: &task::TaskStatus) -> String {
 
 fn human_task_retry(task: &llm_wiki::store::TaskRow) -> String {
     format!("retried: {} {} ({})", task.kind, task.id, task.status)
+}
+
+fn human_task_replan(task: &llm_wiki::store::TaskRow) -> String {
+    format!("replanned: {} {} ({})", task.kind, task.id, task.status)
 }
 
 /// `query` is the only command that decides when to pay for an index update: a

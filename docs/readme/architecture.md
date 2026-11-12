@@ -41,7 +41,7 @@ agent 生成 ── task done --payload ──▶ .wiki/cache/staging/
 
 来源待办独立于页面：转换登记时持久化，重跑交付未完成来源；作者可以更新已有页，不要求每源新建。`affected_pages` 是现有引用关系得到的提示，不保证语义影响完整。任务树以它做增量补写的下限：每个受影响的现有页必须落成一片叶，或显式标 `unchanged` 并写理由。
 
-`task done` 关闭一片叶时只校验载荷与全局基线，把渲染后的页面写进 staging；关闭 `reconcile` 时用 `--accept` 把该页当前哈希写进基线，或用 `--regenerate` 重建来源待办并重新入队；根收尾时才整批合并进 `.wiki/pages/`，并用四道哈希核对来源：源文件当前摘要、`raws` 行、待办记录、根任务登记的 raw 哈希。漂移退出 1，保留待办与 staging。它不验证正文，不发布或恢复页面；没有候选发布、自动内容版本或内置回退，也没有自动备份。CLI 锁不能保护文件系统层的写页，任务外改动在关闭时以 `E_PAGE_CONFLICT` 列出。独立备份是否存在由用户负责。
+`task done` 关闭一片叶时只校验载荷与全局基线，把渲染后的页面写进 staging；关闭 `reconcile` 时用 `--accept` 把该页当前哈希写进基线，或用 `--regenerate` 把来源重新入队：已有根走重规划，保留已合并页、丢弃旧子任务与 staging，再按当前 raw 重建路由；只有没有根时才新建。根收尾时才整批合并进 `.wiki/pages/`，并用四道哈希核对来源：源文件当前摘要、`raws` 行、待办记录、根任务登记的 raw 哈希。漂移退出 1，保留待办；已合并页不回滚，根阻塞后由人用 `task retry <根> --replan` 恢复。它不验证正文，不发布或恢复页面；没有候选发布、自动内容版本或内置回退，也没有自动备份。CLI 锁不能保护文件系统层的写页，任务外改动在关闭时以 `E_PAGE_CONFLICT` 列出。独立备份是否存在由用户负责。
 
 页面与全局基线的比对发生在 `advance` 开头（`task::reconcile_scan`）：有 `sources` 的差异页建 `reconcile` 任务，没 `sources` 的直接写进基线，基线里已不存在的页按接受的删除删掉对应行。基线不再在空闲轮无条件刷新，否则任务外的改动会被静默吸收。
 
@@ -99,7 +99,7 @@ agent 生成 ── task done --payload ──▶ .wiki/cache/staging/
 - 子叶只写 staging，正式页只在根收尾时整批出现；合并前检索不到这一批。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 根收尾只清这一棵根的来源待办，重复收尾是幂等空操作。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 忽略列表只有一个解释入口 `ignore::IgnoreList`：`ingest` 跳过，不许在调用点各自拼通配。`[scan].ignore` 只是目录名的粗过滤，两者不混用。（检查：tests/scan_signature.rs::an_entry_of_the_ignore_list_is_invisible_to_the_scan）
-- 源在任务期间漂移不得合并，`E_SOURCE_DRIFT` 保留待办、staging 与任务。（检查：tests/cli_task.rs::task_done_obeys_the_repository_lock）
+- 源在任务期间漂移不得合并，`E_SOURCE_DRIFT` 保留待办与任务；已合并页不回滚，恢复走 `task retry <根> --replan`。（检查：tests/cli_task.rs::task_done_obeys_the_repository_lock）
 - 索引是派生状态，从正式页增量刷新；根收尾合并后立即刷。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 关系索引（`page_nodes` / `page_links` / `page_source_refs`）同样只从 Markdown 重建：`query`、`graph`、`lint` 与 `task::affected_pages` 共用 `relation::Resolver` 和同一份反查，不各自扫页；`Store::apply_refresh` 在一个事务里写 FTS 与三张关系表。`generation` 只在关系真变化时递增。（检查：tests/query.rs::refresh_keeps_links_both_ways_and_survives_page_deletion）
 

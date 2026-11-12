@@ -24,8 +24,8 @@
 2. **摄入**：`ingest` 扫描、转换并登记 `.wiki/raw/`，持久化未整理来源，输出正式页目录、页面类型、schema、待办 raw 哈希和受影响页面。刚改过的源等 `[ingest].settle_seconds`（默认 300 秒），`--force` 跳过等待并全文复核。每轮转换按队列顺序取前 `max_per_run` 条；上一轮转换失败的源排在从未尝试过的文件之后，本轮超出预算的源以 `waiting:` 逐条列出。
 3. **拆解**：`ingest` 给出一棵待拆叶的根任务（`breakdown`）。agent 读 raw 与受影响页面清单，把这一批拆成一页一片的子叶，用 `task done <id> --leaves <文件>` 提交；每个现有受影响页要么落成一片叶，要么显式标 `unchanged` 并写理由。
 4. **逐叶生成**：`task done` 返回下一页叶子任务。agent 读该页正文与拆解要点，提交载荷（`title`/`summary`/`tags`/`status`/正文），用 `task done <id> --payload <文件>` 关闭；工具渲染 frontmatter、写 `.wiki/cache/staging/`，不碰正式页。
-5. **合并**：最后一片叶关闭后，根任务收尾：全批硬校验、与全局基线比对、逐页原子写入 `.wiki/pages/`、刷索引、核对四道哈希并清待办。源在期间变了就 `E_SOURCE_DRIFT`，staging 保留、根回到待拆叶。`query` 默认含会话蒸馏，`--no-archive` 排除它们。
-6. **复核**：任务外被改过的页面会先变成 `reconcile` 任务，任务视图的 `target.reference` 是那页，源键写在任务视图里。agent 读页与关联源后二选一：`task done <id> --accept` 承认改动并推进基线；`--regenerate` 把来源重新入队，走正常拆解与生成覆盖它。没有 `sources` 的页没有可对照的源，直接吸收进基线。
+5. **合并**：最后一片叶关闭后，根任务收尾：全批硬校验、与全局基线比对、逐页原子写入 `.wiki/pages/`、刷索引、核对四道哈希并清待办。源在期间变了就 `E_SOURCE_DRIFT`：已合并的页不回滚，根阻塞；等源与 raw 重新稳定后，人用 `task retry <根> --replan` 按当前 raw 重规划。`query` 默认含会话蒸馏，`--no-archive` 排除它们。
+6. **复核**：任务外被改过的页面会先变成 `reconcile` 任务，任务视图的 `target.reference` 是那页，源键写在任务视图里。agent 读页与关联源后二选一：`task done <id> --accept` 承认改动并推进基线；`--regenerate` 把来源重新入队：已有根按重规划保留已写页、重建路由，没有根才新建，然后走正常拆解与生成覆盖它。没有 `sources` 的页没有可对照的源，直接吸收进基线。
 7. **删源**：源文件被删后不用另外下命令，下一轮 `ingest` 按 `[ingest].on_missing` 自动收口（默认 `forget`）：页面对它的引用去掉、转 `stale`，一条来源不剩的页整页删除，raw 文件与账本行（含待办）一并清掉，轮次警告以 `vanished:` 开头。收口是自动的、可重试的，失败只报 finding 并把账本行留到下一轮；删除本身不可撤销，只能靠你自己的备份。
 
 **写页没有发布门。** 根收尾不验证正文质量，也不回滚已合并页面；工具不自动备份，没有内置历史恢复。CLI 锁只约束工具命令，不能阻止文件系统层的写页；任务外改动会在关闭时以 `E_PAGE_CONFLICT` 列出。需要恢复必须有独立备份。
@@ -115,7 +115,7 @@ llm-wiki --version                         # 打印版本
 | `read <REF> [--offset <N>] [--limit <N>]` | 读取 wiki 内部文件；`REF` 用 ingest 返回的路径或 `schema`/`index`，单次最多 2000 行 |
 | `task done <ID> [--leaves <FILE>] [--payload <FILE>] [--accept] [--regenerate]` | 关闭当前任务：拆解交叶清单，生成交页面载荷，复核二选一；返回下一个任务 |
 | `task status` | 看任务树、当前任务、失败与阻塞的根 |
-| `task retry <ID>` | 人工重置失败任务；技能不教自动重试 |
+| `task retry <ID> [--replan]` | 人工重置失败任务；`--replan` 只接受根，保留已合并页，按当前 raw 重建路由 |
 | `query [TEXT] [--page <REF> \| --source <RAW>] [--relation <KIND>] [--offset <N>] [--limit <N>] [--no-archive] [--graph]` | FTS5 检索、链接图与精确关系读取；`KIND` 为 `outgoing`/`incoming`/`sources`/`citing`，精确读取分页并带 `generation`；无命中 exit 0 |
 | `ignore [--add <PATTERN>] [--remove <PATTERN>] [--check <KEY>]` | 查看、维护和检查忽略列表 |
 | `--version` | 打印工具软件版本，不是内容版本管理 |

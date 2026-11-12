@@ -1136,7 +1136,7 @@ impl Store {
     ) -> Result<i64> {
         let tx = self.conn.transaction()?;
         let updated = tx.execute(
-            "UPDATE tasks SET payload_json=?1,updated_at=?2 WHERE id=?3 AND kind='breakdown'",
+            "UPDATE tasks SET payload_json=?1,status='active',last_error=NULL,updated_at=?2 WHERE id=?3 AND kind='breakdown'",
             params![root_payload, now, root_id],
         )?;
         require_one_row(updated)?;
@@ -2391,6 +2391,8 @@ mod tests {
             )
             .unwrap();
 
+        s.block_task(root_id, "E_PAGE_CONFLICT: old plan", now)
+            .unwrap();
         let new_route = s
             .replan_root(root_id, "plan-2", &NewTask::pending("route", later), later)
             .unwrap();
@@ -2401,10 +2403,11 @@ mod tests {
             );
         }
         assert_eq!(s.task(new_route).unwrap().unwrap().parent_id, Some(root_id));
-        assert_eq!(
-            s.task(root_id).unwrap().unwrap().payload_json.as_deref(),
-            Some("plan-2")
-        );
+        let root = s.task(root_id).unwrap().unwrap();
+        assert_eq!(root.payload_json.as_deref(), Some("plan-2"));
+        assert_eq!(root.status, "active", "a replan reopens the root");
+        assert_eq!(root.last_error, None, "the old failure is cleared");
+        assert_eq!(root.updated_at, later);
         let after_replan = s.tasks().unwrap().len();
         assert_eq!(after_replan, 2, "one root plus one fresh route");
 

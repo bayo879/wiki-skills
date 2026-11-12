@@ -857,7 +857,9 @@ pub(crate) fn close_route(
     crate::worklist::verify(root, cfg, store, &source_key, &plan.raw_hash).map_err(|err| {
         bad(
             "E_SOURCE_DRIFT",
-            format!("{err}; reread the source and route it again"),
+            format!(
+                "{err}; pages already merged are not rolled back; when the source and raw settle again, run `task retry {parent} --replan`"
+            ),
         )
     })?;
 

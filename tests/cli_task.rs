@@ -710,3 +710,72 @@ fn a_page_without_sources_is_absorbed_not_reviewed() {
     let task = next_task(&dir);
     assert!(task.is_null(), "{task}");
 }
+
+#[test]
+fn replan_rebuilds_a_roots_route_from_the_cli() {
+    let dir = single_source();
+    let (code, status) = run(&dir, &["task", "status"]);
+    assert_eq!(code, 0, "{status}");
+    let root_id = status["roots"][0]["id"].as_i64().unwrap();
+
+    let (code, body) = run(&dir, &["task", "retry", &root_id.to_string(), "--replan"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["kind"], "breakdown", "{body}");
+    assert_eq!(body["status"], "active", "{body}");
+    assert_eq!(body["last_error"], Value::Null, "{body}");
+
+    let next = next_task(&dir);
+    assert_eq!(next["kind"], "route", "{next}");
+    assert_eq!(next["source"]["key"], "a.md", "{next}");
+}
+
+#[test]
+fn replan_refuses_a_non_root_task() {
+    let dir = single_source();
+    let route = next_task(&dir);
+    assert_eq!(route["kind"], "route", "{route}");
+    let (code, body) = run(
+        &dir,
+        &["task", "retry", &task_id(&route).to_string(), "--replan"],
+    );
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_NO_TASK", "{body}");
+    assert_eq!(route["kind"], "route", "the route is left alone");
+}
+
+#[test]
+fn an_accepted_review_still_makes_the_old_page_plan_conflict() {
+    let dir = settled_alpha_with_b_pending();
+    let page = deliver_update_alpha_page(&dir);
+    let path = dir.path().join(".wiki/pages/concept/alpha.md");
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str("\nchanged outside\n");
+    std::fs::write(&path, &text).unwrap();
+
+    // `task status` is read-only; an `ingest` is what scans for authored edits.
+    let page_task = next_task(&dir);
+    assert_eq!(page_task["kind"], "page", "{page_task}");
+    let (code, status) = run(&dir, &["task", "status"]);
+    assert_eq!(code, 0, "{status}");
+    let reconcile = status["reconcile"][0]["id"].as_i64().unwrap();
+    let (code, body) = run(&dir, &["task", "done", &reconcile.to_string(), "--accept"]);
+    assert_eq!(code, 0, "{body}");
+
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&page).to_string(),
+            "--payload",
+            &payload(&dir),
+        ],
+    );
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_PAGE_CONFLICT", "{body}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        text,
+        "an accepted review does not bless the stale page plan"
+    );
+}

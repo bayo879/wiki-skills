@@ -198,6 +198,9 @@ pub enum TaskAction {
     Retry {
         /// Task id to reset.
         id: i64,
+        /// Rebuild a root's route without reverting pages already merged.
+        #[arg(long)]
+        replan: bool,
     },
 }
 
