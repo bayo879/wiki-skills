@@ -31,8 +31,9 @@ use std::sync::Mutex;
 
 use lopdf::Document;
 
+use self::validate::FailureKind;
 use super::asset;
-use super::{Extracted, ParseError, Parser, Result, Source, Warning};
+use super::{Extracted, ParseError, Parser, Result, Source, UnavailableReason, Warning};
 
 /// Backend id recorded in the raw frontmatter and in command output.
 pub const ID: &str = "builtin-pdf";
@@ -80,10 +81,8 @@ impl Parser for PdfParser {
         // document must not be read twice just to answer the probe.
         let validate::Validated {
             document, has_text, ..
-        } = validate::load_and_validate(&input.bytes).map_err(|failure| ParseError::Bad {
-            key: input.key.clone(),
-            message: failure.message(),
-        })?;
+        } = validate::load_and_validate(&input.bytes)
+            .map_err(|failure| unavailable(&input.key, failure))?;
 
         if !has_text {
             return Ok(Extracted {
@@ -103,6 +102,36 @@ impl Parser for PdfParser {
         let bytes = serialise(document, &input.key)?;
         let text = extract(&bytes, &input.key)?;
         Ok(into_markdown(&text, &input.key))
+    }
+}
+
+/// Turns one strict-walk failure into the error the caller sees.
+///
+/// A document that cannot be opened or needs a password is a plain parse
+/// failure. Everything else means the walk got far enough to know text is
+/// missing: a stream or page it could not read is a partial extraction, and a
+/// font it cannot map back to Unicode would silently drop characters, so it is
+/// reported as lossy decoding. Naming the kind and the page is what lets the
+/// caller report "page 3, undecodable stream" instead of guessing "no text".
+fn unavailable(key: &str, failure: validate::Failure) -> ParseError {
+    let key = String::from(key);
+    match failure.kind {
+        FailureKind::Load | FailureKind::PasswordRequired => ParseError::Bad {
+            key,
+            message: failure.message(),
+        },
+        FailureKind::FontEncoding => ParseError::Unavailable {
+            key: key.clone(),
+            backend: String::from(ID),
+            reason: UnavailableReason::LossyDecode,
+            page: failure.page,
+        },
+        _ => ParseError::Unavailable {
+            key,
+            backend: String::from(ID),
+            reason: UnavailableReason::PartialExtraction,
+            page: failure.page,
+        },
     }
 }
 

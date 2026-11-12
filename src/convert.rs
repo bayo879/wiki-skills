@@ -373,9 +373,28 @@ fn render_raw(
     if extracted.no_text_layer {
         out.push_str("no_text_layer: true\n");
     }
+    render_warnings(&mut out, &extracted.warnings);
     out.push_str("pin: false\n---\n");
     out.push_str(&extracted.markdown);
     out
+}
+
+/// Renders `warnings` as a block sequence under a `warnings:` key.
+///
+/// An empty list is written as `[]` rather than omitted: a reader can then tell
+/// "the backend reported nothing" from "this raw predates the field", and both
+/// parse. The list is a sequence of mappings rather than flow style so a message
+/// containing a comma or a brace changes nothing.
+fn render_warnings(out: &mut String, warnings: &[Warning]) {
+    if warnings.is_empty() {
+        out.push_str("warnings: []\n");
+        return;
+    }
+    out.push_str("warnings:\n");
+    for warning in warnings {
+        let _ = writeln!(out, "  - code: {}", yaml_scalar(&warning.code));
+        let _ = writeln!(out, "    message: {}", yaml_scalar(&warning.message));
+    }
 }
 
 /// Renders `value` as a YAML scalar that parses back to the same string.
@@ -391,7 +410,10 @@ pub(crate) fn yaml_scalar(value: &str) -> String {
             .chars()
             .any(|c| c.is_control() || "#:\"'\\,[]{}&*!|>%@`".contains(c))
         || value.starts_with('-')
-        || value.starts_with('?');
+        || value.starts_with('?')
+        // A bare `true` or `500` would come back as a boolean or a number, so
+        // a value that looks like another YAML type is quoted as well.
+        || looks_like_another_type(value);
 
     if !needs_quotes {
         return String::from(value);
@@ -410,6 +432,18 @@ pub(crate) fn yaml_scalar(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Whether YAML would read `value` as something other than a string.
+fn looks_like_another_type(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~" | ".nan" | ".inf" | "-.inf"
+    ) {
+        return true;
+    }
+    value.parse::<f64>().is_ok()
 }
 
 /// The value of `name` in the first frontmatter block of `text`.
@@ -505,6 +539,7 @@ mod tests {
                 "converted_at",
                 "asset",
                 "no_text_layer",
+                "warnings",
                 "pin"
             ]
         );
@@ -521,7 +556,14 @@ mod tests {
         );
         assert_eq!(
             keys(&plain),
-            ["source", "source_hash", "parser", "converted_at", "pin"]
+            [
+                "source",
+                "source_hash",
+                "parser",
+                "converted_at",
+                "warnings",
+                "pin"
+            ]
         );
         assert!(plain.contains("pin: false\n---\n正文\n"));
     }
@@ -566,6 +608,77 @@ mod tests {
             Some("false")
         );
         assert_eq!(frontmatter_field(&document, "asset"), None);
+    }
+
+    fn frontmatter(document: &str) -> serde_yaml::Value {
+        let body = document.strip_prefix("---\n").expect("frontmatter opens");
+        let end = body.find("\n---\n").expect("frontmatter closes");
+        serde_yaml::from_str(&body[..end]).expect("frontmatter is YAML")
+    }
+
+    #[test]
+    fn empty_warnings_render_as_an_empty_sequence() {
+        let document = render_raw(
+            "source/a.md",
+            "blake3:abc",
+            "builtin-text",
+            "t",
+            &extracted(false, false),
+        );
+        let value = frontmatter(&document);
+        assert_eq!(
+            value["warnings"].as_sequence().map(Vec::len),
+            Some(0),
+            "an empty list must be explicit, not missing"
+        );
+    }
+
+    #[test]
+    fn warnings_survive_the_yaml_round_trip() {
+        let extracted = Extracted {
+            markdown: String::from("正文\n"),
+            warnings: vec![
+                Warning::new("bad_utf8", "invalid byte at offset 3, replaced"),
+                Warning::new("odd", "quote \" colon: dash - [x] #hash {}"),
+                Warning::new("numeric", "500"),
+                Warning::new("spaced", " leading and trailing "),
+            ],
+            asset: false,
+            no_text_layer: false,
+        };
+        let document = render_raw("source/a.md", "blake3:abc", "builtin-html", "t", &extracted);
+        let value = frontmatter(&document);
+        let warnings = value["warnings"].as_sequence().expect("a sequence");
+        let pairs: Vec<(&str, &str)> = warnings
+            .iter()
+            .map(|warning| {
+                (
+                    warning["code"].as_str().expect("code is a string"),
+                    warning["message"].as_str().expect("message is a string"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("bad_utf8", "invalid byte at offset 3, replaced"),
+                ("odd", "quote \" colon: dash - [x] #hash {}"),
+                ("numeric", "500"),
+                ("spaced", " leading and trailing "),
+            ],
+            "400 and 500 stay strings; punctuation changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_raw_predating_the_warnings_field_still_reads() {
+        let old = "---\nsource: source/a.md\nsource_hash: blake3:abc\nparser: builtin-text\nconverted_at: t\npin: false\n---\n正文\n";
+        assert_eq!(
+            frontmatter_field(old, "source").as_deref(),
+            Some("source/a.md")
+        );
+        assert_eq!(frontmatter_field(old, "pin").as_deref(), Some("false"));
+        assert_eq!(frontmatter_field(old, "warnings"), None);
     }
 
     #[test]

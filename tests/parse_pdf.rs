@@ -280,12 +280,27 @@ fn parse_bytes(bytes: &[u8]) -> llm_wiki::parse::Result<llm_wiki::parse::Extract
     PdfParser::new().parse(&Source::inline("sample.pdf", bytes))
 }
 
-/// The stable reason a parse failed with, panicking on success.
-fn failure_reason(bytes: &[u8]) -> String {
+/// The error a parse failed with, panicking on success.
+fn failure(bytes: &[u8]) -> parse::ParseError {
     match parse_bytes(bytes) {
         Ok(extracted) => panic!("expected a failure, got {:?}", extracted.markdown),
-        Err(llm_wiki::parse::ParseError::Bad { message, .. }) => message,
-        Err(other) => panic!("expected a bad-source error, got {other:?}"),
+        Err(error) => error,
+    }
+}
+
+/// The detail of a [`parse::ParseError::Bad`], panicking on any other error.
+fn bad_message(bytes: &[u8]) -> String {
+    match failure(bytes) {
+        parse::ParseError::Bad { message, .. } => message,
+        other => panic!("expected a bad-source error, got {other:?}"),
+    }
+}
+
+/// The stable reason code and page of an unavailable source.
+fn unavailable(bytes: &[u8]) -> (&'static str, Option<u32>) {
+    match failure(bytes) {
+        parse::ParseError::Unavailable { reason, page, .. } => (reason.code(), page),
+        other => panic!("expected an unavailable source, got {other:?}"),
     }
 }
 
@@ -304,7 +319,7 @@ fn rc4_document_with_an_empty_user_password_is_extracted() {
 #[test]
 fn rc4_document_that_needs_a_password_is_refused() {
     let bytes = common::make_encrypted_pdf_bytes("secret body", 3, "secret");
-    let reason = failure_reason(&bytes);
+    let reason = bad_message(&bytes);
     assert!(reason.contains("pdf_password_required"), "{reason}");
 }
 
@@ -338,16 +353,21 @@ fn unicode_cmap_font_without_a_to_unicode_stream_is_extracted() {
 #[test]
 fn a_named_cmap_the_pipeline_cannot_decode_is_an_error() {
     let bytes = common::make_pdf_with_unicode_cmap_bytes("GBK-EUC-H");
-    let reason = failure_reason(&bytes);
-    assert!(reason.contains("pdf_font_encoding"), "{reason}");
+    assert_eq!(
+        unavailable(&bytes),
+        ("lossy_decode", Some(1)),
+        "a CMap the pipeline cannot map back to Unicode drops characters, so it must not pass as text"
+    );
 }
 
 #[test]
 fn an_undecodable_page_stream_fails_the_whole_document() {
     let bytes = common::make_pdf_with_corrupt_second_page_bytes();
-    let reason = failure_reason(&bytes);
-    assert!(reason.contains("pdf_stream_decode"), "{reason}");
-    assert!(reason.contains("page 2"), "{reason}");
+    assert_eq!(
+        unavailable(&bytes),
+        ("partial_extraction", Some(2)),
+        "the second page is named so the report can point at it"
+    );
 }
 
 #[test]
@@ -363,15 +383,13 @@ fn text_inside_a_form_xobject_is_extracted() {
 #[test]
 fn a_form_that_draws_itself_is_an_error() {
     let bytes = common::make_pdf_with_form_cycle_bytes();
-    let reason = failure_reason(&bytes);
-    assert!(reason.contains("pdf_form_cycle"), "{reason}");
+    assert_eq!(unavailable(&bytes), ("partial_extraction", Some(1)));
 }
 
 #[test]
 fn a_draw_of_a_form_the_resources_lack_is_an_error() {
     let bytes = common::make_pdf_with_missing_form_bytes();
-    let reason = failure_reason(&bytes);
-    assert!(reason.contains("pdf_invalid_reference"), "{reason}");
+    assert_eq!(unavailable(&bytes), ("partial_extraction", Some(1)));
 }
 
 #[test]
