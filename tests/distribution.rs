@@ -87,25 +87,29 @@ fn invoke(bin: &Path, caller: &Path, args: &[&str]) -> serde_json::Value {
 }
 
 #[test]
-fn relative_source_leaves_and_payload_use_the_package_root() {
+fn relative_source_route_and_payload_use_the_package_root() {
     let root = tempfile::tempdir().unwrap();
     let bin = install(root.path());
     let caller = tempfile::tempdir().unwrap();
     fs::write(root.path().join("source.md"), "# Alpha\nPackage source\n").unwrap();
     let data = invoke(&bin, caller.path(), &["ingest", "source.md", "--force"]);
     let id = data["next_task"]["id"].as_i64().unwrap().to_string();
-    fs::write(root.path().join(".wiki/leaves.json"), r#"{"leaves":[{"type":"concept","id":"alpha","title":"Alpha","brief":"Package conclusion"}]}"#).unwrap();
+    fs::write(
+        root.path().join(".wiki/route.json"),
+        r#"{"points":[{"id":"p1","finding":"Package conclusion","evidence":"source.md"}],"assignments":[{"point":"p1","action":"create","proposal":"n1"}],"proposals":[{"id":"n1","type":"concept","title":"Alpha","summary":"Package conclusion","why_new":"the source stands alone","why_not_existing":"no page covers it"}],"maintenance":[],"searches":[{"query":"Alpha","candidates":[],"reason":"no existing page"}]}"#,
+    )
+    .unwrap();
     let data = invoke(
         &bin,
         caller.path(),
-        &["task", "done", &id, "--leaves", ".wiki/leaves.json"],
+        &["task", "done", &id, "--payload", ".wiki/route.json"],
     );
-    let leaf = data["next_task"]["id"].as_i64().unwrap().to_string();
+    let page = data["next_task"]["id"].as_i64().unwrap().to_string();
     fs::write(root.path().join(".wiki/payload.json"), r#"{"title":"Alpha","summary":"Package conclusion","tags":[],"status":"draft","body":"Package knowledge."}"#).unwrap();
     invoke(
         &bin,
         caller.path(),
-        &["task", "done", &leaf, "--payload", ".wiki/payload.json"],
+        &["task", "done", &page, "--payload", ".wiki/payload.json"],
     );
     assert!(root.path().join(".wiki/pages/concept/alpha.md").exists());
     assert!(!caller.path().join(".wiki").exists());

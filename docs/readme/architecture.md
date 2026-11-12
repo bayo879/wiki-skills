@@ -94,13 +94,13 @@ agent 生成 ── task done --payload ──▶ .wiki/cache/staging/
 - 账本表只有 `src/store.rs` 能执行 SQL，业务写入只有 `src/ledger.rs` 一个入口：`ingest` 登记、`moves` 改键都表达成 `ledger::Ledger` 的一次调用，顺序与失败语义写在 `ledger.rs` 的注释里。想加意图，加 `Ledger` 的方法，不要绕回 `store`。（检查：tests/invariants.rs::only_ledger_writes_the_ledger）
 - 转换一次只有一个事务：`Store::register_conversion` 在同一个事务里写 `sources`、`raws`、`work_items`、`source_facts` 四张表，raw 文件先落盘、字节与摘要来自同一次读取。半路失败整笔回滚，不会留下「转换成功、待办丢失」的中间态。事务只覆盖账本，不覆盖文件：落在盘的 raw 与账本之间仍可能因断电不一致，由 `doctor` 的 `scan`（`layer=raw` 的 `new`/`changed`）与 `lint` `L7` 暴露。（检查：tests/worklist.rs::failed_enqueue_rolls_back_conversion_baseline_and_can_retry）
 - 对账只有一个答案：`scan::classify`（仓库根）与 `scan::classify_raw`（`.wiki/raw/`）是唯一的分类引擎，「账本认不认识这个 raw」只由 `scan::RawLedger` 回答；`scan` 输出的 `layer` 字段与 `lint` `L7` 都调它，不在调用点自建集合。`tests/reconcile.rs` 钉住这两处必须同答。（检查：tests/reconcile.rs::an_unledgered_raw_is_reported_the_same_way_by_both）
-- 页面 frontmatter 由 `task done --payload` 的载荷驱动，`sources` 由根任务的 raw 键写入，`updated` 由合并当天的日期写入；同一页已有引用时追加而非替换。（检查：tests/cli_task.rs::the_last_leaf_merges_the_batch_and_clears_the_queue）
+- 页面 frontmatter 由 `task done --payload` 的载荷驱动，`sources` 由根任务的 raw 键写入，`updated` 由合并当天的日期写入；同一页已有引用时追加而非替换。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 页面必须有 frontmatter 七字段：`id`、`title`、`type`、`summary`、`sources`、`status`、`updated`；`type` 取自 `[schema].types`。（检查：tests/lint.rs::l1_reports_each_missing_required_field）
-- 子叶只写 staging，正式页只在根收尾时整批出现；合并前检索不到这一批。（检查：tests/cli_task.rs::the_last_leaf_merges_the_batch_and_clears_the_queue）
-- 根收尾只清这一棵根的来源待办，重复收尾是幂等空操作。（检查：tests/cli_task.rs::the_last_leaf_merges_the_batch_and_clears_the_queue）
+- 子叶只写 staging，正式页只在根收尾时整批出现；合并前检索不到这一批。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
+- 根收尾只清这一棵根的来源待办，重复收尾是幂等空操作。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 忽略列表只有一个解释入口 `ignore::IgnoreList`：`ingest` 跳过，不许在调用点各自拼通配。`[scan].ignore` 只是目录名的粗过滤，两者不混用。（检查：tests/scan_signature.rs::an_entry_of_the_ignore_list_is_invisible_to_the_scan）
 - 源在任务期间漂移不得合并，`E_SOURCE_DRIFT` 保留待办、staging 与任务。（检查：tests/cli_task.rs::task_done_obeys_the_repository_lock）
-- 索引是派生状态，从正式页增量刷新；根收尾合并后立即刷。（检查：tests/cli_task.rs::the_last_leaf_merges_the_batch_and_clears_the_queue）
+- 索引是派生状态，从正式页增量刷新；根收尾合并后立即刷。（检查：tests/cli_task.rs::the_last_page_settles_the_source）
 - 关系索引（`page_nodes` / `page_links` / `page_source_refs`）同样只从 Markdown 重建：`query`、`graph`、`lint` 与 `task::affected_pages` 共用 `relation::Resolver` 和同一份反查，不各自扫页；`Store::apply_refresh` 在一个事务里写 FTS 与三张关系表。`generation` 只在关系真变化时递增。（检查：tests/query.rs::refresh_keeps_links_both_ways_and_survives_page_deletion）
 
 ## 机器守卫

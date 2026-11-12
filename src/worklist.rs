@@ -82,15 +82,16 @@ pub fn import_legacy(
     Ok(warnings)
 }
 
-/// Caller holds the repository lock. Returns false for a validated no-op.
-/// Direct page writes are outside this lock and are never reverted here.
-pub fn complete(
+/// Check the four hashes a root must still agree with before it settles:
+/// the source bytes, the raw bytes, the raw row and the work item. Caller
+/// holds the repository lock.
+pub fn verify(
     root: &Path,
     cfg: &Config,
-    store: &mut Store,
+    store: &Store,
     key: &str,
     expected_hash: &str,
-) -> Result<bool, WorkError> {
+) -> Result<(), WorkError> {
     let source = store
         .get_source(key)?
         .ok_or_else(|| WorkError::UnknownSource(key.into()))?;
@@ -98,15 +99,11 @@ pub fn complete(
         .raw_key
         .as_deref()
         .ok_or_else(|| WorkError::MissingRaw(key.into()))?;
-    // No work item means nothing to acknowledge: a second `done` for the same
-    // source is a validated no-op, not an error.
-    let Some(item) = store
+    let item = store
         .work_items()?
         .into_iter()
         .find(|item| item.source_key == key)
-    else {
-        return Ok(false);
-    };
+        .ok_or_else(|| WorkError::Drift(key.into()))?;
     let raw = store
         .all_raws()?
         .into_iter()
@@ -127,5 +124,32 @@ pub fn complete(
     if input.hash != source.hash {
         return Err(WorkError::Drift(key.into()));
     }
+    Ok(())
+}
+
+/// Caller holds the repository lock. Returns false for a validated no-op.
+/// Direct page writes are outside this lock and are never reverted here.
+pub fn complete(
+    root: &Path,
+    cfg: &Config,
+    store: &mut Store,
+    key: &str,
+    expected_hash: &str,
+) -> Result<bool, WorkError> {
+    // No work item means nothing to acknowledge: a second `done` for the same
+    // source is a validated no-op, not an error.
+    if !store
+        .work_items()?
+        .iter()
+        .any(|item| item.source_key == key)
+    {
+        return Ok(false);
+    }
+    verify(root, cfg, store, key, expected_hash)?;
+    let raw = store
+        .all_raws()?
+        .into_iter()
+        .find(|row| row.source_key == key)
+        .ok_or_else(|| WorkError::MissingRaw(key.into()))?;
     Ok(Ledger::new(store).complete_work_item(key, &raw.key, expected_hash)?)
 }

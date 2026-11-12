@@ -661,6 +661,7 @@ fn page_contract() -> Contract {
             "消息说 status '...' is not draft, stable or stale：改成合法值，或删掉该字段（缺省按 draft）。".into(),
             "消息点名某页 does not cite this source 或 not under ...：那是任务目标与载荷不匹配，按 target.reference 重写，不要改任务。".into(),
             "E_PAGE_CONFLICT：pages/ 在任务外被改过；先 read 冲突页并决定保留哪份，再关闭，工具不会替你合并。".into(),
+            "消息说 payload body is empty：补整页正文后重交；空白正文不会写进 staging，任务还在。".into(),
             "以上改完都可以重交；CLI 只验格式与引用，不评判正文质量，语义质量仍由你负责。".into(),
         ],
     }

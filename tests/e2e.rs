@@ -181,47 +181,61 @@ fn doctor_ingest_direct_page_query_round_trip() {
         "both converted sources are handed out as tasks: {ingest}"
     );
 
-    // The agent works the task tree instead of editing pages: a breakdown
-    // lists the leaves, each leaf submits content, and the last close merges
-    // the batch into the live tree. The round hands out one task at a time
-    // until the whole forest settles.
+    // The agent works the task tree instead of editing pages: a route
+    // decides where the source goes, each page target is delivered, and the
+    // last close merges the batch into the live tree. The round hands out one
+    // task at a time until the whole forest settles.
     let mut next = ingest["next_task"].clone();
-    assert_eq!(next["kind"], "breakdown");
+    assert_eq!(next["kind"], "route");
     while !next.is_null() {
         let id = next["id"].as_i64().expect("task id");
         let kind = next["kind"].as_str().expect("task kind");
         let source = next["source"]["key"].as_str().unwrap_or_default();
         match kind {
-            "breakdown" => {
-                let (leaf_id, title) = if source == "notes/retry.md" {
-                    ("alpha", "重试与熔断")
+            "route" => {
+                let (slug, title) = if source == "notes/retry.md" {
+                    ("Alpha", "重试与熔断")
                 } else {
-                    ("beta", "分页与重试")
+                    ("Beta", "分页与重试")
                 };
-                let mut leaves = tempfile::NamedTempFile::new().unwrap();
-                std::io::Write::write_all(
-                    &mut leaves,
-                    serde_json::json!({"leaves":[{"type":"concept","id":leaf_id,"title":title,"brief":"写出来源里的结论"}]})
-                        .to_string()
-                        .as_bytes(),
-                )
-                .unwrap();
+                let mut route = tempfile::NamedTempFile::new().unwrap();
+                let body = serde_json::json!({
+                    "points": [{"id": "p1", "finding": title, "evidence": source}],
+                    "assignments": [{"point": "p1", "action": "create", "proposal": "n1"}],
+                    "proposals": [{
+                        "id": "n1",
+                        "type": "concept",
+                        "title": slug,
+                        "summary": "来源给出的结论",
+                        "why_new": "来源的结论自成一页",
+                        "why_not_existing": "库里还没有这一页",
+                    }],
+                    "maintenance": [],
+                    "searches": [{"query": title, "candidates": [], "reason": "没有已有页可承载"}],
+                });
+                std::io::Write::write_all(&mut route, body.to_string().as_bytes()).unwrap();
                 let out = ok_call(
                     root,
                     &[
                         "task",
                         "done",
                         &id.to_string(),
-                        "--leaves",
-                        leaves.path().to_str().unwrap(),
+                        "--payload",
+                        route.path().to_str().unwrap(),
                     ],
                 );
                 next = out["next_task"].clone();
             }
             "page" => {
+                let reference = next["target"]["reference"].as_str().expect("target");
+                let title = if reference.ends_with("alpha.md") {
+                    "重试与熔断"
+                } else {
+                    "分页与重试"
+                };
                 let mut payload = tempfile::NamedTempFile::new().unwrap();
                 let body = serde_json::json!({
-                    "title": next["target"]["title"].as_str().expect("leaf title"),
+                    "title": title,
                     "summary": "来源给出的结论",
                     "tags": ["resilience"],
                     "status": "draft",
@@ -246,7 +260,7 @@ fn doctor_ingest_direct_page_query_round_trip() {
     assert_eq!(next, serde_json::Value::Null);
     assert!(
         root.join(".wiki/pages/concept/alpha.md").is_file(),
-        "the last leaf merged the batch into the live tree"
+        "the last page merged the batch into the live tree"
     );
 
     // ----------------------------------------------------------- query

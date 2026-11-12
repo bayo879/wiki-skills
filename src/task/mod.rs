@@ -1,11 +1,11 @@
 //! The ingest task tree.
 //!
-//! A source becomes one root task (`breakdown`); the root is delivered with the
-//! source text, the page index and the pages that already cite the raw, and the
-//! agent answers with a leaf list. Each leaf (`page`) names one target page and
-//! is delivered on its own; its payload is written to
+//! A source becomes one root task (`breakdown`) with a single `route` child. The
+//! route child reads the source, searches the existing wiki and decides which
+//! pages the source changes; closing it plans one `page` task per target. Each
+//! `page` task is delivered on its own and its payload is written to
 //! `.wiki/cache/staging/<source_key>/...`, never to `.wiki/pages/`. When the
-//! last leaf closes, the root merges the whole batch in one step.
+//! last page closes, the root merges the whole batch in one step.
 //!
 //! The tree is the execution state of one ingest unit; it lives in SQLite
 //! (`tasks`, `task_baseline`), so "no row" means "nothing left to do". Closing a
@@ -13,9 +13,9 @@
 //!
 //! Two rules hold the whole thing together:
 //!
-//! - **Leaves first.** A root is only broken down when no leaf anywhere is
-//!   pending, because a breakdown reads the index as it is now; breaking down a
-//!   later source early would plan against pages that are about to change.
+//! - **Route before writing.** No page task exists until a route has read the
+//!   source and the index as they are now; planning against a stale index is
+//!   how a source gets filed into the wrong page.
 //! - **The tool owns the page structure.** `id`, `type`, `sources`, `updated`
 //!   and the frontmatter syntax come from the task, not from the payload.
 
@@ -37,6 +37,8 @@ use crate::paths;
 use crate::query;
 use crate::render;
 use crate::store::{NewTask, Store, StoreError, TaskRow, WorkItem};
+
+use plan::{PagePlan, RootPlan, Stage, WriteStatus};
 
 /// Failure while advancing or closing the task tree.
 #[derive(Debug, thiserror::Error)]
@@ -108,34 +110,6 @@ fn today() -> chrono::NaiveDate {
     Local::now().date_naive()
 }
 
-/// What one breakdown task submits: leaves plus the pages it deliberately leaves
-/// alone.
-#[derive(Debug, Deserialize)]
-struct BreakdownDoc {
-    #[serde(default)]
-    leaves: Vec<LeafSpec>,
-    #[serde(default)]
-    unchanged: Vec<Unchanged>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LeafSpec {
-    #[serde(rename = "type")]
-    typ: String,
-    id: String,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    brief: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Unchanged {
-    path: String,
-    #[serde(default)]
-    reason: String,
-}
-
 /// What one leaf submits: content, never structure.
 #[derive(Debug, Deserialize)]
 pub(crate) struct LeafPayload {
@@ -167,17 +141,6 @@ pub enum Verdict {
     Accept,
     /// Re-queue every source the page cites and regenerate it.
     Regenerate,
-}
-
-/// The leaf brief the workspace shows the agent.
-#[derive(Debug, Serialize)]
-struct LeafNote {
-    target_path: String,
-    target_type: String,
-    target_id: String,
-    title: String,
-    brief: String,
-    source_key: String,
 }
 
 /// One root and its leaves, for `task status`.
@@ -262,20 +225,22 @@ pub fn view(root: &Path, cfg: &Config, store: &Store, task: &TaskRow) -> Result<
             format!("{}/{}", cfg.paths.raw.trim_end_matches('/'), raw_key)
         },
     });
-    let (leaf_title, leaf_brief) = leaf_note(task);
+    let (target_title, target_brief) = page_note(task);
     let target = task.target_path.as_ref().map(|reference| TaskTarget {
         reference: reference.clone(),
         exists: root.join(reference).is_file(),
-        title: leaf_title,
-        brief: leaf_brief,
+        title: target_title,
+        brief: target_brief,
     });
-    let affected_pages = if task.kind == "breakdown" && !raw_key.is_empty() {
-        affected_pages(store, std::slice::from_ref(&raw_key))?
-    } else {
-        Vec::new()
-    };
+    let affected_pages =
+        if matches!(task.kind.as_str(), "breakdown" | "route") && !raw_key.is_empty() {
+            affected_pages(store, std::slice::from_ref(&raw_key))?
+        } else {
+            Vec::new()
+        };
     let (suffix, schema) = match task.kind.as_str() {
         "page" => ("--payload <FILE>", "page-content-v1"),
+        "route" => ("--payload <FILE>", "route-v1"),
         "breakdown" => ("--leaves <FILE>", "leaf-list-v1"),
         "reconcile" => ("--accept | --regenerate", "reconcile-v1"),
         _ => ("", ""),
@@ -294,23 +259,15 @@ pub fn view(root: &Path, cfg: &Config, store: &Store, task: &TaskRow) -> Result<
     })
 }
 
-fn leaf_note(task: &TaskRow) -> (Option<String>, Option<String>) {
+/// The page title and the change request, read off the page's own plan.
+fn page_note(task: &TaskRow) -> (Option<String>, Option<String>) {
     if task.kind != "page" {
         return (None, None);
     }
-    let Ok(note) =
-        serde_json::from_str::<serde_json::Value>(task.payload_json.as_deref().unwrap_or("null"))
-    else {
-        return (None, None);
-    };
-    (
-        note.get("title")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        note.get("brief")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-    )
+    match PagePlan::parse(task) {
+        Ok(plan) => (Some(plan.target.title), Some(plan.target.change)),
+        Err(_) => (None, None),
+    }
 }
 
 /// Ensures a root exists for `item`, and snapshots `pages/` as its baseline.
@@ -335,16 +292,21 @@ pub fn ensure_root(
     let mut new = NewTask::pending("breakdown", stamp);
     new.source_key = Some(item.source_key.clone());
     new.raw_hash = Some(item.raw_hash.clone());
-    store.insert_task(&new)?;
+    new.payload_json = Some(RootPlan::new_routing(&item.raw_key, &item.raw_hash).json()?);
+    let mut route = NewTask::pending("route", stamp);
+    route.source_key = Some(item.source_key.clone());
+    route.allowed_json = Some("route-v1".to_string());
+    store.create_root_with_route(&new, &route)?;
     Ok(true)
 }
 
 /// Delivers the one task the next round should run, or `None` when the tree is
 /// settled.
 ///
-/// Order: finish any root whose leaves are all closed → a pending leaf → a
-/// pending root. An `active` leaf is reset to `pending` first: one machine, one
-/// agent, so an `active` row is a delivery from a previous round, not a lease.
+/// Order: finish any root whose pages are all closed → a pending page → a
+/// pending review → a pending route. An `active` task is reset to `pending`
+/// first: one machine, one agent, so an `active` row is a delivery from a
+/// previous round, not a lease.
 pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> {
     let mut out = Advance::default();
     let stamp = now();
@@ -353,7 +315,7 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
     // here keeps every caller of `advance` on the same snapshot.
     query::refresh(root, cfg, store)?;
     for task in store.tasks()? {
-        if (task.kind == "page" || task.kind == "reconcile") && task.status == "active" {
+        if matches!(task.kind.as_str(), "page" | "reconcile" | "route") && task.status == "active" {
             store.set_task_status(task.id, "pending", &stamp)?;
         }
     }
@@ -361,18 +323,22 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
     loop {
         let tasks = store.tasks()?;
 
-        // 1. A root whose leaves are gone is merged here, not handed out.
+        // 1. A root whose pages are gone settles here, not handed out.
         if let Some(root_task) = tasks.iter().find(|t| {
             t.kind == "breakdown"
                 && t.status == "active"
-                && t.payload_json.is_some()
                 && !tasks.iter().any(|child| child.parent_id == Some(t.id))
+                && RootPlan::parse(t)
+                    .map(|plan| matches!(plan.stage, Stage::Writing | Stage::Settling))
+                    .unwrap_or(false)
         }) {
             let before = out.merged_pages.len();
             let source_key = root_task.source_key.clone().unwrap_or_default();
-            match finish_root(root, cfg, store, root_task, &mut out.merged_pages) {
-                Ok(()) => {
-                    out.confirmed_sources.push(source_key);
+            match finish_root(root, cfg, store, root_task) {
+                Ok(settled) => {
+                    out.merged_pages.extend(settled.merged_pages);
+                    out.confirmed_sources.extend(settled.confirmed_sources);
+                    out.issues.extend(settled.issues);
                     let indexed: std::collections::BTreeSet<String> = store
                         .all_relation_nodes()?
                         .into_iter()
@@ -385,27 +351,19 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
                             ));
                         }
                     }
-                    refresh_global_baseline(root, cfg, store)?;
                     continue;
                 }
                 Err(err) => {
                     let message = format!("{}: {err}", err.code());
-                    let grew = out.merged_pages.len() > before;
-                    out.issues.push(if grew {
-                        format!(
-                            "source {source_key} merged {} page(s) but its settlement failed: {message}",
-                            out.merged_pages.len() - before
-                        )
-                    } else {
-                        format!("source {source_key} could not settle: {message}")
-                    });
+                    out.issues
+                        .push(format!("source {source_key} could not settle: {message}"));
                     store.fail_task(root_task.id, &message, &stamp)?;
                     continue;
                 }
             }
         }
 
-        // 2. Leaves first: never break down a later source while any leaf is open.
+        // 2. Pages before anything else: the route already froze the targets.
         if let Some(task) = tasks
             .iter()
             .filter(|t| t.kind == "page" && t.status == "pending")
@@ -427,31 +385,14 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
             return Ok(out);
         }
 
-        // 4. Only now, the earliest root waiting for a breakdown.
+        // 4. Only now, the earliest root waiting for its route.
         if let Some(task) = tasks
             .iter()
-            .filter(|t| {
-                t.kind == "breakdown"
-                    && (t.status == "pending" || t.status == "active")
-                    && t.payload_json.is_none()
-            })
+            .filter(|t| t.kind == "route" && t.status == "pending")
             .min_by_key(|t| t.id)
         {
-            let drifted = current_raw_hash(store, task.source_key.as_deref())?;
-            if drifted.as_deref() != task.raw_hash.as_deref() {
-                // The source changed under a plan made for older bytes: replan,
-                // but do not let one file replay that forever.
-                let attempts = task.attempts + 1;
-                if attempts >= 2 {
-                    store.set_task_status(task.id, "blocked", &stamp)?;
-                    store.fail_task(
-                        task.id,
-                        "source changed twice while it was being planned",
-                        &stamp,
-                    )?;
-                    continue;
-                }
-                store.update_task_source(task.id, drifted.as_deref(), attempts, &stamp)?;
+            if let Some(parent) = task.parent_id {
+                store.set_task_status(parent, "active", &stamp)?;
             }
             store.set_task_status(task.id, "active", &stamp)?;
             out.task = store.task(task.id)?;
@@ -466,10 +407,10 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
 
 /// Closes one task the agent says it finished.
 ///
-/// A `page` needs `payload` (the JSON content) and must leave `pages/` exactly
-/// as the root's baseline found it; a `breakdown` needs `leaves`; a `reconcile`
-/// needs exactly one of `accept` or `regenerate`. Anything else is a usage error
-/// rather than a guess.
+/// A `route` needs `payload` (the route document) and settles the source; a
+/// `page` needs `payload` (the page content) and must leave `pages/` exactly as
+/// the root's baseline found it; a `reconcile` needs exactly one of `accept` or
+/// `regenerate`. `--leaves` no longer belongs to any task: breakdowns are gone.
 pub fn close(
     root: &Path,
     cfg: &Config,
@@ -479,8 +420,29 @@ pub fn close(
     leaves: Option<&Path>,
     verdict: Option<Verdict>,
 ) -> Result<Advance> {
+    if leaves.is_some() {
+        return Err(bad(
+            "E_TASK_BAD_PAYLOAD",
+            "no task takes --leaves any more; close the route with --payload <file>",
+        ));
+    }
     let task = store.task(id)?.ok_or(TaskError::Unknown(id))?;
     match task.kind.as_str() {
+        "route" if verdict.is_some() => {
+            return Err(bad(
+                "E_TASK_BAD_PAYLOAD",
+                "only a reconcile task takes --accept or --regenerate",
+            ))
+        }
+        "route" => {
+            let payload = payload.ok_or_else(|| {
+                bad(
+                    "E_TASK_BAD_PAYLOAD",
+                    "a route task needs --payload <file> with the route document",
+                )
+            })?;
+            return route::close_route(root, cfg, store, &task, payload);
+        }
         "page" if verdict.is_some() => {
             return Err(bad(
                 "E_TASK_BAD_PAYLOAD",
@@ -495,15 +457,6 @@ pub fn close(
                 )
             })?;
             close_page(root, cfg, store, &task, payload)?;
-        }
-        "breakdown" => {
-            let leaves = leaves.ok_or_else(|| {
-                bad(
-                    "E_TASK_BAD_PAYLOAD",
-                    "a breakdown task needs --leaves <file> with the leaf list",
-                )
-            })?;
-            close_breakdown(cfg, store, &task, leaves)?;
         }
         "reconcile" => {
             close_reconcile(root, cfg, store, &task, verdict)?;
@@ -748,20 +701,10 @@ fn close_page(
     task: &TaskRow,
     payload_path: &Path,
 ) -> Result<()> {
-    task.parent_id.ok_or_else(|| {
-        bad(
-            "E_TASK_BAD_PAYLOAD",
-            format!("page task {} has no parent root", task.id),
-        )
-    })?;
-    let target = task.target_path.clone().ok_or_else(|| {
-        bad(
-            "E_TASK_BAD_PAYLOAD",
-            format!("page task {} has no target", task.id),
-        )
-    })?;
+    let plan = PagePlan::parse(task)?;
+    let target = plan.target.path.clone();
     let (typ, id) = split_target(cfg, &target)?;
-    let raw_key = work_item_raw_key(store, task.source_key.as_deref())?;
+    let raw_key = plan.raw_key.clone();
 
     let bytes = std::fs::read(payload_path).map_err(|source| TaskError::Io {
         path: payload_path.to_path_buf(),
@@ -776,6 +719,14 @@ fn close_page(
     let status = parse_status(doc.status.as_deref())?;
     if doc.title.trim().is_empty() {
         return Err(bad("E_TASK_BAD_PAYLOAD", "payload needs a non-empty title"));
+    }
+    // A whitespace-only body renders a page with no content: reject it before
+    // anything reaches staging so the task can be resubmitted with real text.
+    if doc.body.trim().is_empty() {
+        return Err(bad(
+            "E_TASK_BAD_PAYLOAD",
+            "payload body is empty; add the page content and resubmit (whitespace is not content)",
+        ));
     }
 
     // A page that already exists keeps its other sources: a rewrite of one
@@ -842,227 +793,88 @@ fn close_page(
         ));
     }
 
-    store.set_task_payload(
-        task.id,
-        &String::from_utf8_lossy(&bytes),
-        Some(&format!("[\"{target}\"]")),
-        &now(),
-    )?;
-    store.delete_task(task.id)?;
+    let root_task = store
+        .task(plan.root)?
+        .ok_or(TaskError::Unknown(plan.root))?;
+    let mut root_plan = RootPlan::parse(&root_task)?;
+    let slot = root_plan
+        .targets
+        .iter_mut()
+        .find(|entry| entry.path == target)
+        .ok_or_else(|| {
+            bad(
+                "E_TASK_BAD_PAYLOAD",
+                format!("root plan has no target for {target}"),
+            )
+        })?;
+    slot.status = WriteStatus::Staged;
+    slot.expected = Some(hash::hash_bytes(&rendered));
+    store.commit_page(plan.root, task.id, &root_plan.json()?, &now())?;
     Ok(())
 }
 
-fn close_breakdown(
-    cfg: &Config,
-    store: &mut Store,
-    task: &TaskRow,
-    leaves_path: &Path,
-) -> Result<()> {
-    let source_key = task
-        .source_key
-        .clone()
-        .ok_or_else(|| bad("E_TASK_BAD_PAYLOAD", "breakdown task has no source"))?;
-    let raw_key = work_item_raw_key(store, Some(&source_key))?;
-    let bytes = std::fs::read(leaves_path).map_err(|source| TaskError::Io {
-        path: leaves_path.to_path_buf(),
-        source,
-    })?;
-    let doc: BreakdownDoc = serde_json::from_slice(&bytes).map_err(|err| {
-        bad(
-            "E_TASK_BAD_PAYLOAD",
-            format!("leaf list is not valid JSON: {err}"),
-        )
-    })?;
-
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut planned: Vec<(String, String, String, String, String)> = Vec::new();
-    for leaf in &doc.leaves {
-        if !cfg.schema.types.iter().any(|known| known == &leaf.typ) {
-            return Err(bad(
-                "E_TASK_BAD_PAYLOAD",
-                format!(
-                    "type '{}' is not in [schema].types ({})",
-                    leaf.typ,
-                    cfg.schema.types.join(", ")
-                ),
-            ));
-        }
-        if !is_valid_id(&leaf.id) {
-            return Err(bad(
-                "E_TASK_BAD_PAYLOAD",
-                format!("'{}' is not a valid page id (kebab-case)", leaf.id),
-            ));
-        }
-        let path = page_path(cfg, &leaf.typ, &leaf.id);
-        if !seen.insert(path.clone()) {
-            return Err(bad(
-                "E_TASK_BAD_PAYLOAD",
-                format!("{path} appears more than once in the leaf list"),
-            ));
-        }
-        planned.push((
-            path,
-            leaf.typ.clone(),
-            leaf.id.clone(),
-            leaf.title.clone(),
-            leaf.brief.clone(),
-        ));
-    }
-
-    // Every page that already cites this raw must be a leaf or carry a reason.
-    let affected = affected_pages(store, std::slice::from_ref(&raw_key))?;
-    let mut unchanged: BTreeMap<String, String> = BTreeMap::new();
-    for item in &doc.unchanged {
-        if item.reason.trim().is_empty() {
-            return Err(bad(
-                "E_TASK_BAD_PAYLOAD",
-                format!("{} is listed as unchanged without a reason", item.path),
-            ));
-        }
-        unchanged.insert(item.path.clone(), item.reason.clone());
-    }
-    for key in &affected {
-        if !seen.contains(key) && !unchanged.contains_key(key) {
-            return Err(bad(
-                "E_TASK_BAD_PAYLOAD",
-                format!(
-                    "{key} cites this source but has neither a leaf nor an explicit reason to stay unchanged"
-                ),
-            ));
-        }
-    }
-
-    for (path, typ, id, title, brief) in planned {
-        let mut new = NewTask::pending("page", &now());
-        new.parent_id = Some(task.id);
-        new.source_key = Some(source_key.clone());
-        new.raw_hash = task.raw_hash.clone();
-        new.target_path = Some(path.clone());
-        new.allowed_json = Some(format!("[\"{path}\"]"));
-        new.payload_json = Some(
-            serde_json::to_string(&LeafNote {
-                target_path: path,
-                target_type: typ,
-                target_id: id,
-                title,
-                brief,
-                source_key: source_key.clone(),
-            })
-            .unwrap_or_default(),
-        );
-        store.insert_task(&new)?;
-    }
-
-    store.set_task_payload(task.id, &String::from_utf8_lossy(&bytes), None, &now())?;
-    store.set_task_status(task.id, "active", &now())?;
-    Ok(())
-}
-
-/// Merges one settled root: validate the batch, confirm nobody touched `pages/`,
-/// write every staged page atomically, then clear the work item and the tree.
-fn finish_root(
-    root: &Path,
-    cfg: &Config,
-    store: &mut Store,
-    task: &TaskRow,
-    merged: &mut Vec<String>,
-) -> Result<()> {
+/// Merges one settled root: write every staged page atomically, record its
+/// expected hash in the baseline, then clear the work item and the tree.
+fn finish_root(root: &Path, cfg: &Config, store: &mut Store, task: &TaskRow) -> Result<Advance> {
+    let mut out = Advance::default();
     let source_key = task
         .source_key
         .clone()
         .ok_or_else(|| bad("E_TASK_BAD_PAYLOAD", "root has no source"))?;
-    let raw_key = work_item_raw_key(store, Some(&source_key))?;
-    let staged = staged_pages(root, cfg, &source_key, &raw_key)?;
+    let mut plan = RootPlan::parse(task)?;
 
-    let current = page_hashes(root, cfg)?;
-    let baseline: BTreeMap<String, String> = store.baseline(GLOBAL_BASELINE)?.into_iter().collect();
-    let diff = baseline_diff(&current, &baseline);
-    if !diff.is_empty() {
-        return Err(bad(
-            "E_PAGE_CONFLICT",
-            format!(
-                "pages changed while this batch was being written: {}; the batch stays in staging",
-                diff.join(", ")
-            ),
-        ));
+    for target in &mut plan.targets {
+        match target.status {
+            WriteStatus::Written => {}
+            WriteStatus::Staged => {
+                let expected = target.expected.clone().ok_or_else(|| {
+                    bad(
+                        "E_TASK_BAD_PAYLOAD",
+                        format!("{} is staged without an expected hash", target.path),
+                    )
+                })?;
+                let (typ, id) = split_target(cfg, &target.path)?;
+                let staging = staging_path(root, cfg, &source_key, &typ, &id);
+                let bytes = std::fs::read(&staging).map_err(|source| TaskError::Io {
+                    path: staging.clone(),
+                    source,
+                })?;
+                render::write_atomic(&root.join(&target.path), &bytes)?;
+                store.set_baseline(GLOBAL_BASELINE, &target.path, &expected)?;
+                target.status = WriteStatus::Written;
+                out.merged_pages.push(target.path.clone());
+            }
+            WriteStatus::Planned => {
+                return Err(bad(
+                    "E_TASK_BAD_PAYLOAD",
+                    format!("{} was planned but never staged", target.path),
+                ))
+            }
+        }
     }
 
-    for (key, bytes) in &staged {
-        let path = root.join(key);
-        render::write_atomic(&path, bytes)?;
-        merged.push(key.clone());
+    let stamp = now();
+    if !plan.targets.is_empty() {
+        store.set_task_payload(task.id, &plan.json()?, None, &stamp)?;
     }
     query::refresh(root, cfg, store)?;
 
-    let raw_hash = task.raw_hash.clone().unwrap_or_default();
-    if !raw_key.is_empty() {
-        // Same four-way hash check `done` used to run: a source that drifted
-        // while the batch was being written keeps its queue entry, and the
-        // root comes back to be re-broken down.
-        crate::worklist::complete(root, cfg, store, &source_key, &raw_hash).map_err(|err| {
-            bad(
-                "E_SOURCE_DRIFT",
-                format!("{err}; the batch stays in staging"),
-            )
-        })?;
+    if !plan.raw_key.is_empty() {
+        // The same four-way hash check the route ran: a source that drifted
+        // while the batch was being written keeps its queue entry and the root
+        // stays open with its staging intact.
+        crate::worklist::complete(root, cfg, store, &source_key, &plan.raw_hash).map_err(
+            |err| {
+                bad(
+                    "E_SOURCE_DRIFT",
+                    format!("{err}; the batch stays in staging"),
+                )
+            },
+        )?;
     }
     store.delete_task(task.id)?;
-    let dir = staging_root(root, cfg, &source_key);
-    let _ = std::fs::remove_dir_all(dir);
-    Ok(())
-}
-
-/// Every staged page of one root, validated and keyed by repository path.
-fn staged_pages(
-    root: &Path,
-    cfg: &Config,
-    source_key: &str,
-    raw_key: &str,
-) -> Result<Vec<(String, Vec<u8>)>> {
-    let dir = staging_root(root, cfg, source_key);
-    let mut out = Vec::new();
-    if !dir.exists() {
-        return Ok(out);
-    }
-    for entry in walkdir::WalkDir::new(&dir).follow_links(false) {
-        let entry = entry.map_err(|err| TaskError::Io {
-            path: dir.clone(),
-            source: std::io::Error::other(err.to_string()),
-        })?;
-        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
-            continue;
-        }
-        let bytes = std::fs::read(entry.path()).map_err(|source| TaskError::Io {
-            path: entry.path().to_path_buf(),
-            source,
-        })?;
-        let (front, _) = page::parse(&bytes)?;
-        let key = page_path(cfg, &front.typ, &front.id);
-        if !cfg.schema.types.iter().any(|known| known == &front.typ) {
-            return Err(bad(
-                "E_TASK_BAD_PAYLOAD",
-                format!("{key} has a type outside [schema].types"),
-            ));
-        }
-        if !front
-            .sources
-            .iter()
-            .any(|reference| reference_key(&cfg.paths.raw, reference) == raw_key)
-        {
-            return Err(bad(
-                "E_TASK_BAD_PAYLOAD",
-                format!("{key} does not cite this source"),
-            ));
-        }
-        if front.title.trim().is_empty() {
-            return Err(bad(
-                "E_TASK_BAD_PAYLOAD",
-                format!("{key} has an empty title"),
-            ));
-        }
-        out.push((key, bytes));
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    let _ = std::fs::remove_dir_all(staging_root(root, cfg, &source_key));
+    out.confirmed_sources.push(source_key);
     Ok(out)
 }
 
@@ -1158,17 +970,6 @@ fn work_item_raw_key(store: &Store, source_key: Option<&str>) -> Result<String> 
         .unwrap_or_default())
 }
 
-fn current_raw_hash(store: &Store, source_key: Option<&str>) -> Result<Option<String>> {
-    let Some(source_key) = source_key else {
-        return Ok(None);
-    };
-    Ok(store
-        .work_items()?
-        .into_iter()
-        .find(|item| item.source_key == source_key)
-        .map(|item| item.raw_hash))
-}
-
 /// The staging path for one page: `<engine>/cache/staging/<source>/<type>/<id>.md`.
 fn staging_root(root: &Path, cfg: &Config, source_key: &str) -> PathBuf {
     root.join(&cfg.paths.engine)
@@ -1181,11 +982,6 @@ fn staging_path(root: &Path, cfg: &Config, source_key: &str, typ: &str, id: &str
     staging_root(root, cfg, source_key)
         .join(typ)
         .join(format!("{id}.md"))
-}
-
-/// The repository path of one page.
-fn page_path(cfg: &Config, typ: &str, id: &str) -> String {
-    format!("{}/{typ}/{id}.md", cfg.paths.wiki.trim_end_matches('/'))
 }
 
 fn split_target(cfg: &Config, target: &str) -> Result<(String, String)> {
@@ -1218,18 +1014,6 @@ fn parse_status(raw: Option<&str>) -> Result<Status> {
             format!("status '{other}' is not draft, stable or stale"),
         )),
     }
-}
-
-/// A page id is a kebab-case slug: lowercase letters, digits and single dashes.
-fn is_valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && !id.starts_with('-')
-        && !id.ends_with('-')
-        && !id.contains("--")
-        && id
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
 /// A `sources:` entry without its `#p=..` fragment, relative to the raw dir.

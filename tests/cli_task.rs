@@ -1,4 +1,5 @@
-//! The task tree: advancing ingest is one close at a time.
+//! The task tree: a source is routed, then each target is written, then the
+//! root settles.
 use assert_cmd::Command;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -29,6 +30,16 @@ fn repo() -> TempDir {
     dir
 }
 
+/// A repository with only `a.md`, already ingested but not routed.
+fn single_source() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    llm_wiki::init::run(dir.path(), false).unwrap();
+    std::fs::write(dir.path().join("a.md"), "# A\n\nEvidence A\n").unwrap();
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0, "{body}");
+    dir
+}
+
 /// Writes a JSON payload inside the engine, where no round will treat it as a
 /// source.
 fn temp_json(dir: &TempDir, name: &str, body: &str) -> String {
@@ -43,112 +54,351 @@ fn next_task(dir: &TempDir) -> Value {
     body["next_task"].clone()
 }
 
-fn leaves(dir: &TempDir, leaf: &str) -> String {
-    temp_json(
-        dir,
-        "leaves.json",
-        &json!({"leaves":[{"type":"concept","id":"alpha","title":"Alpha","brief":leaf}]})
-            .to_string(),
-    )
+fn task_id(task: &Value) -> i64 {
+    task["id"].as_i64().unwrap()
 }
 
-fn payload(dir: &TempDir) -> String {
+/// A route that creates `concept/alpha.md` from the current source.
+fn route_create_alpha(dir: &TempDir) -> String {
     temp_json(
         dir,
-        "payload.json",
+        "route.json",
         &json!({
-            "title": "Alpha",
-            "summary": "A conclusion",
-            "tags": ["t"],
-            "status": "draft",
-            "body": "Alpha body text\n",
+            "points": [{"id": "p1", "finding": "A 的结论", "evidence": "a.md"}],
+            "assignments": [{"point": "p1", "action": "create", "proposal": "n1"}],
+            "proposals": [{
+                "id": "n1",
+                "type": "concept",
+                "title": "Alpha",
+                "summary": "A conclusion",
+                "why_new": "a.md 的结论自成一页",
+                "why_not_existing": "库里还没有这一页",
+            }],
+            "maintenance": [],
+            "searches": [{"query": "Alpha", "candidates": [], "reason": "没有已有页可承载"}],
         })
         .to_string(),
     )
 }
 
-#[test]
-fn a_breakdown_hands_out_one_page_leaf() {
-    let dir = repo();
-    let task = next_task(&dir);
-    assert_eq!(task["kind"], "breakdown");
-    let id = task["id"].as_i64().unwrap();
-    let leaves = leaves(&dir, "写 A 的结论");
+fn page_payload(dir: &TempDir, name: &str, title: &str, body: &str) -> String {
+    temp_json(
+        dir,
+        name,
+        &json!({
+            "title": title,
+            "summary": "A conclusion",
+            "tags": ["t"],
+            "status": "draft",
+            "body": body,
+        })
+        .to_string(),
+    )
+}
+
+fn payload(dir: &TempDir) -> String {
+    page_payload(dir, "payload.json", "Alpha", "Alpha body text\n")
+}
+
+fn close_route(dir: &TempDir, task: &Value) -> Value {
+    let route = route_create_alpha(dir);
     let (code, body) = run(
-        &dir,
-        &["task", "done", &id.to_string(), "--leaves", &leaves],
+        dir,
+        &[
+            "task",
+            "done",
+            &task_id(task).to_string(),
+            "--payload",
+            &route,
+        ],
     );
     assert_eq!(code, 0, "{body}");
-    assert_eq!(body["next_task"]["kind"], "page");
+    body
+}
+
+fn close_alpha_page(dir: &TempDir, body: &str) -> Value {
+    let task = next_task(dir);
+    assert_eq!(task["kind"], "page", "{task}");
+    let payload = page_payload(dir, "payload.json", "Alpha", body);
+    let (code, response) = run(
+        dir,
+        &[
+            "task",
+            "done",
+            &task_id(&task).to_string(),
+            "--payload",
+            &payload,
+        ],
+    );
+    assert_eq!(code, 0, "{response}");
+    response
+}
+
+/// A repository with one source already settled into one page.
+fn one_source_repo() -> TempDir {
+    let dir = single_source();
+    let route = next_task(&dir);
+    close_route(&dir, &route);
+    let body = close_alpha_page(&dir, "Alpha body text\n");
+    assert!(body["next_task"].is_null(), "{body}");
+    dir
+}
+
+#[test]
+fn a_source_is_routed_before_any_page() {
+    let dir = repo();
+    let task = next_task(&dir);
+    assert_eq!(task["kind"], "route", "{task}");
+    assert_eq!(task["source"]["key"], "a.md", "{task}");
+    assert!(task["target"].is_null(), "{task}");
+    assert_eq!(task["submit"]["schema"], "route-v1", "{task}");
     assert!(
-        body["next_task"]["target"]["reference"]
-            .as_str()
-            .unwrap()
-            .ends_with("concept/alpha.md"),
-        "{body}"
+        task["affected_pages"]
+            .as_array()
+            .expect("affected pages")
+            .is_empty(),
+        "{task}"
     );
 }
 
 #[test]
-fn the_last_leaf_merges_the_batch_and_clears_the_queue() {
+fn route_update_and_create_make_one_page_per_target() {
     let dir = repo();
-    let root = next_task(&dir);
-    let root_id = root["id"].as_i64().unwrap();
-    let leaves = leaves(&dir, "写 A 的结论");
-    let (_, after) = run(
+    // Settle a.md into concept/alpha.md first.
+    let route = next_task(&dir);
+    close_route(&dir, &route);
+    close_alpha_page(&dir, "Alpha body text\n");
+
+    // b.md both updates alpha and creates beta.
+    let route = next_task(&dir);
+    assert_eq!(route["kind"], "route", "{route}");
+    assert_eq!(route["source"]["key"], "b.md", "{route}");
+    let doc = temp_json(
         &dir,
-        &["task", "done", &root_id.to_string(), "--leaves", &leaves],
+        "route.json",
+        &json!({
+            "points": [
+                {"id": "p1", "finding": "补一段 Beta", "evidence": "b.md"},
+                {"id": "p2", "finding": "Beta 自成一页", "evidence": "b.md"},
+            ],
+            "assignments": [
+                {
+                    "point": "p1",
+                    "action": "update",
+                    "target": ".wiki/pages/concept/alpha.md",
+                    "change": "补 Beta 一节",
+                    "basis": "b.md",
+                },
+                {"point": "p2", "action": "create", "proposal": "n2"},
+            ],
+            "proposals": [{
+                "id": "n2",
+                "type": "concept",
+                "title": "Beta",
+                "summary": "B conclusion",
+                "why_new": "b.md 的结论另立一页",
+                "why_not_existing": "alpha 只讲 A",
+            }],
+            "maintenance": [],
+            "searches": [{"query": "Beta", "candidates": [], "reason": "没有已有页可承载"}],
+        })
+        .to_string(),
     );
-    let leaf_id = after["next_task"]["id"].as_i64().unwrap();
-    let payload = payload(&dir);
     let (code, body) = run(
         &dir,
-        &["task", "done", &leaf_id.to_string(), "--payload", &payload],
+        &[
+            "task",
+            "done",
+            &task_id(&route).to_string(),
+            "--payload",
+            &doc,
+        ],
     );
     assert_eq!(code, 0, "{body}");
-    // The other source still has a root, so the tool hands that one out next.
-    assert_eq!(body["next_task"]["source"]["key"], "b.md", "{body}");
 
-    let page = dir.path().join(".wiki/pages/concept/alpha.md");
-    let text = std::fs::read_to_string(&page).unwrap();
-    assert!(text.contains("Alpha body text"), "{text}");
+    let first = next_task(&dir);
+    assert_eq!(first["kind"], "page", "{first}");
     assert!(
-        text.contains(".wiki/raw/a.md"),
-        "the tool fills sources: {text}"
+        first["target"]["reference"]
+            .as_str()
+            .unwrap()
+            .ends_with("concept/alpha.md"),
+        "{first}"
     );
+    let alpha_payload = page_payload(
+        &dir,
+        "alpha.json",
+        "Alpha",
+        "Alpha body text\n\nBeta part\n",
+    );
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&first).to_string(),
+            "--payload",
+            &alpha_payload,
+        ],
+    );
+    assert_eq!(code, 0, "{body}");
 
-    let (_, again) = run(&dir, &["ingest"]);
-    assert_ne!(
-        again["next_task"]["source"]["key"].as_str(),
-        Some("a.md"),
-        "closing the tree clears its queue entry: {again}"
+    let second = next_task(&dir);
+    assert_eq!(second["kind"], "page", "{second}");
+    assert!(
+        second["target"]["reference"]
+            .as_str()
+            .unwrap()
+            .ends_with("concept/beta.md"),
+        "{second}"
     );
+    let beta_payload = page_payload(&dir, "beta.json", "Beta", "Beta body\n");
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&second).to_string(),
+            "--payload",
+            &beta_payload,
+        ],
+    );
+    assert_eq!(code, 0, "{body}");
+    assert!(body["next_task"].is_null(), "{body}");
+
+    let alpha = std::fs::read_to_string(dir.path().join(".wiki/pages/concept/alpha.md")).unwrap();
+    assert!(alpha.contains("Beta part"), "{alpha}");
+    assert!(dir.path().join(".wiki/pages/concept/beta.md").exists());
+}
+
+#[test]
+fn the_last_page_settles_the_source() {
+    let dir = single_source();
+    let route = next_task(&dir);
+    close_route(&dir, &route);
+
+    let page = next_task(&dir);
+    assert_eq!(page["kind"], "page", "{page}");
+    let leaf = page_payload(&dir, "payload.json", "Alpha", "完整正文\n");
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&page).to_string(),
+            "--payload",
+            &leaf,
+        ],
+    );
+    assert_eq!(code, 0, "{body}");
+    assert!(body["next_task"].is_null(), "{body}");
+
+    assert!(dir.path().join(".wiki/pages/concept/alpha.md").exists());
+    assert!(dir.path().join(".wiki/raw/a.md").exists());
+    let (code, status) = run(&dir, &["task", "status"]);
+    assert_eq!(code, 0, "{status}");
+    assert!(
+        status["roots"].as_array().expect("roots").is_empty(),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_route_that_writes_nothing_settles_the_source() {
+    let dir = single_source();
+    let route = next_task(&dir);
+    let doc = temp_json(
+        &dir,
+        "empty-route.json",
+        &json!({
+            "points": [],
+            "assignments": [],
+            "proposals": [],
+            "maintenance": [],
+            "searches": [],
+            "source_reason": "已有页覆盖，不需要改动",
+        })
+        .to_string(),
+    );
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&route).to_string(),
+            "--payload",
+            &doc,
+        ],
+    );
+    assert_eq!(code, 0, "{body}");
+    assert!(body["next_task"].is_null(), "{body}");
+    let (code, status) = run(&dir, &["task", "status"]);
+    assert_eq!(code, 0, "{status}");
+    assert!(
+        status["roots"].as_array().expect("roots").is_empty(),
+        "{status}"
+    );
+    assert!(!dir.path().join(".wiki/pages/concept/alpha.md").exists());
+}
+
+#[test]
+fn a_page_with_an_empty_body_is_refused() {
+    let dir = single_source();
+    let route = next_task(&dir);
+    close_route(&dir, &route);
+    let page = next_task(&dir);
+    let page_id = task_id(&page);
+    let bad = page_payload(&dir, "empty.json", "Alpha", "  \n\t\n");
+    let (code, body) = run(
+        &dir,
+        &["task", "done", &page_id.to_string(), "--payload", &bad],
+    );
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_TASK_BAD_PAYLOAD");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("body is empty"),
+        "{body}"
+    );
+    assert!(!dir.path().join(".wiki/pages/concept/alpha.md").exists());
+    assert!(!dir
+        .path()
+        .join(".wiki/cache/staging/a.md/concept/alpha.md")
+        .exists());
+
+    // The task is still open: a real body closes it.
+    let again = next_task(&dir);
+    assert_eq!(task_id(&again), page_id, "{again}");
+    let good = payload(&dir);
+    let (code, body) = run(
+        &dir,
+        &["task", "done", &page_id.to_string(), "--payload", &good],
+    );
+    assert_eq!(code, 0, "{body}");
+    assert!(body["next_task"].is_null(), "{body}");
 }
 
 #[test]
 fn a_page_edited_outside_the_task_is_refused() {
-    let dir = repo();
-    let root = next_task(&dir);
-    let root_id = root["id"].as_i64().unwrap();
-    let leaves = leaves(&dir, "写 A 的结论");
-    let (_, after) = run(
-        &dir,
-        &["task", "done", &root_id.to_string(), "--leaves", &leaves],
-    );
-    let leaf_id = after["next_task"]["id"].as_i64().unwrap();
+    let dir = single_source();
+    let route = next_task(&dir);
+    close_route(&dir, &route);
+    let page = next_task(&dir);
+    let page_id = task_id(&page);
 
     let stray = dir.path().join(".wiki/pages/concept/stray.md");
     std::fs::create_dir_all(stray.parent().unwrap()).unwrap();
     std::fs::write(
         &stray,
-        "---\nid: stray\ntitle: Stray\ntype: concept\nsummary: x\nstatus: draft\nupdated: 2026-01-01\nsources: [\".wiki/raw/a.md\"]\n---\nstray\n",
+        "---\nid: stray\ntype: concept\ntitle: Stray\nsources:\n  - .wiki/raw/a.md\n---\n\nout of band\n",
     )
     .unwrap();
-
     let payload = payload(&dir);
     let (code, body) = run(
         &dir,
-        &["task", "done", &leaf_id.to_string(), "--payload", &payload],
+        &["task", "done", &page_id.to_string(), "--payload", &payload],
     );
     assert_eq!(code, 1, "{body}");
     assert_eq!(body["error"]["code"], "E_PAGE_CONFLICT");
@@ -164,22 +414,19 @@ fn a_page_edited_outside_the_task_is_refused() {
     std::fs::remove_file(&stray).unwrap();
     let (code, body) = run(
         &dir,
-        &["task", "done", &leaf_id.to_string(), "--payload", &payload],
+        &["task", "done", &page_id.to_string(), "--payload", &payload],
     );
     assert_eq!(code, 0, "{body}");
 }
 
 #[test]
 fn task_done_obeys_the_repository_lock() {
-    let dir = repo();
-    let root = next_task(&dir);
-    let root_id = root["id"].as_i64().unwrap();
-    let leaves = leaves(&dir, "写 A 的结论");
+    let dir = single_source();
+    let route = next_task(&dir);
+    let id = task_id(&route);
+    let doc = route_create_alpha(&dir);
     let _lock = llm_wiki::lock::acquire(dir.path()).unwrap();
-    let (code, body) = run(
-        &dir,
-        &["task", "done", &root_id.to_string(), "--leaves", &leaves],
-    );
+    let (code, body) = run(&dir, &["task", "done", &id.to_string(), "--payload", &doc]);
     assert_eq!(code, 4, "{body}");
     assert_eq!(body["error"]["code"], "E_LOCKED");
 }
@@ -196,11 +443,24 @@ fn an_unknown_task_is_reported() {
 }
 
 #[test]
-fn a_breakdown_without_leaves_is_a_usage_error() {
+fn leaves_is_rejected_and_a_route_needs_a_payload() {
     let dir = repo();
-    let root = next_task(&dir);
-    let root_id = root["id"].as_i64().unwrap();
-    let (code, body) = run(&dir, &["task", "done", &root_id.to_string()]);
+    let route = next_task(&dir);
+    let id = task_id(&route);
+    let leaves = temp_json(
+        &dir,
+        "leaves.json",
+        &json!({"leaves":[{"type":"concept","id":"alpha","title":"Alpha","brief":"写结论"}]})
+            .to_string(),
+    );
+    let (code, body) = run(
+        &dir,
+        &["task", "done", &id.to_string(), "--leaves", &leaves],
+    );
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_TASK_BAD_PAYLOAD");
+
+    let (code, body) = run(&dir, &["task", "done", &id.to_string()]);
     assert_eq!(code, 1, "{body}");
     assert_eq!(body["error"]["code"], "E_TASK_BAD_PAYLOAD");
 }
@@ -213,49 +473,24 @@ fn status_reports_the_tree_without_advancing_it() {
     assert_eq!(code, 0, "{body}");
     let roots = body["roots"].as_array().expect("root list");
     assert!(
-        roots.iter().any(|row| row["id"] == task["id"]),
-        "status shows the open root: {body}"
+        roots.iter().any(|root| root["leaves"]
+            .as_array()
+            .map(|leaves| leaves.iter().any(|leaf| leaf["id"] == task["id"]))
+            .unwrap_or(false)),
+        "status shows the open route: {body}"
     );
     // Asking twice changes nothing.
     let (_, again) = run(&dir, &["task", "status"]);
     assert_eq!(again["roots"], body["roots"]);
 }
 
-/// A repository with one source already merged into one page.
-fn one_source_repo() -> TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    llm_wiki::init::run(dir.path(), false).unwrap();
-    std::fs::write(dir.path().join("a.md"), "# A\n\nEvidence A\n").unwrap();
-    let (code, body) = run(&dir, &["ingest", "--force"]);
-    assert_eq!(code, 0, "{body}");
-    let root_id = body["next_task"]["id"].as_i64().unwrap();
-    let leaves = leaves(&dir, "写 A 的结论");
-    let (code, body) = run(
-        &dir,
-        &["task", "done", &root_id.to_string(), "--leaves", &leaves],
-    );
-    assert_eq!(code, 0, "{body}");
-    let leaf_id = body["next_task"]["id"].as_i64().unwrap();
-    let payload = payload(&dir);
-    let (code, body) = run(
-        &dir,
-        &["task", "done", &leaf_id.to_string(), "--payload", &payload],
-    );
-    assert_eq!(code, 0, "{body}");
-    assert_eq!(body["next_task"], Value::Null, "{body}");
-    dir
-}
-
-fn page_path(dir: &TempDir) -> std::path::PathBuf {
-    dir.path().join(".wiki/pages/concept/alpha.md")
-}
-
 #[test]
 fn a_page_edited_outside_the_tree_is_queued_for_review() {
     let dir = one_source_repo();
-    let mut page = std::fs::read_to_string(page_path(&dir)).unwrap();
-    page.push_str("\nHuman correction.\n");
-    std::fs::write(page_path(&dir), page).unwrap();
+    let page = dir.path().join(".wiki/pages/concept/alpha.md");
+    let mut text = std::fs::read_to_string(&page).unwrap();
+    text.push_str("\nhand edit\n");
+    std::fs::write(&page, text).unwrap();
 
     let task = next_task(&dir);
     assert_eq!(task["kind"], "reconcile", "{task}");
@@ -266,37 +501,45 @@ fn a_page_edited_outside_the_tree_is_queued_for_review() {
             .ends_with("concept/alpha.md"),
         "{task}"
     );
-    // Accepting the edit absorbs it: the next round has nothing left to say.
-    let id = task["id"].as_i64().unwrap();
-    let (code, body) = run(&dir, &["task", "done", &id.to_string(), "--accept"]);
+    let (code, body) = run(
+        &dir,
+        &["task", "done", &task_id(&task).to_string(), "--accept"],
+    );
     assert_eq!(code, 0, "{body}");
-    assert_eq!(next_task(&dir), Value::Null);
+    assert!(body["next_task"].is_null(), "{body}");
 }
 
 #[test]
 fn regenerating_review_puts_the_source_back_in_the_queue() {
     let dir = one_source_repo();
-    let mut page = std::fs::read_to_string(page_path(&dir)).unwrap();
-    page.push_str("\nHuman correction.\n");
-    std::fs::write(page_path(&dir), page).unwrap();
+    let page = dir.path().join(".wiki/pages/concept/alpha.md");
+    let mut text = std::fs::read_to_string(&page).unwrap();
+    text.push_str("\nhand edit\n");
+    std::fs::write(&page, text).unwrap();
 
     let task = next_task(&dir);
     assert_eq!(task["kind"], "reconcile", "{task}");
-    let id = task["id"].as_i64().unwrap();
-    let (code, body) = run(&dir, &["task", "done", &id.to_string(), "--regenerate"]);
+    let (code, body) = run(
+        &dir,
+        &["task", "done", &task_id(&task).to_string(), "--regenerate"],
+    );
     assert_eq!(code, 0, "{body}");
-    assert_eq!(body["next_task"]["kind"], "breakdown", "{body}");
-    assert_eq!(body["next_task"]["source"]["key"], "a.md", "{body}");
+    let next = body["next_task"].clone();
+    assert_eq!(next["kind"], "route", "{next}");
+    assert_eq!(next["source"]["key"], "a.md", "{next}");
 }
 
 #[test]
 fn a_review_needs_exactly_one_verdict() {
     let dir = one_source_repo();
-    let mut page = std::fs::read_to_string(page_path(&dir)).unwrap();
-    page.push_str("\nHuman correction.\n");
-    std::fs::write(page_path(&dir), page).unwrap();
-    let id = next_task(&dir)["id"].as_i64().unwrap();
-    let (code, body) = run(&dir, &["task", "done", &id.to_string()]);
+    let page = dir.path().join(".wiki/pages/concept/alpha.md");
+    let mut text = std::fs::read_to_string(&page).unwrap();
+    text.push_str("\nhand edit\n");
+    std::fs::write(&page, text).unwrap();
+
+    let task = next_task(&dir);
+    assert_eq!(task["kind"], "reconcile", "{task}");
+    let (code, body) = run(&dir, &["task", "done", &task_id(&task).to_string()]);
     assert_eq!(code, 1, "{body}");
     assert_eq!(body["error"]["code"], "E_TASK_BAD_PAYLOAD");
 }
@@ -306,8 +549,9 @@ fn a_page_without_sources_is_absorbed_not_reviewed() {
     let dir = one_source_repo();
     std::fs::write(
         dir.path().join(".wiki/pages/concept/notes.md"),
-        "---\nid: \"notes\"\ntitle: \"Notes\"\ntype: \"concept\"\nsummary: \"\"\ntags: []\nsources: []\nstatus: \"draft\"\nupdated: \"2026-11-10\"\n---\n\nA note.\n",
+        "---\nid: notes\ntype: concept\ntitle: Notes\nupdated: 2026-01-01\n---\n\nno sources\n",
     )
     .unwrap();
-    assert_eq!(next_task(&dir), Value::Null);
+    let task = next_task(&dir);
+    assert!(task.is_null(), "{task}");
 }

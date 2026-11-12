@@ -11,11 +11,14 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::plan::{Origin, PlanPoint};
-use super::{bad, Result};
+use super::plan::{
+    Origin, PagePlan, PlanPoint, RootPlan, Stage, TargetPlan, WriteStatus, PAGE_PLAN_SCHEMA,
+};
+use super::{advance, affected_pages, bad, Advance, Result, TaskError};
 use crate::config::Config;
 use crate::hash;
 use crate::page;
+use crate::store::{NewTask, Store, TaskRow};
 
 /// One piece of information extracted from the source.
 #[derive(Debug, Clone, Deserialize)]
@@ -823,6 +826,95 @@ fn normalize_target(raw: &str) -> Result<String> {
         ));
     }
     Ok(parts.join("/"))
+}
+
+/// Closes a route: settle the source now, or plan one page task per target.
+///
+/// A route that decides the source changes nothing still has to settle it, so a
+/// zero-target route moves the root straight to `settling`; otherwise the root
+/// moves to `writing` and carries one frozen [`TargetPlan`] per page.
+pub(crate) fn close_route(
+    root: &Path,
+    cfg: &Config,
+    store: &mut Store,
+    task: &TaskRow,
+    payload: &Path,
+) -> Result<Advance> {
+    let parent = task.parent_id.ok_or_else(|| {
+        bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("route task {} has no parent root", task.id),
+        )
+    })?;
+    let root_task = store.task(parent)?.ok_or(TaskError::Unknown(parent))?;
+    let mut plan = RootPlan::parse(&root_task)?;
+    let source_key = root_task.source_key.clone().ok_or_else(|| {
+        bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("root {} has no source", root_task.id),
+        )
+    })?;
+    crate::worklist::verify(root, cfg, store, &source_key, &plan.raw_hash).map_err(|err| {
+        bad(
+            "E_SOURCE_DRIFT",
+            format!("{err}; reread the source and route it again"),
+        )
+    })?;
+
+    let bytes = std::fs::read(payload).map_err(|source| TaskError::Io {
+        path: payload.to_path_buf(),
+        source,
+    })?;
+    let doc = parse(&bytes)?;
+    let affected = affected_pages(store, std::slice::from_ref(&plan.raw_key))?;
+    validate_shape(&doc, &affected, &cfg.schema.types)?;
+    let targets = plan_targets(root, cfg, &doc, &affected)?;
+    let stamp = super::now();
+
+    if targets.is_empty() {
+        plan.stage = Stage::Settling;
+        plan.source_key = source_key;
+        plan.targets.clear();
+        store.commit_route(parent, &plan.json()?, &[], task.id, &stamp)?;
+        return advance(root, cfg, store);
+    }
+
+    plan.stage = Stage::Writing;
+    plan.source_key = source_key.clone();
+    plan.targets = targets
+        .iter()
+        .map(|target| TargetPlan {
+            path: target.path.clone(),
+            title: target.title.clone(),
+            origin: target.origin,
+            before: target.before.clone(),
+            expected: None,
+            status: WriteStatus::Planned,
+            points: target.points.clone(),
+            change: target.change.clone(),
+        })
+        .collect();
+
+    let mut pages = Vec::with_capacity(plan.targets.len());
+    for target in &plan.targets {
+        let page_plan = PagePlan {
+            schema: PAGE_PLAN_SCHEMA.to_string(),
+            root: parent,
+            raw_key: plan.raw_key.clone(),
+            raw_hash: plan.raw_hash.clone(),
+            target: target.clone(),
+        };
+        let mut new = NewTask::pending("page", &stamp);
+        new.parent_id = Some(parent);
+        new.source_key = Some(source_key.clone());
+        new.raw_hash = Some(plan.raw_hash.clone());
+        new.target_path = Some(target.path.clone());
+        new.allowed_json = Some(format!("[\"{}\"]", target.path));
+        new.payload_json = Some(page_plan.json()?);
+        pages.push(new);
+    }
+    store.commit_route(parent, &plan.json()?, &pages, task.id, &stamp)?;
+    advance(root, cfg, store)
 }
 
 #[cfg(test)]

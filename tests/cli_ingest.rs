@@ -64,7 +64,8 @@ fn ingest_without_arguments_converts_and_hands_off_live_pages() {
         .unwrap()
         .iter()
         .any(|ty| ty == "concept"));
-    assert_eq!(body["data"]["next_task"]["kind"], "breakdown");
+    assert_eq!(body["data"]["next_task"]["kind"], "route");
+    assert_eq!(body["data"]["next_task"]["submit"]["schema"], "route-v1");
     assert!(body["data"]["next_task"]["affected_pages"].is_array());
     assert!(!dir.path().join(".wiki/staging/pending.json").exists());
 }
