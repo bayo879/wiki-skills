@@ -21,7 +21,7 @@ use serde::Serialize;
 /// between [`Guide::cli_can_check`] and [`Guide::agent_owns`] keeps the tool
 /// from implying it proved more than it did.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct Guide {
+pub struct Guide {
     /// One sentence: what this task decides, in the agent's own terms.
     pub goal: String,
     /// What to read, in order, with the field or command that points at it.
@@ -47,7 +47,7 @@ pub(crate) struct Guide {
 /// resolve). The examples are the same data the tests feed to the real parsers,
 /// so the contract cannot quietly disagree with the validator.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct Contract {
+pub struct Contract {
     /// Schema tag the task names, e.g. `route-v1`.
     pub schema: String,
     /// Every field, nested ones by dot path (`points[].id`).
@@ -62,7 +62,7 @@ pub(crate) struct Contract {
 
 /// One field of a payload schema.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct Field {
+pub struct Field {
     /// Dot path inside the payload; array items use `[]`.
     pub name: String,
     /// JSON shape, e.g. `string`, `array<object>`, `flag`.
@@ -82,7 +82,7 @@ pub(crate) struct Field {
 /// Who fills a field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum FilledBy {
+pub enum FilledBy {
     /// The agent decides the value.
     Agent,
     /// The tool constructs it; the agent must not invent one.
@@ -91,7 +91,7 @@ pub(crate) enum FilledBy {
 
 /// One valid payload, named by what it demonstrates.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct Example {
+pub struct Example {
     /// Short description of the case the example covers.
     pub title: String,
     /// The payload as the agent would submit it.

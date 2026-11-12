@@ -194,6 +194,21 @@ fn deliver_update_alpha_page(dir: &TempDir) -> Value {
     assert_eq!(code, 0, "{body}");
     let page = next_task(dir);
     assert_eq!(page["kind"], "page", "{page}");
+    assert_eq!(page["stage"], "writing", "{page}");
+    assert!(
+        page["target"]["before"].is_string(),
+        "a page view carries the snapshot the route took: {page}"
+    );
+    assert!(
+        page["guide"]["goal"]
+            .as_str()
+            .is_some_and(|goal| !goal.is_empty()),
+        "{page}"
+    );
+    assert!(
+        page["contract"]["fields"].as_array().unwrap().len() >= 5,
+        "{page}"
+    );
     page
 }
 
@@ -579,9 +594,44 @@ fn status_reports_the_tree_without_advancing_it() {
             .unwrap_or(false)),
         "status shows the open route: {body}"
     );
+    assert_eq!(
+        body["current"], task,
+        "status shows the same view ingest delivered: {body}"
+    );
     // Asking twice changes nothing.
     let (_, again) = run(&dir, &["task", "status"]);
     assert_eq!(again["roots"], body["roots"]);
+}
+
+#[test]
+fn ingest_and_status_return_the_same_task_view() {
+    let dir = repo();
+    let (code, ingest) = run(&dir, &["ingest"]);
+    assert_eq!(code, 0, "{ingest}");
+    let (code, status) = run(&dir, &["task", "status"]);
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(ingest["next_task"], status["current"]);
+    assert_eq!(
+        ingest["next_task"]["guide"]["goal"], status["current"]["guide"]["goal"],
+        "both surfaces explain the task the same way"
+    );
+    assert!(
+        ingest["next_task"]["contract"]["fields"]
+            .as_array()
+            .unwrap()
+            .len()
+            > 5,
+        "the route contract lists every field: {ingest}"
+    );
+}
+
+#[test]
+fn status_shows_stage_and_open_children() {
+    let dir = repo();
+    let (code, status) = run(&dir, &["task", "status"]);
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["roots"][0]["stage"], "routing", "{status}");
+    assert_eq!(status["roots"][0]["open_children"], 1, "{status}");
 }
 
 #[test]
@@ -594,6 +644,11 @@ fn a_page_edited_outside_the_tree_is_queued_for_review() {
 
     let task = next_task(&dir);
     assert_eq!(task["kind"], "reconcile", "{task}");
+    assert_eq!(task["stage"], "reconcile", "{task}");
+    assert!(
+        task["guide"]["goal"].is_string() && task["contract"]["fields"].is_array(),
+        "a reconcile view explains itself too: {task}"
+    );
     assert!(
         task["target"]["reference"]
             .as_str()

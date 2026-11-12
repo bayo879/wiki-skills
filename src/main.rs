@@ -563,7 +563,7 @@ fn remaining(store: &Store, waiting: usize) -> Remaining {
     for task in store.tasks().unwrap_or_default() {
         match task.status.as_str() {
             "pending" | "active"
-                if matches!(task.kind.as_str(), "page" | "breakdown" | "reconcile") =>
+                if matches!(task.kind.as_str(), "page" | "route" | "reconcile") =>
             {
                 out.actionable += 1
             }
@@ -713,6 +713,17 @@ fn human_task_view(task: Option<&llm_wiki::task::TaskView>) -> String {
         return String::from("\ntask: none");
     };
     let mut out = format!("\ntask: {} {} ({})", task.kind, task.id, task.status);
+    out.push_str(&human_task_details(task));
+    out
+}
+
+/// Everything the view explains besides its identity, shared by `ingest`,
+/// `task done` and the current task in `task status`.
+fn human_task_details(task: &llm_wiki::task::TaskView) -> String {
+    let mut out = String::new();
+    if let Some(stage) = &task.stage {
+        out.push_str(&format!("\nstage: {stage}"));
+    }
     if let Some(source) = &task.source {
         out.push_str(&format!(
             "\nsource: {} read {}",
@@ -724,9 +735,24 @@ fn human_task_view(task: Option<&llm_wiki::task::TaskView>) -> String {
             "\ntarget: {} (exists: {})",
             target.reference, target.exists
         ));
+        if let Some(title) = &target.title {
+            out.push_str(&format!("\ntarget_title: {title}"));
+        }
     }
     for page in &task.affected_pages {
         out.push_str(&format!("\naffected_page: {page}"));
+    }
+    out.push_str(&format!("\nguide: {}", task.guide.goal));
+    for forbidden in &task.guide.forbidden {
+        out.push_str(&format!("\nforbidden: {forbidden}"));
+    }
+    out.push_str(&format!(
+        "\ncontract: {} fields [{}]",
+        task.contract.fields.len(),
+        task.contract.schema
+    ));
+    if let Some(example) = task.contract.examples.first() {
+        out.push_str(&format!("\nexample: {}", example.title));
     }
     out.push_str(&format!(
         "\nsubmit: {} [{}]",
@@ -932,7 +958,7 @@ fn run_task(action: TaskAction) -> ! {
                 Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
             }
         }
-        TaskAction::Status => match task::status(&mut store) {
+        TaskAction::Status => match task::status(&root, &cfg, &mut store) {
             Ok(status) => report::emit_with(cmd, status, Exit::Ok, human_task_status),
             Err(err) => report::fail(cmd, Exit::Error, err.code(), &err.to_string()),
         },
@@ -975,7 +1001,7 @@ fn human_task_status(status: &task::TaskStatus) -> String {
     let mut out = String::new();
     for root in &status.roots {
         out.push_str(&format!(
-            "\nroot {} {} [{}{}]",
+            "\nroot {} {} [{}{}] stage {} open {}",
             root.id,
             root.source_key,
             root.status,
@@ -983,7 +1009,9 @@ fn human_task_status(status: &task::TaskStatus) -> String {
                 format!(", attempts {}", root.attempts)
             } else {
                 String::new()
-            }
+            },
+            root.stage.as_deref().unwrap_or("-"),
+            root.open_children
         ));
         for leaf in &root.leaves {
             out.push_str(&format!(
@@ -995,7 +1023,13 @@ fn human_task_status(status: &task::TaskStatus) -> String {
         }
     }
     match &status.current {
-        Some(task) => out.push_str(&format!("\ncurrent: {} {}", task.kind, task.id)),
+        Some(task) => {
+            out.push_str(&format!(
+                "\ncurrent: {} {} ({})",
+                task.kind, task.id, task.status
+            ));
+            out.push_str(&human_task_details(task));
+        }
         None => out.push_str("\ncurrent: none"),
     }
     for task in &status.failed {

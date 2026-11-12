@@ -23,6 +23,10 @@ mod contract;
 mod plan;
 mod route;
 
+/// The self-describing half of [`TaskView`], exposed so a caller can name the
+/// type. The module itself stays private: only these five types leave `task`.
+pub use contract::{Contract, Example, Field, FilledBy, Guide};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -151,6 +155,10 @@ pub struct RootView {
     pub status: String,
     pub attempts: i64,
     pub last_error: Option<String>,
+    /// The root plan's stage, or `None` when the plan cannot be read.
+    pub stage: Option<String>,
+    /// Leaves still pending or active: work this root is not done with.
+    pub open_children: usize,
     pub leaves: Vec<TaskRow>,
 }
 
@@ -158,7 +166,7 @@ pub struct RootView {
 #[derive(Debug, Serialize)]
 pub struct TaskStatus {
     pub roots: Vec<RootView>,
-    pub current: Option<TaskRow>,
+    pub current: Option<TaskView>,
     pub reconcile: Vec<TaskRow>,
     pub failed: Vec<TaskRow>,
     pub blocked: Vec<TaskRow>,
@@ -184,12 +192,17 @@ pub struct TaskView {
     pub id: i64,
     pub kind: String,
     pub status: String,
+    /// Which step of the source's life this task belongs to: `routing`,
+    /// `writing` or `reconcile`.
+    pub stage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<TaskSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<TaskTarget>,
     pub affected_pages: Vec<String>,
     pub submit: SubmitView,
+    pub guide: Guide,
+    pub contract: Contract,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,6 +219,10 @@ pub struct TaskTarget {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub brief: Option<String>,
+    /// The page hash the route froze before this task existed; absent when the
+    /// route creates the page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,12 +242,20 @@ pub fn view(root: &Path, cfg: &Config, store: &Store, task: &TaskRow) -> Result<
             format!("{}/{}", cfg.paths.raw.trim_end_matches('/'), raw_key)
         },
     });
-    let (target_title, target_brief) = page_note(task);
+    let (target_title, target_brief, target_before) = match page_plan(task) {
+        Some(plan) => (
+            Some(plan.target.title),
+            Some(plan.target.change),
+            plan.target.before,
+        ),
+        None => (None, None, None),
+    };
     let target = task.target_path.as_ref().map(|reference| TaskTarget {
         reference: reference.clone(),
         exists: root.join(reference).is_file(),
         title: target_title,
         brief: target_brief,
+        before: target_before,
     });
     let affected_pages =
         if matches!(task.kind.as_str(), "breakdown" | "route") && !raw_key.is_empty() {
@@ -238,17 +263,18 @@ pub fn view(root: &Path, cfg: &Config, store: &Store, task: &TaskRow) -> Result<
         } else {
             Vec::new()
         };
-    let (suffix, schema) = match task.kind.as_str() {
-        "page" => ("--payload <FILE>", "page-content-v1"),
-        "route" => ("--payload <FILE>", "route-v1"),
-        "breakdown" => ("--leaves <FILE>", "leaf-list-v1"),
-        "reconcile" => ("--accept | --regenerate", "reconcile-v1"),
-        _ => ("", ""),
+    let (stage, suffix, schema) = match task.kind.as_str() {
+        "page" => (Some("writing"), "--payload <FILE>", "page-content-v1"),
+        "route" => (Some("routing"), "--payload <FILE>", "route-v1"),
+        "breakdown" => (None, "--leaves <FILE>", "leaf-list-v1"),
+        "reconcile" => (Some("reconcile"), "--accept | --regenerate", "reconcile-v1"),
+        _ => (None, "", ""),
     };
     Ok(TaskView {
         id: task.id,
         kind: task.kind.clone(),
         status: task.status.clone(),
+        stage: stage.map(String::from),
         source,
         target,
         affected_pages,
@@ -256,18 +282,17 @@ pub fn view(root: &Path, cfg: &Config, store: &Store, task: &TaskRow) -> Result<
             command: format!("llm-wiki task done {} {suffix}", task.id),
             schema: String::from(schema),
         },
+        guide: contract::guide(&task.kind),
+        contract: contract::contract(schema, &cfg.schema.types),
     })
 }
 
-/// The page title and the change request, read off the page's own plan.
-fn page_note(task: &TaskRow) -> (Option<String>, Option<String>) {
+/// The page's own plan, when this is a page task and the plan still parses.
+fn page_plan(task: &TaskRow) -> Option<PagePlan> {
     if task.kind != "page" {
-        return (None, None);
+        return None;
     }
-    match PagePlan::parse(task) {
-        Ok(plan) => (Some(plan.target.title), Some(plan.target.change)),
-        Err(_) => (None, None),
-    }
+    PagePlan::parse(task).ok()
 }
 
 /// Ensures a root exists for `item`, and snapshots `pages/` as its baseline.
@@ -324,14 +349,7 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
         let tasks = store.tasks()?;
 
         // 1. A root whose pages are gone settles here, not handed out.
-        if let Some(root_task) = tasks.iter().find(|t| {
-            t.kind == "breakdown"
-                && t.status == "active"
-                && !tasks.iter().any(|child| child.parent_id == Some(t.id))
-                && RootPlan::parse(t)
-                    .map(|plan| matches!(plan.stage, Stage::Writing | Stage::Settling))
-                    .unwrap_or(false)
-        }) {
+        if let Some(root_task) = tasks.iter().find(|t| owes_settlement(&tasks, t)) {
             let before = out.merged_pages.len();
             let source_key = root_task.source_key.clone().unwrap_or_default();
             match finish_root(root, cfg, store, root_task) {
@@ -493,7 +511,12 @@ pub fn retry(store: &mut Store, id: i64) -> Result<TaskRow> {
 }
 
 /// Reads the tree without advancing it.
-pub fn status(store: &mut Store) -> Result<TaskStatus> {
+///
+/// The selection order is `advance`'s: a page, then a reconcile, then a route.
+/// A root the tool still owes a merge outranks all of them, so `current` is
+/// `None` while that settle is pending. This only reads: no row is set active
+/// and no baseline moves.
+pub fn status(root: &Path, cfg: &Config, store: &mut Store) -> Result<TaskStatus> {
     let tasks = store.tasks()?;
     let mut roots = Vec::new();
     for task in tasks.iter().filter(|t| t.kind == "breakdown") {
@@ -503,6 +526,16 @@ pub fn status(store: &mut Store) -> Result<TaskStatus> {
             status: task.status.clone(),
             attempts: task.attempts,
             last_error: task.last_error.clone(),
+            stage: RootPlan::parse(task)
+                .ok()
+                .map(|plan| stage_name(&plan.stage).to_string()),
+            open_children: tasks
+                .iter()
+                .filter(|child| {
+                    child.parent_id == Some(task.id)
+                        && matches!(child.status.as_str(), "pending" | "active")
+                })
+                .count(),
             leaves: tasks
                 .iter()
                 .filter(|child| child.parent_id == Some(task.id))
@@ -510,23 +543,17 @@ pub fn status(store: &mut Store) -> Result<TaskStatus> {
                 .collect(),
         });
     }
-    let current = tasks
-        .iter()
-        .filter(|t| t.kind == "page" && t.status == "pending")
-        .min_by_key(|t| t.id)
-        .or_else(|| {
-            tasks
-                .iter()
-                .filter(|t| t.kind == "reconcile" && t.status == "pending")
-                .min_by_key(|t| t.id)
-        })
-        .or_else(|| {
-            tasks
-                .iter()
-                .filter(|t| t.kind == "breakdown" && t.status == "pending")
-                .min_by_key(|t| t.id)
-        })
-        .cloned();
+    let current = if tasks.iter().any(|task| owes_settlement(&tasks, task)) {
+        None
+    } else {
+        pick_task(&tasks, "page")
+            .or_else(|| pick_task(&tasks, "reconcile"))
+            .or_else(|| pick_task(&tasks, "route"))
+    };
+    let current = match current {
+        Some(task) => Some(view(root, cfg, store, task)?),
+        None => None,
+    };
     Ok(TaskStatus {
         roots,
         current,
@@ -546,6 +573,39 @@ pub fn status(store: &mut Store) -> Result<TaskStatus> {
             .cloned()
             .collect(),
     })
+}
+
+/// The earliest pending or active task of one kind.
+///
+/// A delivered task stays `active` until it is closed, so status must count
+/// both; only `advance` gets to reset the row to `pending`.
+fn pick_task<'a>(tasks: &'a [TaskRow], kind: &str) -> Option<&'a TaskRow> {
+    tasks
+        .iter()
+        .filter(|t| t.kind == kind && matches!(t.status.as_str(), "pending" | "active"))
+        .min_by_key(|t| t.id)
+}
+
+/// Whether the tool, not the agent, owes this root the next step.
+///
+/// One predicate for both surfaces: `advance` settles the root first and
+/// `status` refuses to call it current, so the two cannot disagree about what
+/// comes next.
+fn owes_settlement(tasks: &[TaskRow], task: &TaskRow) -> bool {
+    task.kind == "breakdown"
+        && task.status == "active"
+        && !tasks.iter().any(|child| child.parent_id == Some(task.id))
+        && RootPlan::parse(task)
+            .map(|plan| matches!(plan.stage, Stage::Writing | Stage::Settling))
+            .unwrap_or(false)
+}
+
+fn stage_name(stage: &Stage) -> &'static str {
+    match stage {
+        Stage::Routing => "routing",
+        Stage::Writing => "writing",
+        Stage::Settling => "settling",
+    }
 }
 
 /// The pages that already cite any of `raw_keys`, sorted.
