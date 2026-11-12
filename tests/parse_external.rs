@@ -241,9 +241,11 @@ fn auto_both_failures_are_reported_together() {
     let message = err.to_string();
     assert!(message.contains("cannot parse"), "message: {message}");
     assert!(message.contains("500"), "message: {message}");
-    assert_eq!(
-        message.matches("failed").count(),
-        2,
+    // Both reasons must be present. Matching the two labels rather than the
+    // count of the word "failed" keeps the assertion stable when a backend's
+    // own error text happens to use it too.
+    assert!(
+        message.contains("builtin backend failed") && message.contains("external backend failed"),
         "both reasons must be present: {message}"
     );
 }

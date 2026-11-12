@@ -267,3 +267,124 @@ fn mixed_pdf_extracts_the_one_text_page() {
     assert!(!out.asset);
     assert!(!out.no_text_layer);
 }
+
+// -------------------------------------------------------------- strict layer
+//
+// The tests below cover what the shallow probe used to hide: encryption, a text
+// layer outside the sample, named CMaps `pdf-extract` panics on, undecodable
+// streams and text reached through Form XObjects. Every one of them is a real
+// document the old code accepted while losing the body.
+
+/// Parses `bytes` as a PDF without touching the filesystem.
+fn parse_bytes(bytes: &[u8]) -> llm_wiki::parse::Result<llm_wiki::parse::Extracted> {
+    PdfParser::new().parse(&Source::inline("sample.pdf", bytes))
+}
+
+/// The stable reason a parse failed with, panicking on success.
+fn failure_reason(bytes: &[u8]) -> String {
+    match parse_bytes(bytes) {
+        Ok(extracted) => panic!("expected a failure, got {:?}", extracted.markdown),
+        Err(llm_wiki::parse::ParseError::Bad { message, .. }) => message,
+        Err(other) => panic!("expected a bad-source error, got {other:?}"),
+    }
+}
+
+#[test]
+fn rc4_document_with_an_empty_user_password_is_extracted() {
+    let bytes = common::make_encrypted_pdf_bytes("encrypted body", 3, "");
+    let out = parse_bytes(&bytes).unwrap();
+    assert!(
+        out.markdown.contains("encrypted body"),
+        "{:?}",
+        out.markdown
+    );
+    assert!(!out.asset);
+}
+
+#[test]
+fn rc4_document_that_needs_a_password_is_refused() {
+    let bytes = common::make_encrypted_pdf_bytes("secret body", 3, "secret");
+    let reason = failure_reason(&bytes);
+    assert!(reason.contains("pdf_password_required"), "{reason}");
+}
+
+#[test]
+fn text_layer_probe_reads_an_encrypted_document() {
+    let d = tempdir().unwrap();
+    let p = d.path().join("encrypted.pdf");
+    common::make_encrypted_pdf(&p, "probe body", 2, "");
+    assert!(has_text_layer(&p).unwrap());
+}
+
+#[test]
+fn text_outside_the_sample_is_still_extracted() {
+    let out = parse_bytes(&common::make_pdf_with_text_on_fourth_page_bytes()).unwrap();
+    assert!(
+        out.markdown.contains("text on the fourth page"),
+        "{:?}",
+        out.markdown
+    );
+    assert!(!out.asset);
+}
+
+#[test]
+fn unicode_cmap_font_without_a_to_unicode_stream_is_extracted() {
+    let bytes = common::make_pdf_with_unicode_cmap_bytes("UniGB-UTF16-H");
+    let out = parse_bytes(&bytes).unwrap();
+    assert!(out.markdown.contains("你好"), "{:?}", out.markdown);
+    assert!(!out.asset);
+}
+
+#[test]
+fn a_named_cmap_the_pipeline_cannot_decode_is_an_error() {
+    let bytes = common::make_pdf_with_unicode_cmap_bytes("GBK-EUC-H");
+    let reason = failure_reason(&bytes);
+    assert!(reason.contains("pdf_font_encoding"), "{reason}");
+}
+
+#[test]
+fn an_undecodable_page_stream_fails_the_whole_document() {
+    let bytes = common::make_pdf_with_corrupt_second_page_bytes();
+    let reason = failure_reason(&bytes);
+    assert!(reason.contains("pdf_stream_decode"), "{reason}");
+    assert!(reason.contains("page 2"), "{reason}");
+}
+
+#[test]
+fn text_inside_a_form_xobject_is_extracted() {
+    let out = parse_bytes(&common::make_pdf_with_form_text_bytes()).unwrap();
+    assert!(
+        out.markdown.contains("text inside a form"),
+        "{:?}",
+        out.markdown
+    );
+}
+
+#[test]
+fn a_form_that_draws_itself_is_an_error() {
+    let bytes = common::make_pdf_with_form_cycle_bytes();
+    let reason = failure_reason(&bytes);
+    assert!(reason.contains("pdf_form_cycle"), "{reason}");
+}
+
+#[test]
+fn a_draw_of_a_form_the_resources_lack_is_an_error() {
+    let bytes = common::make_pdf_with_missing_form_bytes();
+    let reason = failure_reason(&bytes);
+    assert!(reason.contains("pdf_invalid_reference"), "{reason}");
+}
+
+#[test]
+fn a_page_without_content_is_not_a_failure() {
+    let out = parse_bytes(&common::make_pdf_with_blank_middle_page_bytes()).unwrap();
+    assert!(
+        out.markdown.contains("before the blank page"),
+        "{:?}",
+        out.markdown
+    );
+    assert!(
+        out.markdown.contains("after the blank page"),
+        "{:?}",
+        out.markdown
+    );
+}

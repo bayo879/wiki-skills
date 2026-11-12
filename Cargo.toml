@@ -15,7 +15,8 @@ thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 walkdir = "2"
 scraper = "0.19"
-lopdf = "0.32"
+flate2 = "1"
+lopdf = "0.41"
 pdf-extract = "0.7"
 ureq = { version = "3", features = ["multipart"] }
 
