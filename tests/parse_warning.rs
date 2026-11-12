@@ -49,11 +49,12 @@ fn short_markdown_is_never_warned_about() {
 }
 
 #[test]
-fn assets_are_never_warned_about() {
+fn an_asset_is_refused_instead_of_warned_about() {
     let cfg = Config::default();
-    let got = codes(&cfg, "a.png", b"\x89PNG\r\n\x1a\n");
+    let err = parse_with(&cfg, &Source::inline("a.png", b"\x89PNG\r\n\x1a\n")).unwrap_err();
+    assert_eq!(err.code(), "E_BAD_SOURCE");
     assert!(
-        !got.iter().any(|code| code == "below_min_chars"),
-        "an asset is a link by design: {got:?}"
+        err.to_string().contains("text_unavailable"),
+        "an image is a link, never a source: {err}"
     );
 }

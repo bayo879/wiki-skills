@@ -135,37 +135,116 @@ pub trait Parser {
     fn parse(&self, input: &Source) -> Result<Extracted>;
 }
 
+/// Why a backend result cannot be delivered as a knowledge source.
+///
+/// The reason is structured, not a sentence to be matched: callers report
+/// `code()` and the page, and a test can assert the classification without
+/// depending on the wording around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnavailableReason {
+    /// The result carries no body: a link only, or nothing but whitespace.
+    TextUnavailable,
+    /// Known missing content: a page, form or stream the backend could not read.
+    PartialExtraction,
+    /// Known lossy decoding: text this build cannot map back to Unicode.
+    LossyDecode,
+}
+
+impl UnavailableReason {
+    /// Stable classification used in messages and by tests.
+    pub fn code(&self) -> &'static str {
+        match self {
+            UnavailableReason::TextUnavailable => "text_unavailable",
+            UnavailableReason::PartialExtraction => "partial_extraction",
+            UnavailableReason::LossyDecode => "lossy_decode",
+        }
+    }
+}
+
 /// Why a source could not be parsed.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     /// No registered backend claims the extension.
-    #[error("no parser handles the extension {ext:?} of source {key:?}")]
     NoParser { key: String, ext: String },
     /// The file behind a source could not be read.
-    #[error("cannot read {}: {message}", path.display())]
     Io { path: PathBuf, message: String },
     /// A backend claimed the source and then could not decode it.
-    #[error("cannot parse source {key:?}: {message}")]
     Bad { key: String, message: String },
+    /// A backend produced a result that cannot be delivered as text.
+    ///
+    /// `page` is set only when the backend can name the page that failed.
+    Unavailable {
+        key: String,
+        backend: String,
+        reason: UnavailableReason,
+        page: Option<u32>,
+    },
     /// The external service is configured incompletely.
-    #[error("external parser configuration is incomplete: {message}")]
     ExternalConfig { message: String },
     /// The environment variable named by `auth_env` is not set.
-    #[error("external parser token variable {name} is not set")]
     NoAuthEnv { name: String },
     /// The external service could not be reached or returned an unusable answer.
-    #[error("external parser failed: {message}")]
     External { message: String },
     /// The external service answered with an unexpected HTTP status.
-    #[error("external parser returned HTTP {status}: {body}")]
     ExternalStatus { status: u16, body: String },
     /// In `auto` mode both the builtin and the external backend failed.
-    #[error("builtin backend failed ({builtin}); external backend failed ({external})")]
     BothFailed { builtin: String, external: String },
     /// The source is above `parse.max_source_bytes` and is refused.
-    #[error("source is {size} bytes, above parse.max_source_bytes ({limit} bytes)")]
     Oversize { size: u64, limit: u64 },
 }
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::NoParser { key, ext } => write!(
+                f,
+                "no parser handles the extension {ext:?} of source {key:?}"
+            ),
+            ParseError::Io { path, message } => {
+                write!(f, "cannot read {}: {message}", path.display())
+            }
+            ParseError::Bad { key, message } => {
+                write!(f, "cannot parse source {key:?}: {message}")
+            }
+            ParseError::Unavailable {
+                key,
+                backend,
+                reason,
+                page,
+            } => {
+                write!(
+                    f,
+                    "source {key:?} has no usable text from the {backend} backend ({})",
+                    reason.code()
+                )?;
+                match page {
+                    Some(page) => write!(f, " at page {page}"),
+                    None => Ok(()),
+                }
+            }
+            ParseError::ExternalConfig { message } => {
+                write!(f, "external parser configuration is incomplete: {message}")
+            }
+            ParseError::NoAuthEnv { name } => {
+                write!(f, "external parser token variable {name} is not set")
+            }
+            ParseError::External { message } => write!(f, "external parser failed: {message}"),
+            ParseError::ExternalStatus { status, body } => {
+                write!(f, "external parser returned HTTP {status}: {body}")
+            }
+            ParseError::BothFailed { builtin, external } => write!(
+                f,
+                "builtin backend failed ({builtin}); external backend failed ({external})"
+            ),
+            ParseError::Oversize { size, limit } => write!(
+                f,
+                "source is {size} bytes, above parse.max_source_bytes ({limit} bytes)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
 
 impl ParseError {
     /// Stable error code for the response envelope.
@@ -174,6 +253,7 @@ impl ParseError {
             ParseError::NoParser { .. } => "E_NO_PARSER",
             ParseError::Io { .. } => "E_IO",
             ParseError::Bad { .. } => "E_BAD_SOURCE",
+            ParseError::Unavailable { .. } => "E_BAD_SOURCE",
             ParseError::ExternalConfig { .. } => "E_BAD_CONFIG",
             ParseError::NoAuthEnv { .. } => "E_NO_AUTH_ENV",
             ParseError::External { .. } => "E_EXTERNAL",
@@ -307,16 +387,41 @@ pub fn pick_backend(cfg: &Config, ext: &str) -> Vec<&'static str> {
 /// The second value is the id of the backend that produced the result, so the
 /// caller can record it in the raw frontmatter without asking the parser again.
 ///
-/// In `auto` mode the builtin result is kept unless it is thin (fewer than
-/// `[parse].min_chars` characters) or it has no text layer at all; only then is
-/// the external service tried. A failed external attempt never loses the builtin
-/// result: it is returned with an `external_failed` warning instead. Only when
-/// both backends fail is there no result, and then both reasons travel together
-/// in [`ParseError::BothFailed`].
+/// Every candidate result passes through [`validate_extracted`] before the
+/// fallback decides anything: a link or an empty body is not a source, and
+/// publishing one would turn "we could not read this" into "this document has no
+/// text". In `auto` mode an unusable or thin builtin result is retried against
+/// the external service. A failed external attempt keeps the builtin result only
+/// when that result was usable on its own; otherwise the two reasons travel
+/// together in [`ParseError::BothFailed`].
 pub fn parse_with(cfg: &Config, src: &Source) -> Result<(Extracted, String)> {
     let (mut extracted, backend) = parse_with_backend(cfg, src)?;
     append_below_min_chars(cfg, &mut extracted, &backend);
     Ok((extracted, backend))
+}
+
+/// Refuses a backend result that cannot be delivered as a knowledge source.
+///
+/// The rule is deliberately about the result, not the backend: every backend is
+/// held to it, so a service that answers "200 OK" with an empty body or a bare
+/// attachment link is refused the same way a scan is. Known partial or lossy
+/// extraction does not reach here: a backend that knows it lost text returns
+/// [`ParseError::Unavailable`] itself, with the page it can name.
+pub fn validate_extracted(src: &Source, backend: &str, extracted: Extracted) -> Result<Extracted> {
+    let unavailable = |reason| ParseError::Unavailable {
+        key: src.key.clone(),
+        backend: String::from(backend),
+        reason,
+        page: None,
+    };
+
+    if extracted.asset {
+        return Err(unavailable(UnavailableReason::TextUnavailable));
+    }
+    if extracted.markdown.trim().is_empty() {
+        return Err(unavailable(UnavailableReason::TextUnavailable));
+    }
+    Ok(extracted)
 }
 
 /// Warns when a backend that had to interpret a format produced almost nothing.
@@ -324,9 +429,9 @@ pub fn parse_with(cfg: &Config, src: &Source) -> Result<(Extracted, String)> {
 /// A thin result from `html`, `pdf` or the external service usually means the
 /// extraction failed rather than that the source is short, so it is worth
 /// surfacing. `builtin-text` is exempt: it copies the bytes, so a short note is
-/// short on purpose. Assets are exempt too: they are links by design.
+/// short on purpose.
 fn append_below_min_chars(cfg: &Config, extracted: &mut Extracted, backend: &str) {
-    if extracted.asset || backend == text::ID {
+    if backend == text::ID {
         return;
     }
     let chars = extracted.markdown.chars().count();
@@ -352,7 +457,7 @@ fn parse_with_backend(cfg: &Config, src: &Source) -> Result<(Extracted, String)>
 
     if first == external::ID {
         let parser = external::ExternalParser::from_config(&cfg.parse.external)?;
-        let extracted = parser.parse(src)?;
+        let extracted = validate_extracted(src, external::ID, parser.parse(src)?)?;
         return Ok((extracted, String::from(external::ID)));
     }
 
@@ -361,58 +466,70 @@ fn parse_with_backend(cfg: &Config, src: &Source) -> Result<(Extracted, String)>
         .find(|backend| backend.id() == first)
         .expect("pick_backend only names registered builtin backends");
     if !order.contains(&external::ID) {
-        return Ok((builtin.parse(src)?, String::from(first)));
+        let extracted = validate_extracted(src, first, builtin.parse(src)?)?;
+        return Ok((extracted, String::from(first)));
     }
     let external_parser = external::ExternalParser::from_config(&cfg.parse.external)?;
 
-    let extracted = match builtin.parse(src) {
-        Ok(extracted) => extracted,
+    match builtin
+        .parse(src)
+        .and_then(|extracted| validate_extracted(src, first, extracted))
+    {
         Err(builtin_error) => {
-            return match external_parser.parse(src) {
-                Ok(extracted) => Ok((
-                    with_warning(
-                        extracted,
-                        "external_used",
-                        format!(
-                            "the builtin backend failed ({builtin_error}), used the external one"
+            match external_parser.parse(src) {
+                Ok(extracted) => match validate_extracted(src, external::ID, extracted) {
+                    Ok(extracted) => Ok((
+                        with_warning(
+                            extracted,
+                            "external_used",
+                            format!(
+                                "the {first} backend produced no usable text ({builtin_error}), used the external one"
+                            ),
                         ),
-                    ),
-                    String::from(external::ID),
-                )),
+                        String::from(external::ID),
+                    )),
+                    Err(external_error) => Err(ParseError::BothFailed {
+                        builtin: builtin_error.to_string(),
+                        external: external_error.to_string(),
+                    }),
+                },
                 Err(external_error) => Err(ParseError::BothFailed {
                     builtin: builtin_error.to_string(),
                     external: external_error.to_string(),
                 }),
-            };
+            }
         }
-    };
-
-    let chars = extracted.markdown.chars().count();
-    let too_thin = !extracted.asset && chars < cfg.parse.min_chars;
-    if !extracted.asset && !too_thin {
-        return Ok((extracted, String::from(first)));
-    }
-
-    match external_parser.parse(src) {
-        Ok(extracted) => Ok((
-            with_warning(
-                extracted,
-                "external_used",
-                if chars < cfg.parse.min_chars {
-                    format!(
-                        "the builtin backend produced only {chars} characters (min_chars {}), used the external one",
-                        cfg.parse.min_chars
-                    )
-                } else {
-                    String::from("the source has no text layer, used the external one")
+        Ok(thin) if thin.markdown.chars().count() >= cfg.parse.min_chars => {
+            Ok((thin, String::from(first)))
+        }
+        Ok(thin) => {
+            let chars = thin.markdown.chars().count();
+            match external_parser.parse(src) {
+                Ok(extracted) => match validate_extracted(src, external::ID, extracted) {
+                    Ok(extracted) => Ok((
+                        with_warning(
+                            extracted,
+                            "external_used",
+                            format!(
+                                "the {first} backend produced only {chars} characters (min_chars {}), used the external one",
+                                cfg.parse.min_chars
+                            ),
+                        ),
+                        String::from(external::ID),
+                    )),
+                    // The builtin text was short but real, so a fallback that
+                    // came back empty must not cost us the usable result.
+                    Err(external_error) => Ok((
+                        with_warning(thin, "external_failed", external_error.to_string()),
+                        String::from(first),
+                    )),
                 },
-            ),
-            String::from(external::ID),
-        )),
-        Err(error) => Ok((
-            with_warning(extracted, "external_failed", error.to_string()),
-            String::from(first),
-        )),
+                Err(error) => Ok((
+                    with_warning(thin, "external_failed", error.to_string()),
+                    String::from(first),
+                )),
+            }
+        }
     }
 }
 

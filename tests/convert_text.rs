@@ -199,7 +199,7 @@ fn plain_text_without_frontmatter_passes_through() {
 }
 
 #[test]
-fn source_that_is_all_frontmatter_warns_empty() {
+fn source_that_is_all_frontmatter_is_refused() {
     let (d, mut s, cfg) = setup();
     fs::write(
         d.path().join("empty.md"),
@@ -207,13 +207,13 @@ fn source_that_is_all_frontmatter_warns_empty() {
     )
     .unwrap();
 
-    let out = convert::convert_one(d.path(), &cfg, &mut s, "empty.md").unwrap();
+    let err = convert::convert_one(d.path(), &cfg, &mut s, "empty.md").unwrap_err();
+    assert_eq!(err.code(), "E_BAD_SOURCE");
+    assert!(err.to_string().contains("text_unavailable"), "{err}");
     assert!(
-        out.warnings.iter().any(|warning| warning.code == "empty"),
-        "expected an `empty` warning, got {:?}",
-        out.warnings
+        !d.path().join(".wiki/raw/empty.md").exists(),
+        "a source with no body must not be published as an empty raw"
     );
-    assert_eq!(out.chars, 0);
 }
 
 #[test]
@@ -230,11 +230,18 @@ fn raw_frontmatter_key_order_is_fixed() {
         .map(|line| line.split(':').next().unwrap())
         .collect();
     // The text backend never sets `asset` / `no_text_layer`, so the fixed order
-    // collapses to these five keys; asset variants are covered by the unit test
+    // collapses to these six keys; asset variants are covered by the unit test
     // on the renderer.
     assert_eq!(
         keys,
-        ["source", "source_hash", "parser", "converted_at", "pin"]
+        [
+            "source",
+            "source_hash",
+            "parser",
+            "converted_at",
+            "warnings",
+            "pin"
+        ]
     );
 }
 
@@ -489,7 +496,7 @@ fn text_backend_claims_markdown_and_txt_only() {
 }
 
 #[test]
-fn registry_binds_the_html_and_asset_backends() {
+fn registry_binds_html_and_refuses_a_bare_image() {
     let cfg = Config::default();
 
     let (extracted, id) =
@@ -498,11 +505,15 @@ fn registry_binds_the_html_and_asset_backends() {
     assert_eq!(extracted.markdown, "hi");
     assert!(!extracted.asset);
 
-    let (extracted, id) =
-        parse::parse_with(&cfg, &parse::Source::inline("a.png", b"\x89PNG")).unwrap();
-    assert_eq!(id, "builtin-asset");
-    assert!(extracted.asset);
-    assert_eq!(extracted.markdown, "![](../../a.png)");
+    // The asset backend still runs and still builds its link, but a link is not
+    // a source: `parse_with` refuses it so ingestion cannot publish an image as
+    // an empty document.
+    let err = parse::parse_with(&cfg, &parse::Source::inline("a.png", b"\x89PNG")).unwrap_err();
+    assert_eq!(err.code(), "E_BAD_SOURCE");
+    assert!(
+        err.to_string().contains("png") || err.to_string().contains("a.png"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -585,10 +596,11 @@ fn cli_parse_of_a_missing_source_is_a_runtime_error() {
 }
 
 /// The window between `write_atomic` and the ledger transaction: a crash there
-/// leaves a raw file nobody registered. The next round must reuse it, not clash
-/// with it and not need a manual delete first.
+/// leaves a raw file nobody registered. It cannot be proven to be machine output
+/// any more (a person may have edited it since), so the round refuses and names
+/// the file; deleting it is the documented way to let the conversion rebuild it.
 #[test]
-fn a_raw_left_by_an_interrupted_conversion_is_reused_next_round() {
+fn a_raw_left_by_an_interrupted_conversion_is_refused_until_it_is_deleted() {
     let (d, mut store, cfg) = setup();
     fs::write(d.path().join("crash.md"), "第一版\n").unwrap();
     convert::convert_one(d.path(), &cfg, &mut store, "crash.md").unwrap();
@@ -600,6 +612,11 @@ fn a_raw_left_by_an_interrupted_conversion_is_reused_next_round() {
     assert!(store.all_raws().unwrap().is_empty());
     assert!(d.path().join(".wiki/raw/crash.md").is_file());
 
+    let error = convert::convert_one(d.path(), &cfg, &mut store, "crash.md").unwrap_err();
+    assert_eq!(error.code(), "E_RAW_COLLISION");
+    assert!(d.path().join(".wiki/raw/crash.md").is_file());
+
+    fs::remove_file(d.path().join(".wiki/raw/crash.md")).unwrap();
     convert::convert_one(d.path(), &cfg, &mut store, "crash.md").unwrap();
     let row = store.get_source("crash.md").unwrap().unwrap();
     assert_eq!(row.raw_key.as_deref(), Some(".wiki/raw/crash.md"));

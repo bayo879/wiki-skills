@@ -211,15 +211,28 @@ fn parser_works_from_the_bytes_it_was_handed() {
     );
 }
 
+/// Pages are extracted one at a time, so the body keeps their boundaries
+/// instead of arriving as one block of unknown shape.
 #[test]
-fn text_pdf_reports_that_the_page_split_is_unknown() {
+fn a_multi_page_pdf_keeps_its_page_boundaries() {
     let d = tempdir().unwrap();
     let p = d.path().join("pages.pdf");
     common::make_pdf(&p, "multi page", 3);
     let out = PdfParser::new().parse(&Source::path(&p).unwrap()).unwrap();
+    assert_eq!(
+        out.markdown.matches("multi page").count(),
+        3,
+        "{:?}",
+        out.markdown
+    );
     assert!(
-        out.warnings.iter().any(|w| w.code == "page_split_unknown"),
-        "expected a `page_split_unknown` warning, got {:?}",
+        !out.warnings.iter().any(|w| w.code == "page_split_unknown"),
+        "page boundaries are known now: {:?}",
+        out.warnings
+    );
+    assert!(
+        !out.warnings.iter().any(|w| w.code == "page_text_blank"),
+        "every page carried its text: {:?}",
         out.warnings
     );
 }
@@ -266,4 +279,216 @@ fn mixed_pdf_extracts_the_one_text_page() {
     );
     assert!(!out.asset);
     assert!(!out.no_text_layer);
+}
+
+// -------------------------------------------------------------- strict layer
+//
+// The tests below cover what the shallow probe used to hide: encryption, a text
+// layer outside the sample, named CMaps `pdf-extract` panics on, undecodable
+// streams and text reached through Form XObjects. Every one of them is a real
+// document the old code accepted while losing the body.
+
+/// Parses `bytes` as a PDF without touching the filesystem.
+fn parse_bytes(bytes: &[u8]) -> llm_wiki::parse::Result<llm_wiki::parse::Extracted> {
+    PdfParser::new().parse(&Source::inline("sample.pdf", bytes))
+}
+
+/// The error a parse failed with, panicking on success.
+fn failure(bytes: &[u8]) -> parse::ParseError {
+    match parse_bytes(bytes) {
+        Ok(extracted) => panic!("expected a failure, got {:?}", extracted.markdown),
+        Err(error) => error,
+    }
+}
+
+/// The detail of a [`parse::ParseError::Bad`], panicking on any other error.
+fn bad_message(bytes: &[u8]) -> String {
+    match failure(bytes) {
+        parse::ParseError::Bad { message, .. } => message,
+        other => panic!("expected a bad-source error, got {other:?}"),
+    }
+}
+
+/// The stable reason code and page of an unavailable source.
+fn unavailable(bytes: &[u8]) -> (&'static str, Option<u32>) {
+    match failure(bytes) {
+        parse::ParseError::Unavailable { reason, page, .. } => (reason.code(), page),
+        other => panic!("expected an unavailable source, got {other:?}"),
+    }
+}
+
+#[test]
+fn rc4_document_with_an_empty_user_password_is_extracted() {
+    let bytes = common::make_encrypted_pdf_bytes("encrypted body", 3, "");
+    let out = parse_bytes(&bytes).unwrap();
+    assert!(
+        out.markdown.contains("encrypted body"),
+        "{:?}",
+        out.markdown
+    );
+    assert!(!out.asset);
+}
+
+#[test]
+fn rc4_document_that_needs_a_password_is_refused() {
+    let bytes = common::make_encrypted_pdf_bytes("secret body", 3, "secret");
+    let reason = bad_message(&bytes);
+    assert!(reason.contains("pdf_password_required"), "{reason}");
+}
+
+/// Real notices often clear the copy bit while keeping an empty user password.
+/// Extraction must depend on the password the file accepts, not that bit.
+#[test]
+fn a_document_that_forbids_copying_is_still_read() {
+    let bytes = common::make_encrypted_pdf_bytes_with_permissions(
+        "copy-protected body",
+        2,
+        "",
+        lopdf::Permissions::PRINTABLE,
+    );
+    let out = PdfParser::new()
+        .parse(&Source::inline("notice.pdf", &bytes))
+        .unwrap();
+    assert!(
+        out.markdown.contains("copy-protected body"),
+        "{:?}",
+        out.markdown
+    );
+    assert!(!out.asset);
+}
+
+#[test]
+fn text_layer_probe_reads_an_encrypted_document() {
+    let d = tempdir().unwrap();
+    let p = d.path().join("encrypted.pdf");
+    common::make_encrypted_pdf(&p, "probe body", 2, "");
+    assert!(has_text_layer(&p).unwrap());
+}
+
+#[test]
+fn text_outside_the_sample_is_still_extracted() {
+    let out = parse_bytes(&common::make_pdf_with_text_on_fourth_page_bytes()).unwrap();
+    assert!(
+        out.markdown.contains("text on the fourth page"),
+        "{:?}",
+        out.markdown
+    );
+    assert!(!out.asset);
+}
+
+#[test]
+fn unicode_cmap_font_without_a_to_unicode_stream_is_extracted() {
+    let bytes = common::make_pdf_with_unicode_cmap_bytes("UniGB-UTF16-H");
+    let out = parse_bytes(&bytes).unwrap();
+    assert!(out.markdown.contains("你好"), "{:?}", out.markdown);
+    assert!(!out.asset);
+}
+
+#[test]
+fn a_named_cmap_the_pipeline_cannot_decode_is_an_error() {
+    let bytes = common::make_pdf_with_unicode_cmap_bytes("GBK-EUC-H");
+    assert_eq!(
+        unavailable(&bytes),
+        ("lossy_decode", Some(1)),
+        "a CMap the pipeline cannot map back to Unicode drops characters, so it must not pass as text"
+    );
+}
+
+#[test]
+fn an_undecodable_page_stream_fails_the_whole_document() {
+    let bytes = common::make_pdf_with_corrupt_second_page_bytes();
+    assert_eq!(
+        unavailable(&bytes),
+        ("partial_extraction", Some(2)),
+        "the second page is named so the report can point at it"
+    );
+}
+
+#[test]
+fn text_inside_a_form_xobject_is_extracted() {
+    let out = parse_bytes(&common::make_pdf_with_form_text_bytes()).unwrap();
+    assert!(
+        out.markdown.contains("text inside a form"),
+        "{:?}",
+        out.markdown
+    );
+}
+
+#[test]
+fn a_form_that_draws_itself_is_an_error() {
+    let bytes = common::make_pdf_with_form_cycle_bytes();
+    assert_eq!(unavailable(&bytes), ("partial_extraction", Some(1)));
+}
+
+#[test]
+fn a_draw_of_a_form_the_resources_lack_is_an_error() {
+    let bytes = common::make_pdf_with_missing_form_bytes();
+    assert_eq!(unavailable(&bytes), ("partial_extraction", Some(1)));
+}
+
+#[test]
+fn a_page_without_content_is_not_a_failure() {
+    let out = parse_bytes(&common::make_pdf_with_blank_middle_page_bytes()).unwrap();
+    assert!(
+        out.markdown.contains("before the blank page"),
+        "{:?}",
+        out.markdown
+    );
+    assert!(
+        out.markdown.contains("after the blank page"),
+        "{:?}",
+        out.markdown
+    );
+}
+
+/// A page with visible text the extractor can only render as blank is not a
+/// blank page: the body would silently lose it, so the document fails.
+#[test]
+fn text_the_extractor_cannot_produce_fails_the_whole_document() {
+    let bytes = common::make_pdf_with_blank_mapping_bytes();
+    let (reason, page) = unavailable(&bytes);
+    assert_eq!(reason, "partial_extraction");
+    assert_eq!(page, Some(1));
+}
+
+/// Every string in a `TJ` array is drawn, so a trailing blank string must not
+/// hide the solid one beside it in either order.
+#[test]
+fn a_tj_array_cannot_hide_visible_text_behind_a_blank_string() {
+    for tail_blank in [false, true] {
+        let bytes = common::make_pdf_with_tj_blank_mapping_bytes(tail_blank);
+        let (reason, page) = unavailable(&bytes);
+        assert_eq!(reason, "partial_extraction", "tail_blank={tail_blank}");
+        assert_eq!(page, Some(1), "tail_blank={tail_blank}");
+    }
+}
+
+/// `pdf-extract` ignores the `'` and `"` operators, which both move to the
+/// next line and then draw. A page mixing them with `Tj` would publish the
+/// `Tj` part and silently drop the rest, so the document is refused.
+#[test]
+fn text_drawn_with_a_quote_operator_is_refused() {
+    for dquote in [false, true] {
+        let bytes = common::make_pdf_with_quoted_text_bytes(dquote);
+        let (reason, page) = unavailable(&bytes);
+        assert_eq!(reason, "lossy_decode", "dquote={dquote}");
+        assert_eq!(page, Some(1), "dquote={dquote}");
+    }
+}
+
+/// A quote operator that only draws blanks loses nothing.
+#[test]
+fn a_quote_operator_that_draws_only_blanks_is_not_a_failure() {
+    let bytes = common::make_pdf_with_blank_quote_bytes();
+    let out = parse_bytes(&bytes).expect("blank quote is harmless");
+    assert!(out.markdown.contains("Hello"));
+}
+
+/// The quote operators are tracked through Form XObjects as well.
+#[test]
+fn a_quote_operator_inside_a_form_is_refused() {
+    let bytes = common::make_pdf_with_form_quote_text_bytes();
+    let (reason, page) = unavailable(&bytes);
+    assert_eq!(reason, "lossy_decode");
+    assert_eq!(page, Some(1));
 }

@@ -32,7 +32,7 @@
 用 A/B（读技能 vs 裸跑 CLI）实测过四个任务：技能的增量集中在顺序与门禁——`ingest` 一次给出 `write_to` 与 `next_task`，route 视图再给 `affected_pages`、`stage`/`guide`/`contract`，page 任务只在 route 判定了新增或修订后出现；`task done` 只认根任务登记的 raw 哈希、漂移就不合并且保留待办；
 flag 与字段的解释与 `--help`、`init.rs` 生成的 `SCHEMA.md` 高度重复，加长技能文本收益很低，反而会和 CLI 漂移。
 所以：技能里写「什么时候做什么、做错了怎么判」，不写「这个参数是什么意思」。
-例外是 `SKILL.md` 保留一份最小命令速查（`doctor` / `ingest` / `ingest --auto` / `read` / `query` / `task done` / `task status` / `task retry` / `ignore` 与常用 flag）：agent 需要先知道入口存在，但参数、字段形状与报错码仍以 `--help` 和 CLI 输出为准。
+例外是 `SKILL.md` 保留一份最小命令速查（`doctor` / `ingest` / `ingest --auto` / `ingest --reconvert` / `read` / `query` / `task done` / `task status` / `task retry` / `ignore` 与常用 flag）：agent 需要先知道入口存在，但参数、字段形状与报错码仍以 `--help` 和 CLI 输出为准。
 
 ### 2.18 删命令前先和 spec 做一次差集
 

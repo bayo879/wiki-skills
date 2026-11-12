@@ -842,6 +842,7 @@ pub(crate) fn close_route(
     task: &TaskRow,
     payload: &Path,
 ) -> Result<Advance> {
+    super::require_open_parent(store, task)?;
     let parent = task.parent_id.ok_or_else(|| {
         bad(
             "E_TASK_BAD_PAYLOAD",

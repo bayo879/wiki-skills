@@ -39,7 +39,7 @@ agent 写页 ── task done --payload ──▶ .wiki/cache/staging/
                      └── worklist::complete：核对四道哈希，只清对应来源待办
 ```
 
-`ingest` 保留稳定窗口，`--force` 可跳过等待并强制全文复核，不能越 `parse.max_source_bytes`。扫描以大小和修改时间缓存全文摘要：可漏检元数据保持的改动，不能宣称每轮重读所有源。转换对同一份受限固定字节计算摘要并解析，读取期间检测到变化则拒绝交付。超限源不进待办、不失败，但每轮以 `oversize:` warning 点名键名与上限——静默跳过会被读成「已经整理过」。
+`ingest` 保留稳定窗口，`--force` 可跳过等待并强制全文复核，不能越 `parse.max_source_bytes`。扫描以大小和修改时间缓存全文摘要：可漏检元数据保持的改动，不能宣称每轮重读所有源。转换对同一份受限固定字节计算摘要并解析，读取期间检测到变化则拒绝交付。超限源不进待办、不失败，但每轮以 `oversize:` warning 点名键名与上限——静默跳过会被读成「已经整理过」。扩展名没有后端的文件同样不进待办、不算失败，每轮以 `unsupported:` 点名。`ingest --reconvert <KEY>...` 是唯一能重转内容未变来源的入口：提交前校验来源摘要、raw 当前摘要与账本记录的 raw 摘要、归属和 pin，只有机器产物被替换；缺账本记录或摘要不符时保留文件并报 `E_RAW_COLLISION`，不按文本形似猜测。
 
 来源待办独立于页面：转换登记时持久化，重跑交付未完成来源；作者可以更新已有页，不要求每源新建。`affected_pages` 是现有引用关系得到的提示，不保证语义影响完整，也不是候选全集。任务树以它做维护下限：每个已引用这个来源的现有页必须在 `maintenance` 里得到 `update` 或 `unchanged` 的处置并写理由。
 
@@ -68,7 +68,9 @@ agent 写页 ── task done --payload ──▶ .wiki/cache/staging/
 | `src/layout.rs` | 引擎目录布局的唯一一张表：路径 + `authored`，`init`、闸门、补建共用 |
 | `src/paths.rs` | 路径归一（`identity_key`）与安全拼接 |
 | `src/scan.rs` | 两层对账（仓库根、`.wiki/raw/` ↔ 账本）；唯一分类引擎与「账本认不认识这个 raw」的唯一答案 |
-| `src/convert.rs` | 转换的 `prepare`（并行读源、解析）与 `commit`（串行写 raw 与账本） |
+| `src/convert.rs` | 转换编排：`prepare`（并行读源、解析、记录输入基线）、`preflight`（只做保护检查）、`commit`（重读校验后串行写 raw 与账本）；错误码含 `E_RAW_COLLISION` |
+| `src/convert/protection.rs` | 保护判定：来源摘要、raw 当前摘要、账本 raw 摘要、归属与 pin；缺账本或摘要不符一律冲突 |
+| `src/convert/commit.rs` | 文件先行、账本随后；登记失败回写旧字节或删除新文件，恢复失败留下 `.*.recovery` 材料 |
 | `src/parse/` | 解析后端与 `auto` 回退（`text`/`html`/`asset`/`pdf`/`external`） |
 | `src/chunk.rs` | 大文件的按需分块 |
 | `src/page.rs` | 页面 frontmatter 的读写、校验与渲染（`render` 是工具生成 frontmatter 的唯一路径） |

@@ -74,6 +74,19 @@ pub enum Command {
         /// Convert now, even if a source was modified within `[ingest].settle_seconds`.
         #[arg(long)]
         force: bool,
+        /// Convert these sources again, whether or not their content changed.
+        ///
+        /// For repairing a raw file left behind by an older backend. Protected:
+        /// a pinned raw, a hand-edited raw or one with no ledger row is
+        /// reported instead of replaced, and an open root is blocked until it is
+        /// rebuilt with `task retry <ID> --replan`.
+        #[arg(
+            long,
+            value_name = "KEY",
+            num_args = 1..,
+            conflicts_with_all = ["auto", "keys", "key", "chunk", "range", "force_large"]
+        )]
+        reconvert: Vec<String>,
     },
     /// Print one wiki file through an internal reference.
     ///

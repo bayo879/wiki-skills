@@ -67,6 +67,7 @@ fn dispatch(cli: Cli) -> ! {
             range,
             force_large,
             force,
+            reconvert,
         } => run_ingest(IngestOptions {
             keys,
             auto,
@@ -76,6 +77,7 @@ fn dispatch(cli: Cli) -> ! {
             range,
             force_large,
             force,
+            reconvert,
         }),
         Command::Read {
             reference,
@@ -526,6 +528,38 @@ struct IngestOptions {
     range: Option<String>,
     force_large: bool,
     force: bool,
+    reconvert: Vec<String>,
+}
+
+/// A reconvert target must name exactly one file inside `source/`.
+///
+/// Wildcards and `..` are refused rather than expanded: the whole point of the
+/// option is that a human names what gets rewritten, and a glob would quietly
+/// turn one request into a batch the protections were not reviewed for.
+fn check_reconvert_key(key: &str) -> std::result::Result<(), String> {
+    if key.is_empty() {
+        return Err("--reconvert needs a repo-relative source key".into());
+    }
+    if key.starts_with('/') || key.contains('\\') {
+        return Err(format!(
+            "--reconvert '{key}': use the repo-relative key shown by `ingest`, not a path"
+        ));
+    }
+    if key.contains(['*', '?', '[', ']']) {
+        return Err(format!(
+            "--reconvert '{key}': wildcards are not expanded; name each source"
+        ));
+    }
+    let parts: Vec<&str> = key.split('/').collect();
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || *part == "." || *part == "..")
+    {
+        return Err(format!(
+            "--reconvert '{key}': the key must stay inside the source directory"
+        ));
+    }
+    Ok(())
 }
 
 fn run_ingest(options: IngestOptions) -> ! {
@@ -538,6 +572,7 @@ fn run_ingest(options: IngestOptions) -> ! {
         range,
         force_large,
         force,
+        reconvert,
     } = options;
     let cmd = "ingest";
     if auto
@@ -547,7 +582,8 @@ fn run_ingest(options: IngestOptions) -> ! {
             || chunk.is_some()
             || range.is_some()
             || force_large
-            || force)
+            || force
+            || !reconvert.is_empty())
     {
         report::fail(
             cmd,
@@ -555,6 +591,11 @@ fn run_ingest(options: IngestOptions) -> ! {
             "E_USAGE",
             "--auto runs one default round and cannot be combined with manual ingest options",
         );
+    }
+    for key in &reconvert {
+        if let Err(why) = check_reconvert_key(key) {
+            report::fail(cmd, Exit::Usage, "E_USAGE", &why);
+        }
     }
     let root = wiki_root(cmd);
     let cfg = open_repo(cmd, &root);
@@ -573,6 +614,7 @@ fn run_ingest(options: IngestOptions) -> ! {
         dry_run,
         force,
         only: keys,
+        reconvert,
     };
     match sync::run(&root, &cfg, &mut store, &args) {
         Ok(report) => {

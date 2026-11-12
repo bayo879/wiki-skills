@@ -113,6 +113,10 @@ pub struct ScanReport {
     pub changes: Vec<Change>,
     /// Number of files skipped because their extension is not allowed.
     pub ignored_count: usize,
+    /// The skipped keys themselves, sorted, so a round can name what it left
+    /// alone instead of reporting a bare count. Only the source layer can fill
+    /// this.
+    pub unsupported: Vec<String>,
 }
 
 /// Why a scan could not finish.
@@ -176,6 +180,7 @@ pub fn scan_source_with_force(
     Ok(ScanReport {
         changes,
         ignored_count: walked.ignored_count,
+        unsupported: walked.unsupported,
     })
 }
 
@@ -191,6 +196,7 @@ pub fn scan_raw(root: &Path, cfg: &Config, store: &Store) -> Result<ScanReport> 
     Ok(ScanReport {
         changes: classify_raw(&disk, &ledger),
         ignored_count: 0,
+        unsupported: Vec::new(),
     })
 }
 
@@ -206,9 +212,13 @@ pub fn scan_all(root: &Path, cfg: &Config, store: &Store) -> Result<ScanReport> 
     let mut changes = source.changes;
     changes.extend(raw.changes);
     changes.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| a.layer.cmp(&b.layer)));
+    let mut unsupported = source.unsupported;
+    unsupported.extend(raw.unsupported);
+    unsupported.sort();
     Ok(ScanReport {
         changes,
         ignored_count: source.ignored_count + raw.ignored_count,
+        unsupported,
     })
 }
 
@@ -400,6 +410,8 @@ struct Walked {
     present: BTreeSet<String>,
     /// Files skipped for their extension.
     ignored_count: usize,
+    /// Those files by key, so the caller can report each one.
+    unsupported: Vec<String>,
 }
 
 /// Walks the source tree (the repository root) and digests the allowed files.
@@ -417,6 +429,7 @@ fn walk_source(
     let mut disk = Vec::new();
     let mut present = BTreeSet::new();
     let mut ignored_count = 0usize;
+    let mut unsupported = Vec::new();
 
     if source_root.is_dir() {
         let walker = WalkDir::new(source_root)
@@ -432,6 +445,7 @@ fn walk_source(
             present.insert(key.clone());
             if !extension_allowed(cfg, entry.path()) {
                 ignored_count += 1;
+                unsupported.push(key);
                 continue;
             }
             let meta = entry.metadata()?;
@@ -464,10 +478,12 @@ fn walk_source(
 
     // Walk order is filesystem order; every later step wants a stable one.
     disk.sort_by(|a, b| a.key.cmp(&b.key));
+    unsupported.sort();
     Ok(Walked {
         disk,
         present,
         ignored_count,
+        unsupported,
     })
 }
 
@@ -508,7 +524,7 @@ fn is_ignored_source(
 }
 
 /// Whether the file extension is whitelisted, ignoring ASCII case.
-fn extension_allowed(cfg: &Config, path: &Path) -> bool {
+pub(crate) fn extension_allowed(cfg: &Config, path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
         return false;
     };

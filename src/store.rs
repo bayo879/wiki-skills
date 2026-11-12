@@ -1290,6 +1290,56 @@ impl Store {
         tx.execute("INSERT INTO sources(key,hash,size,mtime,raw_key,converted_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,size=excluded.size,mtime=excluded.mtime,raw_key=excluded.raw_key,converted_at=excluded.converted_at", params![source.key,source.hash,source.size,source.mtime,source.raw_key,source.converted_at])?;
         tx.execute("INSERT INTO raws(key,hash,source_key,converted_at) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,source_key=excluded.source_key,converted_at=excluded.converted_at", params![raw.key,raw.hash,raw.source_key,raw.converted_at])?;
         tx.execute("INSERT INTO work_items(source_key,raw_key,raw_hash) VALUES(?1,?2,?3) ON CONFLICT(source_key) DO UPDATE SET raw_key=excluded.raw_key,raw_hash=excluded.raw_hash", params![source.key,raw.key,raw.hash])?;
+
+        // A root froze the raw hash its page plan was built from. Converting the
+        // source again leaves that plan describing text nobody can read, so the
+        // root is blocked here, in the same transaction that replaces the raw.
+        // The children, payloads and staging are all kept: only an explicit
+        // `task retry <id> --replan` may discard them.
+        // A root already blocked or failed is included on purpose: its plan is
+        // just as stale, and an ordinary retry would otherwise reopen it and
+        // merge pages planned from text the source has replaced.
+        let frozen = tx
+            .query_row(
+                "SELECT id, raw_hash, last_error FROM tasks WHERE source_key = ?1 AND kind = 'breakdown' \
+                 AND status IN ('pending','active','blocked','failed')",
+                [&source.key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((id, frozen, previous)) = frozen {
+            // A root with no frozen hash cannot prove its plan still describes
+            // the current text either, so it is treated the same way.
+            let stale = frozen.as_deref() != Some(raw.hash.as_str());
+            if stale {
+                let reason = match frozen {
+                    Some(_) => "the source was converted again, so the root was planned from text that is no longer current",
+                    None => "the root recorded no raw hash, so its plan cannot be proven to describe the current text",
+                };
+                let earlier = match previous {
+                    Some(error) if !error.starts_with("E_SOURCE_DRIFT") => {
+                        format!(" (the root was already stopped: {error})")
+                    }
+                    _ => String::new(),
+                };
+                let message = format!(
+                    "E_SOURCE_DRIFT: {reason}; root {id} is kept with its pages, children and staging, and no longer delivers \
+                     work or settles{earlier}. Run `llm-wiki task retry {id} --replan` to keep the already merged pages, check \
+                     the rest for conflicts and then discard the unmerged page tasks and staging before routing again"
+                );
+                tx.execute(
+                    "UPDATE tasks SET status = 'blocked', last_error = ?2, updated_at = ?3 \
+                     WHERE id = ?1",
+                    params![id, message, raw.converted_at],
+                )?;
+            }
+        }
         tx.execute("DELETE FROM source_attempts WHERE key=?1", [&source.key])?;
         if let Some(ns) = mtime_ns {
             tx.execute("INSERT INTO source_facts(key,hash,size,mtime_ns) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,size=excluded.size,mtime_ns=excluded.mtime_ns", params![source.key,source.hash,source.size,ns])?;
@@ -2104,6 +2154,48 @@ mod tests {
             .unwrap();
         s.delete_source("b.pdf").unwrap();
         assert!(s.attempts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn converting_again_restamps_a_blocked_or_failed_root() {
+        for status in ["blocked", "failed"] {
+            let d = tempdir().unwrap();
+            let mut s = Store::open(&d.path().join("state.db")).unwrap();
+            s.migrate().unwrap();
+            s.conn
+                .execute(
+                    "INSERT INTO tasks(kind,status,source_key,raw_hash,last_error,created_at,updated_at) \
+                     VALUES('breakdown',?1,'a.pdf','blake3:old','E_PAGE_CONFLICT: a page moved', \
+                            '2026-11-12T10:00:00Z','2026-11-12T10:00:00Z')",
+                    [status],
+                )
+                .unwrap();
+
+            let source = SourceRow {
+                key: String::from("a.pdf"),
+                hash: String::from("blake3:aa"),
+                size: 10,
+                mtime: 1,
+                raw_key: Some(String::from("raw/a.md")),
+                converted_at: Some(String::from("2026-11-12T10:00:01Z")),
+            };
+            s.register_conversion(&source, &raw_row("raw/a.md", "blake3:bb"), None)
+                .unwrap();
+
+            let root = s
+                .tasks()
+                .unwrap()
+                .into_iter()
+                .find(|task| task.kind == "breakdown")
+                .unwrap();
+            assert_eq!(root.status, "blocked", "{status}");
+            let error = root.last_error.unwrap();
+            assert!(error.starts_with("E_SOURCE_DRIFT"), "{status}: {error}");
+            assert!(
+                error.contains("E_PAGE_CONFLICT"),
+                "the earlier stop is worth keeping: {status}: {error}"
+            );
+        }
     }
 
     fn user_version(store: &Store) -> i64 {

@@ -241,9 +241,11 @@ fn auto_both_failures_are_reported_together() {
     let message = err.to_string();
     assert!(message.contains("cannot parse"), "message: {message}");
     assert!(message.contains("500"), "message: {message}");
-    assert_eq!(
-        message.matches("failed").count(),
-        2,
+    // Both reasons must be present. Matching the two labels rather than the
+    // count of the word "failed" keeps the assertion stable when a backend's
+    // own error text happens to use it too.
+    assert!(
+        message.contains("builtin backend failed") && message.contains("external backend failed"),
         "both reasons must be present: {message}"
     );
 }
@@ -312,15 +314,15 @@ fn timeout_is_an_error_not_a_hang() {
 }
 
 #[test]
-fn image_stays_builtin_even_in_external_mode() {
+fn image_is_refused_even_in_external_mode() {
     let mut cfg = Config::default();
     cfg.parse.primary = Primary::External;
     cfg.parse.external = Some(mock_http::sample_external());
 
-    let (extracted, id) = parse::parse_with(&cfg, &Source::inline("a.png", b"\x89PNG")).unwrap();
-    assert_eq!(id, "builtin-asset");
-    assert!(extracted.asset);
-    assert_eq!(extracted.markdown, "![](../../a.png)");
+    // Images never go to the service, and the builtin link is not a source, so
+    // the result is a refusal rather than an empty document.
+    let err = parse::parse_with(&cfg, &Source::inline("a.png", b"\x89PNG")).unwrap_err();
+    assert_eq!(err.code(), "E_BAD_SOURCE");
 }
 
 #[test]

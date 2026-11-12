@@ -391,6 +391,7 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
         if let Some(task) = tasks
             .iter()
             .filter(|t| t.kind == "page" && t.status == "pending")
+            .filter(|t| task_parent_is_open(&tasks, t))
             .min_by_key(|t| t.id)
         {
             store.set_task_status(task.id, "active", &stamp)?;
@@ -402,6 +403,7 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
         if let Some(task) = tasks
             .iter()
             .filter(|t| t.kind == "reconcile" && t.status == "pending")
+            .filter(|t| task_parent_is_open(&tasks, t))
             .min_by_key(|t| t.id)
         {
             store.set_task_status(task.id, "active", &stamp)?;
@@ -447,6 +449,7 @@ pub fn close(
     verdict: Option<Verdict>,
 ) -> Result<Advance> {
     let task = store.task(id)?.ok_or(TaskError::Unknown(id))?;
+    require_open_parent(store, &task)?;
     match task.kind.as_str() {
         "route" if verdict.is_some() => {
             return Err(bad(
@@ -506,6 +509,27 @@ pub fn retry(store: &mut Store, id: i64) -> Result<TaskRow> {
     }
     if task.status == "pending" || task.status == "active" {
         return Ok(task);
+    }
+    // A leaf under a blocked root must not be put back in the queue: the root's
+    // plan is what needs rebuilding, not one of its old pages.
+    require_open_parent(store, &task)?;
+    // A root blocked because its source was converted again was planned from
+    // text that no longer exists. Reopening it would let the old pages merge, so
+    // the only exit is `--replan`, which checks what already landed first.
+    if task.kind == "breakdown"
+        && task.status == "blocked"
+        && task
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("E_SOURCE_DRIFT"))
+    {
+        return Err(bad(
+            "E_SOURCE_DRIFT",
+            format!(
+                "root {} was planned from a raw the source has since replaced; an ordinary retry would merge its old pages. Run `task retry {} --replan` to keep the merged pages, check the rest and rebuild the route.",
+                task.id, task.id
+            ),
+        ));
     }
     store.retry_task(id, &now())?;
     store.task(id)?.ok_or(TaskError::Unknown(id))
@@ -620,8 +644,21 @@ pub fn replan(root: &Path, cfg: &Config, store: &mut Store, id: i64) -> Result<(
     route.allowed_json = Some("route-v1".to_string());
     store.replan_root(id, &fresh.json()?, &route, &stamp)?;
     // Only after the tree is committed: if the transaction fails, the drafts
-    // are still the only copies of work the old plan points at.
-    let _ = std::fs::remove_dir_all(staging_root(root, cfg, &source_key));
+    // are still the only copies of work the old plan points at. A staging that
+    // survives the replan would sit next to the new route with no owner, so the
+    // root is blocked until a person removes it.
+    let staging = staging_root(root, cfg, &source_key);
+    if let Err(err) = std::fs::remove_dir_all(&staging) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            let message = format!(
+                "E_IO: the old staging at {} could not be discarded ({err}); root {id} is blocked; \
+                 remove that directory and run `task retry {id}`",
+                staging.display()
+            );
+            store.block_task(id, &message, &now())?;
+            return Err(bad("E_IO", message));
+        }
+    }
     Ok(())
 }
 
@@ -698,16 +735,66 @@ fn pick_task<'a>(tasks: &'a [TaskRow], kind: &str) -> Option<&'a TaskRow> {
     tasks
         .iter()
         .filter(|t| t.kind == kind && matches!(t.status.as_str(), "pending" | "active"))
+        .filter(|t| task_parent_is_open(tasks, t))
         .min_by_key(|t| t.id)
 }
 
 /// A route is only as good as the root it belongs to: a blocked or failed root
 /// has a stale plan, so its route must not be handed to an agent.
 fn route_parent_is_open(tasks: &[TaskRow], route: &TaskRow) -> bool {
-    route
-        .parent_id
-        .and_then(|id| tasks.iter().find(|task| task.id == id))
-        .is_some_and(|parent| !matches!(parent.status.as_str(), "blocked" | "failed"))
+    route.parent_id.is_some() && task_parent_is_open(tasks, route)
+}
+
+/// Whether `task`'s root is still open.
+///
+/// A blocked or failed root has a plan the source no longer matches: its pages
+/// were written from text that has since changed, so neither running one nor
+/// accepting its result is safe. A row the tree never attached to a parent (a
+/// root, or an orphan the cascade should have removed) is open.
+fn task_parent_is_open(tasks: &[TaskRow], task: &TaskRow) -> bool {
+    match task.parent_id {
+        Some(id) => tasks
+            .iter()
+            .find(|parent| parent.id == id)
+            .is_none_or(|parent| !matches!(parent.status.as_str(), "blocked" | "failed")),
+        None => true,
+    }
+}
+
+/// Refuses to act on a leaf whose root was blocked or failed.
+///
+/// `advance` already withholds such leaves; this is the other half, for the
+/// paths a caller drives directly (`task done`, `task retry`). Without it an old
+/// page id would still be accepted after its plan was invalidated, and the
+/// result would be merged into a tree built from different text.
+pub(crate) fn require_open_parent(store: &Store, task: &TaskRow) -> Result<()> {
+    if task.kind == "breakdown" {
+        return Ok(());
+    }
+    let Some(parent_id) = task.parent_id else {
+        return Ok(());
+    };
+    let Some(parent) = store.task(parent_id)? else {
+        return Ok(());
+    };
+    if !matches!(parent.status.as_str(), "blocked" | "failed") {
+        return Ok(());
+    }
+    Err(bad(
+        "E_SOURCE_DRIFT",
+        format!(
+            "task {} belongs to root {}, which is {}: {}; run `llm-wiki task retry {} --replan` \
+             before submitting again",
+            task.id,
+            parent.id,
+            parent.status,
+            parent
+                .last_error
+                .as_deref()
+                .unwrap_or("its plan is no longer open"),
+            parent.id
+        ),
+    ))
 }
 
 fn pick_route(tasks: &[TaskRow]) -> Option<&TaskRow> {
@@ -1213,7 +1300,15 @@ fn finish_root(root: &Path, cfg: &Config, store: &mut Store, task: &TaskRow) -> 
         }
     }
     store.delete_task(task.id)?;
-    let _ = std::fs::remove_dir_all(staging_root(root, cfg, &source_key));
+    let staging = staging_root(root, cfg, &source_key);
+    if let Err(err) = std::fs::remove_dir_all(&staging) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            out.issues.push(format!(
+                "source {source_key} settled, but its staging at {} could not be discarded ({err}); remove it before the next conversion of this source",
+                staging.display()
+            ));
+        }
+    }
     out.confirmed_sources.push(source_key);
     Ok(out)
 }
@@ -1408,6 +1503,7 @@ mod tests {
                     dry_run: false,
                     force: true,
                     only: Vec::new(),
+                    reconvert: Vec::new(),
                 },
             )
             .unwrap();

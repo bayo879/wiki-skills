@@ -45,6 +45,9 @@ pub struct SyncArgs {
     pub force: bool,
     /// Convert only these repo-relative keys; empty means every pending source.
     pub only: Vec<String>,
+    /// Convert exactly these keys again, even when their content did not
+    /// change. Empty means a normal round.
+    pub reconvert: Vec<String>,
 }
 
 /// What one round did.
@@ -164,8 +167,17 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         .unwrap_or_else(|| "dry-run".into());
     let mut warnings = Vec::new();
 
-    // 2. What changed on disk.
-    let changes = scan::scan_source_with_force(root, cfg, store, args.force)?.changes;
+    // 2. What changed on disk. A file whose extension has no backend is not a
+    //    conversion failure and never becomes a work item, but leaving it out of
+    //    the report is how a person concludes the wiki already holds it. Name
+    //    each one; the format is the reason, so nobody expects text from it.
+    let scanned = scan::scan_source_with_force(root, cfg, store, args.force)?;
+    for key in &scanned.unsupported {
+        warnings.push(format!(
+            "unsupported: '{key}' was not converted: no backend reads this format"
+        ));
+    }
+    let changes = scanned.changes;
 
     // 3. The settle gate, in one pass and with no memory between rounds: a
     //    source is taken when its mtime is old enough and its bytes are still
@@ -269,15 +281,82 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
             "failed: {key} is parked after 3 conversion failures; fix it and run `task retry`"
         ));
     }
-    pending.retain(|change| !parked.contains(&change.key));
+    // 3e. The candidate list. A normal round takes what `scan` called new or
+    //     changed; an explicit reconvert takes exactly the keys the caller
+    //     named, changed or not. Each named key is checked to be a real,
+    //     readable source first: a missing file, a format no backend reads, an
+    //     oversize file or a source still settling is reported and skipped
+    //     rather than turned into a failure row.
+    let mut candidates: Vec<String> = if args.reconvert.is_empty() {
+        pending.iter().map(|change| change.key.clone()).collect()
+    } else {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut keys = Vec::new();
+        for key in &args.reconvert {
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let path = paths::join_key(&root.join(&cfg.paths.source), key);
+            if !path.is_file() {
+                warnings.push(format!("reconvert: no source has the key '{key}'"));
+                continue;
+            }
+            if !scan::extension_allowed(cfg, &path) {
+                warnings.push(format!(
+                    "reconvert: '{key}' was not converted: no backend reads this format"
+                ));
+                continue;
+            }
+            let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            if size > cfg.parse.max_source_bytes {
+                warnings.push(format!(
+                    "oversize: '{key}' is above parse.max_source_bytes ({} bytes); it stays unconverted until the file is ignored or the limit is raised",
+                    cfg.parse.max_source_bytes
+                ));
+                continue;
+            }
+            if !(args.force || cfg.ingest.settle_seconds == 0) {
+                if let Some(age) = quiet_seconds(&path) {
+                    if age < cfg.ingest.settle_seconds {
+                        warnings.push(format!(
+                            "settle: '{key}' was modified {age}s ago; waiting another {}s",
+                            cfg.ingest.settle_seconds - age
+                        ));
+                        continue;
+                    }
+                }
+            }
+            keys.push(key.clone());
+        }
+        keys
+    };
+    candidates.retain(|key| !parked.contains(key));
 
     // 4. Convert, first in queue order, up to the budget.
-    let planned = pending.len();
+    let planned = candidates.len();
     let budget = planned.min(args.limit);
-    let waiting: Vec<String> = pending.iter().skip(budget).map(|c| c.key.clone()).collect();
+    let waiting: Vec<String> = candidates.iter().skip(budget).cloned().collect();
     let queued = waiting.len();
 
     if args.dry_run {
+        // A reconvert preview must answer the question the real run answers
+        // first: is this raw still a machine product nobody touched? `preflight`
+        // only reads the source digest, the raw frontmatter and the ledger, so
+        // no parser runs and nothing is written.
+        if !args.reconvert.is_empty() {
+            for key in candidates.iter().take(budget) {
+                match convert::preflight(root, cfg, store, key) {
+                    Ok(Some(parser)) if parser.is_empty() => {
+                        warnings.push(format!("dry run: '{key}' would be skipped (pinned)"))
+                    }
+                    Ok(Some(parser)) => warnings.push(format!(
+                        "dry run: '{key}' would be skipped (pinned, {parser})"
+                    )),
+                    Ok(None) => warnings.push(format!("dry run: would reconvert '{key}'")),
+                    Err(err) => warnings.push(format!("reconvert: '{key}': {err}")),
+                }
+            }
+        }
         if budget > 0 {
             warnings.push(format!("dry run: {budget} source(s) would be converted"));
         }
@@ -346,7 +425,7 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
     //    run on a small thread pool; writing the raw file and the ledger rows
     //    stays on this thread because `Store` is not `Sync`.
     let mut converted = 0;
-    let keys: Vec<String> = pending.iter().take(budget).map(|c| c.key.clone()).collect();
+    let keys: Vec<String> = candidates.iter().take(budget).cloned().collect();
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
