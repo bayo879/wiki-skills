@@ -408,9 +408,10 @@ pub fn advance(root: &Path, cfg: &Config, store: &mut Store) -> Result<Advance> 
 /// Closes one task the agent says it finished.
 ///
 /// A `route` needs `payload` (the route document) and settles the source; a
-/// `page` needs `payload` (the page content) and must leave `pages/` exactly as
-/// the root's baseline found it; a `reconcile` needs exactly one of `accept` or
-/// `regenerate`. `--leaves` no longer belongs to any task: breakdowns are gone.
+/// `page` needs `payload` (the page content) and must still match the snapshot
+/// the route took of its own target; a `reconcile` needs exactly one of `accept`
+/// or `regenerate`. `--leaves` no longer belongs to any task: breakdowns are
+/// gone.
 pub fn close(
     root: &Path,
     cfg: &Config,
@@ -705,6 +706,58 @@ fn close_page(
     let target = plan.target.path.clone();
     let (typ, id) = split_target(cfg, &target)?;
     let raw_key = plan.raw_key.clone();
+    let source_key = task.source_key.clone().ok_or_else(|| {
+        bad(
+            "E_TASK_BAD_PAYLOAD",
+            format!("page task {} has no source", task.id),
+        )
+    })?;
+
+    // The source the page was planned against must still be the one on disk:
+    // nothing is rendered or staged until the raw and its ledger rows agree.
+    crate::worklist::verify(root, cfg, store, &source_key, &plan.raw_hash)
+        .map_err(|err| bad("E_SOURCE_DRIFT", format!("{err}; the page was not written")))?;
+
+    // Check the target's own snapshot before touching staging. A page edited
+    // after routing is not overwritten; a page created after routing is not
+    // clobbered. Other pages are `reconcile_scan`'s business, not this task's.
+    let full = root.join(&target);
+    match plan.target.before.as_deref() {
+        Some(before) => {
+            let current = match hash::hash_file(&full, true) {
+                Ok(digest) => digest,
+                Err(hash::HashError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Err(bad(
+                        "E_PAGE_CONFLICT",
+                        format!(
+                            "{target} disappeared after this task was planned; reroute the source or restore it"
+                        ),
+                    ));
+                }
+                Err(err) => return Err(TaskError::Hash(err)),
+            };
+            if current != before {
+                return Err(bad(
+                    "E_PAGE_CONFLICT",
+                    format!(
+                        "{target} changed after this task was planned; reroute the source or restore it"
+                    ),
+                ));
+            }
+        }
+        None => {
+            if full.exists() {
+                return Err(bad(
+                    "E_PAGE_CONFLICT",
+                    format!(
+                        "{target} was created after this task was planned; reroute the source or remove it"
+                    ),
+                ));
+            }
+        }
+    }
 
     let bytes = std::fs::read(payload_path).map_err(|source| TaskError::Io {
         path: payload_path.to_path_buf(),
@@ -778,20 +831,6 @@ fn close_page(
         })?;
     }
     render::write_atomic(&staging, &rendered)?;
-
-    // Nothing outside this leaf's target may have changed since the root opened.
-    let current = page_hashes(root, cfg)?;
-    let baseline: BTreeMap<String, String> = store.baseline(GLOBAL_BASELINE)?.into_iter().collect();
-    let diff = baseline_diff(&current, &baseline);
-    if !diff.is_empty() {
-        return Err(bad(
-            "E_PAGE_CONFLICT",
-            format!(
-                "pages changed outside this task: {}; revert them or close the task after reviewing",
-                diff.join(", ")
-            ),
-        ));
-    }
 
     let root_task = store
         .task(plan.root)?

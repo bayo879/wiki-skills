@@ -134,6 +134,28 @@ fn close_alpha_page(dir: &TempDir, body: &str) -> Value {
     response
 }
 
+/// A route that updates `concept/alpha.md` from the current source.
+fn route_update_alpha(dir: &TempDir) -> String {
+    temp_json(
+        dir,
+        "route-update.json",
+        &json!({
+            "points": [{"id": "p1", "finding": "B 补充 Alpha", "evidence": "b.md"}],
+            "assignments": [{
+                "point": "p1",
+                "action": "update",
+                "target": ".wiki/pages/concept/alpha.md",
+                "change": "补 Beta 一节",
+                "basis": "b.md",
+            }],
+            "maintenance": [],
+            "proposals": [],
+            "searches": [],
+        })
+        .to_string(),
+    )
+}
+
 /// A repository with one source already settled into one page.
 fn one_source_repo() -> TempDir {
     let dir = single_source();
@@ -142,6 +164,37 @@ fn one_source_repo() -> TempDir {
     let body = close_alpha_page(&dir, "Alpha body text\n");
     assert!(body["next_task"].is_null(), "{body}");
     dir
+}
+
+/// `a.md` is settled into `concept/alpha.md`; `b.md` still waits for its route.
+fn settled_alpha_with_b_pending() -> TempDir {
+    let dir = repo();
+    let route = next_task(&dir);
+    close_route(&dir, &route);
+    close_alpha_page(&dir, "Alpha body text\n");
+    dir
+}
+
+/// Closes `b.md`'s route as an update of `alpha` and returns its page task.
+fn deliver_update_alpha_page(dir: &TempDir) -> Value {
+    let route = next_task(dir);
+    assert_eq!(route["kind"], "route", "{route}");
+    assert_eq!(route["source"]["key"], "b.md", "{route}");
+    let doc = route_update_alpha(dir);
+    let (code, body) = run(
+        dir,
+        &[
+            "task",
+            "done",
+            &task_id(&route).to_string(),
+            "--payload",
+            &doc,
+        ],
+    );
+    assert_eq!(code, 0, "{body}");
+    let page = next_task(dir);
+    assert_eq!(page["kind"], "page", "{page}");
+    page
 }
 
 #[test]
@@ -295,12 +348,98 @@ fn the_last_page_settles_the_source() {
 
     assert!(dir.path().join(".wiki/pages/concept/alpha.md").exists());
     assert!(dir.path().join(".wiki/raw/a.md").exists());
+    let merged = std::fs::read_to_string(dir.path().join(".wiki/pages/concept/alpha.md")).unwrap();
+    assert!(
+        merged.contains(".wiki/raw/a.md"),
+        "the merged page cites the source it was written from: {merged}"
+    );
     let (code, status) = run(&dir, &["task", "status"]);
     assert_eq!(code, 0, "{status}");
     assert!(
         status["roots"].as_array().expect("roots").is_empty(),
         "{status}"
     );
+}
+
+#[test]
+fn a_target_changed_after_routing_is_refused() {
+    let dir = settled_alpha_with_b_pending();
+    let page = deliver_update_alpha_page(&dir);
+    let alpha = dir.path().join(".wiki/pages/concept/alpha.md");
+    let mut text = std::fs::read_to_string(&alpha).unwrap();
+    text.push_str("\nchanged outside\n");
+    std::fs::write(&alpha, text).unwrap();
+
+    let payload = page_payload(&dir, "payload.json", "Alpha", "新正文\n");
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&page).to_string(),
+            "--payload",
+            &payload,
+        ],
+    );
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_PAGE_CONFLICT");
+    assert!(
+        !dir.path()
+            .join(".wiki/cache/staging/b.md/concept/alpha.md")
+            .exists(),
+        "a refused page leaves no staging file"
+    );
+    assert_eq!(task_id(&next_task(&dir)), task_id(&page));
+}
+
+#[test]
+fn a_changed_raw_is_refused_before_staging() {
+    let dir = settled_alpha_with_b_pending();
+    let page = deliver_update_alpha_page(&dir);
+    std::fs::write(dir.path().join(".wiki/raw/b.md"), "tampered").unwrap();
+
+    let payload = page_payload(&dir, "payload.json", "Alpha", "新正文\n");
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&page).to_string(),
+            "--payload",
+            &payload,
+        ],
+    );
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_SOURCE_DRIFT");
+    assert!(
+        !dir.path()
+            .join(".wiki/cache/staging/b.md/concept/alpha.md")
+            .exists(),
+        "drift is reported before staging"
+    );
+}
+
+#[test]
+fn an_unrelated_page_change_does_not_block_the_page() {
+    let dir = settled_alpha_with_b_pending();
+    let page = deliver_update_alpha_page(&dir);
+    let gamma = dir.path().join(".wiki/pages/concept/gamma.md");
+    std::fs::write(&gamma, "无关改动").unwrap();
+
+    let payload = page_payload(&dir, "payload.json", "Alpha", "新正文\n");
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&page).to_string(),
+            "--payload",
+            &payload,
+        ],
+    );
+    assert_eq!(code, 0, "{body}");
+    assert!(body["next_task"].is_null(), "{body}");
+    assert_eq!(std::fs::read_to_string(&gamma).unwrap(), "无关改动");
 }
 
 #[test]
@@ -378,45 +517,6 @@ fn a_page_with_an_empty_body_is_refused() {
     );
     assert_eq!(code, 0, "{body}");
     assert!(body["next_task"].is_null(), "{body}");
-}
-
-#[test]
-fn a_page_edited_outside_the_task_is_refused() {
-    let dir = single_source();
-    let route = next_task(&dir);
-    close_route(&dir, &route);
-    let page = next_task(&dir);
-    let page_id = task_id(&page);
-
-    let stray = dir.path().join(".wiki/pages/concept/stray.md");
-    std::fs::create_dir_all(stray.parent().unwrap()).unwrap();
-    std::fs::write(
-        &stray,
-        "---\nid: stray\ntype: concept\ntitle: Stray\nsources:\n  - .wiki/raw/a.md\n---\n\nout of band\n",
-    )
-    .unwrap();
-    let payload = payload(&dir);
-    let (code, body) = run(
-        &dir,
-        &["task", "done", &page_id.to_string(), "--payload", &payload],
-    );
-    assert_eq!(code, 1, "{body}");
-    assert_eq!(body["error"]["code"], "E_PAGE_CONFLICT");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("stray.md"),
-        "the offending file is named: {body}"
-    );
-
-    // The untouched tree is still there: removing the stray page unblocks it.
-    std::fs::remove_file(&stray).unwrap();
-    let (code, body) = run(
-        &dir,
-        &["task", "done", &page_id.to_string(), "--payload", &payload],
-    );
-    assert_eq!(code, 0, "{body}");
 }
 
 #[test]
