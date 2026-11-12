@@ -205,6 +205,7 @@ fn direct_page_workflow_is_the_only_shipped_workflow() {
         "output/.wiki/skills/llm-wiki/content.md",
         "output/.wiki/skills/llm-wiki/ops.md",
         "output/.wiki/skills/llm-wiki/init.md",
+        "output/.wiki/skills/llm-wiki/relations.md",
         "output/.wiki/skills/llm-wiki-session/SKILL.md",
     ] {
         let text = fs::read_to_string(root.join(relative)).unwrap();
@@ -680,4 +681,34 @@ fn the_docs_only_name_things_the_code_has() {
          unavoidable name in tests/docs_tokens.allow):\n{}",
         unknown.join("\n")
     );
+}
+
+/// The release job packs whatever `output/` holds, and the packer refuses
+/// anything it was not told about. A new shipped file must be listed there,
+/// otherwise every platform build fails only when a tag is pushed.
+#[test]
+fn every_shipped_skill_file_is_listed_for_packaging() {
+    let root = workspace();
+    let script = fs::read_to_string(root.join("scripts/build-output.sh"))
+        .expect("scripts/build-output.sh is missing");
+    for directory in [
+        "output/.wiki/skills/llm-wiki",
+        "output/.wiki/skills/llm-wiki-session",
+    ] {
+        let entries = fs::read_dir(root.join(directory)).unwrap();
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if !path.is_file() {
+                continue;
+            }
+            let relative = format!(
+                "{directory}/{}",
+                path.file_name().unwrap().to_string_lossy()
+            );
+            assert!(
+                script.contains(&relative),
+                "{relative} is shipped but scripts/build-output.sh does not list it"
+            );
+        }
+    }
 }

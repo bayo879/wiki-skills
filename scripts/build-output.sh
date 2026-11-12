@@ -11,7 +11,7 @@ validate_tree() {
     case "$entry" in
       output/.wiki|output/.wiki/cli|output/.wiki/skills|output/.wiki/skills/llm-wiki|output/.wiki/skills/llm-wiki-session)
         [ -d "$entry" ] && validate_tree "$entry" || return 1 ;;
-      output/.wiki/readme.md|output/.wiki/skills/llm-wiki/SKILL.md|output/.wiki/skills/llm-wiki/init.md|output/.wiki/skills/llm-wiki/content.md|output/.wiki/skills/llm-wiki/ops.md|output/.wiki/skills/llm-wiki-session/SKILL.md|output/.wiki/cli/llm-wiki|output/.wiki/cli/llm-wiki.exe)
+      output/.wiki/readme.md|output/.wiki/skills/llm-wiki/SKILL.md|output/.wiki/skills/llm-wiki/init.md|output/.wiki/skills/llm-wiki/content.md|output/.wiki/skills/llm-wiki/ops.md|output/.wiki/skills/llm-wiki/relations.md|output/.wiki/skills/llm-wiki-session/SKILL.md|output/.wiki/cli/llm-wiki|output/.wiki/cli/llm-wiki.exe)
         [ -f "$entry" ] || return 1 ;;
       *) echo "Unknown distribution entry: $entry" >&2; return 1 ;;
     esac
@@ -19,7 +19,7 @@ validate_tree() {
 }
 [ -d output ] && [ ! -L output ]
 validate_tree output
-for required in output/.wiki/readme.md output/.wiki/skills/llm-wiki/{SKILL,init,content,ops}.md output/.wiki/skills/llm-wiki-session/SKILL.md; do
+for required in output/.wiki/readme.md output/.wiki/skills/llm-wiki/{SKILL,init,content,ops,relations}.md output/.wiki/skills/llm-wiki-session/SKILL.md; do
   [ -f "$required" ] || { echo "Missing installation resource: $required" >&2; exit 1; }
 done
 host=$(rustc -vV | sed -n 's/^host: //p')
