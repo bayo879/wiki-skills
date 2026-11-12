@@ -124,7 +124,7 @@ fn route_guide() -> Guide {
         must_read: vec![
             "先用 read 读 source.read_ref 指向的 raw 全文：它是这个来源的完整内容，不是摘要。".into(),
             "再逐个 read 打开 affected_pages 里的页面正文：这些是已有引用页，不是候选全集，写处置前必须看过。".into(),
-            "用 query <关键词> 检索候选，必要时叠加 --page 遍历关系、--source 查引用，多轮迭代到你相信“已有页能不能承载”这个判断为止。".into(),
+            "用 query <关键词> 检索候选；要按页或按来源精确看关系时另起 query --page <页 key> 或 query --source <raw>，多轮迭代到你相信“已有页能不能承载”这个判断为止。".into(),
         ],
         must_decide: vec![
             "来源里有哪几条信息点：一条点是一个可独立转述的结论或做法，不要按段落切。".into(),
@@ -138,7 +138,7 @@ fn route_guide() -> Guide {
             "不得用 skip 掩盖没读过的页，也不得在 unchanged 里写“未涉及”这类没有判断的理由。".into(),
         ],
         done_when: vec![
-            "每个 points[].id 都有且只有一条 assignments[] 去向（update/create/skip），引用的点和提案都真实存在。".into(),
+            "每个 points[].id 至少有一条 assignments[] 去向（update/create/skip）；同一个点可以指向多个页面，CLI 会在每个目标里重复这个点。引用的点和提案都真实存在。".into(),
             "affected_pages 里的每一页在 maintenance[] 都有 update 或 unchanged，并带非空 reason。".into(),
             "points 为空时 source_reason 写清这个来源为什么不需要任何页面。".into(),
             "每条 create 都能在 proposals[] 找到同 id 的提案，提案有类型、标题、摘要与两条理由。".into(),
@@ -196,7 +196,7 @@ fn reconcile_guide() -> Guide {
     Guide {
         goal: "决定一页在任务外被改过的内容算不算数：接受这次改动（accept），或按页面引用的来源重新生成它（regenerate）。".into(),
         must_read: vec![
-            "先 read target.reference 的当前正文，看清改了什么、和它引用的来源是否还一致。".into(),
+            "先 read target.reference 的当前正文：target.reference 与任务哈希由 CLI 从任务给出，不在你提交的载荷里；页面正文要和它引用的来源逐条比对，才判断得了改动是否仍然成立。".into(),
             "需要时用 query --page 看这一页的出入链、query --source 看还有谁引用同一个 raw，再裁决。".into(),
         ],
         must_decide: vec![
@@ -224,19 +224,36 @@ fn reconcile_guide() -> Guide {
 }
 
 fn uncovered_guide(kind: &str) -> Guide {
+    // Only `convert` is advanced by the tool. Other kinds that reach the
+    // fallback (e.g. `breakdown`) do have a submission path; pretending they
+    // have none would be a lie, so they get "no contract here, read the task".
+    if kind == "convert" {
+        return Guide {
+            goal: "convert 任务没有提交载荷：它由工具推进（来源转换成功或失败都会更新这一行），不要用 task done 关闭它。".into(),
+            must_read: Vec::new(),
+            must_decide: Vec::new(),
+            forbidden: vec![
+                "不得对 convert 任务提交 --payload、--leaves 或裁决；task done 会以 E_TASK_BAD_PAYLOAD 拒绝。".into(),
+            ],
+            done_when: vec!["任务由工具推进时，按 task status 看它下一步变成什么。".into()],
+            human_escalation: "任务长时间不动或反复失败时，用 task status 看原因，必要时 task retry 或问用户。".into(),
+            cli_can_check: vec!["任务状态与失败原因。".into()],
+            agent_owns: vec!["不要替工具推进这类任务；需要人处理的失败交给用户。".into()],
+        };
+    }
     Guide {
         goal: format!(
-            "{kind} 任务没有提交载荷：它由工具推进（convert 自动转换来源，根任务由 route 与 page 子任务推进），不要用 task done 关闭它。"
+            "{kind} 任务没有定义交付契约：不要自己构造载荷，按 task status 看它当前的状态与下一步。"
         ),
-        must_read: Vec::new(),
+        must_read: vec!["先用 task status 看这个任务的状态、失败原因与可用的后续动作。".into()],
         must_decide: Vec::new(),
         forbidden: vec![format!(
-            "不得对 {kind} 任务提交 --payload、--leaves 或裁决；task done 会以 E_TASK_BAD_PAYLOAD 拒绝。"
+            "不得给 {kind} 任务拼一个自创载荷：没有为它定义字段与校验，提交只会被当成任务与载荷不匹配。"
         )],
-        done_when: vec!["任务由工具推进时，按 task status 看它下一步变成什么。".into()],
+        done_when: vec!["按 task status 给出的状态确认下一步；这类任务不通过本契约交付。".into()],
         human_escalation: "任务长时间不动或反复失败时，用 task status 看原因，必要时 task retry 或问用户。".into(),
         cli_can_check: vec!["任务状态与失败原因。".into()],
-        agent_owns: vec!["不要替工具推进这类任务；需要人处理的失败交给用户。".into()],
+        agent_owns: vec!["按 task status 处理，不要替工具发明载荷或裁决。".into()],
     }
 }
 
@@ -288,7 +305,7 @@ fn route_contract(types: &[String]) -> Contract {
             false,
             "每个信息点的去向，一个点一行。",
             FilledBy::Agent,
-            "只在 points 为空时可以缺省；否则每个点都必须有一条。",
+            "只在 points 为空时可以缺省；否则每个点至少有一条，同一个点指向多个页面时每个页面各写一条。",
         ),
         field(
             "assignments[].point",
@@ -490,7 +507,7 @@ fn route_contract(types: &[String]) -> Contract {
         schema: "route-v1".into(),
         fields,
         constraints: vec![
-            "每个 points[].id 必须有且只有一条 assignments[]；assignments[].point 必须指向 points 里的 id，没提到点的会被拒。".into(),
+            "每个 points[].id 至少有一条 assignments[]：同一个点可以指向多个页面（CLI 在每个目标里重复这个点），但一条都没有会被拒；assignments[].point 必须指向 points 里的 id，没提到点的会被拒。".into(),
             "assignments[].action=skip 必须给出非空 assignments[].reason，且不得携带 target、change、basis、proposal；covered_by 可选。".into(),
             "assignments[].action=update 必须给出 target、change、basis，且不得携带 proposal、reason、covered_by；target 必须是一张可解析的已有页。".into(),
             "assignments[].action=create 必须给出指向 proposals[].id 的 proposal，且不得携带 target、change、basis、reason、covered_by；页面路径与页面 id 由 CLI 分配。".into(),
@@ -565,6 +582,7 @@ fn route_contract(types: &[String]) -> Contract {
             "消息说 point '...' has no assignment：给该 points[].id 补一条 assignments[]；消息说 create refers to proposal '...' not in proposals：补 proposals[] 或改 proposal 引用。".into(),
             "消息说 skip assignment needs a non-empty reason 或 cannot carry target：skip 只保留 point/action/reason（有单一覆盖页可加 covered_by），删掉写入字段后重交。".into(),
             "消息说 update assignment needs a non-empty target/change/basis：补齐这三个字段；update 不能带 proposal/reason/covered_by。".into(),
+            "消息说 target '<path>' does not exist：query 后把 assignments[].target 改成仓库里真实存在的页面路径；任务还在，改完可以重交。".into(),
             "消息说 create assignment cannot carry ...：create 只保留 point/action/proposal，页面路径交给 proposals[] 由 CLI 分配。".into(),
             "消息说某页 is an affected page but maintenance has no verdict：补上 update 或 unchanged 加理由；maintenance 里 affected_pages 之外的页一律不要写。".into(),
             "消息说 a route with no points needs a non-empty source_reason：要么补信息点，要么写清这个来源为什么不需要页面。".into(),
@@ -616,7 +634,7 @@ fn page_contract() -> Contract {
                 true,
                 "融合后的整页正文，不含 frontmatter。",
                 FilledBy::Agent,
-                "缺省或空正文会写出一张空白页；工具不拦，等于主动清空。",
+                "必填；空正文会被拒绝。",
             ),
         ],
         constraints: vec![
@@ -653,14 +671,6 @@ fn reconcile_contract() -> Contract {
         schema: "reconcile-v1".into(),
         fields: vec![
             field(
-                "target",
-                "string (page reference)",
-                true,
-                "任务目标页的仓库相对路径；来自 task.target.reference。",
-                FilledBy::Cli,
-                "由 CLI 填写，不会为空。",
-            ),
-            field(
                 "page_hash",
                 "string",
                 true,
@@ -674,7 +684,7 @@ fn reconcile_contract() -> Contract {
                 true,
                 "页面引用的 raw key；regenerate 逐个重新排队。",
                 FilledBy::Cli,
-                "空数组表示没有可重建的来源，regenerate 会被拒。",
+                "不会为空：没有 sources 的页在生成 reconcile 任务前就被吸收，因此这里至少有页面引用的一个 raw。",
             ),
             enum_field(
                 "verdict",
@@ -718,7 +728,7 @@ fn uncovered_contract(kind: &str) -> Contract {
         schema: kind.to_string(),
         fields: Vec::new(),
         constraints: vec![format!(
-            "没有为 {kind} 定义提交契约：这个载荷不由 agent 填，task done 会以 E_TASK_BAD_PAYLOAD 拒绝。"
+            "没有为 {kind} 定义提交契约：不要自己构造载荷，按 task status 确认当前任务的交付方式与状态。"
         )],
         examples: Vec::new(),
         failure_fixes: vec![
@@ -775,22 +785,39 @@ mod tests {
     #[test]
     fn examples_run_through_the_real_parsers() {
         let route = contract("route-v1", &["concept".into()]);
+        // One fixed affected list per example, in example order. Deriving it
+        // from the example's own `maintenance` would make the validator's
+        // "affected page has no verdict" and "maintenance names a page outside
+        // affected_pages" branches unreachable.
+        let affected_by_example: [&[&str]; 4] =
+            [&[".wiki/pages/concept/task-tree.md"], &[], &[], &[]];
+        assert_eq!(
+            route.examples.len(),
+            affected_by_example.len(),
+            "each route example needs its own fixed affected list"
+        );
         let mut actions = BTreeSet::new();
         let mut zero_page = false;
-        for example in &route.examples {
+        for (example, affected) in route.examples.iter().zip(affected_by_example) {
             let bytes = serde_json::to_vec(&example.payload).unwrap();
             let doc = route::parse(&bytes)
                 .unwrap_or_else(|err| panic!("{} does not parse: {err}", example.title));
-            // An example and its affected pages must agree: every maintenance
-            // entry is an affected page, and the validator wants a verdict for
-            // no page outside that list.
-            let affected: Vec<String> = doc
-                .maintenance
-                .iter()
-                .map(|item| item.page.clone())
-                .collect();
+            let affected: Vec<String> = affected.iter().map(|page| page.to_string()).collect();
             route::validate_shape(&doc, &affected, &["concept".to_string()])
                 .unwrap_or_else(|err| panic!("{} does not validate: {err}", example.title));
+            // The validator already proves both directions; state the agreement
+            // here too so a wrong fixture names the example it belongs to.
+            let verdicted: BTreeSet<&str> = doc
+                .maintenance
+                .iter()
+                .map(|item| item.page.as_str())
+                .collect();
+            assert_eq!(
+                verdicted,
+                affected.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+                "{} and its affected pages disagree",
+                example.title
+            );
             for assignment in &doc.assignments {
                 actions.insert(assignment.action.clone());
             }
@@ -907,6 +934,19 @@ mod tests {
         ] {
             assert!(text.contains(rule), "constraints never mention {rule}");
         }
+        assert!(
+            text.contains("至少有一条"),
+            "constraints still demand exactly one assignment per point"
+        );
+        assert!(
+            !text.contains("有且只有"),
+            "constraints contradict the validator's at-least-one rule"
+        );
+        let fixes = c.failure_fixes.join("\n");
+        assert!(
+            fixes.contains("does not exist") && fixes.contains("query"),
+            "the missing update target has no recovery instruction"
+        );
     }
 
     #[test]
@@ -921,6 +961,16 @@ mod tests {
             .find(|f| f.name == "status")
             .expect("status is documented");
         assert_eq!(status.allowed, vec!["draft", "stable", "stale"]);
+        let body = c
+            .fields
+            .iter()
+            .find(|f| f.name == "body")
+            .expect("body is documented");
+        assert!(body.required, "body must stay required");
+        assert!(
+            body.empty.contains("必填"),
+            "body's empty text does not say it is required"
+        );
     }
 
     #[test]
@@ -946,6 +996,19 @@ mod tests {
                 "{name} is filled by the tool, not the agent"
             );
         }
+        assert!(
+            c.fields.iter().all(|f| f.name != "target"),
+            "target is task context, not a ReconcilePayload field"
+        );
+        let raw_keys = c
+            .fields
+            .iter()
+            .find(|f| f.name == "raw_keys")
+            .expect("raw_keys is documented");
+        assert!(
+            raw_keys.empty.contains("不会为空"),
+            "raw_keys describes an empty array that a reconcile task cannot have"
+        );
         let verdict = c
             .fields
             .iter()
@@ -967,6 +1030,10 @@ mod tests {
             read.contains("affected_pages"),
             "read order omits the cited pages"
         );
+        assert!(
+            read.contains("query --page") && read.contains("query --source"),
+            "the guide stacks --page/--source on a keyword query, which clap rejects"
+        );
         let forbidden = g.forbidden.join("\n");
         assert!(
             forbidden.contains("不得直接创建"),
@@ -977,6 +1044,14 @@ mod tests {
             "the guide does not forbid path-only dedup"
         );
         assert_eq!(g.done_when.len(), 4);
+        assert!(
+            g.done_when.iter().any(|item| item.contains("至少有一条")),
+            "done_when still demands exactly one assignment per point"
+        );
+        assert!(
+            g.done_when.iter().all(|item| !item.contains("有且只有")),
+            "done_when contradicts the validator's at-least-one rule"
+        );
         assert!(
             g.done_when
                 .iter()
@@ -1041,17 +1116,37 @@ mod tests {
             g.forbidden.iter().any(|item| item.contains("不关闭")),
             "the guide lets a reconcile task sit open"
         );
+        let read = g.must_read.join("\n");
+        assert!(
+            read.contains("逐条比对"),
+            "the guide does not say what to compare the body against"
+        );
+        assert!(
+            !read.contains("看清改了什么"),
+            "the guide asks for page history the tool does not keep"
+        );
     }
 
     #[test]
     fn failure_fixes_say_what_to_change_and_whether_to_resubmit() {
-        for kind in ["route-v1", "page-content-v1", "reconcile-v1"] {
+        // The positive wording matters: a schema must say out loud that the
+        // judgement stays with the agent, not merely avoid one bad phrase.
+        let owned = [
+            ("route-v1", "语义责任仍在你身上"),
+            ("page-content-v1", "语义质量仍由你负责"),
+            ("reconcile-v1", "裁决对错由你负责"),
+        ];
+        for (kind, agent_owns) in owned {
             let c = contract(kind, &["concept".into()]);
             assert!(!c.failure_fixes.is_empty(), "{kind} has no failure fixes");
             let text = c.failure_fixes.join("\n");
             assert!(
                 text.contains("重交"),
                 "{kind} does not say whether to resubmit"
+            );
+            assert!(
+                text.contains(agent_owns),
+                "{kind} does not say in positive terms that the semantic judgement stays with the agent"
             );
             assert!(
                 !text.contains("语义质量已"),
@@ -1062,10 +1157,26 @@ mod tests {
 
     #[test]
     fn an_unknown_kind_gets_an_honest_empty_contract() {
-        let g = guide("convert");
+        let convert = guide("convert");
         assert!(
-            g.goal.contains("工具"),
-            "unknown task kinds must say the tool advances them"
+            convert.goal.contains("工具"),
+            "convert must say the tool advances it"
+        );
+        let breakdown = guide("breakdown");
+        assert!(
+            !breakdown.goal.contains("由工具推进"),
+            "breakdown is closed with --leaves, so it is not tool-advanced"
+        );
+        assert!(
+            breakdown.goal.contains("没有定义") && breakdown.goal.contains("task status"),
+            "an uncovered kind must say no contract is defined and point at task status"
+        );
+        assert!(
+            breakdown
+                .forbidden
+                .iter()
+                .all(|item| !item.contains("--leaves")),
+            "the fallback still claims breakdown cannot be closed with --leaves"
         );
         let c = contract("mystery-v1", &["concept".into()]);
         assert!(c.fields.is_empty());
@@ -1073,6 +1184,10 @@ mod tests {
         assert!(
             c.constraints.iter().any(|rule| rule.contains("mystery-v1")),
             "the contract does not name the schema it has no rules for"
+        );
+        assert!(
+            !c.constraints.join("\n").contains("E_TASK_BAD_PAYLOAD"),
+            "the unknown-schema fallback promises a rejection it cannot know"
         );
     }
 }
