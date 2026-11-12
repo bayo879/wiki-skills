@@ -44,6 +44,7 @@ fn args(limit: usize) -> sync::SyncArgs {
         dry_run: false,
         force: false,
         only: Vec::new(),
+        reconvert: Vec::new(),
     }
 }
 
@@ -361,6 +362,7 @@ fn dry_run_writes_nothing() {
             dry_run: true,
             force: false,
             only: Vec::new(),
+            reconvert: Vec::new(),
         },
     )
     .unwrap();

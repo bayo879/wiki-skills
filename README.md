@@ -21,7 +21,7 @@
 一条源文件的生命周期：
 
 1. **看**：`doctor` 体检，`doctor --fix` 修机械缺陷；`ingest --dry-run` 演练转换计划，不写盘。
-2. **摄入**：`ingest` 扫描、转换并登记 `.wiki/raw/`，持久化未整理来源，输出正式页目录、页面类型、schema、待办 raw 哈希和受影响页面。刚改过的源等 `[ingest].settle_seconds`（默认 300 秒），`--force` 跳过等待并全文复核。每轮转换按队列顺序取前 `max_per_run` 条；上一轮转换失败的源排在从未尝试过的文件之后，本轮超出预算的源以 `waiting:` 逐条列出。
+2. **摄入**：`ingest` 扫描、转换并登记 `.wiki/raw/`，持久化未整理来源，输出正式页目录、页面类型、schema、待办 raw 哈希和受影响页面。刚改过的源等 `[ingest].settle_seconds`（默认 300 秒），`--force` 跳过等待并全文复核。每轮转换按队列顺序取前 `max_per_run` 条；上一轮转换失败的源排在从未尝试过的文件之后，本轮超出预算的源以 `waiting:` 逐条列出。没有后端读取的格式不进待办，每轮以 `unsupported:` 点名；旧版本留下的坏 raw 用 `ingest --reconvert <KEY>...` 显式重转，只处理列出的来源，并受 pin、手工修改与缺失账本记录保护。
 3. **路由**：`ingest` 给出来源根任务下的 `route` 任务。agent 用 `read` 读 raw 全文、逐个 `read` 打开 `affected_pages` 里的页面，用 `query` 检索候选，然后提交 `route-v1`：每个信息点一条 `points` 与至少一条 `assignments` 去向（`update`/`create`/`skip`），每个已引用页在 `maintenance` 里给 `update` 或 `unchanged` 并写理由，新页先写 `proposals`，检索记录放 `searches`。来源没有信息点时用 `source_reason` 说明为什么不需要页面。route 关闭前不会出现任何写页任务。
 4. **写页**：`route` 关闭后，CLI 只为真正要新增或修订的页面建 `page` 任务；没有写页目标的来源直接结算（零写页）。page 任务给出目标页；维护已有页时另给 `target.before` 哈希与要承接的点（新页没有 `before`）。agent 读目标页当前完整正文与 raw，提交融合后的完整正文（`title`/`summary`/`tags`/`status`/正文），用 `task done <id> --payload <文件>` 关闭。工具渲染 frontmatter、写 `.wiki/cache/staging/`，不碰正式页。
 5. **合并**：最后一个 page 关闭后，根任务收尾：按目标核对 `before`/`expected` 哈希、逐页原子写入 `.wiki/pages/`、刷索引、核对四道哈希并清待办。目标页在规划后被改过就以 `E_PAGE_CONFLICT` 拒绝写入，不会覆盖；源在期间变了就 `E_SOURCE_DRIFT`：已写页不回滚，根阻塞；等源与 raw 重新稳定后，人用 `task retry <根> --replan` 按当前 raw 重建 route，已写页保留。`query` 默认含会话蒸馏，`--no-archive` 排除它们。
@@ -111,7 +111,7 @@ llm-wiki --version                         # 打印版本
 | 命令 | 作用 |
 |---|---|
 | `doctor [--fix] [--only scan\|convert\|session] [--key <KEY>]` | 体检；补建目录、契约与索引 |
-| `ingest [<KEY>...] [--dry-run] [--key <KEY>] [--chunk <N>] [--range <A-B>] [--force-large] [--force]` | 扫描、转换、登记及交付来源待办；`--key` 只预览，`--force` 强制复核并跳过等待；保留的 `--force-large` 不绕体积上限 |
+| `ingest [<KEY>...] [--dry-run] [--key <KEY>] [--chunk <N>] [--range <A-B>] [--force-large] [--force] [--reconvert <KEY>...]` | 扫描、转换、登记及交付来源待办；`--key` 只预览，`--force` 强制复核并跳过等待；`--reconvert` 显式重转未变的源（修复旧后端留下的 raw），`--force-large` 不绕体积上限 |
 | `read <REF> [--offset <N>] [--limit <N>]` | 读取 wiki 内部文件；`REF` 用 ingest 返回的路径或 `schema`/`index`，单次最多 2000 行 |
 | `task done <ID> [--payload <FILE>] [--accept] [--regenerate]` | 关闭当前任务：路由/写页交载荷，复核二选一；返回下一个任务 |
 | `task status` | 看任务树、当前任务、失败与阻塞的根 |

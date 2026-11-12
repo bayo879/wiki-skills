@@ -183,43 +183,88 @@ fn confirm_raw_unchanged(ready: &Ready) -> Result<()> {
 ///
 /// The source digest moving on disk is normal — that is what a re-conversion is
 /// for — so the comparison is between the ledger and the raw file, the two
-/// records of the last conversion. If they disagree, one of them was edited by
-/// hand and overwriting either would destroy that edit.
+/// records of the last conversion. Fewer than two matching records means the
+/// file is no longer provably the machine output: a missing `raws` row, a digest
+/// that differs from the recorded one, or a `source_hash` the ledger disagrees
+/// with all end the conversion with nothing written. A body edit keeps the
+/// frontmatter intact, so only the digest can catch it — which is why it is
+/// checked.
 fn confirm_ledger(store: &Store, ready: &Ready) -> Result<()> {
-    let row = store.get_source(&ready.source_row.key)?;
     let recorded = ready
         .baseline
         .bytes
         .as_deref()
         .and_then(|bytes| frontmatter_field(&String::from_utf8_lossy(bytes), "source_hash"));
-    match (row, recorded) {
-        (Some(row), Some(recorded)) if row.hash != recorded => {
+    check_records(
+        store,
+        &ready.source_row.key,
+        &ready.raw_row.key,
+        &ready.raw_path,
+        ready.baseline.hash.as_deref(),
+        recorded.as_deref(),
+    )
+}
+
+/// The one comparison of ledger rows against the raw file on disk.
+///
+/// Shared by the real run and the dry run so a preview cannot promise a
+/// conversion the real run would refuse. `raw_digest` is `None` when there is no
+/// file; a file without a ledger row, a digest that differs from the recorded
+/// one, or free text posing as a raw all count as "not provably machine output".
+fn check_records(
+    store: &Store,
+    source_key: &str,
+    raw_rel: &str,
+    raw_path: &Path,
+    raw_digest: Option<&str>,
+    raw_source_hash: Option<&str>,
+) -> Result<()> {
+    if let (Some(row), Some(recorded)) = (store.get_source(source_key)?, raw_source_hash) {
+        if row.hash != recorded {
             return Err(conflict(
-                &ready.raw_path,
+                raw_path,
                 format!(
-                    "the ledger records {} at {}, but the raw file records {}",
-                    ready.source_row.key, row.hash, recorded
+                    "the ledger records {source_key} at {}, but the raw file records {recorded}",
+                    row.hash
                 ),
             ));
         }
-        // A row without a raw file is a lost raw, not a hand edit: there is no
-        // text to destroy, so the conversion is allowed to recreate it.
-        (None, None) | (None, Some(_)) | (Some(_), None) | (Some(_), Some(_)) => {}
     }
-    if let Some(row) = store.get_raw(&ready.raw_row.key)? {
-        if row.source_key != ready.source_row.key {
-            return Err(conflict(
-                &ready.raw_path,
-                format!(
-                    "the ledger says {} belongs to {}, not {}",
-                    ready.raw_path.display(),
-                    row.source_key,
-                    ready.source_row.key
-                ),
-            ));
+    match (raw_digest, store.get_raw(raw_rel)?) {
+        // No raw file: nothing of ours to destroy, so it may be recreated.
+        (None, _) => Ok(()),
+        (Some(_), None) => Err(conflict(
+            raw_path,
+            String::from(
+                "no ledger row records this raw file, so it cannot be proven to be machine \
+                 output; delete it to let it be rebuilt",
+            ),
+        )),
+        (Some(found), Some(row)) => {
+            if row.source_key != source_key {
+                return Err(conflict(
+                    raw_path,
+                    format!(
+                        "the ledger says {} belongs to {}, not {source_key}",
+                        raw_path.display(),
+                        row.source_key
+                    ),
+                ));
+            }
+            if row.hash != found {
+                return Err(conflict(
+                    raw_path,
+                    format!(
+                        "the raw file is not the one the last conversion wrote (the ledger \
+                         records {}, the file is {found}); it may have been edited, and \
+                         deleting it lets the conversion rebuild it",
+                        row.hash
+                    ),
+                ));
+            }
+            Ok(())
         }
     }
-    Ok(())
 }
 
 /// Runs the protection checks alone, without parsing or writing.
@@ -251,27 +296,14 @@ pub(crate) fn preflight(root: &Path, cfg: &Config, store: &Store, key: &str) -> 
         .bytes
         .as_deref()
         .and_then(|bytes| frontmatter_field(&String::from_utf8_lossy(bytes), "source_hash"));
-    match (store.get_source(key)?, recorded) {
-        (Some(row), Some(recorded)) if row.hash != recorded => {
-            return Err(conflict(
-                &raw_path,
-                format!(
-                    "the ledger records {key} at {}, but the raw file records {recorded}",
-                    row.hash
-                ),
-            ));
-        }
-        _ => {}
-    }
-    if let Some(row) = store.get_raw(&raw_rel)? {
-        if row.source_key != key {
-            return Err(conflict(
-                &raw_path,
-                format!("the ledger says {} belongs to {}", raw_key, row.source_key),
-            ));
-        }
-    }
-    Ok(())
+    check_records(
+        store,
+        key,
+        &raw_rel,
+        &raw_path,
+        baseline.hash.as_deref(),
+        recorded.as_deref(),
+    )
 }
 
 impl RawState {

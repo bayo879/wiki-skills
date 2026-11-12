@@ -169,18 +169,50 @@ fn preflight_reports_a_ledger_that_disagrees_with_the_raw() {
 }
 
 #[test]
-fn a_raw_without_a_ledger_row_is_still_replaced() {
+fn a_raw_without_a_ledger_row_is_refused_until_it_is_deleted() {
     let (d, mut store, cfg) = setup();
     fs::write(d.path().join("a.md"), "body\n").unwrap();
-    // Our file, but the ledger lost its row: the content is provably ours, so
-    // the conversion may rebuild the row instead of refusing forever.
+    // The file names us, but no ledger row proves it is still machine output;
+    // it may have been edited after the row was lost, so it is kept as is.
     let old = "---\nsource: a.md\nsource_hash: blake3:stale\npin: false\n---\nold\n";
     fs::write(d.path().join(".wiki/raw/a.md"), old).unwrap();
 
+    let error = convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap_err();
+    assert_eq!(error.code(), "E_RAW_COLLISION");
+    assert_eq!(
+        fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap(),
+        old,
+        "a raw nobody can vouch for must be left alone"
+    );
+
+    // Deleting it is the documented way out: with no text there is nothing to
+    // destroy, so the conversion rebuilds the file and the row.
+    fs::remove_file(d.path().join(".wiki/raw/a.md")).unwrap();
     convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();
     let raw = fs::read_to_string(d.path().join(".wiki/raw/a.md")).unwrap();
     assert!(raw.contains("body"), "the raw must hold the new text");
     assert!(store.get_source("a.md").unwrap().unwrap().raw_key.is_some());
+}
+
+#[test]
+fn a_raw_whose_body_was_edited_is_not_replaced() {
+    let (d, mut store, cfg) = setup();
+    fs::write(d.path().join("a.md"), "body\n").unwrap();
+    convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();
+    let path = d.path().join(".wiki/raw/a.md");
+    let edited = format!(
+        "{}a hand-written note\n",
+        fs::read_to_string(&path).unwrap()
+    );
+    fs::write(&path, &edited).unwrap();
+
+    let error = convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap_err();
+    assert_eq!(error.code(), "E_RAW_COLLISION");
+    assert!(
+        error.to_string().contains("may have been edited"),
+        "the report must say why: {error}"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }
 
 #[test]

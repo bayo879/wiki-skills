@@ -1464,6 +1464,7 @@ mod tests {
                     dry_run: false,
                     force: true,
                     only: Vec::new(),
+                    reconvert: Vec::new(),
                 },
             )
             .unwrap();

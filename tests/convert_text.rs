@@ -594,10 +594,11 @@ fn cli_parse_of_a_missing_source_is_a_runtime_error() {
 }
 
 /// The window between `write_atomic` and the ledger transaction: a crash there
-/// leaves a raw file nobody registered. The next round must reuse it, not clash
-/// with it and not need a manual delete first.
+/// leaves a raw file nobody registered. It cannot be proven to be machine output
+/// any more (a person may have edited it since), so the round refuses and names
+/// the file; deleting it is the documented way to let the conversion rebuild it.
 #[test]
-fn a_raw_left_by_an_interrupted_conversion_is_reused_next_round() {
+fn a_raw_left_by_an_interrupted_conversion_is_refused_until_it_is_deleted() {
     let (d, mut store, cfg) = setup();
     fs::write(d.path().join("crash.md"), "第一版\n").unwrap();
     convert::convert_one(d.path(), &cfg, &mut store, "crash.md").unwrap();
@@ -609,6 +610,11 @@ fn a_raw_left_by_an_interrupted_conversion_is_reused_next_round() {
     assert!(store.all_raws().unwrap().is_empty());
     assert!(d.path().join(".wiki/raw/crash.md").is_file());
 
+    let error = convert::convert_one(d.path(), &cfg, &mut store, "crash.md").unwrap_err();
+    assert_eq!(error.code(), "E_RAW_COLLISION");
+    assert!(d.path().join(".wiki/raw/crash.md").is_file());
+
+    fs::remove_file(d.path().join(".wiki/raw/crash.md")).unwrap();
     convert::convert_one(d.path(), &cfg, &mut store, "crash.md").unwrap();
     let row = store.get_source("crash.md").unwrap().unwrap();
     assert_eq!(row.raw_key.as_deref(), Some(".wiki/raw/crash.md"));
