@@ -250,6 +250,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(saved).unwrap(), "old");
     }
 
+    // Making a directory read-only is a Unix permission; Windows has no
+    // equivalent that would stop the write in the same way.
+    #[cfg(unix)]
     #[test]
     fn a_restore_that_cannot_write_reports_where_the_bytes_went() {
         let d = tempfile::tempdir().unwrap();
