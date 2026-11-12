@@ -1290,6 +1290,34 @@ impl Store {
         tx.execute("INSERT INTO sources(key,hash,size,mtime,raw_key,converted_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,size=excluded.size,mtime=excluded.mtime,raw_key=excluded.raw_key,converted_at=excluded.converted_at", params![source.key,source.hash,source.size,source.mtime,source.raw_key,source.converted_at])?;
         tx.execute("INSERT INTO raws(key,hash,source_key,converted_at) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,source_key=excluded.source_key,converted_at=excluded.converted_at", params![raw.key,raw.hash,raw.source_key,raw.converted_at])?;
         tx.execute("INSERT INTO work_items(source_key,raw_key,raw_hash) VALUES(?1,?2,?3) ON CONFLICT(source_key) DO UPDATE SET raw_key=excluded.raw_key,raw_hash=excluded.raw_hash", params![source.key,raw.key,raw.hash])?;
+
+        // A root froze the raw hash its page plan was built from. Converting the
+        // source again leaves that plan describing text nobody can read, so the
+        // root is blocked here, in the same transaction that replaces the raw.
+        // The children, payloads and staging are all kept: only an explicit
+        // `task retry <id> --replan` may discard them.
+        let frozen = tx
+            .query_row(
+                "SELECT id, raw_hash FROM tasks WHERE source_key = ?1 AND kind = 'breakdown' \
+                 AND status IN ('pending','active')",
+                [&source.key],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        if let Some((id, Some(frozen))) = frozen {
+            if frozen != raw.hash {
+                let message = format!(
+                    "E_SOURCE_DRIFT: the source was converted again, so root {id} was planned \
+                     from text that is no longer current; run `llm-wiki task retry {id} --replan` \
+                     to rebuild it (its pages and staging are kept until then)"
+                );
+                tx.execute(
+                    "UPDATE tasks SET status = 'blocked', last_error = ?2, updated_at = ?3 \
+                     WHERE id = ?1",
+                    params![id, message, raw.converted_at],
+                )?;
+            }
+        }
         tx.execute("DELETE FROM source_attempts WHERE key=?1", [&source.key])?;
         if let Some(ns) = mtime_ns {
             tx.execute("INSERT INTO source_facts(key,hash,size,mtime_ns) VALUES(?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET hash=excluded.hash,size=excluded.size,mtime_ns=excluded.mtime_ns", params![source.key,source.hash,source.size,ns])?;

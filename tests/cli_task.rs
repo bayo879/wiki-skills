@@ -786,3 +786,154 @@ fn an_accepted_review_still_makes_the_old_page_plan_conflict() {
         "an accepted review does not bless the stale page plan"
     );
 }
+
+/// The id of the only root in the tree.
+fn root_id(dir: &TempDir) -> i64 {
+    let (code, status) = run(dir, &["task", "status"]);
+    assert_eq!(code, 0, "{status}");
+    status["roots"][0]["id"].as_i64().unwrap()
+}
+
+#[test]
+fn a_conversion_that_changes_the_raw_blocks_the_open_root() {
+    let dir = single_source();
+    let root = root_id(&dir);
+    let stale_route = next_task(&dir);
+    assert_eq!(stale_route["kind"], "route", "{stale_route}");
+
+    // The source is converted again while the root still has not routed it.
+    std::fs::write(dir.path().join("a.md"), "# A\n\nEvidence A, revised\n").unwrap();
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0, "{body}");
+
+    let (code, status) = run(&dir, &["task", "status"]);
+    assert_eq!(code, 0, "{status}");
+    let root_view = &status["roots"][0];
+    assert_eq!(root_view["status"], "blocked", "{status}");
+    let reason = root_view["last_error"].as_str().unwrap();
+    assert!(reason.contains("E_SOURCE_DRIFT"), "{reason}");
+    assert!(
+        reason.contains(&format!("task retry {root} --replan")),
+        "the reason must name the command that fixes it: {reason}"
+    );
+    assert_eq!(
+        root_view["leaves"].as_array().unwrap().len(),
+        1,
+        "a blocked root keeps its children until a replan"
+    );
+
+    // The stale route is neither delivered nor accepted.
+    let (code, body) = run(&dir, &["ingest"]);
+    assert_eq!(code, 0, "{body}");
+    assert!(body["next_task"].is_null(), "{body}");
+
+    let route = route_create_alpha(&dir);
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&stale_route).to_string(),
+            "--payload",
+            &route,
+        ],
+    );
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_SOURCE_DRIFT", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&root.to_string()),
+        "the refusal must name the root: {body}"
+    );
+}
+
+#[test]
+fn a_replan_after_drift_routes_the_new_raw() {
+    let dir = single_source();
+    let root = root_id(&dir);
+    let stale_route = next_task(&dir);
+
+    std::fs::write(dir.path().join("a.md"), "# A\n\nEvidence A, revised\n").unwrap();
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0, "{body}");
+
+    let (code, body) = run(&dir, &["task", "retry", &root.to_string(), "--replan"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["status"], "active", "{body}");
+
+    let next = next_task(&dir);
+    assert_eq!(next["kind"], "route", "{next}");
+    assert_eq!(next["source"]["key"], "a.md", "{next}");
+    assert_ne!(
+        task_id(&next),
+        task_id(&stale_route),
+        "the old route is gone"
+    );
+
+    // The discarded route id is not a task any more.
+    let route = route_create_alpha(&dir);
+    let (code, body) = run(
+        &dir,
+        &[
+            "task",
+            "done",
+            &task_id(&stale_route).to_string(),
+            "--payload",
+            &route,
+        ],
+    );
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_NO_TASK", "{body}");
+}
+
+#[test]
+fn a_blocked_root_does_not_stop_another_source() {
+    let dir = tempfile::tempdir().unwrap();
+    llm_wiki::init::run(dir.path(), false).unwrap();
+    std::fs::write(dir.path().join("a.md"), "# A\n\nEvidence A\n").unwrap();
+    std::fs::write(dir.path().join("b.md"), "# B\n\nEvidence B\n").unwrap();
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0, "{body}");
+    let first = next_task(&dir);
+    assert_eq!(first["source"]["key"], "a.md", "{first}");
+
+    std::fs::write(dir.path().join("a.md"), "# A\n\nEvidence A, revised\n").unwrap();
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0, "{body}");
+
+    let next = next_task(&dir);
+    assert_eq!(
+        next["source"]["key"], "b.md",
+        "the open source must still be routed: {next}"
+    );
+}
+
+#[test]
+fn a_refused_conversion_leaves_the_open_root_open() {
+    let dir = single_source();
+    let root = root_id(&dir);
+    // A source whose body is only frontmatter is refused before conversion, so
+    // no raw is written and no root is touched.
+    std::fs::write(dir.path().join("c.md"), "---\ntitle: nothing\n---\n").unwrap();
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(
+        code, 1,
+        "a refused conversion is reported as a failure: {body}"
+    );
+    assert!(
+        body["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("c.md")),
+        "{body}"
+    );
+
+    let (code, status) = run(&dir, &["task", "status"]);
+    assert_eq!(code, 0, "{status}");
+    let root_view = &status["roots"][0];
+    assert_eq!(root_view["id"].as_i64().unwrap(), root);
+    assert_ne!(root_view["status"], "blocked", "{status}");
+}
