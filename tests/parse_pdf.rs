@@ -211,15 +211,28 @@ fn parser_works_from_the_bytes_it_was_handed() {
     );
 }
 
+/// Pages are extracted one at a time, so the body keeps their boundaries
+/// instead of arriving as one block of unknown shape.
 #[test]
-fn text_pdf_reports_that_the_page_split_is_unknown() {
+fn a_multi_page_pdf_keeps_its_page_boundaries() {
     let d = tempdir().unwrap();
     let p = d.path().join("pages.pdf");
     common::make_pdf(&p, "multi page", 3);
     let out = PdfParser::new().parse(&Source::path(&p).unwrap()).unwrap();
+    assert_eq!(
+        out.markdown.matches("multi page").count(),
+        3,
+        "{:?}",
+        out.markdown
+    );
     assert!(
-        out.warnings.iter().any(|w| w.code == "page_split_unknown"),
-        "expected a `page_split_unknown` warning, got {:?}",
+        !out.warnings.iter().any(|w| w.code == "page_split_unknown"),
+        "page boundaries are known now: {:?}",
+        out.warnings
+    );
+    assert!(
+        !out.warnings.iter().any(|w| w.code == "page_text_missing"),
+        "every page carried its text: {:?}",
         out.warnings
     );
 }
@@ -321,6 +334,27 @@ fn rc4_document_that_needs_a_password_is_refused() {
     let bytes = common::make_encrypted_pdf_bytes("secret body", 3, "secret");
     let reason = bad_message(&bytes);
     assert!(reason.contains("pdf_password_required"), "{reason}");
+}
+
+/// Real notices often clear the copy bit while keeping an empty user password.
+/// Extraction must depend on the password the file accepts, not that bit.
+#[test]
+fn a_document_that_forbids_copying_is_still_read() {
+    let bytes = common::make_encrypted_pdf_bytes_with_permissions(
+        "copy-protected body",
+        2,
+        "",
+        lopdf::Permissions::PRINTABLE,
+    );
+    let out = PdfParser::new()
+        .parse(&Source::inline("notice.pdf", &bytes))
+        .unwrap();
+    assert!(
+        out.markdown.contains("copy-protected body"),
+        "{:?}",
+        out.markdown
+    );
+    assert!(!out.asset);
 }
 
 #[test]

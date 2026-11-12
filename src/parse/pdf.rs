@@ -5,10 +5,11 @@
 //! [`pdf_extract`] is allowed to render it: encryption, the page tree, every
 //! content stream a page uses (including Form XObjects) and every font the text
 //! is set in are checked, page by page. When the walk finds text the document is
-//! re-saved decrypted and handed to the extractor; when it genuinely finds none,
-//! the backend does not guess: a scan degrades to the same link the asset backend
-//! emits and is flagged `no_text_layer`, because there is no OCR in this pipeline
-//! and plausible nonsense is worse than an honest link.
+//! re-saved decrypted and handed to the extractor. When the walk genuinely finds
+//! no text the backend returns the same flagged placeholder the asset backend
+//! emits (`asset`, `no_text_layer`); the shared gate in `parse::validate_extracted`
+//! then refuses it, because there is no OCR in this pipeline and a link must not
+//! be registered as a converted document.
 //!
 //! The old probe sampled the first two, middle two and last two pages and gave up
 //! on the rest; it also treated any load or decode error as "no text". Both were
@@ -29,7 +30,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Mutex;
 
-use lopdf::Document;
+use lopdf::{Document, Object};
 
 use self::validate::FailureKind;
 use super::asset;
@@ -40,9 +41,6 @@ pub const ID: &str = "builtin-pdf";
 
 /// The one extension this backend claims.
 const EXTENSION: &str = "pdf";
-
-/// The form feed `pdf_extract` uses as a page separator, when it emits one.
-const PAGE_BREAK: char = '\u{0c}';
 
 /// Serialises the panic-hook swap.
 ///
@@ -80,7 +78,9 @@ impl Parser for PdfParser {
         // The bytes come from `Source`, never from the filesystem: a big
         // document must not be read twice just to answer the probe.
         let validate::Validated {
-            document, has_text, ..
+            document,
+            has_text,
+            pages,
         } = validate::load_and_validate(&input.bytes)
             .map_err(|failure| unavailable(&input.key, failure))?;
 
@@ -99,9 +99,26 @@ impl Parser for PdfParser {
             });
         }
 
-        let bytes = serialise(document, &input.key)?;
-        let text = extract(&bytes, &input.key)?;
-        Ok(into_markdown(&text, &input.key))
+        // One page per extraction: a document-level call lets the extractor stop
+        // at the first page it cannot read and still return the pages before it,
+        // which would publish a silently truncated body. Page numbers come from
+        // this loop, not from separators the extractor may or may not emit.
+        let mut texts = Vec::with_capacity(pages.len());
+        let mut missing = Vec::new();
+        for (index, page) in pages.iter().enumerate() {
+            let number = index as u32 + 1;
+            let bytes = serialise_page(&document, page, &input.key)?;
+            let text = extract(&bytes, &input.key)?;
+            // The walk saw a text operator and the extractor returned nothing.
+            // It may be a page that only draws blank strings, so this is a
+            // named nonfatal warning rather than a refusal — but it travels in
+            // the raw frontmatter, so a dropped page cannot go unnoticed.
+            if page.has_text && !text.chars().any(|c| !c.is_whitespace()) {
+                missing.push(number);
+            }
+            texts.push(text);
+        }
+        Ok(into_markdown(&texts, &missing, &input.key))
     }
 }
 
@@ -137,9 +154,10 @@ fn unavailable(key: &str, failure: validate::Failure) -> ParseError {
 
 /// Whether the document at `path` has a text layer on any page.
 ///
-/// Only reading the file can fail: a document the strict walk refuses is
-/// reported as having text, so the extractor gets to report the real error
-/// instead of the probe guessing that the file is a scan.
+/// Test-facing only: ingestion goes through [`Parser::parse`], which turns the
+/// strict walk's failures into `ParseError` themselves. Only reading the file can
+/// fail here; a document the walk refuses is reported as having text, so a caller
+/// that does use this gets the parser's real error instead of a false "scan".
 pub fn has_text_layer(path: &Path) -> Result<bool> {
     let bytes = std::fs::read(path).map_err(|err| ParseError::Io {
         path: path.to_path_buf(),
@@ -152,16 +170,68 @@ pub fn has_text_layer(path: &Path) -> Result<bool> {
 
 // -------------------------------------------------------------- extraction
 
-/// Writes the validated document back out, unencrypted, for the extractor.
+/// Writes a one-page copy of the validated document out, unencrypted.
 ///
 /// `pdf-extract` only accepts bytes, and a document it opens itself would still
 /// be encrypted and still carry the unreadable CMap, so the normalised copy is
-/// what it gets.
-fn serialise(mut document: Document, key: &str) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    document.save_to(&mut out).map_err(|err| ParseError::Bad {
+/// what it gets. Narrowing the page tree to one page is what makes an extraction
+/// failure attributable to a page number.
+fn serialise_page(document: &Document, page: &validate::PageInfo, key: &str) -> Result<Vec<u8>> {
+    let invalid = |detail: &str| ParseError::Bad {
         key: String::from(key),
-        message: format!("pdf_serialise: the validated document could not be written back: {err}"),
+        message: format!("pdf_serialise: {detail}"),
+    };
+
+    let mut copy = document.clone();
+    let root = copy
+        .trailer
+        .get(b"Root")
+        .map_err(|_| invalid("the trailer lost its /Root"))?
+        .as_reference()
+        .map_err(|_| invalid("/Root stopped being a reference"))?;
+    let catalog = copy
+        .get_object(root)
+        .map_err(|_| invalid("/Root stopped resolving"))?
+        .as_dict()
+        .map_err(|_| invalid("/Root stopped being a dictionary"))?
+        .clone();
+    let pages_id = catalog
+        .get(b"Pages")
+        .map_err(|_| invalid("the catalog has no /Pages"))?
+        .as_reference()
+        .map_err(|_| invalid("/Pages stopped being a reference"))?;
+
+    // The page may inherit `/Resources`; the copy has no ancestors to inherit
+    // from, so the resolved dictionary is written onto the page itself.
+    let mut page_dict = copy
+        .get_object(page.id)
+        .map_err(|_| invalid("the page stopped resolving"))?
+        .as_dict()
+        .map_err(|_| invalid("the page stopped being a dictionary"))?
+        .clone();
+    if !page_dict.has(b"Resources") {
+        if let Some(resources) = &page.resources {
+            page_dict.set("Resources", Object::Dictionary(resources.clone()));
+        }
+    }
+    copy.objects.insert(page.id, Object::Dictionary(page_dict));
+
+    let mut pages_dict = copy
+        .get_object(pages_id)
+        .map_err(|_| invalid("/Pages stopped resolving"))?
+        .as_dict()
+        .map_err(|_| invalid("/Pages stopped being a dictionary"))?
+        .clone();
+    pages_dict.set("Kids", vec![Object::Reference(page.id)]);
+    pages_dict.set("Count", 1_i64);
+    copy.objects
+        .insert(pages_id, Object::Dictionary(pages_dict));
+
+    let mut out = Vec::new();
+    copy.save_to(&mut out).map_err(|err| {
+        invalid(&format!(
+            "the validated document could not be written back: {err}"
+        ))
     })?;
     Ok(out)
 }
@@ -210,31 +280,35 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     String::from("unknown panic payload")
 }
 
-/// Turns extracted text into markdown, reporting how much it trusted the pages.
+/// Turns the per-page texts into markdown.
 ///
-/// `pdf-extract` 0.7 does not emit page separators, so a multi-page document
-/// arrives as one block; the `page_split_unknown` warning is what keeps that
-/// silent loss of structure visible. When a separator is present the pages are
-/// trimmed and joined by one blank line.
-fn into_markdown(text: &str, key: &str) -> Extracted {
+/// The page boundaries are exact — they come from the loop that extracted one
+/// page at a time — so pages are joined by one blank line and there is no
+/// "page split unknown" warning any more. A page the walk saw text on but the
+/// extractor returned nothing for is named by number; a document whose pages are
+/// all blank still gets `empty`.
+fn into_markdown(texts: &[String], missing: &[u32], key: &str) -> Extracted {
     let mut warnings = Vec::new();
-    let trimmed = text.trim();
-    let markdown = if text.contains(PAGE_BREAK) {
-        text.split(PAGE_BREAK)
-            .map(str::trim)
-            .filter(|page| !page.is_empty())
+    if !missing.is_empty() {
+        let pages = missing
+            .iter()
+            .map(|page| page.to_string())
             .collect::<Vec<_>>()
-            .join("\n\n")
-    } else {
-        String::from(trimmed)
-    };
-
-    if !text.contains(PAGE_BREAK) && !trimmed.is_empty() {
+            .join(", ");
         warnings.push(Warning::new(
-            "page_split_unknown",
-            format!("{key} was extracted as one block: the extractor reported no page boundaries"),
+            "page_text_missing",
+            format!(
+                "{key}: page(s) {pages} draw text but the extractor returned none; the body may be incomplete"
+            ),
         ));
     }
+    let markdown = texts
+        .iter()
+        .map(|page| page.trim())
+        .filter(|page| !page.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
     if markdown.trim().is_empty() {
         warnings.push(Warning::new(
             "empty",

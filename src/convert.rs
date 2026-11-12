@@ -188,12 +188,15 @@ pub fn prepare(root: &Path, cfg: &Config, key: &str) -> Result<Prepared> {
     // The raw file is read once and kept: the commit compares against these
     // bytes, so a file edited in between is a conflict instead of a lost edit.
     let baseline = protection::inspect(&raw_path, &source_ref)?;
-    if let Some(parser) = baseline.pinned_parser() {
+    if baseline.is_pinned() {
+        let backend = baseline
+            .pinned_parser()
+            .unwrap_or_else(|| String::from("pinned"));
         return Ok(Prepared {
             outcome: ConvertOutcome {
                 raw_path: raw_key,
                 chars: 0,
-                backend: parser,
+                backend,
                 duration_ms: started.elapsed().as_millis() as u64,
                 warnings: Vec::new(),
                 skipped: true,
@@ -281,7 +284,7 @@ pub fn commit(store: &mut Store, prepared: Prepared) -> Result<ConvertOutcome> {
 /// digest it, reads the raw frontmatter, and compares both with the ledger. A
 /// pinned raw is not an error — the real run reports it as a skip — while a
 /// foreign raw is, because no run would overwrite it.
-pub fn preflight(root: &Path, cfg: &Config, store: &Store, key: &str) -> Result<()> {
+pub fn preflight(root: &Path, cfg: &Config, store: &Store, key: &str) -> Result<Option<String>> {
     protection::preflight(root, cfg, store, key)
 }
 

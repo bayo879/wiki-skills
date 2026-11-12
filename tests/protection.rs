@@ -137,6 +137,30 @@ fn a_ledger_failure_on_a_first_conversion_removes_the_raw() {
     assert!(store.get_source("b.md").unwrap().is_none());
 }
 
+/// Both ledger rows are written in one transaction, so a raw row without its
+/// source row means the pair is incomplete — the file cannot be proven ours.
+#[test]
+fn a_raw_whose_source_row_is_missing_is_a_conflict() {
+    let (d, mut store, cfg) = setup();
+    fs::write(d.path().join("a.md"), "first body\n").unwrap();
+    convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap();
+
+    let conn = rusqlite::Connection::open(d.path().join(".wiki/state.db")).unwrap();
+    conn.execute("DELETE FROM sources WHERE key = 'a.md'", [])
+        .unwrap();
+
+    let error = convert::convert_one(d.path(), &cfg, &mut store, "a.md").unwrap_err();
+    assert_eq!(error.code(), "E_RAW_COLLISION", "{error}");
+    assert!(
+        error.to_string().contains("not the source a.md"),
+        "the message must name the missing row: {error}"
+    );
+    assert!(
+        d.path().join(".wiki/raw/a.md").exists(),
+        "a conflicting raw is left in place"
+    );
+}
+
 #[test]
 fn preflight_checks_protection_without_parsing() {
     let (d, store, cfg) = setup();

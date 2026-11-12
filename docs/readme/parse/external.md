@@ -83,14 +83,15 @@ timeout_s = 120
 | 警告 `external_used` | 本次结果来自外部后端 |
 | 警告 `external_failed` | 外部尝试失败或没有正文，保留的是内置结果 |
 | `E_BAD_SOURCE` | 没有可用正文：`text_unavailable`、`partial_extraction`、`lossy_decode`，消息带后端与页号（若有）；PDF 另有 `pdf_*` 原因 |
-| 警告（写入 raw frontmatter） | 非致命提示随 raw 一起保存，例如 `page_split_unknown`、`bad_utf8`、`external_failed` |
+| 警告（写入 raw frontmatter） | 非致命提示随 raw 一起保存，例如 `page_text_missing`、`bad_utf8`、`external_failed` |
 
 ## PDF 抽取与失败可见性
 
 - 空口令加密（含 RC4 V4/R4）在加载时自动解密；仍需口令的文档报 `E_BAD_SOURCE` / `pdf_password_required`，不会去猜口令。
 - 每一页的 `Contents` 与它实际绘制的 Form XObject 都会被读取；声明的 Filter 必须能解压，页树、引用、递归、字体编码异常都按页报出 `pdf_invalid_page_tree`、`pdf_invalid_reference`、`pdf_stream_decode`、`pdf_content_decode`、`pdf_form_cycle`、`pdf_recursion_limit`、`pdf_font_encoding`。
+- 逐页提取：每页单独交给提取器，页号由这次循环给出，正文按页拼接，不再有「页分隔未知」。某页明明画了文字、提取器却返回空时，以 `page_text_missing` 告警点名页号，并写进 raw frontmatter。
 - 任一页有明确失败，整份不提交（`partial_extraction`）；正常空白页不算失败。整篇没有非空白正文报 `text_unavailable`，扫描版 PDF 不再被发布成一张附件链接。
-- 只重写能精确映射的 Unicode CMap（`Uni*-UCS2-H/V`、`Uni*-UTF16-H/V`）；GBK-EUC-H 之类无法无歧义解码的命名 CMap 报 `lossy_decode`，不猜、不静默丢字。
+- 只重写能精确映射的 Unicode CMap（`Uni*-UCS2-H/V`、`Uni*-UTF16-H/V`）；竖排的 `-V` 版本也改写成 `Identity-H`，因为字符串字节本身仍是 UTF-16BE，逐字映射不受书写方向影响。GBK-EUC-H 之类无法无歧义解码的命名 CMap 报 `lossy_decode`，不猜、不静默丢字。
 - 不内置 OCR：图片型 PDF 的正文不会被识别，只会作为「未处理」被点名。
 
 ## 安全与测试

@@ -180,6 +180,20 @@ fn doctor_ingest_direct_page_query_round_trip() {
         ingest["remaining"]["actionable"], 2,
         "both converted sources are handed out as tasks: {ingest}"
     );
+    // The image is visible but is not a source: no text, no OCR, no raw, and
+    // the round names it instead of quietly dropping it.
+    assert!(
+        ingest["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("img/diagram.png")))),
+        "the round names the refused image: {ingest}"
+    );
+    assert!(
+        !root.join(".wiki/raw/img/diagram.png").exists(),
+        "no raw is written for a bare image"
+    );
 
     // The agent works the task tree instead of editing pages: a route
     // decides where the source goes, each page target is delivered, and the

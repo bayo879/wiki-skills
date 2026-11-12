@@ -847,6 +847,19 @@ fn a_conversion_that_changes_the_raw_blocks_the_open_root() {
             .contains(&root.to_string()),
         "the refusal must name the root: {body}"
     );
+
+    // An ordinary retry must not quietly reopen a plan built from older text:
+    // its unmerged pages would go straight to the merge.
+    let (code, body) = run(&dir, &["task", "retry", &root.to_string()]);
+    assert_eq!(code, 1, "{body}");
+    assert_eq!(body["error"]["code"], "E_SOURCE_DRIFT", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--replan"),
+        "the refusal must point at replan: {body}"
+    );
 }
 
 #[test]

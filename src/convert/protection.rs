@@ -50,6 +50,14 @@ pub(crate) struct Baseline {
 }
 
 impl Baseline {
+    /// Whether the raw file asks to be left alone, with or without a `parser:`.
+    ///
+    /// A raw that predates the field, or one a person edited by hand, may carry
+    /// only `pin: true`; treating that as "not pinned" would overwrite it.
+    pub(crate) fn is_pinned(&self) -> bool {
+        matches!(self.state, RawState::Pinned { .. })
+    }
+
     /// The parser recorded in a pinned raw's frontmatter, if any.
     pub(crate) fn pinned_parser(&self) -> Option<String> {
         match &self.state {
@@ -219,7 +227,18 @@ fn check_records(
     raw_digest: Option<&str>,
     raw_source_hash: Option<&str>,
 ) -> Result<()> {
-    if let (Some(row), Some(recorded)) = (store.get_source(source_key)?, raw_source_hash) {
+    let source_row = store.get_source(source_key)?;
+    // A raw row without the matching source row is half a record: the last
+    // conversion never committed both, so nothing proves the file is ours.
+    if raw_digest.is_some() && store.get_raw(raw_rel)?.is_some() && source_row.is_none() {
+        return Err(conflict(
+            raw_path,
+            format!(
+                "the ledger records the raw file but not the source {source_key}, so the file cannot be proven to be machine output; delete it to let it be rebuilt"
+            ),
+        ));
+    }
+    if let (Some(row), Some(recorded)) = (source_row, raw_source_hash) {
         if row.hash != recorded {
             return Err(conflict(
                 raw_path,
@@ -271,10 +290,15 @@ fn check_records(
 ///
 /// This is what `ingest --dry-run` needs: the same refusals a real run would
 /// produce for a pinned, foreign or stale raw, but decided from file metadata,
-/// digests and the ledger only. A pinned raw is not an error here — the real run
-/// reports it as a skip — but a foreign one is, because no run would overwrite
-/// it.
-pub(crate) fn preflight(root: &Path, cfg: &Config, store: &Store, key: &str) -> Result<()> {
+/// digests and the ledger only. A pinned raw is reported as `Ok(Some(parser))`
+/// rather than an error, so the dry run can say `skipped (pinned)` like the real
+/// run; a foreign or stale one is an error, because no run would overwrite it.
+pub(crate) fn preflight(
+    root: &Path,
+    cfg: &Config,
+    store: &Store,
+    key: &str,
+) -> Result<Option<String>> {
     let source_path = paths::join_key(&root.join(&cfg.paths.source), key);
     let source_ref = slash_join(&cfg.paths.source, key);
     let raw_rel = crate::convert::raw_key_for(key);
@@ -292,6 +316,11 @@ pub(crate) fn preflight(root: &Path, cfg: &Config, store: &Store, key: &str) -> 
             key: source_ref,
         });
     }
+    // A pinned raw is never replaced, so its digest is beside the point: the
+    // preview says "skipped" for the same reason the real run would.
+    if baseline.is_pinned() {
+        return Ok(Some(baseline.pinned_parser().unwrap_or_default()));
+    }
     let recorded = baseline
         .bytes
         .as_deref()
@@ -303,7 +332,8 @@ pub(crate) fn preflight(root: &Path, cfg: &Config, store: &Store, key: &str) -> 
         &raw_path,
         baseline.hash.as_deref(),
         recorded.as_deref(),
-    )
+    )?;
+    Ok(None)
 }
 
 impl RawState {

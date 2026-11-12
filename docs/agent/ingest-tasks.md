@@ -78,10 +78,10 @@
 
 解析结果必须过一道统一闸门（`parse::validate_extracted`）：去空白后非空、且不是资源链接占位。此前 PDF 抽样探测的假阴性会把有字文档写成附件链接并登记成功，图片后端也靠 `asset` 标志绕过阈值；现在这类结果统一报 `E_BAD_SOURCE`（`text_unavailable` / `partial_extraction` / `lossy_decode`），不进 `raws`、不建根，按既有失败记录让位并在收尾逐份点名。扫描件与图片没有 OCR，属于未处理，不能汇报成已取得正文。
 
-PDF 后端（`src/parse/pdf.rs` + `src/parse/pdf/validate.rs`）只负责“读全、读准、把失败说清楚”：手工遍历页树、逐页严格解压 `Contents` 与 Form XObject、空口令加密自动解密、只重写能精确映射的 Unicode CMap；任一页明确失败则整份不提交，正常空白页不算失败。扩展名没有后端的文件不进待办、不算失败，每轮以 `unsupported:` 点名。
+PDF 后端（`src/parse/pdf.rs` + `src/parse/pdf/validate.rs`）只负责“读全、读准、把失败说清楚”：手工遍历页树、逐页严格解压 `Contents` 与 Form XObject、空口令加密自动解密、只重写能精确映射的 Unicode CMap；提取按页进行（每页一个单页副本），页号由循环给出而不是靠分隔符；某页画了文字却提取为空时发 `page_text_missing` 并点名页号。任一页明确失败则整份不提交，正常空白页不算失败。扩展名没有后端的文件不进待办、不算失败，每轮以 `unsupported:` 点名。
 
 ### 2.27 重转是显式入口，保护写在提交路径上
 
 `ingest --reconvert <KEY>...` 是唯一能重转内容未变来源的入口，只处理显式列出的键，冲突于 `--auto`/位置参数/`--key`/预览选项，支持 `--dry-run` 与 `--force`。`--dry-run` 只做保护检查，不解析、不联网、不写盘。保护逻辑集中在 `src/convert/protection.rs`，普通转换与重转共用：来源摘要、raw 当前摘要、账本记录的 raw 摘要、归属与 pin 必须一致；缺账本记录或摘要不符报 `E_RAW_COLLISION`，不按文本形似猜测。`src/convert/commit.rs` 文件先行、账本随后，登记失败时回写旧字节或删除新文件，恢复也失败则留下 `.*.recovery` 材料并报 `E_IO`。
 
-重转成功时，`Store::register_conversion` 在同一事务里把该源的活动根标成 `E_SOURCE_DRIFT` blocked，保留载荷、子任务与 staging；只有用户显式 `task retry <根> --replan` 才丢弃旧子任务与 staging 并重建 route，已写页按冲突规则保留。不要把这个阻断当成可以绕过的锁，也不要自动 replan。
+重转成功时，`Store::register_conversion` 在同一事务里把该源的活动根标成 `E_SOURCE_DRIFT` blocked，保留载荷、子任务与 staging；只有用户显式 `task retry <根> --replan`（或用户在 reconcile 中显式选择 regenerate，`task done ... --regenerate` 走同一条 replan 路径）才丢弃旧子任务与 staging 并重建 route，已写页按冲突规则保留。普通 `task retry` 对被 `E_SOURCE_DRIFT` 阻断的根返回同码错误，避免旧页混进合并。不要把这个阻断当成可以绕过的锁，也不要自动 replan。

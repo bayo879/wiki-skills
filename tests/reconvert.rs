@@ -136,6 +136,53 @@ fn a_reconvert_blocks_the_root_and_a_replan_recovers() {
     assert!(status["roots"][0]["last_error"].is_null(), "{status}");
 }
 
+/// A hand-pinned raw may predate the `parser:` field or have lost it; the pin
+/// alone must be enough, both for a real reconvert and for its preview.
+#[test]
+fn a_pin_without_a_parser_field_is_honoured() {
+    let dir = ingested();
+    let path = raw_path(&dir, "a.md");
+    let pinned = "---\nsource: a.md\npin: true\n---\nhand-written notes\n";
+    fs::write(&path, pinned).unwrap();
+
+    let (code, body) = run(
+        &dir,
+        &["ingest", "--reconvert", "a.md", "--dry-run", "--force"],
+    );
+    assert_eq!(code, 0, "{body}");
+    let warnings = body["warnings"].to_string();
+    assert!(warnings.contains("would be skipped (pinned)"), "{body}");
+
+    let (code, body) = run(&dir, &["ingest", "--reconvert", "a.md", "--force"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["converted"], 0, "{body}");
+    assert!(
+        body["warnings"].to_string().contains("skipped (pinned)"),
+        "{body}"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), pinned);
+}
+
+/// The per-round budget applies to a reconvert round too: the keys past the
+/// limit stay waiting, under the same names a normal round would report.
+#[test]
+fn a_reconvert_respects_the_round_budget() {
+    let dir = ingested();
+    fs::write(dir.path().join("b.md"), "# B\n\nEvidence B\n").unwrap();
+    let (code, body) = run(&dir, &["ingest", "--force"]);
+    assert_eq!(code, 0, "{body}");
+    let config = dir.path().join(".wiki/wiki.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    let text = text.replace("max_per_run         = 20", "max_per_run         = 1");
+    fs::write(&config, text).unwrap();
+
+    let (code, body) = run(&dir, &["ingest", "--reconvert", "a.md", "b.md", "--force"]);
+    assert_eq!(code, 0, "{body}");
+    assert_eq!(body["converted"], 1, "{body}");
+    assert_eq!(body["remaining"]["waiting"], 1, "{body}");
+    assert_eq!(body["waiting"], serde_json::json!(["b.md"]), "{body}");
+}
+
 #[test]
 fn a_reconvert_requires_keys_and_refuses_other_selectors() {
     let dir = fresh();

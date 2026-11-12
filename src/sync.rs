@@ -346,7 +346,13 @@ pub fn run(root: &Path, cfg: &Config, store: &mut Store, args: &SyncArgs) -> Res
         if !args.reconvert.is_empty() {
             for key in candidates.iter().take(budget) {
                 match convert::preflight(root, cfg, store, key) {
-                    Ok(()) => warnings.push(format!("dry run: would reconvert '{key}'")),
+                    Ok(Some(parser)) if parser.is_empty() => {
+                        warnings.push(format!("dry run: '{key}' would be skipped (pinned)"))
+                    }
+                    Ok(Some(parser)) => warnings.push(format!(
+                        "dry run: '{key}' would be skipped (pinned, {parser})"
+                    )),
+                    Ok(None) => warnings.push(format!("dry run: would reconvert '{key}'")),
                     Err(err) => warnings.push(format!("reconvert: '{key}': {err}")),
                 }
             }

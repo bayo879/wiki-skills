@@ -285,6 +285,19 @@ pub fn make_pdf_missing_media_box(path: &Path) {
 /// without a prompt but every stream is still encrypted. A non-empty one models
 /// a document the pipeline must refuse instead of guessing.
 pub fn make_encrypted_pdf_bytes(body: &str, pages: usize, user_password: &str) -> Vec<u8> {
+    make_encrypted_pdf_bytes_with_permissions(body, pages, user_password, Permissions::all())
+}
+
+/// The same document, with the permissions byte a publisher chose.
+///
+/// Real notices often clear "copy"; extraction must depend on the password the
+/// file accepts, not on that permission bit.
+pub fn make_encrypted_pdf_bytes_with_permissions(
+    body: &str,
+    pages: usize,
+    user_password: &str,
+    permissions: Permissions,
+) -> Vec<u8> {
     let pages: Vec<Page> = (0..pages).map(|_| Page::Text(String::from(body))).collect();
     let mut doc = document(&pages);
     doc.compress();
@@ -308,7 +321,7 @@ pub fn make_encrypted_pdf_bytes(body: &str, pages: usize, user_password: &str) -
             string_filter: b"StdCF".to_vec(),
             owner_password: "owner-secret",
             user_password,
-            permissions: Permissions::all(),
+            permissions,
         };
         EncryptionState::try_from(version).expect("V4/R4 is supported")
     };

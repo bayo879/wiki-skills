@@ -1304,12 +1304,19 @@ impl Store {
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()?;
-        if let Some((id, Some(frozen))) = frozen {
-            if frozen != raw.hash {
+        if let Some((id, frozen)) = frozen {
+            // A root with no frozen hash cannot prove its plan still describes
+            // the current text either, so it is treated the same way.
+            let stale = frozen.as_deref() != Some(raw.hash.as_str());
+            if stale {
+                let reason = match frozen {
+                    Some(_) => "the source was converted again, so the root was planned from text that is no longer current",
+                    None => "the root recorded no raw hash, so its plan cannot be proven to describe the current text",
+                };
                 let message = format!(
-                    "E_SOURCE_DRIFT: the source was converted again, so root {id} was planned \
-                     from text that is no longer current; run `llm-wiki task retry {id} --replan` \
-                     to rebuild it (its pages and staging are kept until then)"
+                    "E_SOURCE_DRIFT: {reason}; root {id} is kept with its pages, children and staging, and no longer delivers \
+                     work or settles. Run `llm-wiki task retry {id} --replan` to keep the already merged pages, check the \
+                     rest for conflicts and then discard the unmerged page tasks and staging before routing again"
                 );
                 tx.execute(
                     "UPDATE tasks SET status = 'blocked', last_error = ?2, updated_at = ?3 \

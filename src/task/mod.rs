@@ -513,6 +513,24 @@ pub fn retry(store: &mut Store, id: i64) -> Result<TaskRow> {
     // A leaf under a blocked root must not be put back in the queue: the root's
     // plan is what needs rebuilding, not one of its old pages.
     require_open_parent(store, &task)?;
+    // A root blocked because its source was converted again was planned from
+    // text that no longer exists. Reopening it would let the old pages merge, so
+    // the only exit is `--replan`, which checks what already landed first.
+    if task.kind == "breakdown"
+        && task.status == "blocked"
+        && task
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("E_SOURCE_DRIFT"))
+    {
+        return Err(bad(
+            "E_SOURCE_DRIFT",
+            format!(
+                "root {} was planned from a raw the source has since replaced; an ordinary retry would merge its old pages. Run `task retry {} --replan` to keep the merged pages, check the rest and rebuild the route.",
+                task.id, task.id
+            ),
+        ));
+    }
     store.retry_task(id, &now())?;
     store.task(id)?.ok_or(TaskError::Unknown(id))
 }
@@ -626,8 +644,21 @@ pub fn replan(root: &Path, cfg: &Config, store: &mut Store, id: i64) -> Result<(
     route.allowed_json = Some("route-v1".to_string());
     store.replan_root(id, &fresh.json()?, &route, &stamp)?;
     // Only after the tree is committed: if the transaction fails, the drafts
-    // are still the only copies of work the old plan points at.
-    let _ = std::fs::remove_dir_all(staging_root(root, cfg, &source_key));
+    // are still the only copies of work the old plan points at. A staging that
+    // survives the replan would sit next to the new route with no owner, so the
+    // root is blocked until a person removes it.
+    let staging = staging_root(root, cfg, &source_key);
+    if let Err(err) = std::fs::remove_dir_all(&staging) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            let message = format!(
+                "E_IO: the old staging at {} could not be discarded ({err}); root {id} is blocked; \
+                 remove that directory and run `task retry {id}`",
+                staging.display()
+            );
+            store.block_task(id, &message, &now())?;
+            return Err(bad("E_IO", message));
+        }
+    }
     Ok(())
 }
 

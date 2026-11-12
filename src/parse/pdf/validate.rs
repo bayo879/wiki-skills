@@ -129,6 +129,21 @@ pub struct Validated {
     pub document: Document,
     /// Whether any page draws text.
     pub has_text: bool,
+    /// Every page, in document order, with the resources it inherits.
+    pub pages: Vec<PageInfo>,
+}
+
+/// One checked page, enough to hand it to the extractor on its own.
+pub struct PageInfo {
+    /// The page object; the extractor sees a document whose page tree holds
+    /// only this page, so a page it silently dropped cannot hide inside a
+    /// combined result.
+    pub id: ObjectId,
+    /// The `/Resources` the page effectively uses, already resolved through the
+    /// page tree; `None` only when the document genuinely has none.
+    pub resources: Option<Dictionary>,
+    /// Whether the strict walk found text drawing on this page.
+    pub has_text: bool,
 }
 
 /// Reads `bytes` strictly; the returned document is safe to hand to `pdf-extract`.
@@ -145,14 +160,22 @@ pub fn load_and_validate(bytes: &[u8]) -> std::result::Result<Validated, Failure
     }
 
     let checker = Checker { doc: &document };
-    let mut has_text = false;
-    for (index, page) in pages.iter().enumerate() {
-        if checker.page_has_text(page, index as u32 + 1)? {
-            has_text = true;
-        }
+    let mut infos = Vec::with_capacity(pages.len());
+    for (index, page) in pages.into_iter().enumerate() {
+        let has_text = checker.page_has_text(&page, index as u32 + 1)?;
+        infos.push(PageInfo {
+            id: page.id,
+            resources: page.resources,
+            has_text,
+        });
     }
+    let has_text = infos.iter().any(|page| page.has_text);
 
-    Ok(Validated { document, has_text })
+    Ok(Validated {
+        document,
+        has_text,
+        pages: infos,
+    })
 }
 
 /// Loads and — when the file uses an empty user password — decrypts `bytes`.
