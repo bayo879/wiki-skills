@@ -1089,14 +1089,12 @@ fn record_operator(token: &[u8], operands: &[Operand], scan: &mut Scan) {
     match token {
         b"Tj" | b"TJ" | b"'" | b"\"" => {
             scan.has_text = true;
+            // Every string in a `TJ` array is drawn, so any solid one makes
+            // the page carry visible text; looking only at the last string let
+            // a trailing blank hide the visible one before it.
             scan.has_nonblank_text |= operands
                 .iter()
-                .rev()
-                .find_map(|operand| match operand {
-                    Operand::Text { solid } => Some(*solid),
-                    _ => None,
-                })
-                .unwrap_or(false);
+                .any(|operand| matches!(operand, Operand::Text { solid: true }));
         }
         b"Do" => {
             if let Some(Operand::Name(name)) = operands.last() {

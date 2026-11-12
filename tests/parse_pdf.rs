@@ -450,3 +450,15 @@ fn text_the_extractor_cannot_produce_fails_the_whole_document() {
     assert_eq!(reason, "partial_extraction");
     assert_eq!(page, Some(1));
 }
+
+/// Every string in a `TJ` array is drawn, so a trailing blank string must not
+/// hide the solid one beside it in either order.
+#[test]
+fn a_tj_array_cannot_hide_visible_text_behind_a_blank_string() {
+    for tail_blank in [false, true] {
+        let bytes = common::make_pdf_with_tj_blank_mapping_bytes(tail_blank);
+        let (reason, page) = unavailable(&bytes);
+        assert_eq!(reason, "partial_extraction", "tail_blank={tail_blank}");
+        assert_eq!(page, Some(1), "tail_blank={tail_blank}");
+    }
+}

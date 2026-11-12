@@ -372,6 +372,12 @@ pub fn make_pdf_with_text_on_fourth_page_bytes() -> Vec<u8> {
 /// non-blank string, the extractor can only produce blank text. Publishing the
 /// rest of the document would drop the page silently.
 pub fn make_pdf_with_blank_mapping_bytes() -> Vec<u8> {
+    make_pdf_with_tj_blank_mapping_bytes(false)
+}
+
+/// The same blank-mapped text inside a `TJ` array, with the blank string last
+/// (`tail_blank`) or first: both draw the solid string and both must fail.
+pub fn make_pdf_with_tj_blank_mapping_bytes(tail_blank: bool) -> Vec<u8> {
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();
 
@@ -412,7 +418,11 @@ pub fn make_pdf_with_blank_mapping_bytes() -> Vec<u8> {
     });
     let resources = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
 
-    let content = b"BT\n/F1 12 Tf\n100 700 Td\n<0001> Tj\nET\n".to_vec();
+    let content = if tail_blank {
+        b"BT\n/F1 12 Tf\n100 700 Td\n[<0001> -120 <0020>] TJ\nET\n".to_vec()
+    } else {
+        b"BT\n/F1 12 Tf\n100 700 Td\n[<0020> -120 <0001>] TJ\nET\n".to_vec()
+    };
     let content_id = doc.add_object(Stream::new(dictionary! {}, content));
     let page_id = page(
         &mut doc,

@@ -84,4 +84,4 @@ PDF 后端（`src/parse/pdf.rs` + `src/parse/pdf/validate.rs`）只负责“读�
 
 `ingest --reconvert <KEY>...` 是唯一能重转内容未变来源的入口，只处理显式列出的键，冲突于 `--auto`/位置参数/`--key`/预览选项，支持 `--dry-run` 与 `--force`。`--dry-run` 只做保护检查，不解析、不联网、不写盘。保护逻辑集中在 `src/convert/protection.rs`，普通转换与重转共用：来源摘要、raw 当前摘要、账本记录的 raw 摘要、归属与 pin 必须一致；缺账本记录或摘要不符报 `E_RAW_COLLISION`，不按文本形似猜测。`src/convert/commit.rs` 文件先行、账本随后，登记失败时回写旧字节或删除新文件，恢复也失败则留下 `.*.recovery` 材料并报 `E_IO`。
 
-重转成功时，`Store::register_conversion` 在同一事务里把该源的活动根标成 `E_SOURCE_DRIFT` blocked，保留载荷、子任务与 staging；只有用户显式 `task retry <根> --replan`（或用户在 reconcile 中显式选择 regenerate，`task done ... --regenerate` 走同一条 replan 路径）才丢弃旧子任务与 staging 并重建 route，已写页按冲突规则保留。普通 `task retry` 对被 `E_SOURCE_DRIFT` 阻断的根返回同码错误，避免旧页混进合并。不要把这个阻断当成可以绕过的锁，也不要自动 replan。
+重转成功时，`Store::register_conversion` 在同一事务里把该源尚未完成的根（pending/active/blocked/failed）标成 `E_SOURCE_DRIFT` blocked，保留载荷、子任务与 staging；只有用户显式 `task retry <根> --replan`（或用户在 reconcile 中显式选择 regenerate，`task done ... --regenerate` 走同一条 replan 路径）才丢弃旧子任务与 staging 并重建 route，已写页按冲突规则保留。普通 `task retry` 对被 `E_SOURCE_DRIFT` 阻断的根返回同码错误，避免旧页混进合并。不要把这个阻断当成可以绕过的锁，也不要自动 replan。
