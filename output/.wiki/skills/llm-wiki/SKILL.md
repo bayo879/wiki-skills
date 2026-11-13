@@ -24,7 +24,7 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 - `llm-wiki task done <ID> --payload <FILE>` 关闭 route 任务（提交 route-v1 归属）或 page 任务（提交一页完整正文）；`--accept` / `--regenerate` 关闭复核任务。关闭后返回下一个任务。
 - `llm-wiki task status` 看任务树、当前任务与失败任务；`llm-wiki task retry <ID>` 由人重置失败任务，不要自动重试。
 - `llm-wiki read <REF>` 读取内部文件；一次最多 2000 行，`--offset` 从第几行开始，`--limit` 改条数。
-- `llm-wiki query <词>` 检索；`--graph` 看链接图；`--page <页>` 看这一页的出入链与来源，`--source <raw>` 看哪些页引用了这个源（两者可分页）。检索结果只是候选，链接不是结论；多跳方法见 relations.md。
+- `llm-wiki query <词>` 检索；`--graph` 看链接图；`--page <页>` 看这一页的出入链与来源，`--source <raw>` 看哪些页引用了这个源（出入链与同源引用页可分页）。检索前先读 relations.md，按其中的方法组合 `query` 与 `read`。
 - `llm-wiki ignore --add <PATTERN>` 维护忽略列表。
 - 需要机器可读输出时加 `--json`；不要靠解析人类输出。
 
@@ -85,7 +85,7 @@ description: 当要在仓库里查历史结论、把材料沉淀成可检索的�
 
 ## 按需阅读
 
-- relations.md：多跳检索、出链/入链/同源反查与链接的语义边界。
+- relations.md：检索前先读；关键词回退、正文与关系交替、来源核对、停止条件与回答边界。
 - content.md：建页、证据与改写。
 - ops.md：体检、漂移、覆盖风险、忽略与叫人。
 - init.md：首次接入时由 agent 完成的两件事（持久化记忆与定时任务）。
