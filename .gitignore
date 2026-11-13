@@ -9,16 +9,16 @@ superpowers/
 .dsh
 .dsh-tmp
 
-# Rust
-/target
-/.cargo-home
+# Python
+__pycache__/
+*.pyc
 
+# 知识库运行时数据（正文在账本里，不入库）
+.wiki/
 
 # mac
 .DS_Store
 
-# 随 Release 分发的 CLI 二进制，不进仓库
-output/.wiki/cli/
-
-# 发布产物（本地构建或 CI 生成）
-dist/
+# 旧 Rust 构建产物与离线依赖缓存（不再使用）
+/dist/
+/.cargo-home/

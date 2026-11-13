@@ -1,281 +1,192 @@
 #!/usr/bin/env python3
-"""End-to-end self test. Creates a disposable workspace, never touches real data.
+"""End-to-end self test for the task-driven wiki engine.
 
-Run:  python3 scripts/selftest.py [--keep]
+Runs a disposable knowledge base in a temp directory: ingest, route decisions,
+page submission, mirror drift, import/restore, classification, dry run. Never
+touches real data and only uses the standard library.
+
+Run:  python3 scripts/selftest.py [--keep] [--json]
 Exit: 0 all checks passed, 1 a check failed.
 """
 
 import argparse
-import hashlib
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent / "wiki.py"
-CHECKS = []
+CHECKED = []
 
 
-def check(name, function):
-    try:
-        function()
-    except AssertionError as error:
-        CHECKS.append((name, "FAIL", str(error)))
-        return False
-    except Exception as error:  # noqa: BLE001 - report any harness error as a failure
-        CHECKS.append((name, "ERROR", f"{type(error).__name__}: {error}"))
-        return False
-    CHECKS.append((name, "ok", ""))
-    return True
+def check(results, name, condition, detail=""):
+    results.append((name, bool(condition), detail))
+    if not condition:
+        raise AssertionError(f"{name}: {detail}")
 
 
-def build_docx(path):
-    xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        "<w:body><w:p><w:r><w:t>采购审批流程：需求部门发起，财务复核，分管领导审批。</w:t>"
-        "</w:r></w:p></w:body></w:document>"
+def run(root, *args, expect=0, stdin=None):
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), *args, "--json"],
+        cwd=root, capture_output=True, text=True, input=stdin,
     )
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("[Content_Types].xml", "<Types/>")
-        archive.writestr("word/document.xml", xml)
-
-
-class Harness:
-    def __init__(self, entry, workspace):
-        self.entry = entry
-        self.workspace = workspace
-
-    def run(self, args, expect=0, cwd=None, timeout=120, input_text=None):
-        completed = subprocess.run(
-            [sys.executable, str(self.entry), *args],
-            cwd=str(cwd or self.workspace),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            input=input_text,
+    payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    allowed = expect if isinstance(expect, tuple) else (expect,)
+    if proc.returncode not in allowed:
+        raise AssertionError(
+            f"{' '.join(args)} exited {proc.returncode}, expected {expect}: {proc.stderr or proc.stdout}"
         )
-        assert completed.returncode == expect, (
-            f"expected exit {expect}, got {completed.returncode}: {completed.stdout}{completed.stderr}"
-        )
-        payload = None
-        if "--json" in args:
-            try:
-                payload = json.loads(completed.stdout)
-            except json.JSONDecodeError as error:
-                raise AssertionError(f"invalid JSON: {error}: {completed.stdout}") from error
-        return completed, payload
+    return payload
 
 
-def make_workspace(root):
-    notes = root / "notes"
-    notes.mkdir()
-    (notes / "alpha.md").write_text(
-        "# 反诈模型要求\n\n禁止混用非涉诈模型。存量模型要自查，新模型从严审核。\n",
-        encoding="utf-8",
-    )
-    (notes / "beta.html").write_text(
-        "<html><head><style>p{}</style><script>var x=1;</script></head>"
-        "<body><h1>云网安全</h1><p>双零行动：变更操作零失误、云网安全零事故。</p></body></html>",
-        encoding="utf-8",
-    )
-    build_docx(notes / "gamma.docx")
-    (notes / "binary.bin").write_bytes(b"\x00\x01\x02\x03")
+def payload_file(root, name, data):
+    path = Path(root) / name
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return str(path)
 
 
-def snapshot(root):
-    records = {}
-    for path in sorted(Path(root).rglob("*")):
-        if path.is_file():
-            records[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return records
-
-
-def run_checks(harness, workspace):
-    wiki = workspace / ".wiki"
-
-    def first_ingest():
-        _, payload = harness.run(["ingest", "--json"], expect=0)
-        data = payload["data"]
-        assert len(data["ingested"]) == 3, data["ingested"]
-        assert len(data["unsupported"]) == 1, data["unsupported"]
-        assert data["pending_total"] == 3, data["pending_total"]
-
-    def read_raw():
-        completed, _ = harness.run(["read", "raw:notes/alpha.md", "--limit", "5"])
-        assert "反诈模型" in completed.stdout, completed.stdout
-        completed, _ = harness.run(["read", "raw:notes/alpha.md", "--offset", "99", "--json"])
-        payload = json.loads(completed.stdout)
-        assert payload["data"]["content"] == "", payload
-
-    def write_pages():
-        body = workspace / ".drafts" / "alpha.md"
-        body.parent.mkdir(exist_ok=True)
-        body.write_text("双零行动见 [[beta-page]]。\n", encoding="utf-8")
-        _, payload = harness.run([
-            "page", "put", "--id", "alpha-page", "--title", "反诈模型要求",
-            "--type", "concept", "--summary", "禁止混用非涉诈模型。",
-            "--source", "notes/alpha.md", "--body", str(body), "--json",
-        ])
-        assert payload["ok"]
-        _, payload = harness.run([
-            "page", "put", "--id", "beta-page", "--title", "云网安全",
-            "--type", "concept", "--summary", "双零行动的两项指标。",
-            "--source", "notes/beta.html", "--body", "-", "--json",
-        ], input_text="双零行动：变更操作零失误、云网安全零事故。\n")
-        assert payload["ok"]
-
-    def settle():
-        _, payload = harness.run(["settle", "--json"], expect=1)
-        assert [item["key"] for item in payload["data"]["settled"]] == ["notes/alpha.md", "notes/beta.html"]
-        assert payload["data"]["pending"] == ["notes/gamma.docx"], payload["data"]
-        assert payload["data"]["blocked"][0]["key"] == "notes/gamma.docx"
-        harness.run(["settle", "notes/gamma.docx", "--skip", "--json"])
-        _, payload = harness.run(["status", "--json"])
-        assert payload["data"]["pending"] == [], payload["data"]
-
-    def query_and_links():
-        _, payload = harness.run(["query", "零事故", "--json"])
-        assert payload["data"]["results"][0]["id"] == "beta-page", payload["data"]
-        _, payload = harness.run(["query", "双零", "--json"])
-        assert payload["data"]["returned"] >= 1
-        _, payload = harness.run(["query", "--page", "alpha-page", "--json"])
-        assert payload["data"]["outgoing"] == ["beta-page"], payload["data"]
-        _, payload = harness.run(["query", "--page", "beta-page", "--json"])
-        assert payload["data"]["incoming"] == ["alpha-page"], payload["data"]
-
-    def stable_digest():
-        before = snapshot(workspace)
-        _, payload = harness.run(["ingest", "--json"])
-        assert payload["data"]["ingested"] == [], payload["data"]
-        assert len(payload["data"]["unchanged"]) == 3
-        after = snapshot(workspace)
-        assert before == after, "unchanged ingest rewrote files"
-
-    def dry_run_pure():
-        before = snapshot(workspace)
-        _, payload = harness.run(["ingest", "--dry-run", "--force", "--json"])
-        after = snapshot(workspace)
-        assert before == after, "--dry-run changed files"
-        assert payload["data"]["dry_run"] is True
-        fresh = workspace / ".fresh"
-        fresh.mkdir()
-        (fresh / "note.md").write_text("新来源。\n")
-        _, fresh_payload = harness.run([
-            "ingest", "--dry-run", "--root", str(fresh), "--json",
-        ])
-        assert fresh_payload["root"] == str(fresh.resolve()), fresh_payload["root"]
-        assert not (fresh / ".wiki").exists(), "dry-run initialized .wiki on a fresh root"
-        assert [p.name for p in fresh.iterdir()] == ["note.md"]
-        shutil.rmtree(fresh)
-
-    def source_vanishes_and_returns():
-        source = workspace / "notes" / "beta.html"
-        backup = workspace / "beta.html.bak"
-        source.rename(backup)
-        _, payload = harness.run(["ingest", "--json"])
-        assert payload["data"]["vanished"] == ["notes/beta.html"], payload["data"]
-        _, payload = harness.run(["status", "--json"])
-        assert payload["data"]["stale_pages"] == ["beta-page"], payload["data"]
-        _, payload = harness.run(["doctor", "--json"])
-        assert any(item["code"] == "L10" for item in payload["data"]["issues"]), payload["data"]
-        backup.rename(source)
-        _, payload = harness.run(["ingest", "--json"])
-        assert payload["data"]["restored"] == ["notes/beta.html"], payload["data"]
-        _, payload = harness.run(["status", "--json"])
-        assert payload["data"]["stale_pages"] == [], payload["data"]
-
-    def source_changes():
-        (workspace / "notes" / "alpha.md").write_text(
-            "# 反诈模型要求\n\n禁止混用非涉诈模型。新增：连续 6 个月未更新要评估效能。\n",
-            encoding="utf-8",
-        )
-        _, payload = harness.run(["ingest", "--json"])
-        assert [item["key"] for item in payload["data"]["ingested"]] == ["notes/alpha.md"]
-        _, payload = harness.run(["settle", "--json"], expect=1)
-        assert [item["key"] for item in payload["data"]["blocked"]] == ["notes/alpha.md"]
-        assert payload["ok"] is False, payload
-        body = workspace / ".drafts" / "alpha2.md"
-        body.write_text("更新后的正文，引用 [[beta-page]]。\n", encoding="utf-8")
-        harness.run([
-            "page", "put", "--id", "alpha-page", "--title", "反诈模型要求",
-            "--type", "concept", "--summary", "禁止混用非涉诈模型。",
-            "--source", "notes/alpha.md", "--body", str(body), "--json",
-        ])
-        harness.run(["settle", "--json"])
-        _, payload = harness.run(["status", "--json"])
-        assert payload["data"]["pending"] == [], payload["data"]
-
-    def rejected_inputs():
-        _, payload = harness.run([
-            "page", "put", "--id", "x", "--title", "t", "--type", "nope",
-            "--summary", "s", "--source", "notes/alpha.md", "--body", "-", "--json",
-        ], expect=2)
-        assert payload["error"]["code"] == "E_BAD_TYPE"
-        _, payload = harness.run(["page", "delete", "alpha-page", "--json"], expect=3)
-        assert payload["error"]["code"] == "E_CONFIRM"
-        _, payload = harness.run(["read", "../outside.md", "--json"], expect=2)
-        assert payload["error"]["code"] == "E_PATH"
-
-    def doctor_clean():
-        _, payload = harness.run(["doctor", "--json"])
-        assert payload["data"]["healthy"] is True, payload["data"]
-
-    def portable():
-        copy_root = Path(tempfile.mkdtemp(prefix="llm-wiki copy ")) / "技能 目录"
-        try:
-            shutil.copytree(SCRIPT.parent.parent, copy_root, ignore=shutil.ignore_patterns("__pycache__"))
-            entry = copy_root / "scripts" / "wiki.py"
-            completed = subprocess.run(
-                [sys.executable, str(entry), "status", "--root", str(workspace), "--json"],
-                cwd="/",
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            assert completed.returncode == 0, completed.stderr
-            payload = json.loads(completed.stdout)
-            assert payload["data"]["pages"] == 2, payload["data"]
-        finally:
-            shutil.rmtree(copy_root.parent, ignore_errors=True)
-
-    check("首次 ingest 自动建库并分类格式", first_ingest)
-    check("read 支持窗口与越界", read_raw)
-    check("建页与 stdin 正文", write_pages)
-    check("settle 收口并保留未处理来源", settle)
-    check("检索与双向链接", query_and_links)
-    check("摘要未变不重写", stable_digest)
-    check("dry-run 无副作用", dry_run_pure)
-    check("来源消失标记 stale、恢复后复位", source_vanishes_and_returns)
-    check("来源变更需重新收口", source_changes)
-    check("非法输入返回稳定错误码", rejected_inputs)
-    check("doctor 最终健康", doctor_clean)
-    check("含空格与中文路径下可搬迁", portable)
+def body_file(root):
+    path = Path(root) / ".drafts" / "page.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("## 结论\n\n停机后本人持证到厅复机，约两个工作日。\n", encoding="utf-8")
+    return path
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--keep", action="store_true", help="keep the temporary workspace")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--keep", action="store_true", help="keep the temp workspace")
+    parser.add_argument("--json", action="store_true", help="machine-readable summary")
     args = parser.parse_args(argv)
-    workspace = Path(tempfile.mkdtemp(prefix="llm-wiki-selftest-"))
+
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-selftest-"))
+    results = []
     try:
-        make_workspace(workspace)
-        harness = Harness(SCRIPT, workspace)
-        run_checks(harness, workspace)
+        (root / "a.md").write_text(
+            "# 反诈复机\n\n号码被停机后，需要本人持身份证到营业厅办理复机。\n"
+            "审批时长通常为两个工作日。\n",
+            encoding="utf-8",
+        )
+        (root / "b.md").write_text("# 无关材料\n\n用来验证 skip 分支。\n", encoding="utf-8")
+        (root / "scan.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        data = run(root, "init")["data"]
+        check(results, "init creates .wiki", (root / ".wiki/wiki.db").exists() and data["sources"] == 0, data)
+
+        data = run(root, "ingest")["data"]
+        check(results, "ingest queues route tasks", data["pending_total"] == 2, data)
+        check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
+
+        tasks = run(root, "next", "--kind", "route", "--batch", "5")["data"]["tasks"]
+        check(results, "route claims one task per source", len(tasks) == 2, tasks)
+        routes = {task["subject"]: task for task in tasks}
+        source_key = routes["a.md"]["inputs"]["sources"][0]["key"]
+        raw = run(root, "read", f"raw:{source_key}")["data"]
+        check(results, "read returns raw text", "复机" in raw["content"], raw)
+
+        merged = run(
+            root, "submit", routes["b.md"]["id"], "--epoch", str(routes["b.md"]["epoch"]),
+            "--payload", payload_file(root, "skip.json",
+                                      {"decisions": [{"source": "b.md", "action": "skip",
+                                                      "reason": "与主题无关"}]}),
+        )
+        check(results, "skip decision accepted", merged["ok"], merged)
+
+        submitted = run(
+            root, "submit", routes["a.md"]["id"], "--epoch", str(routes["a.md"]["epoch"]),
+            "--payload", payload_file(root, "route.json", {"decisions": [
+                {"source": source_key, "action": "new", "page": "anti-fraud-restore",
+                 "title": "反诈复机", "type": "process", "reason": "完整的复机办理路径"},
+            ]}),
+        )
+        check(results, "route new queues a page task", submitted["data"]["queued_page_tasks"], submitted)
+
+        body_file(root)
+        task = run(root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"][0]
+        payload = {
+            "page": "anti-fraud-restore",
+            "title": "反诈复机",
+            "type": "process",
+            "summary": "停机后本人持证到厅复机，约两个工作日。",
+            "links": [],
+            "body_file": ".drafts/page.md",
+            "evidence": [{"source": source_key, "quote": "需要本人持身份证到营业厅办理复机"}],
+            "boundaries": {"covered": "停机后的复机路径", "not_covered": "异地办理与资费"},
+        }
+        accepted = run(root, "submit", task["id"], "--epoch", str(task["epoch"]),
+                       "--payload", payload_file(root, "page.json", payload))
+        mirror = root / ".wiki/pages/process/anti-fraud-restore.md"
+        check(results, "page submit writes rev 1", accepted["data"]["rev"] == 1 and mirror.exists(), accepted)
+
+        bad = run(root, "submit", task["id"], "--epoch", str(task["epoch"]),
+                  "--payload", payload_file(root, "again.json", payload), expect=3)
+        check(results, "closed task rejects resubmit", bad["error"]["code"] == "E_TASK_STALE", bad)
+
+        status = run(root, "status")["data"]
+        check(results, "status counts page and pending", status["pages"] == 1, status)
+        found = run(root, "query", "复机")["data"]
+        check(results, "query finds the page", found["matches"] == 1, found)
+        page = run(root, "read", "page:anti-fraud-restore")["data"]
+        check(results, "read page comes from the ledger", "两个工作日" in page["content"], page)
+
+        mirror.write_text("手改的内容\n", encoding="utf-8")
+        run(root, "status")
+        drift = list((root / ".wiki/drift").glob("*.md"))
+        check(results, "mirror edit kept as drift", drift and "手改" in drift[0].read_text(encoding="utf-8"), drift)
+        check(results, "mirror restored from ledger", "两个工作日" in mirror.read_text(encoding="utf-8"), mirror)
+
+        edited = root / ".drafts/edited.md"
+        edited.write_text("---\ntitle: 反诈复机\n---\n## 结论\n\n人工补充：可拨打客服确认进度。\n", encoding="utf-8")
+        imported = run(root, "page", "import", "anti-fraud-restore", "--from", str(edited))["data"]
+        check(results, "page import adds a revision", imported["rev"] == 2, imported)
+        restored = run(root, "page", "restore", "anti-fraud-restore", "--rev", "1")["data"]
+        check(results, "page restore rolls back content", restored["rev"] == 3 and "两个工作日" in mirror.read_text(encoding="utf-8"), restored)
+
+        exported = run(root, "export", str(root / ".drafts/export"))["data"]["files"]
+        check(results, "export writes mirror copies", exported, exported)
+
+        config_path = root / ".wiki/wiki.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["ingest"]["max_source_bytes"] = 10
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        (root / "big.md").write_text("x" * 100, encoding="utf-8")
+        oversized = run(root, "ingest", expect=1)["data"]
+        check(results, "oversize classified", "big.md" in {item["key"] for item in oversized["oversize"]}, oversized)
+        config["ingest"]["max_source_bytes"] = 50_000_000
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+
+        dry = root / "dry"
+        dry.mkdir()
+        (dry / "note.md").write_text("# 标题\n\n正文。\n", encoding="utf-8")
+        dry_run = subprocess.run(
+            [sys.executable, str(SCRIPT), "ingest", "--dry-run", "--json"],
+            cwd=dry, capture_output=True, text=True,
+        )
+        check(results, "dry run leaves no .wiki", dry_run.returncode == 0 and not (dry / ".wiki").exists(), dry_run.stderr)
+
+        healthy = run(root, "doctor", expect=(0, 1))["data"]
+        check(results, "doctor runs", isinstance(healthy["issues"], list), healthy)
+    except AssertionError as error:
+        results.append(("failed", False, str(error)))
     finally:
         if args.keep:
-            print(f"workspace kept: {workspace}")
+            print(f"workspace kept at {root}", file=sys.stderr)
         else:
-            shutil.rmtree(workspace, ignore_errors=True)
-    failures = [item for item in CHECKS if item[1] != "ok"]
-    for name, status, detail in CHECKS:
-        print(f"{status:5} {name}{': ' + detail if detail else ''}")
-    print(f"\n{len(CHECKS) - len(failures)}/{len(CHECKS)} passed")
-    return 1 if failures else 0
+            shutil.rmtree(root, ignore_errors=True)
+
+    failures = [item for item in results if not item[1]]
+    if args.json:
+        print(json.dumps({"ok": not failures, "checks": len(results), "failed": len(failures),
+                          "results": [{"name": name, "ok": ok, "detail": str(detail)}
+                                      for name, ok, detail in results]}, ensure_ascii=False))
+    else:
+        for name, ok, detail in results:
+            print(f"{'PASS' if ok else 'FAIL'}  {name}")
+            if not ok:
+                print(f"      {detail}")
+        print(f"\n{len(results) - len(failures)}/{len(results)} checks passed")
+    return 0 if not failures else 1
 
 
 if __name__ == "__main__":

@@ -51,9 +51,9 @@ python3 <安装路径>/scripts/wiki.py --version
 python3 <安装路径>/scripts/selftest.py
 ```
 
-`selftest.py` 在临时目录跑 12 项检查（建库、摄入 Markdown/HTML/DOCX、建页、检索、
-链接、源消失与恢复、源变更需重写、dry-run 不建库、错误码、doctor、含空格/中文路径搬迁），
-不接触真实数据。全部通过即安装可用。
+`selftest.py` 在临时目录跑 20 项检查（建库、摄入与分类、route 决定、页面提交、
+镜像漂移、import/restore、导出、超限、dry-run、doctor），不接触真实数据。全部通过即
+安装可用。
 
 ## 4. 在业务目录启用
 
@@ -63,8 +63,11 @@ python3 <安装路径>/scripts/selftest.py
 python3 <安装路径>/scripts/wiki.py ingest --json
 ```
 
-首次运行会在**当前目录**创建 `.wiki/`（`wiki.json`、`wiki.db`、`raw/`、`pages/`）。
+首次运行会在**当前目录**创建 `.wiki/`（`wiki.json`、`wiki.db`、`raw/`、`pages/`、`drift/`）。
 也可以在任何位置用 `--root <资料目录>` 指向知识库，不需要 `cd`。
+
+摄入只负责把文件变成来源并排队 route 任务；建页由后续任务循环完成，见 `SKILL.md`
+的主循环。不要手工编辑 `.wiki/` 下的文件，页面只能通过 `submit`、`page import` 修改。
 
 ## 5. 搬迁与卸载
 
@@ -75,8 +78,9 @@ python3 <安装路径>/scripts/wiki.py ingest --json
 - **升级**：用新版本目录替换技能目录；`.wiki/wiki.db` 的表结构只增不改，旧库可直接用。
   替换前备份整个 `.wiki/`。
 
-## 6. 与旧 Rust CLI 的关系
+## 6. 与旧版本的关系
 
-本技能是独立实现，只认自己的 `.wiki/wiki.json` 与 `.wiki/wiki.db`。不要把它指向旧 CLI
-已经初始化的 `.wiki/` 目录：两者的库表与配置格式不同。需要迁移时，在新目录重新
-`ingest` 一次原始文件，再把 `pages/` 里的知识页按需搬过去。
+本技能是独立实现，只认自己的 `.wiki/wiki.json` 与 `.wiki/wiki.db`。旧版（Rust CLI 或
+0.1.x Python 版）初始化的 `.wiki/` 表结构与命令面不同，不要直接指向；在新目录重新
+`ingest` 一次原始文件即可。旧版按"页面文件为源"写出的 `.wiki/pages/*.md` 会在首次
+运行时被收为 rev1（`origin=external`），但页面元数据不完整，建议对照 raw 复核后重交一版。

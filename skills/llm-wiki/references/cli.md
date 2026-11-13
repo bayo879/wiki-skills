@@ -1,141 +1,177 @@
 # CLI 契约
 
-入口：`scripts/wiki.py`。所有子命令接受 `--root <目录>`（默认当前目录）和 `--json`。
-参数放在子命令之后：`wiki.py query 反诈 --root ../kb --json`。
+所有命令在知识库根目录执行，或加 `--root <目录>`。除 `version` 外都接受 `--json`。
+引擎只依赖 Python 标准库。
 
-## 输出协议
+## 输出信封
 
 成功：
 
 ```json
-{"ok": true, "cmd": "ingest", "version": "0.1.0", "root": "/abs/root",
- "summary": "人类可读一行", "data": {}}
+{"ok": true, "cmd": "next", "version": "0.2.0", "root": "/abs/root",
+ "summary": "claimed 3 task(s)…", "data": {…}}
 ```
 
 失败：
 
 ```json
-{"ok": false, "cmd": "page put", "version": "0.1.0", "root": "/abs/root",
- "error": {"code": "E_BAD_TYPE", "message": "…", "next": "…"}}
+{"ok": false, "cmd": "submit", "version": "0.2.0", "root": "/abs/root",
+ "error": {"code": "E_EVIDENCE_NOT_FOUND", "message": "quote not found in docs/a.md: '…'",
+           "next": "re-read the raw source and copy an exact sentence"}}
 ```
 
-- `ok: false` 表示这次调用没有完全达成目标；`error.next` 是下一步建议。
-- 退出码：`0` 成功；`1` 部分失败（如个别文件失败、settle 被阻断）；`2` 输入/配置错误；
-  `3` 状态不满足（找不到对象、没有来源、未确认删除）；`130` 中断。
-- 不要解析人类输出；需要机器判断时始终加 `--json`。
+不加 `--json` 时输出人类可读文本，错误写 stderr。
+
+退出码：`0` 成功；`1` 有阻断项（解析失败、超限、数据库损坏）；`2` 用法或载荷错误；
+`3` 状态不满足（任务过期、来源漂移、页面冲突）。
+
+## 语义模型
+
+- 来源（source）：扫描到的文件，键是相对根目录的路径。状态 `pending`、`done`、
+  `skipped`、`unsupported`、`oversize`、`missing`。
+- 任务（task）：`route`（每个来源一条）与 `page`（每页一条）。状态
+  `queued → leased → accepted`；提交被拒时回到 `queued` 并记录 `last_error`。
+- 页面（page）：多版修订，每版有 `rev`、`meta`、`body`、`digest`。当前状态
+  `stable` 或 `stale`（引用来源变化或缺失）。
+- `.wiki/pages/<type>/<id>.md` 是按账本渲染的镜像，不是事实源。
 
 ## 命令
 
 ### init
 
-创建 `.wiki/{wiki.json,wiki.db,raw/,pages/}`（幂等），返回 `created` 列表。
+创建 `.wiki/`（`wiki.db`、`wiki.json`、`raw/`、`pages/`、`drift/`）并报告状态。
+`data`: `{created, config, pages, sources, open_tasks}`。
 
-### ingest [--dry-run] [--force]
+### ingest
 
-扫描根目录（跳过 `scan.ignore`、点文件与隐藏目录），对每个文件：
+扫描根目录（跳过隐藏目录与 `scan.ignore`），解析新文件或内容变化的文件，写入
+`.wiki/raw/`，并为每个新来源入队一条 route 任务。`--dry-run` 不落盘、不建 `.wiki/`；
+`--force` 忽略哈希重新解析。
 
-1. 计算 blake2b 摘要；摘要未变则跳过（`unchanged`）。
-2. 解析为文本：PDF → `pdftotext`/`pypdf`；DOCX → 标准库；HTML → 去标签；其余文本格式直读。
-3. 写入 `.wiki/raw/<可读名>-<哈希8>.md`，登记来源为 `pending`。
+`data`: `{ingested[{key,raw,parser,digest,size,chars}], unchanged, unsupported[{key,suffix,reason,hint}],
+oversize[{key,message}], failed[{key,message}], vanished, restored, queued_tasks, pending_total, pending}`。
 
-返回：`ingested[]`（key/raw/parser/digest/size/chars）、`unchanged[]`、`unsupported[]`、
-`oversize[]`、`failed[]`、`vanished[]`、`restored[]`、`pending[]`。
+超过 `ingest.max_source_bytes` 的文件进 `oversize`，不解析；无文本层的进
+`unsupported`。两者都不会中止整批摄入。
 
-- `--dry-run` 只报告，不写 raw、不改账本、不动页面；在尚未初始化的目录里也不会创建
-  `.wiki/`（已用文件哈希验证）。
-- `--force` 忽略摘要，强制重解析。
-- 源文件消失：来源标记 `missing`，引用它的页面状态改为 `stale`（正文不动）。
-- 源文件恢复且摘要与消失前一致：来源回到 `done`，页面从 `stale` 回到 `stable`，记入
-  `restored`。摘要变了则按新来源重新进入 `pending`。
-- 源文件内容变化（摘要不同）：来源回到 `pending`，`raw/` 被覆盖，引用它的页面标为
-  `stale`。必须重读 raw 并重写页面（`page put` 默认写回 `stable`），否则 `settle` 会阻断。
+### next
 
-### read <ref> [--offset N] [--limit N]
+领取 queued 任务，默认数量取 `ingest.batch`（默认 20），可 `--batch N`、`--kind`。
+route 任务优先。领取时 `epoch + 1`，租约 900 秒。
 
-`ref` 三种形式：`raw:<key>`、`page:<id>`、相对路径。返回 `content`、`total_lines`、
-`next_offset`（读完为 `null`）。offset 从 1 开始；offset 超出总行数时 `content` 为空、
-`next_offset` 为 `null`。仓库外的路径会被拒绝（`E_PATH`）。
+`data.tasks[]`: `{id, kind, subject, state, epoch, attempts, lease_until, last_error,
+inputs, work}`。`work.sources[]` 带 `key/digest/raw/status/chars`；page 任务另有
+`work.mode`、`work.base_rev`，以及当前页面 `work.page{id,rev,meta,body}`。
 
-### query <词...> [--limit N]
+### submit
 
-在页面标题、summary、正文中做不区分大小写的子串匹配，按命中次数加权排序
-（标题 ×5、summary ×3）。返回 `matches`（命中页数）、`results[]`（id/title/type/status/
-summary/sources/path/score/snippet）。结果是**排序子集**，不是覆盖性证明。
+`submit <id> --epoch <n> --payload <file|->`。校验通过才写入并关闭任务；否则返回
+`E_*` 并把任务退回队列，`last_error` 记录原因，可重新 `next` 后再交。
 
-### query --page <id>
+**route 载荷**：
 
-返回单页 frontmatter、正文、`outgoing`/`incoming` 链接（来自 `[[id]]`）。
+```json
+{"decisions": [{"source": "docs/a.md", "action": "new", "page": "refund-process",
+                "title": "退款流程", "type": "process", "reason": "完整办理步骤"}]}
+```
 
-### page put --id ... --title ... --type ... --summary ... --source ... --body <file|-> [--status stable|draft|stale]
+每个输入来源恰好一条决定，`action` 三选一：
 
-- `--id`：`^[a-z0-9][a-z0-9._-]*$`，全局唯一；同 id 重写会覆盖旧文件（类型目录变化时
-  删除旧文件）。
-- `--type`：必须在 `.wiki/wiki.json` 的 `schema.types` 中。
-- `--summary`：非空，一句话。
-- `--source`：可重复，至少一个，且必须是 `sources` 表中已登记的 key。
-- `--body`：文件路径，或 `-` 从 stdin 读取。
-- 写入是原子的（同目录临时文件 + `os.replace`），随后重建链接索引。
+- `new`：`page`、`title`、`type` 必填；页面不能已存在。
+- `merge`：`page` 必填；页面必须存在。若该页已有未完成任务，来源并入该任务。
+- `skip`：`reason` 必填；来源标记 `skipped`。
 
-### page delete <id> --yes
+**page 载荷**：
 
-不可逆；无 `--yes` 返回 `E_CONFIRM`。
+```json
+{"page": "refund-process", "title": "退款流程", "type": "process",
+ "summary": "签收后 7 天内可申请，原路退回。",
+ "links": ["refund-policy"],
+ "body": "## 结论\n…", 
+ "evidence": [{"source": "docs/a.md", "quote": "签收后七日内可申请退款"}],
+ "boundaries": {"covered": "线上订单", "not_covered": "线下门店"}}
+```
 
-### settle [<key>...] [--skip]
+- `body` 或 `body_file` 二选一；最长 60000 字符；不能以 `---` 开头。
+- `summary` 1–200 字符；`title` 1–120 字符；`type` 必须在 `schema.types` 里。
+- `links` 只能指向已存在页面。
+- `evidence` 至少一条；`quote` 去空白后须逐字命中该来源的 raw 文本。
+- `boundaries.covered`、`boundaries.not_covered` 必填。
 
-收口来源：不带 key 时处理全部 `pending`。
+成功后 `data`: `{task, kind, page, rev, sources, queued_page_tasks}`。
 
-- 默认要求该来源至少被一个页面引用，且至少有一个引用页不是 `stale`；否则该 key 进入
-  `blocked`（退出码 1），并提示重读来源、重写页面。
-- `--skip` 把来源标为 `skipped`，用于“看过但决定不建页”（空文件、重复件、纯附件）。
-- 仍有 `pending` 时返回剩余列表；`ok` 为 false 表示有阻断项。
+### release
+
+`release <id>`：把已领取未提交的任务退回队列，不记录错误。
+
+### read
+
+`read "raw:<key>" [--offset N] [--limit N]` 读解析后的来源文本；
+`read "page:<id>"` 读页面正文；也可传根目录内的相对路径。
+`data`: `{path, offset, limit, total_lines, next_offset, meta, content}`。
+
+### query
+
+`query <词...> [--limit N]`：按标题、摘要、正文命中数排序，返回子集。
+`query --page <id>`：返回单页 `meta`、`rev`、`path`、`outgoing`、`incoming`、`body`。
+
+检索结果是定位工具，不是覆盖证明。
+
+### page
+
+- `page import <id> --from <file>`：采用人工编辑的页面文件（可带 frontmatter），
+  生成新修订（`origin=import`），不强制 evidence。只允许已存在的页面。
+- `page restore <id> --rev N`：把第 N 版内容写成新修订（`origin=restore`）。
+
+### export
+
+`export <dir>`：把所有页面按 `type/id.md` 写到目标目录，用于离线浏览或迁移。
 
 ### status
 
-来源状态计数、页面数、`stale_pages`、待处理 key。
+`status [--brief]`。`data`: `{created, sources{状态:数量}, source_total, pages,
+stale_pages, pending, tasks{open,queued,leased,route,page}, next}`。
+`--brief` 只给一行摘要。
 
-### doctor [--fix]
+### doctor
 
-检查：数据库完整性、目录存在、页面 id 唯一、frontmatter 必填字段、类型合法、引用来源已
-登记、页面有来源、`[[链接]]` 是否有目标、来源是否消失。
-
-- 默认只报告，`healthy: true` 表示无问题。
-- `--fix` 只做机械修复：补目录、重建链接索引；不改正文、不删页面。
-- 有 `fail` 级问题时退出码 1。
+`doctor [--fix]`：`PRAGMA integrity_check`、镜像修复、stale 页、未注册来源、
+断链、过期租约。`--fix` 重建链接索引与镜像。`data`: `{issues[{severity,code,message}],
+fixed, healthy}`；有 `fail` 级问题时退出码 1。
 
 ## 错误码
 
 | 码 | 含义 | 处理 |
 | --- | --- | --- |
-| `E_CONFIG` | `wiki.json` 不是合法 JSON | 修语法或删除后重建 |
+| `E_USAGE` | 参数缺失或组合非法 | 看 `error.next`，不要重试同一载荷 |
+| `E_PAYLOAD` | 载荷字段缺失/类型/长度不合法 | 按 message 修正字段 |
+| `E_TASK_UNKNOWN` | 任务 id 不存在 | `next` 取新任务 |
+| `E_TASK_STALE` | 任务未领取、已关闭或 epoch 过期 | 重新 `next`，用新 epoch |
+| `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
+| `E_STATE` | 目标页面正被其他任务写 | 等该任务提交后再试 |
+| `E_PAGE_CONFLICT` | 页面已存在（new）或版本已变（update） | 重新领任务，基于当前 rev 重写 |
+| `E_PAGE_UNKNOWN` | merge 指向不存在的页面 | 改用 new，或查 `page_index` |
+| `E_PAGE_GONE` | update 时页面消失 | 重新 `next` |
+| `E_BAD_ID` | 页面 slug 非法 | 用小写字母数字与 `-_.` |
+| `E_LINK_UNRESOLVED` | 链接目标不存在 | 先建目标页，或去掉链接 |
+| `E_EVIDENCE_NOT_FOUND` | 引文不在来源原文里 | 重读 raw，逐字复制 |
+| `E_SOURCE_DRIFT` | 来源在任务领取后被改动或删除 | 重新 `next`，重读来源 |
+| `E_UNKNOWN_SOURCE` | 页面引用未登记的来源 | 先 `ingest` |
 | `E_EMPTY` | 还没有任何来源 | 先 `ingest` |
-| `E_NOT_FOUND` | 页面/来源/文件不存在 | 用 `query`/`status` 定位 |
-| `E_PATH` | 路径越出知识库根 | 用相对路径 |
-| `E_USAGE` | 参数缺失或组合不合法 | 看 `error.next` |
-| `E_BAD_ID` | 页面 id 不合规 | 用小写 slug |
-| `E_BAD_TYPE` | 类型不在 schema | 换类型或改 `wiki.json` |
-| `E_BAD_SUMMARY` | summary 为空 | 补一句话 |
-| `E_UNKNOWN_SOURCE` | 来源 key 未登记 | 用 `ingest` 输出的原 key |
-| `E_NO_SOURCE` | 建页没给来源 | 加 `--source` |
-| `E_CONFIRM` | 删除未确认 | 确认后加 `--yes` |
-| `E_NOTHING` | 没有可结算的来源 | 先 `ingest` |
-| `E_SOURCE_TOO_LARGE` | 超过 `ingest.max_source_bytes` | 调大阈值或移出目录 |
-| `E_DB` | 数据库不可读 | 用备份恢复，不要手改 `wiki.db` |
-| `E_NO_TARGET` | 安装时没有技能根（仅 install.py） | 原地加载或指定 `--target` |
+| `E_NOT_FOUND` | 页面、版本或文件不存在 | 用 `query`/`read` 定位 |
+| `E_PATH` | 路径越出知识库根目录 | 用根目录内相对路径 |
+| `E_CONFIG` | `.wiki/wiki.json` 非法 | 按提示修正 JSON |
+| `E_SOURCE_TOO_LARGE` | 单文件超过 `max_source_bytes` | 调高阈值或拆分来源 |
+| `E_DB` | 数据库不可读 | 从备份恢复，不要手改 |
 
-## 磁盘布局
+## 配置
 
-```
-<root>/.wiki/
-├── wiki.json      # schema.types / scan.ignore / ingest.max_source_bytes
-├── wiki.db        # sources 账本 + links 索引（SQLite）
-├── raw/           # 解析后的来源文本，一源一文件，带 frontmatter 溯源
-└── pages/<type>/<id>.md   # 知识页，frontmatter + 正文
+`.wiki/wiki.json`（首次运行生成）：
+
+```json
+{"schema": {"types": ["concept", "entity", "process", "note"]},
+ "scan": {"ignore": [".git", "node_modules", "target", "dist"]},
+ "ingest": {"max_source_bytes": 50000000, "batch": 20}}
 ```
 
-页面 frontmatter 字段：`id`、`title`、`type`、`summary`、`sources`（列表）、`status`、
-`updated`（日期）。source 状态：`pending`、`done`、`skipped`、`missing`。
-
-## 并发
-
-SQLite 设置 5 秒 busy timeout；页面与 raw 均为原子替换。写入串行执行即可；不要并行跑
-两个 `ingest` 或同时改同一页。读取（`query`/`read`）不受影响。
+改 `schema.types` 会立即影响后续校验；已存在的页面不会被自动迁移。
