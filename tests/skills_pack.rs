@@ -177,11 +177,48 @@ fn no_skill_reaches_outside_its_directory() {
 }
 
 #[test]
-fn every_skill_names_its_cli_entry_point() {
-    for (dir, text) in skills() {
+fn wiki_skill_names_its_cli_entry_point() {
+    let (_, text) = skills()
+        .into_iter()
+        .find(|(dir, _)| dir == "llm-wiki")
+        .expect("wiki skill must ship");
+    assert!(text.contains(".wiki/cli/llm-wiki"));
+}
+
+/// Text guards pin the role boundary, not real model compliance.
+#[test]
+fn session_skill_only_produces_project_materials() {
+    let (_, text) = skills()
+        .into_iter()
+        .find(|(dir, _)| dir == "llm-wiki-session")
+        .expect("session skill must ship");
+    for required in [
+        "wiki-sources/",
+        "当前项目根目录",
+        "项目事实",
+        "持续生效的规则",
+        "未决问题",
+        "实测",
+        "推断",
+        "明确要求保存",
+        "主动",
+        "未执行摄入",
+    ] {
         assert!(
-            text.contains("llm-wiki"),
-            "{dir}: a skill must tell the agent which command to run"
+            text.contains(required),
+            "missing session boundary: {required}"
+        );
+    }
+    for obsolete in [
+        "[ingest].session_dir",
+        "`ingest` 登记",
+        "根收尾",
+        "先 `query`",
+        "sources` 与 `updated",
+    ] {
+        assert!(
+            !text.contains(obsolete),
+            "obsolete wiki workflow: {obsolete}"
         );
     }
 }

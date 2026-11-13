@@ -55,13 +55,13 @@ Release workflow 在 Ubuntu / macOS / Windows 原生 runner 上测试并打包�
 
 ### Agent skills 安装
 
-两个技能是薄指令层，所有簿记与判定逻辑都在 CLI 里。按 agent 实际加载规则复制或注册它们，并保存目标工作区根及包内 CLI 绝对路径；不从复制后的技能位置推测知识库根。
+两个技能按 agent 实际加载规则复制或注册。`llm-wiki` 负责 wiki 内部整理，簿记与状态校验由 CLI 承担；使用时保存目标工作区根及包内 CLI 绝对路径，不从复制后的技能位置推测知识库根。`llm-wiki-session` 只在当前项目提炼素材，不需要 wiki CLI。
 
 - [llm-wiki](output/.wiki/skills/llm-wiki/SKILL.md)：边界、命令、最小序列、来源确认、退出码。
 - [首次接入](output/.wiki/skills/llm-wiki/init.md)：持久化记忆与定时任务（agent 侧，实现随 agent 而异）。
 - [内容](output/.wiki/skills/llm-wiki/content.md)：建页判断、新源、切片、矛盾、去重。
 - [运维](output/.wiki/skills/llm-wiki/ops.md)：体检、冲突、忽略、叫人。
-- [会话蒸馏](output/.wiki/skills/llm-wiki-session/SKILL.md)：结论写入 `[ingest].session_dir`（默认 `sessions`），原始会话不存。
+- [会话蒸馏](output/.wiki/skills/llm-wiki-session/SKILL.md)：在当前项目的 `wiki-sources/` 按主题保存可复用素材，不存原始会话，不执行摄入；写入不代表已入库。
 
 `.wiki/` 是本地引擎，工具不生成或修改 git 配置。使用 git 时自行安排忽略与备份。独立开发二进制（不在 `.wiki/cli/`）仍以当前目录为根；外部分发只使用完整 output 包。
 
