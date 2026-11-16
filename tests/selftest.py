@@ -662,6 +662,45 @@ def main(argv=None):
         conn.close()
         check(results, "one source never sits in two open page task trees", twins == [], twins)
 
+        # 旧版三字段快照（b2af7c9 那代引擎建的库）：没有源指纹，只能整体判漂移。
+        # 用独立工作区，避免动到上面 fixture 的任务状态。
+        legacy_root = Path(tempfile.mkdtemp(prefix="llm-wiki-legacy-"))
+        try:
+            (legacy_root / "x.md").write_text("# 旧库来源\n\n正文。\n", encoding="utf-8")
+            run(legacy_root, "ingest")
+            conn = sqlite3.connect(legacy_root / ".wiki" / "wiki.db")
+            legacy_id, digest, raw = conn.execute(
+                "SELECT t.id, s.digest, s.raw FROM tasks t, sources s "
+                "WHERE s.key = 'x.md' AND t.kind = 'route'"
+            ).fetchone()
+            conn.execute(
+                "UPDATE tasks SET inputs = ? WHERE id = ?",
+                (json.dumps({"sources": [{"key": "x.md", "digest": digest, "raw": raw}]}),
+                 legacy_id),
+            )
+            conn.commit()
+            conn.close()
+            run(legacy_root, "status")
+            handed = run(legacy_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"]
+            check(results, "a pre-fingerprint task is expired instead of crashing the claim",
+                  handed == [], handed)
+            conn = sqlite3.connect(legacy_root / ".wiki" / "wiki.db")
+            row = conn.execute(
+                "SELECT state, last_error FROM tasks WHERE id = ?", (legacy_id,)
+            ).fetchone()
+            conn.close()
+            check(results, "the invalidated legacy task keeps its reason",
+                  row[0] == "expired" and "predates source fingerprints" in row[1], row)
+            legacy_submit = run(
+                legacy_root, "submit", legacy_id,
+                "--payload", payload_file(legacy_root, "legacy-route.json", {"decisions": []}),
+                expect=3,
+            )
+            check(results, "submitting a pre-fingerprint task reports E_SOURCE_DRIFT",
+                  legacy_submit["error"]["code"] == "E_SOURCE_DRIFT", legacy_submit)
+        finally:
+            shutil.rmtree(legacy_root, ignore_errors=True)
+
         dry = root / "dry"
         dry.mkdir()
         (dry / "note.md").write_text("# 标题\n\n正文。\n", encoding="utf-8")

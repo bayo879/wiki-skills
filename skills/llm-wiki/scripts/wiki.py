@@ -1027,6 +1027,10 @@ class Wiki:
         inputs = json.loads(row["inputs"])
         for item in inputs.get("sources", []):
             key = item["key"]
+            # 旧版三字段快照（key/digest/raw）没有源指纹，判不出是否漂移：
+            # 当作漂移处理，让任务直接过期，不迁移、不猜版本。
+            if not {"source_size", "source_mtime", "source_digest"} <= set(item):
+                return f"task snapshot for {key} predates source fingerprints"
             source = self.source_row(key)
             if source is None or source["status"] == "missing":
                 return f"source {key} vanished"
