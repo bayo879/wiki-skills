@@ -32,7 +32,6 @@ SCENARIO_FILE = "SCENARIO.md"
 MAX_SCENARIO_CHARS = 200_000
 BUILTIN_DIR = "scenarios"
 BUILTIN_LABEL = "内置场景"
-DEFAULT_SCENARIO_ID = "话题探索"
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -123,27 +122,13 @@ def load(root, scenario_id):
     }
 
 
-def default(root):
-    """Return the built-in topic exploration flow when it is loadable."""
-    for entry in scan(root):
-        if entry["id"] != DEFAULT_SCENARIO_ID or not entry["valid"]:
-            continue
-        return {
-            "id": entry["id"],
-            "name": entry["name"],
-            "source": entry["source"],
-            "load": f'scenario load "{entry["id"]}"',
-        }
-    return None
-
-
-def match(root, terms, limit):
-    """Rank valid project scenarios against query terms; reads only files."""
+def match(root, terms, limit, builtin=True):
+    """Rank valid scenarios against search terms; reads only files."""
     terms = [term for term in terms if term]
     if not terms:
         return []
     scored = []
-    for entry in scan(root, builtin=False):
+    for entry in scan(root, builtin=builtin):
         if not entry["valid"]:
             continue
         title = entry["name"]
@@ -161,6 +146,7 @@ def match(root, terms, limit):
         scored.append(
             {
                 "id": entry["id"],
+                "source": entry["source"],
                 "name": title,
                 "description": description,
                 "triggers": entry["triggers"],

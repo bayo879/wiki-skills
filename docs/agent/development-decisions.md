@@ -124,3 +124,19 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   去重约束并入内置场景。`~/.dsh/AGENTS.md` 的 wiki-sources 条目属于全局规则，未改，
   由用户决定是否同步。
 - `selftest.py` 增加内置场景、话题跳过摄入、话题检索与项目覆盖内置场景用例，总计 57 项。
+
+## 2026-11-16：场景改为显式检索，不随 query 注入
+
+用户原话："场景检索要显式操作，必须明确检索场景才能应用场景相关分支能力，以免场景过度
+干预主流程"。
+
+- `query` 只返回页面与 `topics`，移除 `scenarios`、`scenario_matches`、`topic_scenario`；
+  普通知识问答不会被场景分支改写范围或答案结构。
+- 新增 `scenario search <词...> [--limit N]`：显式检索项目场景与内置场景，返回 `source`
+  与 `load`；只有检索并 `scenario load` 之后才按场景流程执行。
+- 内置场景不再自动出现在 `query`；话题探索默认流程仍保留，但入口是显式
+  `scenario load "话题探索"`，由 `SKILL.md` 与内置场景约定，不靠查询字段注入。
+- 场景只读、不进账本、不参与 `ingest` 不变；`scenario list` 仍列非法项，非法场景不进
+  `scenario search`。
+- `selftest.py` 改为断言 `query` 无场景字段、`scenario search` 命中项目/内置场景、
+  场景改动即时可检索、非法场景不进检索，总计仍 57 项；`VERSION=0.4.1`。

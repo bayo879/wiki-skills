@@ -44,7 +44,7 @@ from tasks import task_packet
 from validation import validate_page_payload
 from workspace import WIKI_DIR, dry_store, inside_root, window_safe
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 RAW_SUBDIR = "raw"
 PAGES_SUBDIR = "pages"
 DRIFT_SUBDIR = "drift"
@@ -1606,29 +1606,17 @@ def command_query():
     if not terms:
         raise WikiError("E_USAGE", "query needs text or --page", "example: query 反诈 复机", 2)
     scored, results = search.search_pages(wiki, terms, ARGS.limit)
-    scenario_hits = scenarios.match(wiki.root, terms, ARGS.limit)
     topic_hits = topics.match(wiki.root, terms, ARGS.limit)
-    default_scenario = scenarios.default(wiki.root)
     data = {
         "query": " ".join(terms),
         "matches": len(scored),
         "returned": len(results),
         "results": results,
-        "scenario_matches": len(scenario_hits),
-        "scenarios": scenario_hits,
         "topic_matches": len(topic_hits),
         "topics": topic_hits,
-        "topic_scenario": default_scenario,
         "boundary": "hit count is a ranked subset, not proof of full coverage",
     }
     sections = []
-    if default_scenario:
-        sections.append(
-            [
-                f"default topic flow: {default_scenario['load']}  "
-                f"(source: {default_scenario['source']})"
-            ]
-        )
     pages = [
         f"{item['id']}  [{item['type']}/{item['status']}]  {item['title']}\n    {item['snippet']}"
         for item in results
@@ -1641,12 +1629,6 @@ def command_query():
             block.append(f"{item['name']}  [{item['status'] or 'open'}]  {item['description']}")
             block.append(f"    path: {item['path']}  read: {item['read']}")
         sections.append(block)
-    if scenario_hits:
-        block = ["scenarios (load before following a flow):"]
-        for item in scenario_hits:
-            block.append(f"{item['id']}  {item['description']}")
-            block.append(f"    path: {item['path']}  load: {item['load']}")
-        sections.append(block)
     lines = []
     for block in sections:
         if lines:
@@ -1655,8 +1637,6 @@ def command_query():
     summary = f"{len(scored)} matching pages"
     if topic_hits:
         summary += f", {len(topic_hits)} matching topics"
-    if scenario_hits:
-        summary += f", {len(scenario_hits)} matching scenarios"
     summary += f", showing {len(results)} pages for {' '.join(terms)}"
     emit("query", wiki.root, summary, data, lines)
     wiki.close()
@@ -1671,6 +1651,21 @@ def command_scenario():
             "E_PATH", "scenario root escapes the workspace",
             "run from the workspace, or pass --root inside it", 2,
         )
+    if ARGS.scenario_command == "search":
+        terms = [term.strip() for term in ARGS.text if term.strip()]
+        if not terms:
+            raise WikiError(
+                "E_USAGE", "scenario search needs text",
+                'example: scenario search "开户"', 2,
+            )
+        hits = scenarios.match(root, terms, ARGS.limit)
+        data = {"query": " ".join(terms), "matches": len(hits), "scenarios": hits}
+        lines = []
+        for item in hits:
+            lines.append(f"{item['id']}  {item['description']}")
+            lines.append(f"    path: {item['path']}  load: {item['load']}")
+        emit("scenario search", root, f"{len(hits)} matching scenarios", data, lines)
+        return 0
     if ARGS.scenario_command == "list":
         data = scenarios.inventory(root)
         summary = f"{data['valid']} valid, {data['count'] - data['valid']} invalid scenarios"
@@ -1864,13 +1859,16 @@ def build_parser():
     read.add_argument("ref")
     read.add_argument("--offset", type=int, default=1)
     read.add_argument("--limit", type=int, default=200)
-    query = sub.add_parser("query", parents=[common], help="search pages and scenarios, or inspect one page")
+    query = sub.add_parser("query", parents=[common], help="search pages and topics, or inspect one page")
     query.add_argument("text", nargs="?")
     query.add_argument("--page")
     query.add_argument("--limit", type=int, default=8)
-    scenario = sub.add_parser("scenario", help="inspect project scenario capabilities")
+    scenario = sub.add_parser("scenario", help="inspect scenario capabilities")
     scenario_sub = scenario.add_subparsers(dest="scenario_command", required=True)
     scenario_sub.add_parser("list", parents=[common], help="list scenario capabilities and validity")
+    search_p = scenario_sub.add_parser("search", parents=[common], help="explicitly search scenario capabilities")
+    search_p.add_argument("text", nargs="*")
+    search_p.add_argument("--limit", type=int, default=5)
     load_p = scenario_sub.add_parser("load", parents=[common], help="load one scenario flow and its resources")
     load_p.add_argument("id")
     page = sub.add_parser("page", help="human edits to an existing page")

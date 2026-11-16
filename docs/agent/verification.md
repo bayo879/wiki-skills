@@ -72,6 +72,22 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实
 `matches=0`、`topic_matches=1`，段落之间只有一个空行；`scenario list` 在 `init` 前可用。
 本版本 `VERSION=0.4.0`。
 
+## 2026-11-16 场景显式检索后复跑
+
+`query` 不再返回 `scenarios`/`scenario_matches`/`topic_scenario`；新增
+`scenario search <词...>`，项目场景与内置场景一起检索，`source` 标明来源。复跑
+`python3 -m py_compile skills/llm-wiki/scripts/*.py` 通过；`python3 tests/selftest.py`：
+57/57 通过，退出码 0。新增与改动检查：
+
+- `query` 结果不含场景字段；
+- `scenario search "开户"` 命中项目场景；`scenario search "话题"` 命中内置场景且
+  `source=builtin`；
+- 场景正文修改后 `scenario search` 立即命中，无需 `ingest`；
+- 非法场景不进 `scenario search`；
+- 项目同名场景覆盖内置（`source=project`）。
+
+手工复测：`scenario search` 在 `init` 前可用且不创建 `.wiki/`。本版本 `VERSION=0.4.1`。
+
 ## 一、自测：26/26 通过
 
 ```bash

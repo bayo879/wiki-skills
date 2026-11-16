@@ -36,8 +36,8 @@
 ## 场景是能力，不是页面
 
 知识页回答"是什么"，场景回答"怎么做"。场景放在 `<root>/场景能力/<id>/`，由
-`SCENARIO.md`、`scripts/`、`references/` 组成，`query` 直接扫描，`scenario load`
-返回主流程和资源清单。
+`SCENARIO.md`、`scripts/`、`references/` 组成，只在显式 `scenario search` 后由
+`scenario load` 返回主流程和资源清单。
 
 场景不摄入、不进账本，理由有三点：
 
@@ -48,13 +48,15 @@
 - 场景不是事实源。流程步骤可以规定怎么做，但涉及"是什么"的判断仍要回到页面与 raw；
   这样账本仍是唯一事实源，场景不会变成第二个知识库。
 
-只读也意味着 `scenario list` / `scenario load` 不创建 `.wiki/`、不依赖 `init`，在没有
-知识库的项目里也能单独使用。代价是每次 `query` 都要扫描场景目录；场景数量有限，这个开销
-可以接受。
+只读也意味着 `scenario list` / `scenario search` / `scenario load` 不创建 `.wiki/`、
+不依赖 `init`，在没有知识库的项目里也能单独使用。场景检索与知识查询分开：`query` 只管
+页面与话题，场景必须显式检索，避免流程分支自动介入普通问答；代价是多一条命令，换来的
+是主流程不被场景带偏。
 
 技能自带 `话题探索` 内置场景，回答知识问题时默认进入：定主题、多轮检索、总结，再问是否
-沉淀。内置流程放在技能目录里，不依赖项目文件；项目需要定制时放同名场景覆盖，`query` 的
-`topic_scenario.source` 会从 `builtin` 变为 `project`。
+沉淀。默认进入靠的是显式 `scenario load "话题探索"`，不是 `query` 自动注入。内置流程放在
+技能目录里，不依赖项目文件；项目需要定制时放同名场景覆盖，显式检索的 `source` 会从
+`builtin` 变为 `project`。
 
 ## 话题是探索的沉淀物
 

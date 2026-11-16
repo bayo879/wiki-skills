@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query/read 查知识。回答知识问题时默认按内置「话题探索」场景办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。也能检索并加载项目 `场景能力/` 下的流程场景。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
+description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query/read 查知识。回答知识问题时默认按内置「话题探索」场景办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。场景能力必须显式 `scenario search` 后再 `scenario load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
 ---
 
 # llm-wiki：按任务填内容
@@ -97,9 +97,9 @@ python3 <skill>/scripts/wiki.py read "page:<page-id>" --json
 python3 <skill>/scripts/wiki.py read "raw:<source-key>" --offset 1 --limit 120 --json
 ```
 
-`query` 的 `topic_scenario` 恒指向这个默认场景（项目有同名场景时以项目为准），`topics`
-是已沉淀话题，相关的先读再探索，不重复劳动。单点查页面、查字段或确认某个已知事实，
-直接用 `query`/`read`，不必走完整流程。
+`query` **不检索场景**；话题探索是先显式 `scenario load "话题探索"` 再照着走的流程，
+不是查询时自动注入的分支。`topics` 是已沉淀话题，相关的先读再探索，不重复劳动。单点查
+页面、查字段或确认某个已知事实，直接用 `query`/`read`，不必走完整流程。
 
 回答时给出页面 id 和原始文件 key。页面与 raw 冲突时以 raw 为准，并说明冲突。
 
@@ -107,17 +107,19 @@ python3 <skill>/scripts/wiki.py read "raw:<source-key>" --offset 1 --limit 120 -
 
 项目可以把一类任务的流程写成场景，放在 `<root>/场景能力/<场景>/`：`SCENARIO.md` 是主流程，
 `scripts/` 和 `references/` 是配套脚本与说明。技能自带 `话题探索` 内置场景；项目放同名
-场景即可覆盖它。场景是能力，不是知识页：它不会被 `ingest` 写进账本，但 `query` 会直接
-检索它，所以改完流程不用重新摄入。内置场景的 `path` 只是展示标签
-（`内置场景/<id>/SCENARIO.md`），不是磁盘路径。
+场景即可覆盖它。场景是能力，不是知识页：它不会被 `ingest` 写进账本；`query` 也不检索
+它，必须显式 `scenario search`，避免场景自动介入普通知识问答。改完流程不用重新摄入。
+内置场景的 `path` 只是展示标签（`内置场景/<id>/SCENARIO.md`），不是磁盘路径。
 
-`query` 结果的 `scenarios` 非空时，说明命中了场景。先加载再照做：
+需要场景能力时，先显式检索，再加载照做：
 
 ```bash
+python3 <skill>/scripts/wiki.py scenario search "开户" --json
 python3 <skill>/scripts/wiki.py scenario list --json
 python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
 ```
 
+- 只有确认要按场景办事时才检索场景；普通提问不要先搜场景，也不要让场景替用户决定范围。
 - 用 `content` 里的步骤执行任务，用 `resources` 找配套文件；需要细节时再读
   `references/`，不要一次把所有脚本和说明都倒进上下文。
 - 运行 `scripts/` 前先看清用途与参数；没有把握时先向用户确认，不要盲跑。

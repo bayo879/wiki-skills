@@ -9,7 +9,7 @@
 成功：
 
 ```json
-{"ok": true, "cmd": "next", "version": "0.4.0", "root": "/abs/root",
+{"ok": true, "cmd": "next", "version": "0.4.1", "root": "/abs/root",
  "summary": "1 task(s) ready; read each brief, fill its template, then submit",
  "data": {…}}
 ```
@@ -17,7 +17,7 @@
 失败：
 
 ```json
-{"ok": false, "cmd": "submit", "version": "0.4.0", "root": "/abs/root",
+{"ok": false, "cmd": "submit", "version": "0.4.1", "root": "/abs/root",
  "error": {"code": "E_EVIDENCE_NOT_FOUND", "message": "quote not found in docs/a.md: '…'",
            "next": "re-read the raw source and copy an exact sentence"}}
 ```
@@ -148,17 +148,13 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 ### query
 
 `query <词...> [--limit N]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
-`场景能力/` 与 `话题/`，命中时分别在 `scenarios`、`topics` 里返回。`query --page <id>`：
-返回单页 `meta`、`rev`、`path`、`outgoing`、`incoming`、`body`，不查场景与话题。
+`话题/`，命中时在 `topics` 里返回。`query` **不检索场景**，场景必须显式
+`scenario search`。`query --page <id>`：返回单页 `meta`、`rev`、`path`、`outgoing`、
+`incoming`、`body`，不查话题。
 
-`data`: `{query, matches, returned, results, scenario_matches, scenarios,
-topic_matches, topics, topic_scenario, boundary}`。
-`matches` 只数页面，`scenario_matches` 只数项目场景，`topic_matches` 只数话题；
-`scenarios[]` 为 `{id, source, name, description, triggers, path, load, score, resources}`，
-其中 `load` 是建议的加载命令，`resources` 是配套文件数量；`topics[]` 为
+`data`: `{query, matches, returned, results, topic_matches, topics, boundary}`。
+`matches` 只数页面，`topic_matches` 只数话题；`topics[]` 为
 `{name, title, description, status, updated, path, read, score, snippet}`。
-`topic_scenario` 恒指向内置「话题探索」场景（`{id, name, source, load}`，项目有同名场景时
-`source` 为 `project`），用于默认的探索流程；内置场景不可用时为 `null`，其余结果不受影响。
 
 检索结果是定位工具，不是覆盖证明。
 
@@ -172,17 +168,26 @@ topic_matches, topics, topic_scenario, boundary}`。
 `source` 取 `project` 或 `builtin`。`resources[]` 为 `{path, kind, size}`，`kind` 取
 `script`（`scripts/` 下）、`reference`（`references/` 下）或 `other`。
 
+`scenario search <词...> [--limit N]`：显式检索场景，返回命中的项目场景与内置场景；
+不传词返回 `E_USAGE`。只有显式检索并 `load` 后，才按场景的分支流程执行，避免场景自动
+介入普通知识问答。
+
+`data`: `{query, matches, scenarios[]}`；`matches` 只数场景，`scenarios[]` 为
+`{id, source, name, description, triggers, path, main, load, score, resources}`，
+`source` 取 `project` 或 `builtin`；`load` 是建议的加载命令，`resources` 是配套文件数量。
+非法场景不进 `scenario search` 结果。
+
 `scenario load <id>`：加载一个合法场景（项目或内置），返回主文件全文与资源清单。
 
 `data`: `{scenario, path, content, meta, resources}`。`content` 是 `SCENARIO.md`
 全文（含 frontmatter），`path` 是主文件的根目录相对路径，`resources` 同上。内置场景的
 `path` 是展示标签 `内置场景/<id>/SCENARIO.md`，不是磁盘路径；其 `resources` 恒为空。
 
-两个命令都只读：不创建 `.wiki/`，不写账本，不要求先 `init` 或 `ingest`。场景文件改动后
-下一次 `query` / `scenario load` 立即生效。`id` 必须是 `场景能力/` 下的一级目录名（或内置
-场景 id），包含路径分隔符或试图跳出目录返回 `E_USAGE`；场景不存在返回 `E_NOT_FOUND`；缺
-`SCENARIO.md`、缺 `description`、正文为空、文件过大或场景目录/主文件指向区外返回
-`E_SCENARIO_INVALID`。`scenario list` 不因个别场景不合法而失败。
+三个命令都只读：不创建 `.wiki/`，不写账本，不要求先 `init` 或 `ingest`。场景文件改动后
+下一次 `scenario search` / `scenario load` 立即生效。`id` 必须是 `场景能力/` 下的一级目录名
+（或内置场景 id），包含路径分隔符或试图跳出目录返回 `E_USAGE`；场景不存在返回
+`E_NOT_FOUND`；缺 `SCENARIO.md`、缺 `description`、正文为空、文件过大或场景目录/主文件
+指向区外返回 `E_SCENARIO_INVALID`。`scenario list` 不因个别场景不合法而失败。
 
 ### page
 

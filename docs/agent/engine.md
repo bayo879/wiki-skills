@@ -66,16 +66,16 @@
     `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
     解析后落在扫描根外的符号链接。导入 `errors.py` / `workspace.py` 前设
     `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。
-12. **场景只读且不进账本。** `scan_files` 在扫描根一级跳过 `场景能力/`，不因旧
-    `scan.ignore` 是否包含它而改变；`scenarios.py` 不打开数据库、不写 `.wiki/`、不排任务。
-    `query` 只匹配 `valid` 的项目场景；内置场景不参与关键词匹配，但 `default()` 让它恒出现在
-    `topic_scenario`。`scenario list` 仍列出非法项并带 `error`。`scenario load` 的 id 必须是
-    `场景能力/` 下的一级目录名或内置场景 id，拒绝 `.`、`..`、路径分隔符和区外符号链接。
-    场景文件是活文件，不做缓存或 digest。
+12. **场景只读、不进账本、不随查询注入。** `scan_files` 在扫描根一级跳过 `场景能力/`，
+    不因旧 `scan.ignore` 是否包含它而改变；`scenarios.py` 不打开数据库、不写 `.wiki/`、不排
+    任务。`query` 不读场景文件，场景只通过显式 `scenario search` 检索，项目场景与内置场景
+    一起参与，只返回 `valid` 项。`scenario list` 仍列出非法项并带 `error`。`scenario load`
+    的 id 必须是 `场景能力/` 下的一级目录名或内置场景 id，拒绝 `.`、`..`、路径分隔符和区外
+    符号链接。场景文件是活文件，不做缓存或 digest。
 13. **话题只读且不进账本。** `scan_files` 同时跳过 `话题/`，话题不会被当成来源。`topics.py`
     只读 `话题/*.md`，取 frontmatter 的 `name/description/status/updated`；正文为空或文件超过
     200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的 `topic_matches` 与页面
-    `matches`、场景 `scenario_matches` 分开计数；话题文件由 agent 直接写，不经账本。
+    `matches` 分开计数；话题文件由 agent 直接写，不经账本。
 
 ## 数据方向
 
@@ -104,10 +104,10 @@ page 载荷 → 校验 → page_revs + 镜像 + links
   `tests/selftest.py`。
 - 改场景：同步 `docs/readme/cli.md`、`docs/readme/scenarios.md`、`SKILL.md`、
   `skills/llm-wiki/scripts/health.py` 的 `SCRIPT_FILES` 与 `BUILTIN_SCENARIOS`、
-  `tests/selftest.py`；保持 `query` 只匹配合法项目场景、`load` 只读、内置场景可覆盖。
+  `tests/selftest.py`；保持场景只经显式 `scenario search` 检索、`load` 只读、内置可覆盖。
 - 改话题：同步 `docs/readme/cli.md`、`docs/readme/topics.md`、`SKILL.md`、
   `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`、`scripts/health.py` 的
-  `SCRIPT_FILES`、`tests/selftest.py`；保持 `ingest` 跳过 `话题/`、话题计数独立。
+  `SCRIPT_FILES`、`tests/selftest.py`；保持 `ingest` 跳过 `话题/`、`query` 只带话题。
 - 改表结构：在 `ensure()` 里做幂等迁移，并在 `docs/agent/verification.md` 记录旧库升级结果。
 - 改渲染：`render_page` 与 `split_frontmatter` 必须能往返；跑 `tests/selftest.py` 的
   import/restore 用例。

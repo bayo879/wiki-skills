@@ -10,8 +10,8 @@
 - **改引擎（`scripts/wiki.py`）**：读 [引擎内部](docs/agent/engine.md)，查任务状态机、
   epoch/lease、修订与渲染、drift 处理、错误码约定与单文件规模边界。
 - **改话题探索或沉淀流程**：读 [话题沉淀](docs/readme/topics.md) 与内置场景
-  `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`，查 `query` 的 `topic_scenario`/`topics`
-  字段与 `ingest` 跳过 `话题/` 的约束。
+  `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`，查 `scenario search` 的显式检索、
+  `query` 的 `topics` 字段与 `ingest` 跳过 `话题/` 的约束。
 - **改技能文字、命令契约或输出格式**：读 [技能与契约维护](docs/agent/maintenance.md)，
   查 SKILL.md 与 references 的同步范围、`tests/selftest.py` 守卫、文档编辑的核验要求。
 - **改文档或准备提交**：读 [技能与契约维护](docs/agent/maintenance.md)；

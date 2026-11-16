@@ -84,8 +84,9 @@ updated: 2026-11-16
 ## 检索与摄入
 
 - `ingest` 整目录跳过 `话题/`，话题不会被当成来源，也不会生成 route/page 任务。
-- `query` 直接扫描 `话题/*.md`，命中时放在 `topics`，与页面 `matches`、场景
-  `scenario_matches` 分开计数。每项带 `name`、`description`、`status`、`path`、`read`。
+- `query` 直接扫描 `话题/*.md`，命中时放在 `topics`；话题计数 `topic_matches` 与页面
+  `matches` 分开。每项带 `name`、`description`、`status`、`path`、`read`。场景不进
+  `query` 结果，需要流程时显式 `scenario search`。
 - 话题由 agent 直接写，不经账本、不排任务；写入后要报告“未执行摄入”，不能说成已建页。
 - 话题改动立即对下一次 `query` 生效，不需要重新 `ingest`。
 

@@ -179,25 +179,29 @@ def main(argv=None):
         check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
 
         found = run(root, "query", "开户")["data"]
-        check(results, "query returns scenario matches",
-              found["scenario_matches"] == 1 and found["scenarios"][0]["id"] == "account-opening", found)
-        check(results, "query keeps page and scenario counts separate", found["matches"] == 0, found)
+        check(results, "query does not mix in scenario matches",
+              "scenarios" not in found and "scenario_matches" not in found, found)
+        searched = run(root, "scenario", "search", "开户")["data"]
+        check(results, "scenario search finds a project scenario",
+              searched["matches"] == 1 and searched["scenarios"][0]["id"] == "account-opening", searched)
         scenario_main.write_text(
             scenario_main.read_text(encoding="utf-8") + "\n补充：支持见证开户。\n",
             encoding="utf-8",
         )
-        live = run(root, "query", "见证开户")["data"]
+        live = run(root, "scenario", "search", "见证开户")["data"]
         check(results, "scenario edits are searchable without ingest",
-              live["scenario_matches"] == 1, live)
-        invalid = run(root, "query", "坏场景")["data"]
-        check(results, "invalid scenarios stay out of query",
-              invalid["scenario_matches"] == 0, invalid)
+              live["matches"] == 1, live)
+        invalid = run(root, "scenario", "search", "坏场景")["data"]
+        check(results, "invalid scenarios stay out of scenario search",
+              invalid["matches"] == 0, invalid)
 
         topics_hit = run(root, "query", "复机")["data"]
-        check(results, "query always offers the topic scenario",
-              topics_hit["topic_scenario"]["id"] == "话题探索"
-              and topics_hit["topic_scenario"]["source"] == "builtin",
-              topics_hit["topic_scenario"])
+        builtin_hit = run(root, "scenario", "search", "话题")["data"]
+        check(results, "scenario search finds the builtin explicitly",
+              builtin_hit["matches"] >= 1
+              and builtin_hit["scenarios"][0]["id"] == "话题探索"
+              and builtin_hit["scenarios"][0]["source"] == "builtin",
+              builtin_hit)
         check(results, "query finds the saved topic",
               topics_hit["topic_matches"] == 1
               and topics_hit["topics"][0]["name"] == "复机办理"

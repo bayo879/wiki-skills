@@ -37,8 +37,8 @@ skills/llm-wiki/scenarios/
   `builtin`）；同 id 时项目版优先，内置版不重复列出。
 - `scenario load "话题探索"` 返回内置流程；它的 `path` 是展示标签
   `内置场景/话题探索/SCENARIO.md`，不是磁盘路径，`resources` 恒为空（内置流程自包含）。
-- 内置场景不参与 `query` 的关键词匹配，但 `query` 的 `topic_scenario` 恒指向它，供
-  agent 默认进入话题探索；项目覆盖后 `source` 变为 `project`。
+- 内置场景不自动进入 `query` 结果；需要时显式 `scenario search`，内置场景同样会被检出，
+  `source` 为 `builtin`。项目覆盖后 `source` 变为 `project`。
 - 内置场景只读，改流程请复制到 `场景能力/话题探索/` 再改，不要改技能安装目录。
 
 ## SCENARIO.md
@@ -102,18 +102,20 @@ frontmatter 字段：
 ## 检索与加载
 
 场景不经过 `ingest`，`场景能力/` 在摄入时整目录跳过，因此改流程不需要重建知识库。
-`query` 会直接扫描场景文件，结果里的 `scenarios` 非空表示命中：
+`query` 不检索场景；要用场景能力时必须显式检索，避免场景自动介入普通知识问答：
 
 ```bash
 python3 <skill>/scripts/wiki.py query "开户" --json
+python3 <skill>/scripts/wiki.py scenario search "开户" --json
 python3 <skill>/scripts/wiki.py scenario list --json
 python3 <skill>/scripts/wiki.py scenario load account-opening --json
 python3 <skill>/scripts/wiki.py scenario load "话题探索" --json
 ```
 
-`scenario load` 返回 `content`（`SCENARIO.md` 全文）、`meta`、`path` 和 `resources`。
+`scenario search` 返回命中的项目场景与内置场景，按分数排序；`scenario load` 返回
+`content`（`SCENARIO.md` 全文）、`meta`、`path` 和 `resources`。
 按 `content` 的步骤执行，需要细节时再读 `resources` 里的文件。结构不合法的场景不会出现在
-`query` 结果里，但会出现在 `scenario list` 中并带 `error`，方便修正。
+`scenario search` 结果里，但会出现在 `scenario list` 中并带 `error`，方便修正。
 
 话题探索流程依次做：定主题、找现成能力、找已有话题、多轮查页面、补原始依据、判断收敛、
 总结，最后问用户是否沉淀到 `话题/<主题>.md`。`query` 的 `topics` 是已知话题，相关的先读
