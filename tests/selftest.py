@@ -847,6 +847,192 @@ def main(argv=None):
         check(results, "editing an unrelated raw copy leaves the page stable",
               untouched["status"] == "stable", untouched)
 
+        # --- Task 7: sync 反向回收（观看区手改回到账本）-----------------------
+        check(results, "split_evidence leaves a plain body alone",
+              wiki.split_evidence("## 要点\n\n正文。\n") == ("## 要点\n\n正文。\n", []))
+        check(results, "split_evidence parses the trailing block",
+              wiki.split_evidence("## 要点\n\n正文。\n\n## 证据\n\n- `a.md`：引文。\n")
+              == ("## 要点\n\n正文。", [{"source": "a.md", "quote": "引文。"}]))
+        check(results, "split_evidence keeps a broken block in the body",
+              wiki.split_evidence("## 要点\n\n正文。\n\n## 证据\n\n随手写的。\n")
+              == ("## 要点\n\n正文。\n\n## 证据\n\n随手写的。\n", []))
+
+        room_view = root / "view/pages/note/机房巡检.md"
+        room_text = room_view.read_text(encoding="utf-8")
+        synced = run(root, "sync")["data"]
+        check(results, "sync leaves an untouched view alone",
+              synced["unchanged"] == ["anti-fraud-restore", "machine-room-inspection"], synced)
+        check(results, "sync reports the five buckets",
+              set(synced) == {"imported", "skipped", "failed", "unchanged", "written"}, synced)
+
+        room_view.write_text(
+            room_text.replace("每周巡检一次；记录保留一年。", "每周巡检两次；记录保留两年。"),
+            encoding="utf-8",
+        )
+        synced = run(root, "sync")["data"]
+        check(results, "sync adopts a hand edited body",
+              "machine-room-inspection" in synced["imported"], synced)
+        check(results, "sync writes the canonical text back",
+              "每周巡检两次；记录保留两年。" in room_view.read_text(encoding="utf-8"),
+              room_view.read_text(encoding="utf-8"))
+        page = run(root, "read", "page:machine-room-inspection")["data"]
+        check(results, "the adopted body lands in the ledger",
+              "每周巡检两次" in page["content"], page["content"])
+        check(results, "sync keeps the ledger metadata",
+              page["meta"]["title"] == "机房巡检", page["meta"])
+        conn = sqlite3.connect(root / ".wiki/wiki.db")
+        facts = conn.execute(
+            "SELECT rev, view_path, view_digest FROM page_revs "
+            "WHERE page = 'machine-room-inspection' ORDER BY rev DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        check(results, "sync records the published facts",
+              facts[0] == 2 and facts[1] == "pages/note/机房巡检.md"
+              and facts[2] == wiki.digest_text(room_view.read_text(encoding="utf-8")), facts)
+
+        again = run(root, "sync")["data"]
+        check(results, "sync is idempotent and does not freeze the page",
+              again["unchanged"] == ["anti-fraud-restore", "machine-room-inspection"], again)
+
+        room_view.write_text(room_view.read_text(encoding="utf-8").replace(
+            f"summary: {wiki.yaml_scalar('机房每周巡检一次，巡检记录保留一年。')}",
+            f"summary: {wiki.yaml_scalar('改过的摘要')}"), encoding="utf-8")
+        refused = run(root, "sync", expect=1)["data"]
+        check(results, "sync refuses a metadata edit",
+              any(item["code"] == "E_META_CHANGED" for item in refused["failed"]), refused)
+        check(results, "a refused page keeps its ledger summary",
+              run(root, "read", "page:machine-room-inspection")["data"]["meta"]["summary"]
+              == "机房每周巡检一次，巡检记录保留一年。")
+        check(results, "a refused page file is left alone",
+              "改过的摘要" in room_view.read_text(encoding="utf-8"),
+              room_view.read_text(encoding="utf-8"))
+
+        room_view.write_text(room_view.read_text(encoding="utf-8").replace(
+            "每周巡检两次；记录保留两年。", "每周巡检三次。"), encoding="utf-8")
+        adopted = run(root, "sync", "--body-only")["data"]
+        check(results, "--body-only adopts the body",
+              "machine-room-inspection" in adopted["imported"], adopted)
+        page = run(root, "read", "page:machine-room-inspection")["data"]
+        check(results, "--body-only keeps the ledger metadata",
+              page["meta"]["summary"] == "机房每周巡检一次，巡检记录保留一年。", page["meta"])
+        check(results, "--body-only rewrites the canonical text",
+              "改过的摘要" not in room_view.read_text(encoding="utf-8")
+              and "每周巡检三次" in room_view.read_text(encoding="utf-8"))
+
+        note = root / "view/pages/note/我的笔记.md"
+        note.write_text("# 随手记\n\n不属于账本。\n", encoding="utf-8")
+        stranger = root / "view/pages/note/陌生人.md"
+        stranger.write_text("---\nid: no-such-page\n---\n\n## 内容\n\n别人的文件。\n", encoding="utf-8")
+        skips = run(root, "sync")["data"]
+        check(results, "sync skips files without an id",
+              {"file": "pages/note/我的笔记.md", "reason": "no id"} in skips["skipped"],
+              skips["skipped"])
+        check(results, "sync skips unknown ids",
+              {"file": "pages/note/陌生人.md", "reason": "unknown id"} in skips["skipped"],
+              skips["skipped"])
+        check(results, "skipped files are left untouched",
+              note.read_text(encoding="utf-8") == "# 随手记\n\n不属于账本。\n"
+              and stranger.read_text(encoding="utf-8").startswith("---\nid: no-such-page"))
+
+        conn = sqlite3.connect(root / ".wiki/wiki.db")
+        before_rev = conn.execute(
+            "SELECT MAX(rev) FROM page_revs WHERE page = 'machine-room-inspection'"
+        ).fetchone()[0]
+        conn.close()
+        copy_path = root / "view/pages/note/机房巡检-副本.md"
+        copy_path.write_text(room_view.read_text(encoding="utf-8"), encoding="utf-8")
+        duplicate = run(root, "sync", expect=1)["data"]
+        conn = sqlite3.connect(root / ".wiki/wiki.db")
+        after_rev = conn.execute(
+            "SELECT MAX(rev) FROM page_revs WHERE page = 'machine-room-inspection'"
+        ).fetchone()[0]
+        conn.close()
+        check(results, "duplicate ids fail with E_DUPLICATE",
+              sorted(item["code"] for item in duplicate["failed"]
+                     if item["page"] == "machine-room-inspection")
+              == ["E_DUPLICATE", "E_DUPLICATE"], duplicate["failed"])
+        check(results, "duplicates are not adopted",
+              "machine-room-inspection" not in duplicate["imported"] and before_rev == after_rev,
+              (duplicate["imported"], before_rev, after_rev))
+        check(results, "one failing page does not stop the run",
+              "anti-fraud-restore" in duplicate["unchanged"], duplicate)
+        human = subprocess.run([sys.executable, str(SCRIPT), "sync"], cwd=root,
+                               capture_output=True, text=True)
+        check(results, "sync prints counts and failure codes",
+              human.returncode == 1 and "E_DUPLICATE" in human.stdout, human.stdout)
+        copy_path.unlink()
+
+        room_view.write_text(room_view.read_text(encoding="utf-8").replace(
+            "巡检周期为每周一次", "巡检周期为每周两次"), encoding="utf-8")
+        run(root, "sync")
+        page = run(root, "read", "page:machine-room-inspection")["data"]
+        check(results, "sync parses the evidence block back into meta",
+              any(item["source"] == "d.md" and item["quote"] == "巡检周期为每周两次"
+                  for item in page["meta"]["evidence"]), page["meta"]["evidence"])
+        check(results, "the evidence text stays out of the body",
+              "## 证据" not in page["content"] and "巡检周期为每周两次" not in page["content"],
+              page["content"])
+        check(results, "the canonical text keeps one evidence block",
+              room_view.read_text(encoding="utf-8").count("## 证据") == 1,
+              room_view.read_text(encoding="utf-8"))
+
+        room_view.write_text(room_view.read_text(encoding="utf-8").replace(
+            "- `d.md`：巡检周期为每周两次", "- d.md 巡检周期为每周两次"), encoding="utf-8")
+        broken = subprocess.run([sys.executable, str(SCRIPT), "sync", "--json"], cwd=root,
+                                capture_output=True, text=True)
+        check(results, "an unparseable evidence block warns",
+              broken.returncode == 0 and "warning" in broken.stderr, broken.stderr)
+        page = run(root, "read", "page:machine-room-inspection")["data"]
+        check(results, "a broken block keeps the ledger evidence",
+              any(item["source"] == "d.md" and item["quote"] == "巡检周期为每周两次"
+                  for item in page["meta"]["evidence"]), page["meta"]["evidence"])
+        check(results, "a broken block is adopted as body text",
+              "d.md 巡检周期为每周两次" in page["content"], page["content"])
+
+        canonical = room_view.read_text(encoding="utf-8")
+        head = canonical.split("\n---\n", 1)[0] + "\n---\n"
+        room_view.write_text(head, encoding="utf-8")
+        empty = run(root, "sync", expect=1)["data"]
+        check(results, "an empty body is refused with E_PAYLOAD",
+              any(item["code"] == "E_PAYLOAD" for item in empty["failed"]), empty)
+        room_view.write_text(canonical, encoding="utf-8")
+
+        rename_draft = root / ".wiki/drafts/rename.md"
+        rename_draft.write_text(
+            "---\ntitle: 机房巡检记录\n---\n## 要点\n\n每周巡检三次。\n", encoding="utf-8")
+        run(root, "page", "import", "machine-room-inspection", "--from", str(rename_draft))
+        old_path = root / "view/pages/note/机房巡检.md"
+        new_path = root / "view/pages/note/机房巡检记录.md"
+        moved = run(root, "sync")["data"]
+        check(results, "sync publishes a ledger-side title change",
+              any(item["page"] == "machine-room-inspection"
+                  and item["to"] == "pages/note/机房巡检记录.md" for item in moved["written"])
+              and new_path.exists(), moved)
+        check(results, "the old path is gone after the rename",
+              not old_path.exists(), old_path.exists())
+        check(results, "the new path carries the new title",
+              'title: "机房巡检记录"' in new_path.read_text(encoding="utf-8"),
+              new_path.read_text(encoding="utf-8"))
+        conn = sqlite3.connect(root / ".wiki/wiki.db")
+        moved_facts = conn.execute(
+            "SELECT rev, view_path, view_digest FROM page_revs "
+            "WHERE page = 'machine-room-inspection' ORDER BY rev DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        check(results, "the renamed page's facts follow the new path",
+              moved_facts[1] == "pages/note/机房巡检记录.md"
+              and moved_facts[2] == wiki.digest_text(new_path.read_text(encoding="utf-8")),
+              moved_facts)
+
+        moved_away = root / "view/pages/note/临时位置.md"
+        new_path.rename(moved_away)
+        returned = run(root, "sync")["data"]
+        check(results, "a page file moved by hand is put back",
+              any(item["page"] == "machine-room-inspection"
+                  and item["from"] == "pages/note/临时位置.md"
+                  and item["to"] == "pages/note/机房巡检记录.md" for item in returned["written"])
+              and new_path.exists() and not moved_away.exists(), returned)
+
         status = run(root, "status")["data"]
         check(results, "status counts invalidated tasks without opening them",
               status["tasks"].get("expired", 0) >= 1

@@ -356,6 +356,114 @@ def render_page(meta, body, aliases=None):
     return text
 
 
+EVIDENCE_HEADING = "## 证据"
+EVIDENCE_ROW = re.compile(r"^- `([^`]+)`：(.+)$")
+
+
+def split_evidence(body):
+    """把已发布正文末尾的 `## 证据` 段切下来（R5）。
+
+    返回 (正文, 行列表)。末尾标题之后只要有一行不是 ``- `source`：quote``，就整段留在
+    正文里、返回空列表：调用方沿用账本证据并打 warning。空行忽略。
+    """
+    lines = body.split("\n")
+    start = None
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip() == EVIDENCE_HEADING:
+            start = index
+            break
+    if start is None:
+        return body, []
+    rows = []
+    for line in lines[start + 1:]:
+        if not line.strip():
+            continue
+        match = EVIDENCE_ROW.match(line)
+        if not match:
+            return body, []
+        rows.append({"source": match.group(1).strip(), "quote": match.group(2).strip()})
+    if not rows:
+        return body, []
+    return "\n".join(lines[:start]).rstrip(), rows
+
+
+def meta_mismatch(file_meta, record_meta):
+    """观看区手改动了哪些元数据字段；只改正文时返回空列表（R4）。
+
+    id/status/updated/aliases 不参与比较：id 决定归位，后三者是渲染出来的，改了也无害。
+    """
+    changed = [
+        field for field in ("title", "type", "summary")
+        if str(file_meta.get(field) or "") != str(record_meta.get(field) or "")
+    ]
+    if set(file_meta.get("sources") or []) != set(record_meta.get("sources") or []):
+        changed.append("sources")
+    return changed
+
+
+def sync_view_file(wiki, item, target, body_only):
+    """回收一个已定位的文件；返回 "unchanged" / "written" / "imported"。
+
+    拒绝时抛 WikiError，由 command_sync 记入 failed 后继续（R7）。
+    """
+    page_id = item["page"]
+    record = item["record"]
+    target_path = wiki.publish_dir / target
+    canonical = wiki.view_text(record)
+    if item["text"] == canonical:
+        if item["path"] == target_path:
+            if record["view_path"] != target or record["view_digest"] != digest_text(canonical):
+                wiki.set_view_facts(page_id, record["rev"], target, digest_text(canonical))
+            return "unchanged"
+        write_atomic(target_path, canonical)
+        item["path"].unlink()
+        wiki.set_view_facts(page_id, record["rev"], target, digest_text(canonical))
+        return "written"
+    if record["view_digest"] and digest_text(item["text"]) == record["view_digest"]:
+        # 这份字节正是上一次发布出去的（账本已前进，如账本侧改名）：不是手改（R11）。
+        write_atomic(target_path, canonical)
+        if item["path"] != target_path:
+            item["path"].unlink()
+        wiki.set_view_facts(page_id, record["rev"], target, digest_text(canonical))
+        return "written"
+    changed = meta_mismatch(item["meta"], record["meta"])
+    if changed and not body_only:
+        raise WikiError(
+            "E_META_CHANGED",
+            f"view copy changed {', '.join(changed)}；只同步正文用 sync --body-only；改元数据用 page import",
+            "", 1,
+        )
+    body, evidence = split_evidence(item["body"])
+    if not evidence:
+        if EVIDENCE_HEADING in item["body"]:
+            sys.stderr.write(
+                f"warning: {item['file']}: evidence block does not parse; "
+                "kept the ledger's evidence and adopted the text as body\n"
+            )
+        evidence = list(record["meta"].get("evidence") or [])
+    if not body.strip():
+        raise WikiError("E_PAYLOAD", "the view copy has no body", "", 1)
+    for entry in evidence:
+        if not wiki.source_row(entry["source"]):
+            raise WikiError(
+                "E_UNKNOWN_SOURCE",
+                f"evidence cites unregistered source {entry['source']}",
+                "run `ingest` first, or fix the evidence block", 1,
+            )
+    merged = dict(record["meta"])
+    merged["evidence"] = evidence
+    if merged.get("type") not in wiki.config["schema"]["types"]:
+        raise WikiError("E_PAYLOAD", f"type {merged.get('type')!r} not in schema.types", "", 1)
+    rev = wiki.write_rev(page_id, merged, body, "sync")
+    fresh = wiki.page_record(page_id)
+    text = wiki.view_text(fresh)
+    write_atomic(target_path, text)
+    if item["path"] != target_path:
+        item["path"].unlink()
+    wiki.set_view_facts(page_id, rev, target, digest_text(text))
+    return "imported"
+
+
 def dump_meta(meta):
     """Frontmatter values as JSON-friendly types for command output."""
     clean = {}
@@ -476,7 +584,7 @@ class Wiki:
     def publish_raw_dir(self):
         return self.publish_dir / RAW_SUBDIR
 
-    def ensure(self):
+    def ensure(self, push=True):
         created = []
         for directory in (self.wiki_dir, self.pages_dir, self.drift_dir,
                           self.payload_dir, self.draft_dir):
@@ -502,10 +610,14 @@ class Wiki:
             self.ensure_columns()
             self.migrate_legacy_pages()
         self.ensure_mirror()
-        self.view_events = self.sync_view()
-        for line in self.view_events:
-            if line.startswith("warning: "):
-                sys.stderr.write(line + "\n")
+        # R11：sync 要先看磁盘再让推送动手，否则挪走的文件会被重建出第二个副本。
+        if push:
+            self.view_events = self.sync_view()
+            for line in self.view_events:
+                if line.startswith("warning: "):
+                    sys.stderr.write(line + "\n")
+        else:
+            self.view_events = []
         return created
 
     def ensure_publish(self, created):
@@ -1469,7 +1581,7 @@ def fail(cmd, root, error):
     return error.exit_code
 
 
-def open_wiki(require_sources=False, dry_run=False):
+def open_wiki(require_sources=False, dry_run=False, push=True):
     # The workspace is the directory the command runs in. A wiki may live in a
     # subdirectory, but nothing may point above the workspace.
     workspace = Path.cwd().resolve()
@@ -1487,7 +1599,7 @@ def open_wiki(require_sources=False, dry_run=False):
         wiki = Wiki(dry_store(root), scan_root=root)
     else:
         wiki = Wiki(root)
-    created = wiki.ensure()
+    created = wiki.ensure(push=push)
     if require_sources and not wiki.all_sources():
         raise WikiError(
             "E_EMPTY",
@@ -2322,6 +2434,87 @@ def command_page_restore():
     return 0
 
 
+def command_sync():
+    """Take hand edits back from the view dir (R1-R9)."""
+    # R11：先看磁盘，再让 ensure 的推送动手；否则挪走的文件会被重建出第二个副本。
+    wiki, _ = open_wiki(push=False)
+    pages_dir = wiki.publish_dir / "pages"
+    base = wiki.publish_dir.resolve()
+    imported, unchanged, written = [], [], []
+    skipped, failed = [], []
+    candidates = []
+    paths = sorted(pages_dir.rglob("*.md")) if pages_dir.is_dir() else []
+    for path in paths:
+        rel = norm_key(path.relative_to(wiki.publish_dir))
+        if not window_safe(base, path.resolve()):
+            skipped.append({"file": rel, "reason": "escapes the publish dir"})
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            failed.append({"file": rel, "page": "", "code": "E_IO", "message": str(error)})
+            continue
+        meta, body = split_frontmatter(text)
+        page_id = str(meta.get("id") or "").strip().lower()
+        if not page_id:
+            skipped.append({"file": rel, "reason": "no id"})
+            continue
+        record = wiki.page_record(page_id)
+        if not record:
+            skipped.append({"file": rel, "reason": "unknown id"})
+            continue
+        candidates.append({
+            "file": rel, "path": path, "text": text, "meta": meta,
+            "body": body, "page": page_id, "record": record,
+        })
+    groups = {}
+    for item in candidates:
+        groups.setdefault(item["page"], []).append(item)
+    targets = wiki._view_targets(wiki.all_pages())
+    for page_id in sorted(groups):
+        items = groups[page_id]
+        if len(items) > 1:
+            names = ", ".join(sorted(item["file"] for item in items))
+            for item in items:
+                failed.append({
+                    "file": item["file"], "page": page_id, "code": "E_DUPLICATE",
+                    "message": f"id {page_id} is used by {len(items)} files: {names}",
+                })
+            continue
+        item = items[0]
+        try:
+            bucket = sync_view_file(wiki, item, targets[page_id], ARGS.body_only)
+        except (WikiError, OSError, UnicodeDecodeError) as error:
+            if isinstance(error, WikiError):
+                code, message = error.code, error.message
+            else:
+                code, message = "E_IO", str(error)
+            failed.append({"file": item["file"], "page": page_id,
+                           "code": code, "message": message})
+            continue
+        if bucket == "imported":
+            imported.append(page_id)
+        elif bucket == "written":
+            written.append({"page": page_id, "from": item["file"], "to": targets[page_id]})
+        else:
+            unchanged.append(page_id)
+    imported.sort()
+    unchanged.sort()
+    skipped.sort(key=lambda item: item["file"])
+    failed.sort(key=lambda item: item["file"])
+    written.sort(key=lambda item: (item["page"], item["from"]))
+    data = {"imported": imported, "skipped": skipped, "failed": failed,
+            "unchanged": unchanged, "written": written}
+    summary = (f"sync: {len(imported)} imported, {len(skipped)} skipped, "
+               f"{len(failed)} failed, {len(unchanged)} unchanged, {len(written)} written")
+    lines = [f"imported: {page_id}" for page_id in imported]
+    lines += [f"written: {item['page']} {item['from']} -> {item['to']}" for item in written]
+    lines += [f"failed: {item['file']} [{item['code']}] {item['message']}" for item in failed]
+    emit("sync", wiki.root, summary, data, lines, ok=not failed)
+    wiki.close()
+    return 1 if failed else 0
+
+
 def command_export():
     wiki, _ = open_wiki()
     target = inside_root(
@@ -2460,6 +2653,9 @@ def build_parser():
     export.add_argument("dir")
     status = sub.add_parser("status", parents=[common], help="ledger, pages, tasks")
     status.add_argument("--brief", action="store_true")
+    sync = sub.add_parser("sync", parents=[common], help="take hand edits back from the publish dir")
+    sync.add_argument("--body-only", action="store_true",
+                      help="absorb the body and evidence, keep the ledger metadata")
     doctor = sub.add_parser("doctor", parents=[common], help="health checks; --fix repairs mechanical issues")
     doctor.add_argument("--fix", action="store_true")
     sub.add_parser("version", parents=[common], help="print the engine version")
@@ -2478,6 +2674,7 @@ COMMANDS = {
     "query": command_query,
     "export": command_export,
     "status": command_status,
+    "sync": command_sync,
     "doctor": command_doctor,
     "version": command_version,
 }
