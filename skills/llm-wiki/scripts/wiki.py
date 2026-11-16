@@ -606,6 +606,32 @@ class Wiki:
         """规格 §判定表：raw 侧状态 ok / missing / edited。"""
         return raw_facts(self.root, row)[0]
 
+    def source_snapshot(self, key):
+        """The source version a task accepts: source side plus raw side (规格 §任务类型与快照)."""
+        row = self.source_row(key)
+        if row is None:
+            raise WikiError("E_NOT_FOUND", f"source {key} is not in the ledger",
+                            "run `ingest`, then `next`", 3)
+        # 原文侧以 raw 文件的实际存在性为准：没有副本时三项都记空，
+        # 任务就不会因为一份从未存在过的原文而失效。
+        if self.source_raw_state(row) == "missing":
+            raw, raw_size, raw_mtime, raw_digest = "", 0, 0.0, ""
+        else:
+            raw = row["raw"] or ""
+            raw_size = int(row["raw_size"])
+            raw_mtime = float(row["raw_mtime"])
+            raw_digest = row["raw_digest"] or ""
+        return {
+            "key": key,
+            "source_size": int(row["size"]),
+            "source_mtime": float(row["mtime"]),
+            "source_digest": row["digest"],
+            "raw": raw,
+            "raw_size": raw_size,
+            "raw_mtime": raw_mtime,
+            "raw_digest": raw_digest,
+        }
+
     def write_raw(self, key, text, meta):
         target = self.publish_raw_dir / f"{key2file(key)}.md"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -944,6 +970,24 @@ class Wiki:
         ).fetchone()
         if existing:
             return existing["id"]
+        # 树唯一性：一个源最多出现在一套未完成的任务树里。route 任务只是临时持有者，
+        # 提交时会把源交给 page 树，所以只有 page 持有者才挡新树。
+        for item in inputs.get("sources", []):
+            holder = self.source_in_open_task(item["key"])
+            if not holder:
+                continue
+            holder_row = self.task_row(holder["id"])
+            if holder_row["kind"] != "page":
+                continue
+            if kind == "page" and holder_row["subject"] == subject:
+                continue
+            raise WikiError(
+                "E_TASK_CONFLICT",
+                f"source {item['key']} already belongs to task {holder_row['id']} "
+                f"({holder_row['kind']} {holder_row['subject']})",
+                "run `next` and `submit` to close that task tree first",
+                3,
+            )
         task_id = "t_" + os.urandom(4).hex()
         with self.conn:
             self.conn.execute(
@@ -961,15 +1005,13 @@ class Wiki:
         return task_id
 
     def attach_page_source(self, task_id, source_key):
-        """Add a source to a queued page task, refreshing digests of all cited sources."""
+        """Add a source, with its full snapshot, to an open page task."""
         row = self.task_row(task_id)
         inputs = json.loads(row["inputs"])
-        source = self.source_row(source_key)
-        inputs["sources"] = [item for item in inputs["sources"] if item["key"] != source_key]
-        inputs["sources"].append(
-            {"key": source_key, "digest": source["digest"], "raw": source["raw"]}
-        )
-        self.refresh_source_digests(inputs)
+        if any(item["key"] == source_key for item in inputs.get("sources", [])):
+            # 已经在树上：幂等返回，绝不刷新既有快照。
+            return
+        inputs["sources"].append(self.source_snapshot(source_key))
         with self.conn:
             self.conn.execute(
                 "UPDATE tasks SET inputs = ? WHERE id = ?",
@@ -980,16 +1022,72 @@ class Wiki:
                 (task_id, source_key),
             )
 
-    def refresh_source_digests(self, inputs):
-        """Point a task at the current raw text after a source was reparsed."""
-        changed = False
+    def task_drift(self, row):
+        """First reason this task's snapshot no longer matches the files, or None when it is fresh."""
+        inputs = json.loads(row["inputs"])
         for item in inputs.get("sources", []):
-            source = self.source_row(item["key"])
-            if source and source["digest"] != item["digest"]:
-                item["digest"] = source["digest"]
-                item["raw"] = source["raw"]
-                changed = True
-        return changed
+            key = item["key"]
+            source = self.source_row(key)
+            if source is None or source["status"] == "missing":
+                return f"source {key} vanished"
+            # 两段式判定：先比 stat，一致就不读内容；不一致才读字节算摘要，
+            # 摘要相同说明只是被 touch，任务仍然有效（规格 §判定表）。
+            path = self.scan_root / source["path"]
+            try:
+                stat = path.stat()
+            except OSError:
+                return f"source {key} vanished"
+            if not same_stamp(stat.st_size, stat.st_mtime,
+                              item["source_size"], item["source_mtime"]):
+                if digest_bytes(path.read_bytes()) != item["source_digest"]:
+                    return f"source {key} changed"
+            raw = item.get("raw") or ""
+            if not raw:
+                continue
+            raw_path = self.root / raw
+            try:
+                raw_stat = raw_path.stat()
+            except OSError:
+                return f"raw copy {raw} is missing"
+            if not same_stamp(raw_stat.st_size, raw_stat.st_mtime,
+                              item["raw_size"], item["raw_mtime"]):
+                if digest_bytes(raw_path.read_bytes()) != item["raw_digest"]:
+                    return f"raw copy {raw} was edited"
+        # 页面在任务排队后又前进了一版，任务基于的修订已经过期。
+        if inputs.get("mode") == "update" and inputs.get("base_rev") is not None:
+            record = self.page_record(inputs["page"])
+            if not record or record["rev"] != inputs["base_rev"]:
+                return f"page {inputs['page']} moved past revision {inputs['base_rev']}"
+        return None
+
+    def pin_open_task_raw(self, key, raw, raw_digest, raw_size, raw_mtime):
+        """Point open task snapshots at an adopted raw copy (raw side only)."""
+        rows = self.conn.execute(
+            "SELECT id, inputs FROM tasks WHERE state IN ('queued', 'leased') "
+            "AND id IN (SELECT task_id FROM task_sources WHERE source_key = ?)",
+            (key,),
+        ).fetchall()
+        with self.conn:
+            for row in rows:
+                inputs = json.loads(row["inputs"])
+                changed = False
+                for item in inputs.get("sources", []):
+                    if item["key"] != key:
+                        continue
+                    item.update(
+                        {
+                            "raw": raw,
+                            "raw_size": raw_size,
+                            "raw_mtime": raw_mtime,
+                            "raw_digest": raw_digest,
+                        }
+                    )
+                    changed = True
+                if changed:
+                    self.conn.execute(
+                        "UPDATE tasks SET inputs = ? WHERE id = ?",
+                        (json.dumps(inputs, ensure_ascii=False, sort_keys=True), row["id"]),
+                    )
 
     def claim_tasks(self, kind=None, batch=None):
         now = now_iso()
@@ -1006,19 +1104,19 @@ class Wiki:
             sql += " ORDER BY CASE kind WHEN 'route' THEN 0 ELSE 1 END, created_at, id LIMIT ?"
             params.append(batch)
             rows = self.conn.execute(sql, params).fetchall()
+            claimed = []
             for row in rows:
+                reason = self.task_drift(row)
+                if reason:
+                    # 失效任务留在账本里作为历史，但不发出去。
+                    self.expire_task(row["id"], reason)
+                    continue
                 self.conn.execute(
                     "UPDATE tasks SET state = 'leased', epoch = epoch + 1, lease_until = ?, attempts = attempts + 1 WHERE id = ?",
                     (self._lease_deadline(), row["id"]),
                 )
-                if row["kind"] == "page":
-                    inputs = json.loads(row["inputs"])
-                    if self.refresh_source_digests(inputs):
-                        self.conn.execute(
-                            "UPDATE tasks SET inputs = ? WHERE id = ?",
-                            (json.dumps(inputs, ensure_ascii=False, sort_keys=True), row["id"]),
-                        )
-        return [self.task_row(row["id"]) for row in rows]
+                claimed.append(self.task_row(row["id"]))
+        return claimed
 
     def _lease_deadline(self):
         return datetime.fromtimestamp(
@@ -1040,6 +1138,16 @@ class Wiki:
                 "UPDATE tasks SET state = 'queued', lease_until = NULL, last_error = ? WHERE id = ?",
                 (error, task_id),
             )
+
+    def expire_task(self, task_id, reason):
+        """Close an open task as expired, keeping its row for history."""
+        with self.conn:
+            cursor = self.conn.execute(
+                "UPDATE tasks SET state = 'expired', last_error = ?, lease_until = NULL, closed_at = ? "
+                "WHERE id = ? AND state IN ('queued', 'leased')",
+                (reason, now_iso(), task_id),
+            )
+        return cursor.rowcount > 0
 
     def close_task(self, task_id, payload, epoch=None):
         sql = "UPDATE tasks SET state = 'accepted', payload = ?, lease_until = NULL, closed_at = ? WHERE id = ?"
@@ -1293,6 +1401,12 @@ def command_ingest():
                     raw_rel, row["parser"], row["status"],
                     disk_digest, disk_size, disk_mtime,
                 )
+                # 采纳用户改动后的原文即账本事实：仍在排队或租用的快照要对齐，
+                # 否则同一份原文会被自己的任务判成漂移。
+                if raw_rel:
+                    wiki.pin_open_task_raw(
+                        key, raw_rel, disk_digest, disk_size, disk_mtime
+                    )
             continue
         text, parser = extract_text(path, data)
         if not text.strip():
@@ -1351,13 +1465,9 @@ def command_ingest():
                 "chars": len(text),
             }
         )
-        if not wiki.source_in_open_task(key):
+        if wiki.source_in_open_task(key) is None:
             queued.append(
-                wiki.enqueue_task(
-                    "route",
-                    key,
-                    {"sources": [{"key": key, "digest": digest, "raw": raw_rel}]},
-                )
+                wiki.enqueue_task("route", key, {"sources": [wiki.source_snapshot(key)]})
             )
     vanished = []
     for row in wiki.all_sources():
@@ -1433,6 +1543,12 @@ def command_status():
     for row in open_rows:
         tasks[row["state"]] = tasks.get(row["state"], 0) + row["n"]
         tasks[row["kind"]] = tasks.get(row["kind"], 0) + row["n"]
+    # 终态单独计数：expired 是失效历史，accepted 是已完成，都不属于未完成的工作。
+    closed_rows = wiki.conn.execute(
+        "SELECT state, COUNT(*) AS n FROM tasks WHERE state IN ('expired', 'accepted') GROUP BY state"
+    ).fetchall()
+    for row in closed_rows:
+        tasks[row["state"]] = row["n"]
     stale = sorted(
         record["id"] for record in pages if record["meta"].get("status") == "stale"
     )
@@ -1454,7 +1570,8 @@ def command_status():
         "stale_pages": stale,
         "pending": pending,
         "tasks": {"open": tasks["queued"] + tasks["leased"], "queued": tasks["queued"],
-                  "leased": tasks["leased"], "route": tasks["route"], "page": tasks["page"]},
+                  "leased": tasks["leased"], "route": tasks["route"], "page": tasks["page"],
+                  "expired": tasks.get("expired", 0), "accepted": tasks.get("accepted", 0)},
         "next": "run `next`" if tasks["queued"] else ("wait for leased tasks to expire" if tasks["leased"] else "run `ingest`"),
     }
     emit(
@@ -1526,6 +1643,13 @@ def command_submit():
     if row["state"] == "accepted":
         raise WikiError("E_TASK_STALE", f"task {task_id} is already accepted",
                         "run `next` for new work", 3)
+    # 领取阶段判出的漂移在 submit 时也报来源漂移，而不是笼统的任务过期。
+    if row["state"] == "expired":
+        raise WikiError(
+            "E_SOURCE_DRIFT",
+            f"task {task_id} was invalidated: {row['last_error'] or 'its source changed'}",
+            "re-run `ingest`, then `next` for fresh work", 3,
+        )
     if row["state"] != "leased":
         raise WikiError("E_TASK_STALE", f"task {task_id} is no longer ready",
                         "run `next` again to get fresh work", 3)
@@ -1546,7 +1670,10 @@ def command_submit():
         else:
             result = submit_page(wiki, row, payload)
     except WikiError as error:
-        wiki.requeue_task(task_id, f"{error.code}: {error.message}")
+        # 只有仍在租约里的任务才回队；expired 是终态，不能被回队复活。
+        fresh = wiki.task_row(task_id)
+        if fresh and fresh["state"] == "leased":
+            wiki.requeue_task(task_id, f"{error.code}: {error.message}")
         raise
     emit(
         "submit", wiki.root,
@@ -1660,8 +1787,7 @@ def submit_route(wiki, row, payload):
         if item["action"] == "skip":
             wiki.set_source_status(key, "skipped")
             continue
-        source = wiki.source_row(key)
-        entry = {"key": key, "digest": source["digest"], "raw": source["raw"]}
+        entry = wiki.source_snapshot(key)
         existing = wiki.open_task_for_page(item["page"])
         if existing:
             wiki.attach_page_source(existing["id"], key)
@@ -1689,6 +1815,16 @@ def submit_route(wiki, row, payload):
 
 def submit_page(wiki, row, payload):
     inputs = json.loads(row["inputs"])
+    reason = wiki.task_drift(row)
+    if reason:
+        # 提交时才发现失效：置 expired 并报来源漂移，不回队。
+        wiki.expire_task(row["id"], reason)
+        raise WikiError(
+            "E_SOURCE_DRIFT",
+            f"task {row['id']} no longer matches its source snapshot: {reason}",
+            "re-run `ingest`, then `next` for fresh work",
+            3,
+        )
     page_id = inputs["page"]
     sources = inputs["sources"]
     for item in sources:
@@ -1696,7 +1832,7 @@ def submit_page(wiki, row, payload):
         if current is None or current["status"] == "missing":
             raise WikiError("E_SOURCE_DRIFT", f"source {item['key']} vanished",
                             "re-run `ingest`, then `next`", 3)
-        if current["digest"] != item["digest"]:
+        if current["digest"] != item["source_digest"]:
             raise WikiError(
                 "E_SOURCE_DRIFT", f"source {item['key']} changed after the task was queued",
                 "re-read the source and take a fresh task", 3,

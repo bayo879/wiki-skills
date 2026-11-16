@@ -579,8 +579,56 @@ def main(argv=None):
              "title": "复机进度查询", "type": "process", "reason": "独立主题"},
         ]}))
         drift_task = run(root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"][0]
+
+        # --- Task 4: 快照八字段、领取/提交失效、树唯一性 -------------------------
+        # 快照要同时认下"源文件版本"和"原文版本"，缺一侧就判不出原文被改。
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        snap = json.loads(conn.execute(
+            "SELECT inputs FROM tasks WHERE id = ?", (drift_task["id"],)
+        ).fetchone()[0])["sources"][0]
+        conn.close()
+        check(results, "the page task snapshot carries all eight fields",
+              set(snap) == {"key", "source_size", "source_mtime", "source_digest",
+                            "raw", "raw_size", "raw_mtime", "raw_digest"}, snap)
+        check(results, "the snapshot records both the source and its raw copy",
+              snap["raw"] != "" and snap["source_size"] > 0 and snap["raw_size"] > 0
+              and len(snap["source_digest"]) == 32 and len(snap["raw_digest"]) == 32, snap)
+
+        # CLI 路径会先被 ingest 判重与 attach_page_source 拦住，所以越界组合只能在
+        # 进程内直接调 enqueue_task 才看得到：另一个 page 树想用同一个源必须被拒。
+        engine = wiki.Wiki(root)
+        engine.ensure()
+        conflict = None
+        try:
+            engine.enqueue_task("page", "restore-progress-copy", {
+                "page": "restore-progress-copy", "mode": "create",
+                "sources": [engine.source_snapshot(drift_key)],
+            })
+        except wiki.WikiError as error:
+            conflict = error
+        engine.close()
+        check(results, "a second task tree for the same source is refused",
+              conflict is not None and conflict.code == "E_TASK_CONFLICT", conflict)
+        check(results, "the conflict names the task that already holds the source",
+              conflict is not None and drift_task["id"] in conflict.message,
+              getattr(conflict, "message", conflict))
+
+        # 领取侧失效：放回队列后改源、重新 ingest，next 不能再把它发出来。
+        run(root, "release", drift_task["id"])
         (root / "f.md").write_text("# 复机进度查询\n\n拨打 10086 可查进度。\n", encoding="utf-8")
         run(root, "ingest")
+        after = run(root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"]
+        check(results, "next never hands out a task whose source moved", after == [], after)
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        expired = conn.execute(
+            "SELECT state, last_error, closed_at FROM tasks WHERE id = ?", (drift_task["id"],)
+        ).fetchone()
+        conn.close()
+        check(results, "an invalidated task keeps its row, reason and close time",
+              expired is not None and expired[0] == "expired"
+              and expired[1] and expired[2], expired)
+
+        # 提交侧失效：任务已被判 expired，submit 仍要报 E_SOURCE_DRIFT，且不能复活它。
         body_file(root)
         drifted = run(root, "submit", drift_task["id"], "--payload", payload_file(
             root, "drift-page.json",
@@ -589,6 +637,30 @@ def main(argv=None):
              "evidence": [{"source": drift_key, "quote": "可拨打客服确认进度。"}]}), expect=3)
         check(results, "a source change after the page task still reports E_SOURCE_DRIFT",
               drifted["error"]["code"] == "E_SOURCE_DRIFT", drifted)
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        revived = conn.execute(
+            "SELECT state FROM tasks WHERE id = ?", (drift_task["id"],)
+        ).fetchone()[0]
+        conn.close()
+        check(results, "a failed submit does not revive the expired task", revived == "expired", revived)
+
+        status = run(root, "status")["data"]
+        check(results, "status counts invalidated tasks without opening them",
+              status["tasks"].get("expired", 0) >= 1
+              and status["tasks"]["open"] == status["tasks"]["queued"] + status["tasks"]["leased"],
+              status["tasks"])
+
+        # 树唯一性不变量：只统计 page 树。submit_route 在关闭 route 任务前先建 page 树，
+        # route→page 的交接瞬间同一个 key 会同时挂两行，那是正常交接不是第二套树。
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        twins = conn.execute(
+            "SELECT ts.source_key, COUNT(DISTINCT ts.task_id) AS n "
+            "FROM task_sources ts JOIN tasks t ON t.id = ts.task_id "
+            "WHERE t.kind = 'page' AND t.state IN ('queued', 'leased') "
+            "GROUP BY ts.source_key HAVING n > 1"
+        ).fetchall()
+        conn.close()
+        check(results, "one source never sits in two open page task trees", twins == [], twins)
 
         dry = root / "dry"
         dry.mkdir()
