@@ -81,18 +81,22 @@
 ## 七、备份与迁移
 
 ```bash
-# 最小备份：账本 + 配置
+# 最小备份：账本 + 配置（不含原文与观看区）
 tar czf wiki-ledger-$(date +%F).tgz .wiki/wiki.db .wiki/wiki.json
 
-# 完整备份（含 raw 与镜像，可离线还原）
-tar czf wiki-full-$(date +%F).tgz .wiki
+# 完整备份：账本 + 观看区（原文、页面、话题/场景副本都在这里）
+tar czf wiki-full-$(date +%F).tgz .wiki wiki
 
 # 只导出可读页面（不含账本，用于浏览或迁移参考）
 python3 <技能>/scripts/wiki.py export ./wiki-export
 ```
 
-整个根目录搬迁时连 `.wiki/` 一起复制；`sources.key` 是相对路径，根目录移动不影响引用。
-只复制技能目录不会带走知识库。
+`wiki` 是默认的观看区目录；改了 `publish.dir` 就换成那个名字。原文只在 `<view>/raw/`，
+不在 `.wiki/`：只备份 `.wiki/` 会丢掉全部原文副本（以及你在 raw 里改过、已被账本采纳的
+文本），还原后引用这些原文的页面会全部 stale。
+
+整个根目录搬迁时连 `.wiki/` 与观看区一起复制；`sources.key` 是相对路径，根目录移动不影响
+引用。只复制技能目录不会带走知识库。
 
 ## 八、什么情况下停下来问人
 

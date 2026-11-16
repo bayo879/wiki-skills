@@ -823,6 +823,20 @@ def main(argv=None):
               expired is not None and expired[0] == "expired"
               and expired[1] and expired[2], expired)
 
+        # 失效不是放弃：过期之后来源必须还能重新变成工作项，否则 next 永远空、
+        # status 永远提示 "run ingest"，整个库没有任何出口。
+        requeued = run(root, "ingest")["data"]
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        reopened = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE subject = ? AND state = 'queued'", (drift_key,)
+        ).fetchone()[0]
+        conn.close()
+        check(results, "an expired source is queued again on the next ingest",
+              requeued["queued_tasks"] != [] and reopened == 1, (requeued, reopened))
+        claimed = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"]
+        check(results, "the requeued source can be claimed again",
+              len(claimed) == 1, claimed)
+
         # 提交侧失效：任务已被判 expired，submit 仍要报 E_SOURCE_DRIFT，且不能复活它。
         body_file(root)
         drifted = run(root, "submit", drift_task["id"], "--payload", payload_file(

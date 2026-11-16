@@ -430,7 +430,7 @@ def sync_view_file(wiki, item, target, body_only, warnings=None):
     if changed and not body_only:
         raise WikiError(
             "E_META_CHANGED",
-            f"view copy changed {', '.join(changed)}；只同步正文用 sync --body-only；改元数据用 page import",
+            f"view copy changed {', '.join(changed)}；保留账本元数据、只收正文用 sync --body-only；确实要改元数据用 page import",
             "", 1,
         )
     body, evidence = split_evidence(item["body"])
@@ -1825,6 +1825,20 @@ def command_ingest():
         )
         wiki.close()
         return 0
+    # 失效不是放弃：任务因来源漂移被判 expired 后，来源仍是 pending，但旧任务已经不
+    # 存在，下一轮 ingest 只会走「未变化」分支，不再入队——库会永远空转。这里补一次
+    # 对账：pending 且没有未关闭任务的来源重新入队。没有 raw 的来源（超大、解析失败）
+    # 不排队，它们本来就没有可提交的内容。
+    for row in wiki.all_sources():
+        if row["status"] != "pending" or not row["raw"]:
+            continue
+        if selected is not None and row["key"] not in selected:
+            continue
+        if wiki.source_in_open_task(row["key"]) is not None:
+            continue
+        queued.append(
+            wiki.enqueue_task("route", row["key"], {"sources": [wiki.source_snapshot(row["key"])]})
+        )
     remaining = [row["key"] for row in wiki.all_sources() if row["status"] == "pending"]
     data = {
         "ingested": fresh,

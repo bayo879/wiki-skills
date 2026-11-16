@@ -163,8 +163,8 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 
 `query <词...> [--limit N]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
 `话题/`，命中时在 `topics` 里返回。`query` **不检索场景**，场景必须显式
-`scenario search`。`query --page <id>`：返回单页 `meta`、`rev`、`path`、`outgoing`、
-`incoming`、`body`，不查话题。
+`scenario search`。`query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
+`path`（`.wiki/pages` 镜像路径，不是观看区路径）、`outgoing`、`incoming`、`body`，不查话题。
 
 `data`: `{query, matches, returned, results, topic_matches, topics, boundary}`。
 `matches` 只数页面，`topic_matches` 只数话题；`topics[]` 为
@@ -209,7 +209,8 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 
 - `page import <id> --from <file>`：采用人工编辑的页面文件（可带 frontmatter），
   生成新修订（`origin=import`），不强制 evidence。只允许已存在的页面。
-- `page restore <id> --rev N`：把第 N 版内容写成新修订（`origin=restore`）。
+- `page restore <id> --rev N`：把第 N 版内容写成新修订（`origin=restore`）。该页在观看区
+  有未收割手改时，推送会跳过它，恢复后的内容要到 `sync` 之后才出现在观看区。
 
 ### export
 
@@ -227,7 +228,8 @@ stale_pages, pending, tasks{open,queued,leased,route,page,expired,accepted}, nex
 
 `sync [--body-only]`：把观看区 `<view>/pages/**/*.md` 的手工修改回收进账本（新修订
 `origin=sync`），只回收、不推送。它针对观看区，不是 `.wiki/pages/` 镜像；镜像被改仍按
-drift 处理。
+drift 处理。手改未收割期间该页整体冻结：推送不覆盖、也不按新标题改名，`page import` 的
+改名要到回收之后才在观看区出现。
 
 - 文件没有 `id` 或 `id` 不在账本里：跳过，`reason` 分别为 `no id`、`unknown id`；路径逃出
   观看区（例如符号链接指向外面）时记为 `escapes the publish dir`。
@@ -238,7 +240,8 @@ drift 处理。
   `unknown id` 跳过。
 - 正文为空 `E_PAYLOAD`；证据引用未登记来源 `E_UNKNOWN_SOURCE`；文件读不出 `E_IO`。
 - `## 证据` 段存在但格式不合法：整段保留为正文并在 stderr 警告，账本原证据不变；同一条
-  警告也会追加到 `data.warnings`。
+  警告也会追加到 `data.warnings`。最常见的情形是在证据块后面追加一行——整块会被当正文，
+  规范化重写后正文里会多出一个 `## 证据` 段。
 - 回收成功后把规范化文本写回观看区；只是位置或字节与上次发布一致的文件记为 `written`，
   不产生新修订。
 
@@ -252,7 +255,8 @@ unchanged[page], written[{page,from,to}], warnings[message]}`。有失败项时 
 
 `doctor [--fix]`：`PRAGMA integrity_check`、镜像修复、stale 页、未注册来源、
 断链、过期租约。`--fix` 重建链接索引与镜像。`data`: `{issues[{severity,code,message}],
-fixed, healthy}`；有 `fail` 级问题时退出码 1。
+fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看区：未收割的手改只在
+推送时告警，`healthy:true` 不代表观看区没有待回收内容，用 `sync` 收割。
 
 ## 错误码
 
@@ -265,7 +269,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
 | `E_TASK_CONFLICT` | 来源已属于另一棵未关闭的页面任务树 | 先完成或关闭那个页面任务 |
 | `E_STATE` | 状态不满足：账本结构过旧、观看区路径不是目录、页面正被其他任务写 | 按 message 处理，不要手改账本 |
-| `E_META_CHANGED` | `sync` 时观看区页面的 frontmatter 与账本不一致 | 加 `--body-only`，或改用 `page import` |
+| `E_META_CHANGED` | `sync` 时观看区页面的 `title`/`type`/`summary`/`sources` 与账本不一致 | 只收正文加 `--body-only`；确实要改元数据用 `page import`（手改未收割时改名会被冻结） |
 | `E_DUPLICATE` | `sync` 时同一页面 id 在观看区出现两次 | 删掉重复文件后重跑 |
 | `E_PAGE_CONFLICT` | 页面已存在（new）或版本已变（update） | 重新领任务，基于当前 rev 重写 |
 | `E_PAGE_UNKNOWN` | merge 指向不存在的页面 | 改用 new，或查 `page_index` / `pending_pages` |

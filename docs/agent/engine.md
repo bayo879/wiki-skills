@@ -113,7 +113,7 @@ scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不�
 话题/*.md ──query/scan──→ topics 命中（只读，不落盘）
 ```
 
-`raw` 文件名带 digest 前缀，避免同名覆盖；`sources.raw` 存相对路径。
+`raw` 文件名带 digest 后缀（`<basename>-<digest8>.md`），避免同名覆盖；`sources.raw` 存相对路径。
 
 观看区 `pages/` 是账本的另一份渲染（按标题命名，`view_digest` 记录上次推送的字节）；
 手改过的副本不覆盖，`sync` 收成新修订后才恢复推送。`sync` 只认 `<view>/pages/**/*.md`。

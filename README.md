@@ -100,6 +100,10 @@ Windows 首次使用运行
 - `topics/`、`scenarios/`：首次推送各投放一次，之后归用户；引擎不覆盖、不删除。
 - 其他文件（包括 `.obsidian/`）不删不改。
 
+手改尚未被 `sync` 收割期间，这一页在观看区整体冻结：推送既不覆盖它，也不按新标题改名或
+移动路径，所以 `page import` 改标题后要等回收完成才会出现新文件名。推送的告警（手改、路径
+被占等）只写 stderr，不进 JSON 的 `data`；只有 `sync` 会在 `data.warnings` 里给出同类信息。
+
 配置在 `.wiki/wiki.json` 的 `publish` 段，四个键：`dir`（默认 `wiki`）、`enabled`（默认
 `true`）、`topics`（默认 `true`）、`scenarios`（默认 `true`）。
 
