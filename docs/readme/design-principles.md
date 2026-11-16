@@ -19,19 +19,25 @@
 | agent | 读 raw 与已有页、决定来源归属、写正文与证据、提交载荷 | 直接改页面文件、手改数据库、跳过任务直接落盘 |
 
 分工的边界由命令面固定：agent 日常只用 `check/init/ingest/next/submit/query/read/scenario`；
-`release/page/export/status/doctor` 是人工或维护入口，不写进技能流程。`check` 是初始化和
-日常操作的固定门禁，通过后才允许继续。没有"直接写页"的入口。
+`release/page/export/status/doctor/sync` 是人工或维护入口，不写进技能流程。`sync` 只把
+观看区的手工修改回收进账本，不负责推送。`check` 是初始化和日常操作的固定门禁，通过后
+才允许继续。没有"直接写页"的入口。
 
 ## 账本是唯一事实源
 
-页面正文、修订、证据、来源摘要、任务状态都在 `.wiki/wiki.db`。`.wiki/pages/*.md` 是按
-账本渲染的**镜像**，用于人阅读、Git 查看与迁移，不是输入。
+页面正文、修订、证据、来源摘要、任务状态都在 `.wiki/wiki.db`。引擎按账本渲染两份产物：
+`.wiki/pages/*.md` 是**镜像**，`<view>/pages/*.md`（`publish.dir`，默认 `wiki/`）是给人
+浏览的观看区。两者都不是输入。
 
 理由：如果页面文件是源，agent 顺手一改就会绕过引文校验与任务状态，且无法区分"人改的"与
 "agent 改的"。把账本设为源后，镜像被改只会被覆盖并留证，写入必须走带校验的载荷。
 
-镜像仍然保留（用户 2026-11-13 决定），因为它是免费的导出：离线浏览、diff、迁移都不需要
-额外命令。`export` 只是把镜像按类型目录再复制一份。
+两份产物都保留（镜像由用户 2026-11-13 决定），因为它们都是免费的导出：离线浏览、diff、
+迁移都不需要额外命令。`export` 只是按 `type/id.md` 再复制一份，不读观看区。
+
+观看区多了手工修改的回流通道：`<view>/pages` 被手改时推送只告警、不覆盖，由人工 `sync`
+收进账本；只同步正文用 `sync --body-only`，元数据也改过的改用 `page import`。`<view>/raw`
+与 `<view>/README.md` 以引擎为准，`topics/`、`scenarios/` 首次投放后归用户。
 
 ## 场景是能力，不是页面
 
@@ -74,7 +80,8 @@
 来源被摄入后不是"agent 自己决定从哪开始"，而是引擎给出 route/page 任务：
 
 - 一个来源一条 route 任务；route 通过后，每个目标页一条 page 任务。
-- 任务有 `queued → leased → accepted`，领取带 15 分钟租约与递增 epoch。
+- 任务有 `queued → leased → accepted`，另有终态 `expired`：来源或 raw 副本变化、或旧库
+  迁移时任务被关闭，行保留供审计；领取带 15 分钟租约与递增 epoch。
 - 提交按任务 id 关闭，不需要 epoch；过期或已关闭的任务返回 `E_TASK_STALE`，不会写入。
 - agent 看到的是 brief/template，租约与 epoch 只在引擎内部使用。
 - 校验失败零写入，任务退回队列并记录 `last_error`，修正后重新 `next`。

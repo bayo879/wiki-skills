@@ -51,6 +51,11 @@
 要保留手改内容，用 `page import <id> --from <文件>` 提交成新修订，再把 drift 副本删掉。
 `status` 会报告 drift 数量，`doctor` 会列出最近条目。
 
+观看区（`<view>/pages`，默认 `wiki/pages/`）的手改不走 drift：推送发现副本与账本不一致
+时只告警、不覆盖。要保留就运行 `sync` 收成新修订；元数据也改过的用 `page import`，
+`sync --body-only` 只取正文与证据。`<view>/raw` 与 `<view>/README.md` 以引擎为准；`raw/`
+是原文唯一副本，被删或改坏只能重新 `ingest`，`pages/` 与 `README.md` 会按账本重建。
+
 ## 五、数据库损坏与并发
 
 - `wiki.db` 损坏（`doctor` 报 `E_DB` 或完整性检查失败）：从备份恢复整个 `.wiki/`。

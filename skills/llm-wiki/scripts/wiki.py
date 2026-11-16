@@ -2218,7 +2218,8 @@ def command_read():
         path = resolve_ref(wiki, ref)
         text = path.read_text(encoding="utf-8", errors="replace")
         body = text
-        if path.suffix == ".md" and WIKI_DIR in path.parts:
+        # frontmatter 是文本属性，不是路径属性：原文搬到观看区 raw/ 后，不能再靠 .wiki 判定。
+        if path.suffix == ".md" and text.startswith("---"):
             meta, body = split_frontmatter(text)
     lines = body.splitlines()
     offset = max(1, ARGS.offset)

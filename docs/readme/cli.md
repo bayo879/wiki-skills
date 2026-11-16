@@ -4,6 +4,9 @@
 子目录；指到工作区外返回 `E_PATH`。除 `version` 外都接受 `--json`。引擎只依赖 Python
 标准库。
 
+除 `check`、`version`、`scenario` 外，命令启动时会准备 `.wiki/` 与观看区 `<view>/`
+（`publish.dir`，默认 `wiki/`），结束时按账本推送一次；`sync` 例外，它只回收、不推送。
+
 ## 输出信封
 
 成功：
@@ -32,10 +35,12 @@
 - 来源（source）：扫描到的文件，键是相对根目录的路径。状态 `pending`、`done`、
   `skipped`、`unsupported`、`oversize`、`missing`。
 - 任务（task）：`route`（每个来源一条）与 `page`（每页一条）。状态
-  `queued → leased → accepted`；提交被拒时回到 `queued` 并记录 `last_error`。
+  `queued → leased → accepted`；另有过期终态 `expired`，保留行供审计，不再领取。
+  提交被拒时回到 `queued` 并记录 `last_error`。
 - 页面（page）：多版修订，每版有 `rev`、`meta`、`body`、`digest`。当前状态
   `stable` 或 `stale`（引用来源变化或缺失）。
-- `.wiki/pages/<type>/<id>.md` 是按账本渲染的镜像，不是事实源。
+- 页面按账本渲染两份产物：`.wiki/pages/<type>/<id>.md` 镜像与观看区
+  `<view>/pages/<type>/<标题>.md`。两者都不是事实源，事实源是账本。
 
 ## 工作区边界
 
@@ -57,16 +62,18 @@
 
 ### init
 
-创建 `.wiki/`（`wiki.db`、`wiki.json`、`raw/`、`pages/`、`drift/`、`payloads/`、`drafts/`）并报告状态。
-`data`: `{created, config, pages, sources, open_tasks}`。
+创建 `.wiki/`（`wiki.db`、`wiki.json`、`pages/`、`drift/`、`payloads/`、`drafts/`），并准备
+观看区 `<view>/` 与 `<view>/raw/`。`data`: `{created, config, pages, sources, open_tasks}`。
 
 ### ingest
 
-扫描根目录（跳过隐藏目录、`scan.ignore`、`scenario/`、`场景能力/` 与 `话题/`），解析新文件或内容变化的
-文件，写入 `.wiki/raw/`，并为每个新来源入队一条 route 任务。`scenario/`（旧名 `场景能力/`）是流程能力、
-`话题/` 是 wiki 的探索层，都不作为摄入来源，摄入时整目录跳过；场景与话题的检索分别由
-`scenario search` 和 `query` 直接扫描文件完成。`--dry-run` 不写账本，临时库在
-`.wiki/tmp/`，退出时清理；`--force` 忽略哈希重新解析。
+扫描根目录（跳过隐藏目录、`scan.ignore`、`scenario/`、`场景能力/`、`话题/` 与观看区
+`<view>/`），解析新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），并为每个
+新来源入队一条 route 任务。`scenario/`（旧名 `场景能力/`）是流程能力、`话题/` 是 wiki 的
+探索层，都不作为摄入来源，摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。场景与
+话题的检索分别由 `scenario search` 和 `query` 直接扫描文件完成。`--dry-run` 不写账本，
+临时库在 `.wiki/tmp/`，退出时清理；`--force` 忽略哈希重新解析。`--only` 按根目录相对 key
+精确匹配，不校验参数形状：传绝对路径或含 `..` 的值只会匹配不到来源。
 
 `data`: `{ingested[{key,raw,parser,digest,size,chars}], unchanged, unsupported[{key,suffix,reason,hint}],
 oversize[{key,message}], failed[{key,message}], vanished, restored, queued_tasks, pending_total, pending}`。
@@ -146,6 +153,10 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 `read "page:<id>"` 读页面正文；也可传根目录内的相对路径。
 `data`: `{path, offset, limit, total_lines, next_offset, meta, content}`。
 
+对 `.md`，`read` 先看正文首行：以 `---` 开头就按 frontmatter 解析，`meta` 给出结果，
+`content` 只留正文。按路径读取的 `.md`（例如 `SCENARIO.md`）同样如此，原本的 frontmatter
+段不再出现在 `content` 里；`page:` 直接返回账本里的元数据与正文，不做切分。
+
 ### query
 
 `query <词...> [--limit N]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
@@ -206,8 +217,29 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 ### status
 
 `status [--brief]`。`data`: `{created, sources{状态:数量}, source_total, pages,
-stale_pages, pending, tasks{open,queued,leased,route,page}, next}`。
-`--brief` 只给一行摘要。
+stale_pages, pending, tasks{open,queued,leased,route,page,expired,accepted}, next}`。
+`--brief` 只给一行摘要，摘要不计 `expired`；完整数量看 JSON 的 `tasks`。
+
+### sync
+
+`sync [--body-only]`：把观看区 `<view>/pages/**/*.md` 的手工修改回收进账本（新修订
+`origin=sync`），只回收、不推送。它针对观看区，不是 `.wiki/pages/` 镜像；镜像被改仍按
+drift 处理。
+
+- 文件没有 `id` 或 `id` 不在账本里：跳过，`reason` 分别为 `no id`、`unknown id`；路径逃出
+  观看区（例如符号链接指向外面）时记为 `escapes the publish dir`。
+- 同一 `id` 出现在多个文件：每个文件都记 `E_DUPLICATE`，不回收。
+- frontmatter 与账本不一致：该文件记 `E_META_CHANGED`；加 `--body-only` 只取正文与证据，
+  保留账本元数据（类型、来源、标题等）。
+- 正文为空 `E_PAYLOAD`；证据引用未登记来源 `E_UNKNOWN_SOURCE`；文件读不出 `E_IO`。
+- `## 证据` 段存在但格式不合法：整段保留为正文并在 stderr 警告，账本原证据不变。
+- 回收成功后把规范化文本写回观看区；只是位置或字节与上次发布一致的文件记为 `written`，
+  不产生新修订。
+
+`data`: `{imported[page], skipped[{file,reason}], failed[{file,page,code,message}],
+unchanged[page], written[{page,from,to}]}`。有失败项时 `ok=false`，退出码 1。
+
+`sync` 之后，下一次任意命令启动时才把账本推回观看区。
 
 ### doctor
 
@@ -224,7 +256,10 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。
 | `E_TASK_UNKNOWN` | 任务 id 不存在 | `next` 取新任务 |
 | `E_TASK_STALE` | 任务已关闭、被替换或过期 | 重新 `next`，丢弃旧载荷 |
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
-| `E_STATE` | 目标页面正被其他任务写 | 等该任务提交后再试 |
+| `E_TASK_CONFLICT` | 来源已属于另一棵未关闭的页面任务树 | 先完成或关闭那个页面任务 |
+| `E_STATE` | 状态不满足：账本结构过旧、观看区路径不是目录、页面正被其他任务写 | 按 message 处理，不要手改账本 |
+| `E_META_CHANGED` | `sync` 时观看区页面的 frontmatter 与账本不一致 | 加 `--body-only`，或改用 `page import` |
+| `E_DUPLICATE` | `sync` 时同一页面 id 在观看区出现两次 | 删掉重复文件后重跑 |
 | `E_PAGE_CONFLICT` | 页面已存在（new）或版本已变（update） | 重新领任务，基于当前 rev 重写 |
 | `E_PAGE_UNKNOWN` | merge 指向不存在的页面 | 改用 new，或查 `page_index` / `pending_pages` |
 | `E_PAGE_GONE` | update 时页面消失 | 重新 `next` |
@@ -249,7 +284,13 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。
 ```json
 {"schema": {"types": ["concept", "entity", "process", "note"]},
  "scan": {"ignore": [".git", "node_modules", "target", "dist"]},
- "ingest": {"max_source_bytes": 50000000}}
+ "ingest": {"max_source_bytes": 50000000},
+ "publish": {"dir": "wiki", "enabled": true, "topics": true, "scenarios": true}}
 ```
 
 改 `schema.types` 会立即影响后续校验；已存在的页面不会被自动迁移。
+
+`publish.dir` 是观看区目录名，必须是单个目录名：不能以点开头、不能含路径分隔符，也不能
+是 `.wiki`、`话题`、`scenario`、`场景能力`；非法值即使 `enabled:false` 也返回 `E_CONFIG`。
+`enabled:false` 只停推送，`<view>/` 与 `<view>/raw/` 仍会创建；`topics`、`scenarios`
+控制首次推送时是否投放对应目录。

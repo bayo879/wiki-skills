@@ -7,6 +7,8 @@ description: 把工作区里的本地文档整理成可检索、可追溯的 Mar
 
 引擎决定有哪些任务、校验什么、写到哪里；你只做 brief 要求的内容判断。**不要直接改
 `.wiki/` 下的数据库、页面或任务文件**，手改不会生效，页面只能通过 `submit` 修改。
+观看区（`publish.dir`，默认 `wiki/`）里，`pages/` 由引擎按账本推送，手改不会被覆盖、只会
+告警，只有人工 `sync` 才能收进账本；`raw/` 是原文副本，`README.md` 每次推送重写，都不要手改。
 
 ## 工作区边界
 
@@ -17,7 +19,9 @@ description: 把工作区里的本地文档整理成可检索、可追溯的 Mar
 - 资料在工作区外时，停下来让用户把那个目录作为工作区打开，或复制进来；不要跨区扫描、
   读取或写入。
 - 草稿、载荷、导出与临时文件都放 `<root>/.wiki/` 下：`.wiki/drafts/`、
-  `.wiki/payloads/`、`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源。
+  `.wiki/payloads/`、`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源；
+  场景/话题目录与观看区（默认 `wiki/`）整目录跳过，即使关了发布，观看区目录名也不能
+  当来源。
 
 ## 运行时
 
@@ -103,6 +107,25 @@ python3 <skill>/scripts/wiki.py read "raw:<source-key>" --offset 1 --limit 120 -
 
 回答时给出页面 id 和原始文件 key。页面与 raw 冲突时以 raw 为准，并说明冲突。
 
+## 观看区
+
+命令会在根目录维护一份给人看的产出 `<view>/`（默认 `wiki/`，由 `.wiki/wiki.json` 的
+`publish.dir` 指定；`publish` 段另有 `enabled`、`topics`、`scenarios`，默认都为 `true`，
+一般不需要动）：
+
+- `pages/`：按账本推送的知识页，按 `<type>/<标题>.md` 命名；手改不会覆盖，只会告警。
+- `raw/`：摄入时写入的原文副本，用于核对引文；不要手改。
+- `README.md`：目录说明与统计，每次推送重写。
+- `topics/`、`scenarios/`：首次推送时从 `话题/`、`scenario/` 各投放一份；之后归用户。
+
+不需要为了交付结果去动观看区；`next`/`submit` 正常跑完，下一次命令会自动推送。只有用户
+要求把观看区里的手改收回时，才运行 `sync`（先确认再跑；它只回收、不推送）：
+
+```bash
+python3 <skill>/scripts/wiki.py sync --json
+python3 <skill>/scripts/wiki.py sync --body-only --json
+```
+
 ## 按场景执行
 
 项目可以把一类任务的流程写成场景，放在 `<root>/scenario/<场景>/`（旧名 `场景能力/`，二者同 id 时以
@@ -132,7 +155,8 @@ python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
 
 话题探索收尾时默认问用户是否沉淀；用户要求把一次讨论或调研留给下次时，写到**当前工作区
 根目录**的 `话题/<主题>.md`，一个主题一份。话题是 wiki 的探索层，不是正式知识页：不运行
-`ingest`，不写 `.wiki/`，不建页面、不排任务；写入后报告“未执行摄入”。
+`ingest`，不写 `.wiki/`，不建页面、不排任务；写入后报告“未执行摄入”。观看区的 `topics/`
+只是首次推送时的副本，之后归用户；改话题仍以根目录 `话题/` 为准。
 
 - 话题文件的 frontmatter、固定六节、归属判断、授权与完成标准，见内置场景
   `scenario load "话题探索"` 的“话题文件”与“沉淀前的归属判断”两节。

@@ -88,8 +88,9 @@ python3 <安装路径>/scripts/wiki.py check --json
 python3 <安装路径>/scripts/wiki.py ingest --json
 ```
 
-首次运行会在**当前工作区**创建 `.wiki/`（`wiki.json`、`wiki.db`、`raw/`、`pages/`、
-`drift/`、`payloads/`、`drafts/`）。`--root` 只接受当前目录或它下面的子目录，不能指向工作区外；资料在区外时，
+首次运行会在**当前工作区**创建 `.wiki/`（`wiki.json`、`wiki.db`、`pages/`、`drift/`、
+`payloads/`、`drafts/`），以及观看区 `<view>/` 与 `<view>/raw/`（`publish.dir`，默认
+`wiki/`）；原文副本在观看区的 `raw/`，不在 `.wiki/` 下。`--root` 只接受当前目录或它下面的子目录，不能指向工作区外；资料在区外时，
 请用户把那个目录作为工作区打开，或复制进来。
 
 草稿、载荷、导出与临时文件都放 `.wiki/` 下：`.wiki/drafts/`、`.wiki/payloads/`、

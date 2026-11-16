@@ -8,8 +8,8 @@
 
 设计前提：**确定性的事交给引擎，语义的事交给 agent。** 扫描、解析、哈希、任务状态、
 引文校验、页面渲染都在 `scripts/wiki.py` 里；agent 只领任务、读原文、交 JSON 载荷。
-知识库状态只存在 `.wiki/wiki.db` 账本中，`.wiki/pages/*.md` 只是按账本渲染的镜像；
-场景文件是只读能力，不写账本。
+知识库状态只存在 `.wiki/wiki.db` 账本中；引擎按账本渲染两份产物：`.wiki/pages/` 镜像与
+`<view>/` 观看区（`publish.dir`，默认 `wiki/`）。场景文件是只读能力，不写账本。
 
 ## 快速开始
 
@@ -44,14 +44,15 @@ Windows 首次使用运行
 
 ## 工作方式
 
-1. `ingest` 扫描根目录（跳过隐藏目录与 `scan.ignore`），把新文件或内容变化的文件解析到
-   `.wiki/raw/`，每个来源入队一条 **route** 任务。
+1. `ingest` 扫描根目录（跳过隐藏目录、`scan.ignore`、场景/话题目录与观看区），把新文件或
+   内容变化的文件解析到 `<view>/raw/`（默认 `wiki/raw/`），每个来源入队一条 **route** 任务。
 2. agent 对每个来源提交决定：`new`（新建页）、`merge`（并入已有页）或 `skip`（不要）。
    `new` 与 `merge` 会生成 **page** 任务。
 3. agent 读 raw 与已有页，写正文、摘要、证据引文与边界，提交 page 任务。引文去掉空白后
    必须逐字命中来源文本，否则拒绝写入。
-4. 页面以修订形式写入账本，并渲染到 `.wiki/pages/<type>/<id>.md`。来源变化会让引用页
-   变 `stale`，下次 `ingest` 重新排队。
+4. 页面以修订形式写入账本，并同时渲染到 `.wiki/pages/<type>/<id>.md`（镜像）与
+   `<view>/pages/<type>/<标题>.md`（观看区）。来源变化会让引用页变 `stale`，下次 `ingest`
+   重新排队。
 5. 场景能力放在 `scenario/<场景>/`（旧名 `场景能力/`），由 `SCENARIO.md`、`scripts/`、`references/` 组成。
    `ingest` 跳过整个目录；`query` 不检索场景，需要时显式 `scenario search`，命中后按
    `scenario load` 得到的流程执行。改场景文件立即生效，不用重新摄入。技能自带
@@ -73,6 +74,9 @@ Windows 首次使用运行
   不跨区读写。
 - **页面只能通过命令修改。** 直接改 `.wiki/pages/` 会在下次命令启动时被账本覆盖，原文
   存进 `.wiki/drift/` 留证。人工修改走 `page import`，回滚走 `page restore --rev N`。
+- **观看区的所有权分开算。** `<view>/pages` 的手改不会被覆盖，只给告警，由人工 `sync`
+  收进账本；`<view>/raw` 与 `<view>/README.md` 以引擎为准；`topics/`、`scenarios/` 首次
+  投放后归用户，引擎不覆盖也不删除。详见[观看区与发布](#观看区与发布)。
 - **场景不是知识页。** `scenario/`（或 `场景能力/`）不摄入、不进账本、不生成任务；流程以
   `SCENARIO.md` 为准，事实依据仍以页面和 raw 为准。场景命令只读，不要求先 `init`。
 - **话题是 wiki 的探索层，不是知识页。** `话题/` 由 agent 按内置「话题探索」场景的格式
@@ -81,6 +85,36 @@ Windows 首次使用运行
 - **超限文件不解析。** 默认单文件 50 MB（`ingest.max_source_bytes`），按 `oversize` 报告，
   不中止其他文件。
 - 单机、单写者。SQLite 事务保证单进程一致性；多 agent 并发写不在承诺范围内。
+
+## 观看区与发布
+
+引擎在账本之外维护一份给人看的产出 `<view>/`，默认是工作区根目录的 `wiki/`：
+
+- `pages/`：知识页，按 `<type>/<标题>.md` 渲染。手改过的页面不会被覆盖，只给告警，需要
+  运行 `sync` 收进账本。
+- `raw/`：原文唯一副本，由 `ingest` 维护；删掉或改坏只能靠源文件重新解析。
+- `README.md`：目录说明与统计，每次推送重写。
+- `topics/`、`scenarios/`：首次推送各投放一次，之后归用户；引擎不覆盖、不删除。
+- 其他文件（包括 `.obsidian/`）不删不改。
+
+配置在 `.wiki/wiki.json` 的 `publish` 段，四个键：`dir`（默认 `wiki`）、`enabled`（默认
+`true`）、`topics`（默认 `true`）、`scenarios`（默认 `true`）。
+
+`dir` 必须是单个目录名：不能以点开头、不能含路径分隔符，也不能是 `.wiki`、`话题`、
+`scenario`、`场景能力`；名字非法时即使 `enabled:false` 也报 `E_CONFIG`。这个名字被引擎
+占用，即使关了发布也仍跳过，所以不能拿它当来源目录。`enabled:false` 只停推送：不写
+`README.md`，不再更新 `pages/`、不投放 `topics/`、`scenarios/`，但 `<view>/` 与
+`<view>/raw/` 仍会创建。换 `dir` 后旧目录名不再跳过，`ingest` 会把它当普通来源摄入，
+清理旧目录由用户决定。整目录删除会连 `raw/` 里的原文和 `topics/`、`scenarios/` 里的用户
+改动一起丢掉；`raw/` 要重新 `ingest` 才能补回，`pages/` 与 `README.md` 会按账本重建。
+
+```bash
+python3 <skill>/scripts/wiki.py sync --json              # 回收 <view>/pages 的手改
+python3 <skill>/scripts/wiki.py sync --body-only --json  # 只取正文与证据，保留账本元数据
+```
+
+`sync` 只回收、不推送；下一次任意命令启动时才把账本推回观看区。字段与失败码见
+[CLI 契约的 sync 段](docs/readme/cli.md#sync)。
 
 ## 仓库结构
 
@@ -92,6 +126,8 @@ tests/                    开发/CI 的端到端自测，不随技能安装
 docs/readme/              产品说明：设计原则、CLI、场景、话题、安装、恢复
 docs/agent/               开发指导：决策、引擎内部、维护守则
 docs/issues/              未决问题，一问题一文件
+wiki/                     观看区：运行时在工作区根目录创建（publish.dir 默认 wiki/），
+                          pages/ raw/ topics/ scenarios/ README.md
 ```
 
 Rust 实现已于 2026-11-13 停止维护，归档在 Git tag `rust-archive-2026-11-13`，不在当前
@@ -104,7 +140,7 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 tests/selftest.py
 ```
 
-`tests/selftest.py` 在临时目录跑 57 项端到端检查，不接触真实数据；它和 `tests/` 留在
+`tests/selftest.py` 在临时目录跑 174 项端到端检查，不接触真实数据；它和 `tests/` 留在
 仓库、由开发/CI 执行，不复制进安装后的技能目录。验证记录（含真实 PDF 语料结果）见
 [docs/agent/verification.md](docs/agent/verification.md)。场景目录结构与写法见
 [docs/readme/scenarios.md](docs/readme/scenarios.md)，话题沉淀格式见

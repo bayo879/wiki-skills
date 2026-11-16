@@ -359,6 +359,22 @@ def main(argv=None):
         source_key = routes["a.md"]["work"]["sources"][0]["key"]
         raw = run(root, "read", f"raw:{source_key}")["data"]
         check(results, "read returns raw text", "复机" in raw["content"], raw)
+        raw_read = raw
+        check(results, "read strips raw frontmatter",
+              not raw_read["content"].startswith("---")
+              and 'type: "raw"' not in raw_read["content"],
+              raw_read["content"][:80])
+        check(results, "read returns raw meta",
+              raw_read["meta"].get("type") == "raw", raw_read["meta"])
+
+        front = root / "front.md"
+        front.write_text("---\ntitle: 手工标题\n---\n\n# 正文\n\n内容。\n", encoding="utf-8")
+        front_read = run(root, "read", "front.md")["data"]
+        check(results, "frontmatter split keys on the first line, not on .wiki",
+              front_read["meta"].get("title") == "手工标题"
+              and "title: 手工标题" not in front_read["content"],
+              front_read["meta"])
+        front.unlink()
 
         outside_payload = root.parent / f"{root.name}-payload.json"
         outside_payload.write_text("{}", encoding="utf-8")
