@@ -47,6 +47,14 @@
 
 ## 命令
 
+### check
+
+检查当前安装的运行时：Python 3.12+、技能必需文件与模板、工作区可写、已有账本可读。
+不创建 `.wiki/`，不读写页面内容。`data`: `{ok, checks[{name,ok,detail}]}`；`ok` 与退出码
+一致（`0` 通过，`1` 有失败项）。`init`、`ingest`、`next`、`submit` 会先做同一项轻量检查，
+失败返回 `E_HEALTH`。`check` 是安装/日常流程的门禁；完整回归测试在仓库的
+`tests/selftest.py`，不随技能分发。
+
 ### init
 
 创建 `.wiki/`（`wiki.db`、`wiki.json`、`raw/`、`pages/`、`drift/`、`payloads/`、`drafts/`）并报告状态。
@@ -74,7 +82,8 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 - `brief`: `{goal, steps[], submit, effect}`，说明做什么、怎么做、提交后发生什么。
 - `template`: 已固定结构的载荷；route 为 `decisions[]`，page 为 `page/title/type/
   summary/body/links/evidence/boundaries`。
-- `work`: `sources[{key,raw,chars}]`、`page_index[{id,title,type}]`；更新页任务另有
+- `work`: `sources[{key,raw,chars}]`、`page_index[{id,title,type}]`、
+  `pending_pages[{id,title,type}]`（已排队、尚未写入的页面）；更新页任务另有
   `work.page{id,rev,meta,body}`。
 
 不再返回 `epoch`、`lease_until`、`attempts`、`last_error` 或原始 `inputs`。
@@ -94,11 +103,12 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
                 "title": "退款流程", "type": "process", "reason": "完整办理步骤"}]}
 ```
 
-每个输入来源恰好一条决定，`action` 三选一：
+每个输入来源恰好一条决定，`reason` 每条都必须非空，`action` 三选一：
 
 - `new`：`page`、`title`、`type` 必填；页面不能已存在。
-- `merge`：`page` 必填；页面必须存在。若该页已有未完成任务，来源并入该任务。
-- `skip`：`reason` 必填；来源标记 `skipped`。
+- `merge`：`page` 必填；页面可以已存在，也可以已在 `pending_pages` 里排队
+  （包括同一 route 载荷里的 `new`，顺序不限）。若该页已有未完成任务，来源并入该任务。
+- `skip`：标记 `skipped`。
 
 **page 载荷**：
 
@@ -115,12 +125,14 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
   根目录内，建议放 `.wiki/drafts/`。
 - 新建页面的 `body` 必须保留模板给定的章节标题（如 `## 结论`、`## 步骤`、`## 注意事项`），
   缺章节或改名会被拒绝；更新页面沿用原有结构。
-- `summary` 1–200 字符；`title` 1–120 字符；`type` 必须在 `schema.types` 里。
+- `summary` 必填，1–200 字符；`title` 1–120 字符；`type` 必须在 `schema.types` 里。
 - `links` 只能指向已存在页面。
 - `evidence` 至少一条；`quote` 去空白后须逐字命中该来源的 raw 文本。
+- 更新页时 `sources` 取旧来源与本任务来源的并集，旧 evidence 未在本次载荷中重写时保留；
+  更新任务模板会带出旧 evidence。
 - `boundaries.covered`、`boundaries.not_covered` 必填。
 
-成功后 `data`: `{task, page, rev, sources, queued_page_tasks}`。
+成功后 `data`: `{task, page, rev, sources, queued_page_tasks}`；page 的 `sources` 是并集。
 
 ### release
 
@@ -173,7 +185,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
 | `E_STATE` | 目标页面正被其他任务写 | 等该任务提交后再试 |
 | `E_PAGE_CONFLICT` | 页面已存在（new）或版本已变（update） | 重新领任务，基于当前 rev 重写 |
-| `E_PAGE_UNKNOWN` | merge 指向不存在的页面 | 改用 new，或查 `page_index` |
+| `E_PAGE_UNKNOWN` | merge 指向不存在的页面 | 改用 new，或查 `page_index` / `pending_pages` |
 | `E_PAGE_GONE` | update 时页面消失 | 重新 `next` |
 | `E_BAD_ID` | 页面 slug 非法 | 用小写字母数字与 `-_.` |
 | `E_LINK_UNRESOLVED` | 链接目标不存在 | 先建目标页，或去掉链接 |
@@ -186,6 +198,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。
 | `E_CONFIG` | `.wiki/wiki.json` 非法 | 按提示修正 JSON |
 | `E_SOURCE_TOO_LARGE` | 单文件超过 `max_source_bytes` | 调高阈值或拆分来源 |
 | `E_DB` | 数据库不可读 | 从备份恢复，不要手改 |
+| `E_HEALTH` | 安装自检未通过 | 运行 `check --json`；缺文件时重装技能 |
 
 ## 配置
 

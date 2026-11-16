@@ -6,9 +6,30 @@
 ## 1. 检查运行时
 
 ```bash
-python3 -V          # 需要 3.8+，只用标准库
+python3 -V          # 需要 3.12+，只用标准库
 command -v pdftotext # 可选；没有也能用，PDF 会走 pypdf 或报告 unsupported
 ```
+
+### Windows（PowerShell 5.1+）
+
+Windows 上通常没有 `python3`，用 `py -3.12` 或指向 3.12 的 `python` 替代。首次使用可以直接运行引导脚本，
+它会找 Python 3.12，缺失时按国内镜像安装，再调用 `install.py`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
+```
+
+也可以在终端运行 `scripts\bootstrap.cmd`，它等价于上面的命令，参数原样传递。
+
+- 镜像顺序：华为云 → 清华 TUNA → npmmirror → 官方源；都失败才回退 `winget`。
+- 安装 Python 3.12.8 的 per-user 版本（`InstallAllUsers=0`），只装核心组件，不要求管理员；
+  安装后把 Machine/User 的 PATH 补进当前进程。
+- 不需要 `pip install`：引擎只用标准库；PDF 解析器仍是可选项，不阻塞安装。
+- 放置失败时用 `-Target` 指定技能根，例如
+  `-Target "$env:USERPROFILE\.dsh\skills"`；`-DryRun` 只检查并打印计划，不下载、不复制。
+- 引导脚本只负责运行时和放置技能，不创建 `.wiki/`；知识库仍要在资料目录里 `init`/`ingest`。
+
+整个项目基线是 Python 3.12（最低版本）；Windows 引导安装 3.12.8，避免 3.11 及更早版本。
 
 PDF 支持按优先级降级：`pdftotext` → `pypdf` → 跳过并提示。不要为了装 PDF 解析器
 阻塞其他格式的使用。
@@ -38,7 +59,7 @@ python3 scripts/install.py --target auto --json
   `.dsh/skills`，然后是全局 `~/.dsh`、`~/.claude`、`~/.agents`、`~/.codex`、
   `~/.config/opencode`；`--all` 写入全部，`--dry-run` 只打印计划。
 - 已存在同名目录时默认不动；`--force` 会先改名为 `llm-wiki.bak-<时间>` 再复制。
-- 安装脚本会从目标位置执行一次 `wiki.py --version` 自检。
+- 安装脚本会从目标位置执行一次 `wiki.py --version` 启动检查；验收用下一节的 `check`。
 
 同名冲突：如果已有旧版 `llm-wiki` 技能（例如随 Rust CLI 分发的
 `.wiki/skills/llm-wiki`），先移除或改名再安装。两个同名技能同时存在时，agent 只会加载
@@ -51,12 +72,12 @@ python3 scripts/install.py --target auto --json
 
 ```bash
 python3 <安装路径>/scripts/wiki.py --version
-python3 <安装路径>/scripts/selftest.py
+python3 <安装路径>/scripts/wiki.py check --json
 ```
 
-`selftest.py` 在临时目录跑 30 项检查（建库、摄入与分类、任务包、route 决定、页面提交、
-镜像漂移、import/restore、导出、越界拒绝、超限、dry-run、doctor），不接触真实数据。
-全部通过即安装可用。
+`check` 验证解释器、技能必需文件与模板、当前工作区可写、已有账本可读，不接触真实页面
+内容；`ok: true` 才表示安装可用。完整回归测试在仓库的 `tests/selftest.py`，属于开发/CI
+资产，不随技能复制到安装目录。
 
 ## 4. 在业务目录启用
 

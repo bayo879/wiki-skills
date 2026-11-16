@@ -1,20 +1,22 @@
 # 引擎内部
 
-对象：`skills/llm-wiki/scripts/wiki.py`（1999 行，单文件上限 2000 行；公共错误在
-`errors.py`，工作区边界在 `workspace.py`，任务信息面在 `tasks.py`；再长就按解析 / 账本 /
-任务 / 命令拆模块）。本文件只记录改代码时容易踩的内部约定，命令与字段以
-`docs/readme/cli.md` 为准。
+对象：`skills/llm-wiki/scripts/wiki.py`（1954 行，单文件上限 2000 行；公共错误在
+`errors.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，工作区边界在
+`workspace.py`，任务信息面在 `tasks.py`，页面载荷校验在 `validation.py`；再长就按解析 / 账本 / 任务 / 命令拆模块）。
+本文件只记录改代码时容易踩的内部约定，命令与字段以 `docs/readme/cli.md` 为准。
 
 ## 布局
 
 | 区段 | 位置 | 说明 |
 | --- | --- | --- |
-| 常量与配置 | 文件头、`DEFAULT_CONFIG`、`load_config` | `BODY_MAX_CHARS=60000`、`SUMMARY_MAX_CHARS=200`、`TASK_LEASE_SECONDS=900` |
+| 常量与配置 | 文件头、`DEFAULT_CONFIG`、`load_config` | `TASK_LEASE_SECONDS=900`；正文/摘要上限在 `validation.py` |
 | 错误与输出 | `errors.py` 的 `WikiError`、`emit`、`fail` | 错误码 + `next` + 退出码；所有命令走同一信封 |
 | 工作区边界 | `workspace.py` | `WIKI_DIR`、`window_safe`、`inside_root`、`dry_store`；文件参数一律先过 `inside_root` |
 | 解析 | `extract_text` 及 `pdf_to_text`、`docx_to_text`、`html_to_text`、`decode_bytes` | 纯函数，不碰数据库；超限在 `read_bytes` 抛 |
 | 页面渲染 | `render_page`、`split_frontmatter`、`yaml_scalar` | 渲染与解析 frontmatter 必须对称；改动一侧要同步另一侧 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
+| 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 深检，门禁用轻检 |
+| 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留；纯函数，只读 `Wiki` |
 | 账本 | `class Wiki` | 表、来源、修订、镜像、任务全在这里 |
 | 命令层 | `command_*`、`submit_route`、`submit_page` | 只做参数解析、调用 `Wiki`、组装输出 |
 
@@ -76,8 +78,10 @@ page 载荷 → 校验 → page_revs + 镜像 + links
 
 ## 改动检查表
 
-- 改字段或校验：同步 `docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、`SKILL.md`、`selftest.py`。
+- 改字段或校验：同步 `docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
+  `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
+  `tests/selftest.py`。
 - 改表结构：在 `ensure()` 里做幂等迁移，并在 `docs/agent/verification.md` 记录旧库升级结果。
-- 改渲染：`render_page` 与 `split_frontmatter` 必须能往返；跑 `selftest.py` 的
+- 改渲染：`render_page` 与 `split_frontmatter` 必须能往返；跑 `tests/selftest.py` 的
   import/restore 用例。
 - 改任务：并发前提是单写者；不要为了"更快"去掉提交前的状态与租约检查。

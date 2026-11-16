@@ -3,20 +3,41 @@
 本文件记录 2026-11-13 在 skills-only 版本（`VERSION=0.2.0`）上的实测结果，用于交付验收
 与回归对照。数字来自实际命令输出，不是估算。
 
-环境：macOS，Python 3.15.2，SQLite 3.54.1，pdftotext 25.11.0（Poppler）。没有安装
+环境：macOS，Python 3.15.2（项目基线 3.12），SQLite 3.54.1，pdftotext 25.11.0（Poppler）。没有安装
 `pypdf`，PDF 全部走 `pdftotext` 分支。
 
 ## 2026-11-15 任务信息面改造后复跑
 
 `next` 改为只返回 `{id, brief, template, work}`，`submit` 不再要求 epoch；新建页面的
-正文章节由 `template.body` 固定。复跑 `python3 skills/llm-wiki/scripts/selftest.py`：
+正文章节由 `template.body` 固定。复跑 `python3 tests/selftest.py`：
 30/30 通过，退出码 0。新增检查覆盖任务包字段、内部字段不暴露、route/page 模板骨架。
 下文表格是 2026-11-13 的 26 项基线，字段结构以本次改造后的契约为准。
+
+## 2026-11-16 更新页与首批合并修复后复跑
+
+`validate_page_payload` 拆到 `validation.py`；更新页保留旧 sources/evidence；首批多来源
+可以 merge 到已排队页面。复跑 `python3 tests/selftest.py`：40/40 通过，
+退出码 0。新增检查覆盖 route brief 的 reason、更新页旧证据保留、更新后 sources 并集、
+`pending_pages` 对下一条 route 可见、pending merge 合并两来源、批量页面双来源、
+read page 的 meta 不含 `source_digests`。
+手工 `/tmp/llm-wiki-fix-test` 复测：A/B 首批合并为 rev1 双来源双证据；C 更新为 rev2 后
+sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实机验证，见
+[Windows 引导验收](../issues/2026-11-16-P2-windows-bootstrap-acceptance.md)。
+
+## 2026-11-16 自检门禁与测试拆分
+
+- 自检从技能载荷移到仓库：`tests/selftest.py` 40/40 通过；安装后的副本只含
+  `health.py` 与 `check` 命令，不含 `tests/` 或 `selftest.py`。
+- `wiki.py check --json`：空工作区 `ok:true`；`init` 后 `ok:true`（ledger `integrity ok`）。
+- 删除副本的 `SKILL.md` 后：`check` 返回 `ok:false`、退出码 1；`init` 返回 `E_HEALTH`。
+- `init` 允许修复缺失的 `.wiki/wiki.db` 或 `wiki.json`（`allow_missing`），避免自检把首次初始化
+  或半初始化目录锁死。
+- 安装到临时目标后 `health.py` 存在、`tests/` 不存在，`check` 通过。
 
 ## 一、自测：26/26 通过
 
 ```bash
-python3 skills/llm-wiki/scripts/selftest.py
+python3 tests/selftest.py
 ```
 
 | 用例 | 覆盖点 |
@@ -111,4 +132,7 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
 - 并发写入与多 agent 同时提交：只验证了 lease 与 epoch 的单进程语义。
 - 万级文件、`MAX_RAW_CHARS` 截断边界、超大页面的渲染性能。
 - DSH 之外的 agent 运行时：按目录约定复制，未逐个实测其技能加载器。
+- Windows 引导脚本：当前环境没有 PowerShell，`scripts/bootstrap.ps1` 与 `bootstrap.cmd`
+  未在 Windows 实机验证；镜像下载、静默安装、PATH 刷新与技能根放置都待验收，见
+  `docs/issues/2026-11-16-P2-windows-bootstrap-acceptance.md`。
 - 页面删除：当前没有命令，未验证。

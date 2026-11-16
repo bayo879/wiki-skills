@@ -5,7 +5,7 @@ Runs a disposable knowledge base in a temp directory: ingest, route decisions,
 page submission, mirror drift, import/restore, classification, dry run. Never
 touches real data and only uses the standard library.
 
-Run:  python3 scripts/selftest.py [--keep] [--json]
+Run:  python3 tests/selftest.py [--keep] [--json]
 Exit: 0 all checks passed, 1 a check failed.
 """
 
@@ -17,7 +17,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent / "wiki.py"
+sys.dont_write_bytecode = True
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "skills" / "llm-wiki" / "scripts" / "wiki.py"
+sys.path.insert(0, str(SCRIPT.parent))
+
+from runtime import require_python
+
+require_python()
 WIKI_CACHE = ".wiki"
 CHECKED = []
 
@@ -78,8 +86,14 @@ def main(argv=None):
         (root / "b.md").write_text("# 无关材料\n\n用来验证 skip 分支。\n", encoding="utf-8")
         (root / "scan.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
+        data = run(root, "check")["data"]
+        check(results, "check passes before init", data["ok"], data)
+
         data = run(root, "init")["data"]
         check(results, "init creates .wiki", (root / ".wiki/wiki.db").exists() and data["sources"] == 0, data)
+
+        data = run(root, "check")["data"]
+        check(results, "check passes after init", data["ok"], data)
 
         outside_file = root.parent / f"{root.name}-outside.md"
         outside_file.write_text("# 区外\n", encoding="utf-8")
@@ -169,6 +183,79 @@ def main(argv=None):
         check(results, "query finds the page", found["matches"] == 1, found)
         page = run(root, "read", "page:anti-fraud-restore")["data"]
         check(results, "read page comes from the ledger", "两个工作日" in page["content"], page)
+        check(results, "read page hides source digests", "source_digests" not in page["meta"], page["meta"])
+
+        (root / "c.md").write_text("# 反诈复机\n\n补充：可拨打客服确认进度。\n", encoding="utf-8")
+        run(root, "ingest")
+        route = run(root, "next")["data"]["tasks"][0]
+        c_key = route["work"]["sources"][0]["key"]
+        check(results, "route brief requires reason for every decision",
+              "每条 decision 都必须写 reason" in " ".join(route["brief"]["steps"]), route["brief"])
+        run(root, "submit", route["id"], "--payload", payload_file(
+            root, "update-route.json",
+            {"decisions": [{"source": c_key, "action": "merge", "page": "anti-fraud-restore",
+                            "reason": "补充客服确认方式"}]},
+        ))
+        task = run(root, "next")["data"]["tasks"][0]
+        check(results, "update template keeps old evidence",
+              any(item.get("source") == "a.md" and item.get("quote")
+                  for item in task["template"]["evidence"]), task["template"]["evidence"])
+        update_body = (
+            "## 结论\n\n停机后本人持证到厅复机，约两个工作日。\n\n"
+            "## 步骤\n\n本人带身份证到营业厅提交复机申请。\n\n"
+            "## 注意事项\n\n可拨打客服确认进度。\n"
+        )
+        update_payload = {
+            "page": "anti-fraud-restore", "title": "反诈复机", "type": "process",
+            "summary": "停机后本人持证到厅复机，约两个工作日；可拨打客服确认进度。",
+            "links": [], "body": update_body,
+            "evidence": [{"source": c_key, "quote": "可拨打客服确认进度"}],
+            "boundaries": {"covered": "停机后的复机路径", "not_covered": "异地办理与资费"},
+        }
+        run(root, "submit", task["id"], "--payload", payload_file(root, "update-page.json", update_payload))
+        page = run(root, "read", "page:anti-fraud-restore")["data"]
+        check(results, "update keeps old and new sources",
+              set(page["meta"]["sources"]) == {"a.md", c_key}, page["meta"]["sources"])
+        check(results, "update keeps old evidence",
+              any(item.get("source") == "a.md" for item in page["meta"]["evidence"]),
+              page["meta"]["evidence"])
+
+        (root / "d.md").write_text("# 机房巡检\n\n巡检周期为每周一次。\n", encoding="utf-8")
+        (root / "e.md").write_text("# 机房巡检\n\n巡检记录保留一年。\n", encoding="utf-8")
+        run(root, "ingest")
+        first = run(root, "next")["data"]["tasks"][0]
+        first_key = first["work"]["sources"][0]["key"]
+        run(root, "submit", first["id"], "--payload", payload_file(
+            root, "batch-route-1.json",
+            {"decisions": [{"source": first_key, "action": "new", "page": "machine-room-inspection",
+                            "title": "机房巡检", "type": "note", "reason": "新主题"}]},
+        ))
+        second = run(root, "next")["data"]["tasks"][0]
+        second_key = second["work"]["sources"][0]["key"]
+        check(results, "pending page is visible to the next route",
+              any(item["id"] == "machine-room-inspection" for item in second["work"]["pending_pages"]),
+              second["work"]["pending_pages"])
+        run(root, "submit", second["id"], "--payload", payload_file(
+            root, "batch-route-2.json",
+            {"decisions": [{"source": second_key, "action": "merge", "page": "machine-room-inspection",
+                            "reason": "同主题补充"}]},
+        ))
+        task = run(root, "next")["data"]["tasks"][0]
+        check(results, "pending merge folds both sources into one page task",
+              {item.get("source") for item in task["template"]["evidence"]} == {"d.md", "e.md"},
+              task["template"]["evidence"])
+        batch_payload = {
+            "page": "machine-room-inspection", "title": "机房巡检", "type": "note",
+            "summary": "机房每周巡检一次，巡检记录保留一年。",
+            "links": [], "body": "## 要点\n\n每周巡检一次；记录保留一年。\n",
+            "evidence": [{"source": "d.md", "quote": "巡检周期为每周一次"},
+                         {"source": "e.md", "quote": "巡检记录保留一年"}],
+            "boundaries": {"covered": "巡检周期与记录保存", "not_covered": "巡检项目清单"},
+        }
+        run(root, "submit", task["id"], "--payload", payload_file(root, "batch-page.json", batch_payload))
+        page = run(root, "read", "page:machine-room-inspection")["data"]
+        check(results, "batch page keeps both sources",
+              set(page["meta"]["sources"]) == {"d.md", "e.md"}, page["meta"]["sources"])
 
         mirror.write_text("手改的内容\n", encoding="utf-8")
         run(root, "status")
@@ -179,7 +266,7 @@ def main(argv=None):
         edited = root / ".wiki/drafts/edited.md"
         edited.write_text("---\ntitle: 反诈复机\n---\n## 结论\n\n人工补充：可拨打客服确认进度。\n", encoding="utf-8")
         imported = run(root, "page", "import", "anti-fraud-restore", "--from", str(edited))["data"]
-        check(results, "page import adds a revision", imported["rev"] == 2, imported)
+        check(results, "page import adds a revision", imported["rev"] == 3, imported)
         outside_edit = root.parent / f"{root.name}-edit.md"
         outside_edit.write_text("## 区外\n", encoding="utf-8")
         escaped = run(root, "page", "import", "anti-fraud-restore",
@@ -187,7 +274,7 @@ def main(argv=None):
         check(results, "import outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
         outside_edit.unlink()
         restored = run(root, "page", "restore", "anti-fraud-restore", "--rev", "1")["data"]
-        check(results, "page restore rolls back content", restored["rev"] == 3 and "两个工作日" in mirror.read_text(encoding="utf-8"), restored)
+        check(results, "page restore rolls back content", restored["rev"] == 4 and "两个工作日" in mirror.read_text(encoding="utf-8"), restored)
 
         exported = run(root, "export", str(root / ".wiki/export"))["data"]["files"]
         check(results, "export writes mirror copies", exported, exported)

@@ -10,7 +10,7 @@
 - **改引擎（`scripts/wiki.py`）**：读 [引擎内部](docs/agent/engine.md)，查任务状态机、
   epoch/lease、修订与渲染、drift 处理、错误码约定与单文件规模边界。
 - **改技能文字、命令契约或输出格式**：读 [技能与契约维护](docs/agent/maintenance.md)，
-  查 SKILL.md 与 references 的同步范围、`selftest.py` 守卫、文档编辑的核验要求。
+  查 SKILL.md 与 references 的同步范围、`tests/selftest.py` 守卫、文档编辑的核验要求。
 - **改文档或准备提交**：读 [技能与契约维护](docs/agent/maintenance.md)；
   文字编辑必须用"找不到原文就报错"的 `edit`，改完当轮检索核实。
 

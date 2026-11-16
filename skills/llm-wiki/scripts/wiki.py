@@ -30,11 +30,14 @@ from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 
-# A global skill can live outside the workspace; never write `__pycache__` there.
-sys.dont_write_bytecode = True
+sys.dont_write_bytecode = True  # never write __pycache__ into a global skill
+from runtime import require_python
+require_python()
 
+import health
 from errors import WikiError
-from tasks import missing_sections, task_packet
+from tasks import task_packet
+from validation import validate_page_payload
 from workspace import WIKI_DIR, dry_store, inside_root, window_safe
 
 VERSION = "0.2.0"
@@ -46,8 +49,6 @@ DRAFT_SUBDIR = "drafts"
 DB_NAME = "wiki.db"
 CONFIG_NAME = "wiki.json"
 MAX_RAW_CHARS = 4_000_000
-BODY_MAX_CHARS = 60_000
-SUMMARY_MAX_CHARS = 200
 TASK_LEASE_SECONDS = 900
 TASK_OPEN_STATES = ("queued", "leased")
 
@@ -282,6 +283,8 @@ def dump_meta(meta):
     """Frontmatter values as JSON-friendly types for command output."""
     clean = {}
     for key, value in meta.items():
+        if key == "source_digests":
+            continue
         if isinstance(value, list):
             clean[key] = [item if isinstance(item, (dict, list)) else str(item) for item in value]
         elif isinstance(value, dict):
@@ -912,6 +915,21 @@ class Wiki:
             for record in self.all_pages()
         ]
 
+    def pending_pages(self, exclude=None):
+        """Pages that a queued page task will create but that do not exist yet."""
+        rows = self.conn.execute(
+            "SELECT id, subject, inputs FROM tasks WHERE kind = 'page' AND state IN ('queued', 'leased')"
+        )
+        pending = []
+        for row in rows:
+            if row["id"] == exclude:
+                continue
+            inputs = json.loads(row["inputs"])
+            if inputs.get("mode") == "create" and not self.page_record(row["subject"]):
+                pending.append({"id": row["subject"], "title": inputs.get("title"),
+                                "type": inputs.get("type")})
+        return pending
+
     def source_view(self, item):
         row = self.source_row(item["key"])
         return {
@@ -934,6 +952,7 @@ class Wiki:
                 for view in (self.source_view(item) for item in inputs.get("sources", []))
             ],
             "page_index": self.page_index(),
+            "pending_pages": self.pending_pages(row["id"]),
         }
         if row["kind"] == "page":
             record = self.page_record(inputs["page"])
@@ -1015,7 +1034,28 @@ def open_wiki(require_sources=False, dry_run=False):
     return wiki, created
 
 
+def require_health(allow_missing=False):
+    health.require(Path(__file__).resolve().parent, Path.cwd(), allow_missing=allow_missing)
+
+
+def command_check():
+    report = health.check_installation(Path(__file__).resolve().parent, Path.cwd())
+    lines = [
+        f"{'ok  ' if item['ok'] else 'fail'} {item['name']}: {item['detail']}"
+        for item in report["checks"]
+    ]
+    emit(
+        "check", Path.cwd(),
+        "self-check passed" if report["ok"] else "self-check failed",
+        report,
+        lines,
+        ok=report["ok"],
+    )
+    return 0 if report["ok"] else 1
+
+
 def command_init():
+    require_health(allow_missing=True)
     wiki, created = open_wiki()
     rows = wiki.all_sources()
     pages = wiki.all_pages()
@@ -1037,6 +1077,7 @@ def command_init():
 
 
 def command_ingest():
+    require_health()
     wiki, _ = open_wiki(dry_run=ARGS.dry_run)
     limit = int(wiki.config["ingest"].get("max_source_bytes", 50_000_000))
     force = ARGS.force
@@ -1239,6 +1280,7 @@ def command_status():
 
 
 def command_next():
+    require_health()
     wiki, _ = open_wiki()
     batch = ARGS.batch or 1
     rows = wiki.claim_tasks(kind=ARGS.kind, batch=max(1, batch))
@@ -1286,6 +1328,7 @@ def read_payload(wiki):
 
 
 def command_submit():
+    require_health()
     wiki, _ = open_wiki()
     task_id = ARGS.id
     row = wiki.task_row(task_id)
@@ -1368,6 +1411,10 @@ def submit_route(wiki, row, payload):
     # Validate every decision before touching the ledger, so a bad payload
     # never leaves a half-applied route behind.
     plan = []
+    new_pages = {
+        str(decision.get("page") or "").strip().lower()
+        for decision in decisions if decision.get("action") == "new"
+    }
     for decision in decisions:
         key = decision["source"]
         action = decision["action"]
@@ -1404,13 +1451,20 @@ def submit_route(wiki, row, payload):
             plan.append({"action": "new", "key": key, "page": page_id,
                          "title": title, "type": page_type})
         else:
-            if not record:
+            pending_create = bool(
+                existing and json.loads(existing["inputs"]).get("mode") == "create"
+            )
+            if not record and not pending_create and page_id not in new_pages:
                 raise WikiError(
                     "E_PAGE_UNKNOWN",
                     f"{key}: page {page_id} does not exist",
-                    "use action new, or check `next --json` page_index", 3,
+                    "use action new, or check `next --json` page_index and pending_pages", 3,
                 )
-            plan.append({"action": "merge", "key": key, "page": page_id, "rev": record["rev"]})
+            plan.append({"action": "merge", "key": key, "page": page_id,
+                         "rev": record["rev"] if record else None})
+    # A page created in this same payload must be queued before sources merge
+    # into it; otherwise the merge would create an update task for a missing page.
+    plan.sort(key=lambda item: 0 if item["action"] == "new" else 1)
     page_tasks = []
     for item in plan:
         key = item["key"]
@@ -1481,112 +1535,11 @@ def submit_page(wiki, row, payload):
         "kind": "page",
         "page": page_id,
         "rev": rev,
-        "sources": [item["key"] for item in sources],
-        "summary": f"page {page_id} accepted at rev {rev} ({len(sources)} sources)",
+        "sources": meta["sources"],
+        "summary": f"page {page_id} accepted at rev {rev} ({len(meta['sources'])} sources)",
         "lines": [f"page: {page_id} rev {rev}"],
     }
 
-
-def validate_page_payload(wiki, row, payload, sources):
-    inputs = json.loads(row["inputs"])
-    page_id = inputs["page"]
-    if not isinstance(payload, dict):
-        raise WikiError("E_PAYLOAD", "page payload must be a JSON object", "", 2)
-    if str(payload.get("page") or "").strip().lower() != page_id:
-        raise WikiError("E_PAYLOAD", f"payload.page must be {page_id!r}",
-                        "the task subject is the only page you may write", 2)
-    title = str(payload.get("title") or "").strip()
-    if not title or len(title) > 120:
-        raise WikiError("E_PAYLOAD", "title must be 1-120 characters", "", 2)
-    page_type = str(payload.get("type") or "").strip()
-    if page_type not in wiki.config["schema"]["types"]:
-        raise WikiError("E_PAYLOAD", f"type {page_type!r} not in schema.types",
-                        f"choose one of: {', '.join(wiki.config['schema']['types'])}", 2)
-    summary = str(payload.get("summary") or "").strip()
-    if not summary:
-        raise WikiError("E_PAYLOAD", "summary must not be empty", "", 2)
-    if len(summary) > SUMMARY_MAX_CHARS:
-        raise WikiError("E_PAYLOAD", f"summary is {len(summary)} chars, max {SUMMARY_MAX_CHARS}",
-                        "move detail into the body", 2)
-    links = payload.get("links") or []
-    if not isinstance(links, list) or any(not isinstance(item, str) for item in links):
-        raise WikiError("E_PAYLOAD", "links must be a list of page ids", "", 2)
-    known = wiki.page_ids()
-    for link in links:
-        if link.strip().lower() == page_id:
-            continue
-        if link.strip().lower() not in known:
-            raise WikiError("E_LINK_UNRESOLVED", f"link {link!r} points at no page",
-                            "create that page first, or drop the link", 2)
-    body = payload.get("body")
-    if body is None and payload.get("body_file"):
-        candidate = inside_root(
-            wiki.root, payload["body_file"], "body_file",
-            "put drafts under .wiki/drafts/",
-        )
-        try:
-            body = candidate.read_text(encoding="utf-8")
-        except OSError as error:
-            raise WikiError("E_PAYLOAD", f"cannot read body_file: {error}", "", 2)
-    if not isinstance(body, str) or not body.strip():
-        raise WikiError("E_PAYLOAD", "body must be non-empty text (or use body_file)", "", 2)
-    if body.lstrip().startswith("---"):
-        raise WikiError("E_PAYLOAD", "body must not start with frontmatter",
-                        "send only the markdown sections; the engine renders frontmatter", 2)
-    if inputs.get("mode") == "create":
-        missing = missing_sections(body, page_type)
-        if missing:
-            raise WikiError(
-                "E_PAYLOAD",
-                f"body is missing required section(s): {', '.join(missing)}",
-                "start from the task template.body and fill it; do not rename or drop sections", 2,
-            )
-    if len(body) > BODY_MAX_CHARS:
-        raise WikiError("E_PAYLOAD", f"body is {len(body)} chars, max {BODY_MAX_CHARS}",
-                        "split the page or move detail into linked pages", 2)
-    evidence = payload.get("evidence")
-    if not isinstance(evidence, list) or not evidence:
-        raise WikiError("E_PAYLOAD", "evidence must be a non-empty list of {source, quote}",
-                        "quote at least one sentence from the task sources", 2)
-    available = {item["key"] for item in sources}
-    for item in evidence:
-        if not isinstance(item, dict):
-            raise WikiError("E_PAYLOAD", "each evidence item must be an object", "", 2)
-        key = item.get("source")
-        quote = str(item.get("quote") or "")
-        if key not in available:
-            raise WikiError(
-                "E_TASK_SCOPE", f"evidence source {key!r} is not in this task",
-                f"task sources: {', '.join(sorted(available))}", 3,
-            )
-        if not quote.strip():
-            raise WikiError("E_PAYLOAD", f"{key}: quote must not be empty", "", 2)
-        raw = re.sub(r"\s+", "", wiki.source_body(key))
-        if re.sub(r"\s+", "", quote) not in raw:
-            raise WikiError(
-                "E_EVIDENCE_NOT_FOUND",
-                f"quote not found in {key}: {quote[:60]!r}",
-                "re-read the raw source and copy an exact sentence", 2,
-            )
-    boundaries = payload.get("boundaries")
-    if not isinstance(boundaries, dict) or not str(boundaries.get("covered") or "").strip() \
-            or not str(boundaries.get("not_covered") or "").strip():
-        raise WikiError("E_PAYLOAD", "boundaries.covered and boundaries.not_covered are required",
-                        "state what the page covers and what it deliberately leaves out", 2)
-    meta = {
-        "id": page_id,
-        "title": title,
-        "type": page_type,
-        "summary": summary,
-        "sources": sorted(available),
-        "evidence": evidence,
-        "boundaries": boundaries,
-    }
-    cleaned_links = sorted({link.strip().lower() for link in links if link.strip()})
-    if cleaned_links:
-        trailer = "\n\n## 关联\n" + "\n".join(f"- [[{link}]]" for link in cleaned_links)
-        body = body.rstrip() + trailer
-    return meta, body, evidence, boundaries
 
 
 def command_release():
@@ -1916,6 +1869,7 @@ def build_parser():
     parser.add_argument("--version", action="version", version=f"llm-wiki {VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("check", parents=[common], help="verify the installed skill and workspace")
     sub.add_parser("init", parents=[common], help="create .wiki/ and report state")
     ingest = sub.add_parser("ingest", parents=[common], help="scan sources and queue route tasks")
     ingest.add_argument("--dry-run", action="store_true")
@@ -1957,6 +1911,7 @@ def build_parser():
 
 ARGS = None
 COMMANDS = {
+    "check": command_check,
     "init": command_init,
     "ingest": command_ingest,
     "next": command_next,

@@ -9,19 +9,25 @@
 
 ## 快速开始
 
-要求 Python 3.8+；PDF 可选 `pdftotext`（Poppler）或 `pypdf`。
+要求 Python 3.12+；PDF 可选 `pdftotext`（Poppler）或 `pypdf`。
 
 ```bash
 # 安装到 agent 会扫描的技能目录（也可直接按路径加载 SKILL.md）
 python3 skills/llm-wiki/scripts/install.py --target auto --json
 
-# 在资料所在的工作区根目录初始化并摄入（不要 cd 到工作区外）
+# 在资料所在的工作区根目录先自检，通过后再初始化和摄入（不要 cd 到工作区外）
+python3 <skill>/scripts/wiki.py check --json
+python3 <skill>/scripts/wiki.py init --json
 python3 <skill>/scripts/wiki.py ingest --json
 
 # 任务循环：next 返回 brief 与 template，填好 template 后 submit
 python3 <skill>/scripts/wiki.py next --json
 python3 <skill>/scripts/wiki.py submit <t_id> --payload .wiki/payloads/<t_id>.json --json
 ```
+
+Windows 首次使用运行
+`powershell -NoProfile -ExecutionPolicy Bypass -File skills\llm-wiki\scripts\bootstrap.ps1`；
+其余命令里的 `python3` 用 `py -3.12` 或指向 3.12 的 `python` 替代。
 
 完整命令与字段见 [CLI 契约](docs/readme/cli.md)。
 
@@ -56,8 +62,9 @@ python3 <skill>/scripts/wiki.py submit <t_id> --payload .wiki/payloads/<t_id>.js
 ## 仓库结构
 
 ```text
-skills/llm-wiki/          技能：SKILL.md、references/curation.md、scripts/
+skills/llm-wiki/          技能：SKILL.md、references/（curation.md）、templates/（concept、entity、process、note）、scripts/
 skills/llm-wiki-session/   会话技能：从对话中提炼项目素材，不依赖 wiki 引擎
+tests/                    开发/CI 的端到端自测，不随技能安装
 docs/readme/              产品说明：设计原则、CLI、安装、恢复
 docs/agent/               开发指导：决策、引擎内部、维护守则
 docs/issues/              未决问题，一问题一文件
@@ -70,9 +77,9 @@ Rust 实现已于 2026-11-13 停止维护，归档在 Git tag `rust-archive-2026
 
 ```bash
 python3 -m py_compile skills/llm-wiki/scripts/*.py
-python3 skills/llm-wiki/scripts/selftest.py
+python3 tests/selftest.py
 ```
 
-`selftest.py` 在临时目录跑 30 项端到端检查，不接触真实数据；CI 对多个 Python 版本重复
-执行同一套检查。验证记录（含真实 PDF 语料结果）见
+`tests/selftest.py` 在临时目录跑 40 项端到端检查，不接触真实数据；它和 `tests/` 留在
+仓库、由开发/CI 执行，不复制进安装后的技能目录。验证记录（含真实 PDF 语料结果）见
 [docs/agent/verification.md](docs/agent/verification.md)。

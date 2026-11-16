@@ -77,9 +77,10 @@ def route_brief(task_id, sources):
         "goal": f"判断来源 {keys} 应归入哪一页知识，或跳过。",
         "steps": [
             f"读原文：运行 `read \"raw:{first}\" --offset 1 --limit 120 --json`。",
-            "在 work.page_index 里找同主题的已有页面；已有页面能覆盖时优先 merge。",
-            "填 template.decisions[0]：action 选 new/merge/skip；"
-            "new 还要给 page、title、type，merge 要给 page，skip 要给 reason。",
+            "在 work.page_index 里找同主题的已有页面；已有页面能覆盖时优先 merge。"
+            "work.pending_pages 是已排队、尚未写入的页面，同主题也可以 merge 到它的 id。",
+            "填 template.decisions[0]：action 选 new/merge/skip；每条 decision 都必须写 reason；"
+            "new 还要给 page、title、type，merge 要给 page。",
         ],
         "submit": submit_step(task_id),
         "effect": "提交后引擎自动创建或合并页面写作任务；skip 只留记录，不建页。之后重新运行 `next` 取下一个任务。",
@@ -91,6 +92,12 @@ def page_template(inputs, record):
     if record:
         meta = record.get("meta") or {}
         page_type = meta.get("type") or DEFAULT_TYPE
+        evidence = [dict(item) for item in (meta.get("evidence") or []) if isinstance(item, dict)]
+        cited = {item.get("source") for item in evidence}
+        evidence.extend(
+            {"source": item["key"], "quote": ""}
+            for item in inputs["sources"] if item["key"] not in cited
+        )
         return {
             "page": page_id,
             "title": meta.get("title") or page_id,
@@ -98,7 +105,7 @@ def page_template(inputs, record):
             "summary": meta.get("summary") or "",
             "body": record.get("body") or skeleton_body(page_type),
             "links": [],
-            "evidence": [{"source": item["key"], "quote": ""} for item in inputs["sources"]],
+            "evidence": evidence,
             "boundaries": meta.get("boundaries") or {"covered": "", "not_covered": ""},
         }
     page_type = inputs.get("type") or DEFAULT_TYPE
@@ -122,13 +129,16 @@ def page_brief(task_id, inputs, record):
         "steps": [
             "先读 work.sources 里每份 raw 原文；只写原文支持的事实。",
             "按 template.body 已有的章节填写，不要改章节名，也不要删章节。",
-            "给 template.evidence 的每条来源填一句逐字 quote；"
+            "summary 写 1-200 字的一句话；更新已有页面时，template.evidence 里"
+            "旧来源的证据要保留，不要删。",
+            "给 template.evidence 的每条来源填一到两句逐字 quote；"
             "数字、日期、文号、责任主体都要能回到原文。",
             "links 只填 work.page_index 里已有的页面 id；"
             "boundaries 写清这一页覆盖什么、不覆盖什么。",
         ],
         "submit": submit_step(task_id),
         "effect": "提交后引擎写入新修订并更新 .wiki/pages 镜像；"
+        "旧来源和旧证据会保留，本任务的新来源会加入来源列表。"
         "页面立即可 query/read，来源后续变化会标记待更新。之后重新运行 `next` 取下一个任务。",
     }
 

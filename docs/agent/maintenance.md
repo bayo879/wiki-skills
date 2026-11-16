@@ -8,9 +8,10 @@
 | 内容 | 唯一定义处 | 其他位置只引用 |
 | --- | --- | --- |
 | 命令、载荷字段、错误码、退出码 | `docs/readme/cli.md` | `SKILL.md` 只给取任务/提交示例，不复制字段表 |
-| 任务 brief 与 template 的形状 | `skills/llm-wiki/scripts/tasks.py` | `cli.md` 给字段说明，`selftest.py` 给断言 |
+| 任务 brief 与 template 的形状 | `skills/llm-wiki/scripts/tasks.py` | `cli.md` 给字段说明，`tests/selftest.py` 给断言 |
 | agent 行为约束 | `skills/llm-wiki/SKILL.md` | `README.md` 只讲产品边界 |
 | 页面质量与证据标准 | `skills/llm-wiki/references/curation.md` | — |
+| 页面固定版式与正文模板 | `skills/llm-wiki/templates/`（按类型分文件） | — |
 | 安装与目录约定 | `docs/readme/install.md` | `README.md` 给一行入口 |
 | 故障与恢复 | `docs/readme/recovery.md` | — |
 | 实测结果与未覆盖项 | `docs/agent/verification.md` | — |
@@ -18,16 +19,21 @@
 | 已定方向 | `docs/agent/development-decisions.md` | — |
 
 改命令、载荷、错误码时，至少同时检查：`docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
-`SKILL.md`、`selftest.py`、`README.md` 中的示例。示例里的命令必须能直接跑通。
+`skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
+`tests/selftest.py`、`README.md` 中的示例。
+示例里的命令必须能直接跑通。
+改章节骨架（`tasks.py` 的 `PAGE_SECTIONS`）时，同步 `templates/` 下对应类型的正文模板，
+保证模板章节与引擎一致。
 
 ## 机器守卫
 
 ```bash
+# 需要 Python 3.12+
 python3 -m py_compile skills/llm-wiki/scripts/*.py
-python3 skills/llm-wiki/scripts/selftest.py
+python3 tests/selftest.py
 ```
 
-`selftest.py` 是端到端契约测试，覆盖 next 任务包、route/page 提交、工作区越界、镜像漂移、
+`tests/selftest.py` 是端到端契约测试，覆盖 next 任务包、route/page 提交、工作区越界、镜像漂移、
 import/restore、超限与 dry-run。改引擎行为时先补一个检查再改实现；它同时被 CI 调用，不允许跳过或
 `--keep` 写入仓库。
 

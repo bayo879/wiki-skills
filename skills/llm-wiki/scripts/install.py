@@ -21,6 +21,12 @@ import sys
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
+from runtime import require_python
+
+require_python()
+
 SKILL_NAME = "llm-wiki"
 
 PROJECT_TARGETS = [".agents/skills", ".claude/skills", ".dsh/skills"]

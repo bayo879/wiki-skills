@@ -3,7 +3,8 @@
 ## 交付物是技能，不是程序
 
 `skills/llm-wiki/` 整个目录就是交付物：`SKILL.md` 给 agent 读，`scripts/` 是引擎，
-`references/curation.md` 是页面质量标准。命令契约、安装、恢复与验证记录在
+`references/curation.md` 是页面质量标准，`templates/` 按类型放各页面的正文模板。
+命令契约、安装、恢复与验证记录在
 `docs/readme/` 与 `docs/agent/`，不放进技能目录。复制目录即可使用，没有服务、没有全局状态。
 
 这是 2026-11-13 转型后的唯一形态。Rust CLI、单二进制分发、`output/` 发布包都已停止维护，
@@ -16,8 +17,9 @@
 | 引擎 | 扫描、解析、哈希、任务状态、载荷校验、引文核对、修订与渲染、镜像修复 | 判断哪份材料值得建页、写正文、选标题与边界 |
 | agent | 读 raw 与已有页、决定来源归属、写正文与证据、提交载荷 | 直接改页面文件、手改数据库、跳过任务直接落盘 |
 
-分工的边界由命令面固定：agent 日常只用 `init/ingest/next/submit/query/read`；`release/
-page/export/status/doctor` 是人工或维护入口，不写进技能流程。没有"直接写页"的入口。
+分工的边界由命令面固定：agent 日常只用 `check/init/ingest/next/submit/query/read`；
+`release/page/export/status/doctor` 是人工或维护入口，不写进技能流程。`check` 是初始化和
+日常操作的固定门禁，通过后才允许继续。没有"直接写页"的入口。
 
 ## 账本是唯一事实源
 

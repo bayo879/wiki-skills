@@ -19,6 +19,26 @@ description: 把工作区里的本地文档整理成可检索、可追溯的 Mar
 - 草稿、载荷、导出与临时文件都放 `<root>/.wiki/` 下：`.wiki/drafts/`、
   `.wiki/payloads/`、`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源。
 
+## 运行时
+
+命令示例用 `python3`（项目基线 Python 3.12）。Windows 没有 `python3` 时改用 `py -3.12` 或指向 3.12 的 `python`；首次使用可运行
+`scripts\bootstrap.ps1` 检查/安装 Python 3.12 并把技能放到 agent 的技能目录。安装只在
+技能目录外进行，不要把它当成 wiki 任务的一步。
+
+## 自检
+
+安装后、建库前，以及每次开始日常操作前，先运行：
+
+```bash
+python3 <skill>/scripts/wiki.py check --json
+```
+
+只有返回 `ok: true` 才能继续 `init`、`ingest`、`next` 或 `submit`。`ok: false` 时停止，
+把 `data.checks` 里失败项告诉用户；不要跳过自检，也不要用 `doctor` 或手改 `.wiki/`
+绕过。`check` 只检查解释器、技能文件、工作区可写和现有账本可读，不接触真实页面内容。
+`init`、`ingest`、`next`、`submit` 也会先做同一项轻量检查；失败返回 `E_HEALTH`，按
+`error.next` 处理。
+
 ## 建库或增量摄入
 
 ```bash
@@ -40,7 +60,7 @@ python3 <skill>/scripts/wiki.py next --json
 - `id`：提交时用；
 - `brief`：这个任务要做什么、怎么做、提交后会发生什么；
 - `template`：已经固定好的载荷骨架，只填空；
-- `work`：原文位置、已有页面索引、当前页内容。
+- `work`：原文位置、已有页面索引、已排队但尚未写入的页面（`pending_pages`）、当前页内容。
 
 按 `brief` 做，把 `template` 填好存到 `.wiki/payloads/<id>.json`，然后：
 
@@ -54,8 +74,12 @@ python3 <skill>/scripts/wiki.py submit <id> --payload .wiki/payloads/<id>.json -
 ## 填写内容
 
 - 只写原文支持的事实；数字、日期、文号、责任主体都要能回到 `work.sources` 里的 raw。
-- `evidence[].quote` 从 raw 逐字复制，不改写、不概括；引文对不上会被拒绝。
+- `evidence[].quote` 从 raw 逐字复制，不改写、不概括；一句到两句，引文对不上会被拒绝。
 - 新建页面的章节由 `template.body` 固定，不要改章节名、不要删章节；更新页面沿用原有结构。
+  每节按页面类型的固定组合写，模板在 `templates/<type>.md`（concept、entity、process、note），
+  按 `template` 的类型读对应文件。
+- 新建页面的 `summary` 必填，1–200 字，一句完整的话；更新页面时 `template.evidence`
+  里旧来源的证据要保留，不要删。
 - `links` 只填 `work.page_index` 里已有的页面 id；`boundaries` 写清覆盖与不覆盖。
 - 推断要标“据此推断”；个人联系方式不写入页面。
 - 页面边界、标题、摘要、合并优先等标准见 [references/curation.md](references/curation.md)。
@@ -73,12 +97,13 @@ python3 <skill>/scripts/wiki.py read "raw:<source-key>" --offset 1 --limit 120 -
 
 ## 提交失败
 
-- 读返回的 `error.message` 与 `error.next`，只改 `template` 里对应的内容后重交。
-- 任务已失效或页面已被更新时，重新 `next`，不要复用旧 payload。
+- 提交失败会先把任务退回队列。读返回的 `error.message` 与 `error.next`，重新 `next`
+  领取任务（通常还是同一个 id），再改 `template` 里对应的内容重交；不要拿旧 id 直接重交。
+- 返回 `E_TASK_STALE` 表示任务已被领取、关闭或页面已更新；重新 `next`，不要复用旧 payload。
 - 不要绕过校验，也不要直接改 `.wiki/` 下的文件来“修好”它。
 
 ## 不做
 
-- 不 OCR、不下载依赖、不联网。扫描件没有文本层时会被标为不支持，等有可复制文本后再摄入。
+- wiki 任务中不 OCR、不下载依赖、不联网。扫描件没有文本层时会被标为不支持，等有可复制文本后再摄入。
 - 不跨工作区读写，不把缓存放到 `.wiki/` 之外。
 - 不手写页面文件、不直接改数据库、不编辑任务文件。
