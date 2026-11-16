@@ -281,11 +281,27 @@ def extract_text(path, data):
     return "", ""
 
 
-def render_page(meta, body):
+VIEW_NAME_LIMIT = 60
+VIEW_NAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f-\x9f]')
+
+
+def view_name(title, page_id):
+    """Filesystem-safe page name for the published view tree."""
+    text = VIEW_NAME_BAD.sub("-", str(title or ""))
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip(" .-")
+    if len(text) > VIEW_NAME_LIMIT:
+        text = text[:VIEW_NAME_LIMIT].strip(" .-")
+    return text or page_id
+
+
+def render_page(meta, body, aliases=None):
     """Deterministic mirror text: frontmatter, body, then the evidence block."""
     lines = ["---"]
     for field in ("id", "title", "type", "summary"):
         lines.append(f"{field}: {yaml_scalar(meta[field])}")
+        if field == "title" and aliases:
+            lines.append(f"aliases: [{', '.join(str(alias) for alias in aliases)}]")
     lines.append("sources:")
     for source in meta["sources"]:
         lines.append(f"  - {yaml_scalar(source)}")
@@ -746,12 +762,41 @@ class Wiki:
             row = self.source_row(key)
             if row is None or row["status"] in ("missing", "unsupported", "oversize"):
                 return "stale"
-            if snapshot.get(key) != row["digest"]:
+            if snapshot.get(key) != row["raw_digest"]:
                 return "stale"
         return "stable"
 
     def page_path(self, meta):
         return self.pages_dir / meta["type"] / f"{meta['id']}.md"
+
+    def view_relpath(self, record):
+        """Publish path for one page record, relative to the publish dir."""
+        meta = record["meta"]
+        page_id = record["id"]
+        base = view_name(meta.get("title"), page_id)
+        relpath = f"pages/{meta['type']}/{base}.md"
+        collision = False
+        for other in self.all_pages():
+            if other["id"] == page_id:
+                continue
+            if other["meta"].get("type") != meta.get("type"):
+                continue
+            if view_name(other["meta"].get("title"), other["id"]) == base:
+                collision = True
+                break
+        if not collision:
+            row = self.latest_rev_row(page_id)
+            stored = row["view_path"] if row else ""
+            collision = (
+                (self.publish_dir / relpath).exists() and stored != relpath
+            )
+        if collision:
+            relpath = f"pages/{meta['type']}/{base} ({page_id}).md"
+        return relpath
+
+    def view_text(self, record):
+        """Page text as published in the view tree: same template, id alias."""
+        return render_page(record["meta"], record["body"], aliases=[record["id"]])
 
     def write_rev(self, page, meta, body, origin):
         record = self.page_record(page)
@@ -760,13 +805,17 @@ class Wiki:
         meta["id"] = page
         meta["sources"] = sorted(set(meta.get("sources") or []))
         meta["source_digests"] = {
-            key: (self.source_row(key)["digest"] if self.source_row(key) else "")
+            key: (self.source_row(key)["raw_digest"] if self.source_row(key) else "")
             for key in meta["sources"]
         }
         meta["updated"] = date.today().isoformat()
         meta["status"] = self.computed_status(meta)
         text = render_page(meta, body)
         render_digest = digest_text(text)
+        # 观看区的事实与文本在这里同时产生，同一条 INSERT 落库，不可能互相漂移。
+        view = self.view_text({"id": page, "meta": meta, "body": body})
+        view_digest = digest_text(view)
+        view_path = self.view_relpath({"id": page, "meta": meta})
         canonical = json.dumps(
             {
                 "title": meta.get("title"),
@@ -781,19 +830,18 @@ class Wiki:
             ensure_ascii=False,
         )
         target = self.page_path(meta)
-        # View-side facts belong to the rendered page tree, so a bare revision
-        # records them as empty rather than guessing a path and digest.
         with self.conn:
             self.conn.execute(
                 """
                 INSERT INTO page_revs
                 (page, rev, meta, body, digest, render_digest, view_digest, view_path,
                  origin, accepted_at)
-                VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     page, rev, json.dumps(meta, ensure_ascii=False, sort_keys=True),
-                    body, digest_text(canonical), render_digest, origin, now_iso(),
+                    body, digest_text(canonical), render_digest, view_digest, view_path,
+                    origin, now_iso(),
                 ),
             )
             write_atomic(target, text)
@@ -850,7 +898,7 @@ class Wiki:
                 "summary": str(meta.get("summary") or ""),
                 "sources": sorted(set(sources)),
                 "source_digests": {
-                    key: (self.source_row(key)["digest"] if self.source_row(key) else "")
+                    key: (self.source_row(key)["raw_digest"] if self.source_row(key) else "")
                     for key in set(sources)
                 },
                 "evidence": [],

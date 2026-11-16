@@ -415,6 +415,46 @@ def main(argv=None):
         mirror = root / ".wiki/pages/process/anti-fraud-restore.md"
         check(results, "page submit writes rev 1", accepted["data"]["rev"] == 1 and mirror.exists(), accepted)
 
+        # Task 5: 观看区文件名与别名只从标题生成，先把纯函数钉住。
+        check(results, "view_name strips path separators",
+              wiki.view_name("复机/办理:2026", "p-x") == "复机-办理-2026",
+              wiki.view_name("复机/办理:2026", "p-x"))
+        check(results, "view_name collapses whitespace",
+              wiki.view_name("复机\u3000 办理", "p-x") == "复机 办理",
+              wiki.view_name("复机\u3000 办理", "p-x"))
+        check(results, "view_name truncates long titles",
+              len(wiki.view_name("复" * 200, "p-x")) == 60,
+              len(wiki.view_name("复" * 200, "p-x")))
+        check(results, "view_name falls back to the id when only separators remain",
+              wiki.view_name("///", "p-x") == "p-x",
+              wiki.view_name("///", "p-x"))
+        check(results, "view_name falls back to the id",
+              wiki.view_name("  ..  ", "p-x") == "p-x",
+              wiki.view_name("  ..  ", "p-x"))
+
+        # Task 5: 观看区事实只落在账本里；这里不调用 ensure()，不碰观看区文件（写文件是 Task 6）。
+        engine = wiki.Wiki(root)
+        engine.config = json.loads((root / ".wiki/wiki.json").read_text(encoding="utf-8"))
+        engine.conn = sqlite3.connect(root / ".wiki/wiki.db")
+        engine.conn.row_factory = sqlite3.Row
+        record = engine.page_record("anti-fraud-restore")
+        published = engine.view_text(record)
+        check(results, "view path follows the chinese title",
+              engine.view_relpath(record) == "pages/process/反诈复机.md",
+              engine.view_relpath(record))
+        check(results, "view text aliases the id right after the title",
+              f"title: {wiki.yaml_scalar(record['meta']['title'])}\n"
+              f"aliases: [anti-fraud-restore]" in published,
+              published)
+        stored = engine.latest_rev_row("anti-fraud-restore")
+        check(results, "the revision stores matching view facts",
+              stored["view_path"] == "pages/process/反诈复机.md"
+              and stored["view_digest"] == wiki.digest_text(published),
+              (stored["view_path"], stored["view_digest"]))
+        check(results, "the mirror stays alias-free",
+              "aliases:" not in mirror.read_text(encoding="utf-8"), mirror)
+        engine.close()
+
         bad = run(root, "submit", task["id"],
                   "--payload", payload_file(root, "again.json", payload), expect=3)
         check(results, "closed task rejects resubmit", bad["error"]["code"] == "E_TASK_STALE", bad)
@@ -517,6 +557,21 @@ def main(argv=None):
         outside_edit.unlink()
         restored = run(root, "page", "restore", "anti-fraud-restore", "--rev", "1")["data"]
         check(results, "page restore rolls back content", restored["rev"] == 4 and "两个工作日" in mirror.read_text(encoding="utf-8"), restored)
+
+        aliased = root / ".wiki/drafts/aliased.md"
+        aliased.write_text(
+            "---\ntitle: 反诈复机\naliases: [anti-fraud-restore]\n---\n"
+            "## 结论\n\n导入时 aliases 不应进入账本。\n",
+            encoding="utf-8",
+        )
+        imported_alias = run(
+            root, "page", "import", "anti-fraud-restore", "--from", str(aliased)
+        )["data"]
+        check(results, "page import accepts an aliased source file",
+              imported_alias["rev"] == 5, imported_alias)
+        aliased_page = run(root, "read", "page:anti-fraud-restore")["data"]
+        check(results, "imported aliases do not leak into page meta",
+              "aliases" not in aliased_page["meta"], aliased_page["meta"])
 
         exported = run(root, "export", str(root / ".wiki/export"))["data"]["files"]
         check(results, "export writes mirror copies", exported, exported)
@@ -675,6 +730,27 @@ def main(argv=None):
         ).fetchone()[0]
         conn.close()
         check(results, "a failed submit does not revive the expired task", revived == "expired", revived)
+
+        # --- Task 5: 只有被引用的原文会判 stale -------------------------------
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        raw_d = conn.execute(
+            "SELECT raw FROM sources WHERE key = 'd.md'"
+        ).fetchone()[0]
+        conn.close()
+        before = run(root, "read", "page:machine-room-inspection")["data"]["meta"]
+        check(results, "the page is stable before its raw copy changes",
+              before["status"] == "stable", before)
+        (root / raw_d).write_text(
+            (root / raw_d).read_text(encoding="utf-8") + "\n巡检记录留档。\n",
+            encoding="utf-8",
+        )
+        run(root, "ingest")
+        stale = run(root, "read", "page:machine-room-inspection")["data"]["meta"]
+        check(results, "editing a cited raw copy makes the page stale",
+              stale["status"] == "stale", stale)
+        untouched = run(root, "read", "page:anti-fraud-restore")["data"]["meta"]
+        check(results, "editing an unrelated raw copy leaves the page stable",
+              untouched["status"] == "stable", untouched)
 
         status = run(root, "status")["data"]
         check(results, "status counts invalidated tasks without opening them",
