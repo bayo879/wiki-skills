@@ -290,10 +290,11 @@ def view_name(title, page_id):
     return text or page_id
 
 
-def render_view_readme(wiki):
+def render_view_readme(wiki, records=None):
     """Directory guide for the view tree; rewritten on every push."""
     publish = wiki.publish_dir
-    records = wiki.all_pages()
+    if records is None:
+        records = wiki.all_pages()
     by_type = {}
     for record in records:
         kind = str(record["meta"].get("type") or "unknown")
@@ -1026,21 +1027,43 @@ class Wiki:
         events = []
         # raw/ 由 ingest 维护：这里只保证目录存在，绝不写、删其中任何文件。
         self.publish_raw_dir.mkdir(parents=True, exist_ok=True)
-        self._sync_view_pages(events)
+        records = self.all_pages()
+        self._sync_view_pages(events, records)
         publish = self.config["publish"]
         if publish.get("topics", True):
             self._seed_view_topics(events)
         if publish.get("scenarios", True):
             self._seed_view_scenarios(events)
-        write_atomic(self.publish_dir / "README.md", render_view_readme(self))
+        write_atomic(self.publish_dir / "README.md", render_view_readme(self, records))
         events.append("README.md rewritten")
         return events
 
-    def _sync_view_pages(self, events):
+    def _view_targets(self, records):
+        """Publish path per page for one snapshot; same rules as view_relpath."""
+        shared = {}
+        for record in records:
+            key = (record["meta"].get("type"),
+                   view_name(record["meta"].get("title"), record["id"]))
+            shared[key] = shared.get(key, 0) + 1
+        targets = {}
+        for record in records:
+            meta = record["meta"]
+            base = view_name(meta.get("title"), record["id"])
+            relpath = f"pages/{meta['type']}/{base}.md"
+            taken = shared[(meta.get("type"), base)] > 1 or (
+                (self.publish_dir / relpath).exists() and record["view_path"] != relpath
+            )
+            if taken:
+                relpath = f"pages/{meta['type']}/{base} ({record['id']}).md"
+            targets[record["id"]] = relpath
+        return targets
+
+    def _sync_view_pages(self, events, records):
         """Publish every page; a hand-edited copy is skipped, never overwritten."""
         base = self.publish_dir.resolve()
-        for record in self.all_pages():
-            target = self.view_relpath(record)
+        targets = self._view_targets(records)
+        for record in records:
+            target = targets[record["id"]]
             desired = self.view_text(record)
             target_digest = digest_text(desired)
             published = record["view_path"]
