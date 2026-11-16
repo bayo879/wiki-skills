@@ -130,6 +130,27 @@ def digest_text(text):
     return digest_bytes(text.encode("utf-8", "replace"))
 
 
+def same_stamp(size, mtime, known_size, known_mtime):
+    """First-stage change filter: same byte size and (nearly) the same mtime.
+
+    Hashing only happens when this returns False, so the recorded size/mtime
+    pair is the whole cheap path for both the source file and its raw view.
+    """
+    try:
+        return (
+            int(size) == int(known_size)
+            and abs(float(mtime) - float(known_mtime)) < 1e-6
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def file_facts(path):
+    """(digest, size, mtime) of one file, read once; used right after a write."""
+    stat = Path(path).stat()
+    return digest_bytes(Path(path).read_bytes()), stat.st_size, stat.st_mtime
+
+
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -291,7 +312,7 @@ def publish_dir_name(config):
     one safe segment: no separators, no dot prefix, no absolute path, and no
     name that already belongs to the engine or another wiki layer.
     """
-    section = config.get("publish") or {}
+    section = (config or {}).get("publish") or {}
     value = section.get("dir")
     name = value if isinstance(value, str) else ""
     reason = ""
@@ -340,8 +361,8 @@ class Wiki:
         self.scan_root = Path(scan_root).resolve() if scan_root else self.root
         self.report_root = self.scan_root
         self.wiki_dir = self.root / WIKI_DIR
-        # Where raw text lives before the config is known; ensure() repoints it
-        # at the publish tree when publishing is on.
+        # Placeholder until ensure() reads the config, which then repoints it at
+        # the publish tree: raw text never lives in `.wiki/` any more.
         self.raw_dir = self.wiki_dir / RAW_SUBDIR
         self.pages_dir = self.wiki_dir / PAGES_SUBDIR
         self.drift_dir = self.wiki_dir / DRIFT_SUBDIR
@@ -376,25 +397,44 @@ class Wiki:
             created.append(norm_key(self.config_path.relative_to(self.root)))
         self.config = load_config(self.config_path)
         publish_dir_name(self.config)  # an invalid dir is rejected even when disabled
-        if self.config["publish"]["enabled"]:
-            self.raw_dir = self.publish_raw_dir
-            self.ensure_publish(created)
+        # Raw text is engine data: the publish switch never moves it.
+        self.raw_dir = self.publish_raw_dir
+        self.ensure_publish(created)
         if self.conn is None:
             self.conn = sqlite3.connect(self.db_path)
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA busy_timeout = 5000")
             self._create_schema()
+            self.ensure_columns()
             self.migrate_legacy_pages()
         self.ensure_mirror()
         return created
 
     def ensure_publish(self, created):
-        """Create the view tree and its README; users own what they add there."""
-        for directory in (self.publish_dir, self.publish_raw_dir):
+        """Create the view tree; the switch only stops the page-side output."""
+        name = publish_dir_name(self.config)
+        view = self.root / name
+        if not window_safe(self.root, view.resolve()):
+            raise WikiError(
+                "E_PATH",
+                f"publish dir {name} resolves outside the workspace root",
+                "keep publish.dir inside the workspace, or remove the symlink",
+                2,
+            )
+        if not view.is_dir() and (view.exists() or view.is_symlink()):
+            raise WikiError(
+                "E_STATE",
+                f"publish.dir {name} exists but is not a directory",
+                "move it aside, or set publish.dir to another name",
+                2,
+            )
+        for directory in (view, self.publish_raw_dir):
             if not directory.exists():
                 directory.mkdir(parents=True)
                 created.append(norm_key(directory.relative_to(self.root)))
-        readme = self.publish_dir / "README.md"
+        if not self.config["publish"]["enabled"]:
+            return
+        readme = view / "README.md"
         if not readme.exists():
             write_atomic(readme, PUBLISH_README)
             created.append(norm_key(readme.relative_to(self.root)))
@@ -409,6 +449,9 @@ class Wiki:
                     digest TEXT NOT NULL,
                     size INTEGER NOT NULL,
                     mtime REAL NOT NULL,
+                    raw_digest TEXT NOT NULL,
+                    raw_size INTEGER NOT NULL,
+                    raw_mtime REAL NOT NULL,
                     raw TEXT NOT NULL,
                     parser TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -424,6 +467,7 @@ class Wiki:
                     id TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,
                     subject TEXT NOT NULL,
+                    -- queued | leased | expired | accepted; rows are never deleted
                     state TEXT NOT NULL,
                     epoch INTEGER NOT NULL DEFAULT 0,
                     inputs TEXT NOT NULL,
@@ -448,6 +492,8 @@ class Wiki:
                     body TEXT NOT NULL,
                     digest TEXT NOT NULL,
                     render_digest TEXT NOT NULL,
+                    view_digest TEXT NOT NULL,
+                    view_path TEXT NOT NULL,
                     origin TEXT NOT NULL,
                     accepted_at TEXT NOT NULL,
                     PRIMARY KEY (page, rev)
@@ -462,6 +508,24 @@ class Wiki:
                 );
                 """
             )
+
+    def ensure_columns(self):
+        """Refuse a ledger from an older skill; there is no migration on purpose."""
+        required = (
+            ("sources", ("raw_digest", "raw_size", "raw_mtime")),
+            ("page_revs", ("view_digest", "view_path")),
+        )
+        for table, columns in required:
+            present = {
+                row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")
+            }
+            if not set(columns) <= present:
+                raise WikiError(
+                    "E_STATE",
+                    "ledger schema is older than this skill",
+                    "delete .wiki/ then run `init` and `ingest`",
+                    2,
+                )
 
     def close(self):
         if self.conn is not None:
@@ -499,29 +563,35 @@ class Wiki:
         return self.conn.execute("SELECT * FROM sources ORDER BY key").fetchall()
 
     def write_raw(self, key, text, meta):
-        target = self.raw_dir / f"{key2file(key)}.md"
+        target = self.publish_raw_dir / f"{key2file(key)}.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         write_atomic(target, render_page(meta, text))
         return norm_key(target.relative_to(self.root))
 
-    def upsert_source(self, path, digest, size, mtime, raw, parser, status="pending"):
+    def upsert_source(self, path, digest, size, mtime, raw, parser, status,
+                      raw_digest, raw_size, raw_mtime):
         key = norm_key(path)
         now = date.today().isoformat()
         with self.conn:
             self.conn.execute(
                 """
-                INSERT INTO sources (key, path, digest, size, mtime, raw, parser, status, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sources (key, path, digest, size, mtime, raw_digest, raw_size,
+                                     raw_mtime, raw, parser, status, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET
                     digest = excluded.digest,
                     size = excluded.size,
                     mtime = excluded.mtime,
+                    raw_digest = excluded.raw_digest,
+                    raw_size = excluded.raw_size,
+                    raw_mtime = excluded.raw_mtime,
                     raw = excluded.raw,
                     parser = excluded.parser,
                     status = excluded.status,
                     updated_at = excluded.updated_at
                 """,
-                (key, str(path), digest, size, mtime, raw, parser, status, now),
+                (key, str(path), digest, size, mtime, raw_digest, raw_size, raw_mtime,
+                 raw, parser, status, now),
             )
 
     def set_source_status(self, key, status):
@@ -639,11 +709,15 @@ class Wiki:
             ensure_ascii=False,
         )
         target = self.page_path(meta)
+        # View-side facts belong to the rendered page tree, so a bare revision
+        # records them as empty rather than guessing a path and digest.
         with self.conn:
             self.conn.execute(
                 """
-                INSERT INTO page_revs (page, rev, meta, body, digest, render_digest, origin, accepted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO page_revs
+                (page, rev, meta, body, digest, render_digest, view_digest, view_path,
+                 origin, accepted_at)
+                VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?)
                 """,
                 (
                     page, rev, json.dumps(meta, ensure_ascii=False, sort_keys=True),
@@ -722,8 +796,9 @@ class Wiki:
                 self.conn.execute(
                     """
                     INSERT OR IGNORE INTO page_revs
-                    (page, rev, meta, body, digest, render_digest, origin, accepted_at)
-                    VALUES (?, 1, ?, ?, ?, ?, 'external', ?)
+                    (page, rev, meta, body, digest, render_digest, view_digest, view_path,
+                     origin, accepted_at)
+                    VALUES (?, 1, ?, ?, ?, ?, '', '', 'external', ?)
                     """,
                     (
                         page_id,
@@ -1124,7 +1199,7 @@ def command_ingest():
                     digest_text(key + str(path.stat().st_size)),
                     path.stat().st_size,
                     path.stat().st_mtime,
-                    "", "", "oversize",
+                    "", "", "oversize", "", 0, 0.0,
                 )
             continue
         except OSError as error:
@@ -1152,7 +1227,8 @@ def command_ingest():
             )
             if not ARGS.dry_run:
                 wiki.upsert_source(
-                    path.relative_to(wiki.scan_root), digest, len(data), mtime, "", "", "unsupported"
+                    path.relative_to(wiki.scan_root), digest, len(data), mtime,
+                    "", "", "unsupported", "", 0, 0.0,
                 )
             continue
         if len(text) > MAX_RAW_CHARS:
@@ -1179,7 +1255,9 @@ def command_ingest():
             "updated": date.today().isoformat(),
         }
         raw_rel = wiki.write_raw(key, text, meta)
-        wiki.upsert_source(path.relative_to(wiki.scan_root), digest, len(data), mtime, raw_rel, parser)
+        raw_digest, raw_size, raw_mtime = file_facts(wiki.root / raw_rel)
+        wiki.upsert_source(path.relative_to(wiki.scan_root), digest, len(data), mtime,
+                           raw_rel, parser, "pending", raw_digest, raw_size, raw_mtime)
         fresh.append(
             {
                 "key": key,

@@ -12,6 +12,7 @@ Exit: 0 all checks passed, 1 a check failed.
 import argparse
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -139,10 +140,25 @@ def main(argv=None):
         data = run(root, "check")["data"]
         check(results, "check passes before init", data["ok"], data)
 
+        # A ledger from an older skill is refused, not half-used.
+        legacy = root / ".wiki"
+        legacy.mkdir()
+        legacy_db = sqlite3.connect(legacy / "wiki.db")
+        legacy_db.executescript(
+            "CREATE TABLE sources (key TEXT PRIMARY KEY, path TEXT, digest TEXT, size INTEGER,"
+            " mtime REAL, raw TEXT, parser TEXT, status TEXT, updated_at TEXT);"
+        )
+        legacy_db.close()
+        broken = run(root, "status", expect=(0, 1, 2))
+        check(results, "missing columns report E_STATE",
+              broken.get("error", {}).get("code") == "E_STATE", broken)
+        shutil.rmtree(legacy)
+        shutil.rmtree(root / "wiki", ignore_errors=True)  # the probe touched the view too
+
         data = run(root, "init")["data"]
         check(results, "init creates .wiki", (root / ".wiki/wiki.db").exists() and data["sources"] == 0, data)
         check(results, "init creates the publish directory",
-              (root / "wiki").is_dir() and not (root / ".wiki/raw").exists(), listing)
+              (root / "wiki").is_dir() and not (root / ".wiki/raw").exists(), data)
         check(results, "publish README is written", (root / "wiki/README.md").exists())
 
         data = run(root, "check")["data"]
@@ -180,6 +196,12 @@ def main(argv=None):
         check(results, "ingest skips topic files",
               not any(item["key"].startswith("话题/") for item in data["ingested"]), data["ingested"])
         check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
+
+        check(results, "raw lives under the publish dir",
+              (root / "wiki/raw").is_dir() and not (root / ".wiki/raw").exists())
+        data = run(root, "ingest")["data"]
+        raw_files = sorted(p.name for p in (root / "wiki/raw").glob("*.md"))
+        check(results, "raw files are written into wiki/raw", len(raw_files) == 2, raw_files)
 
         found = run(root, "query", "开户")["data"]
         check(results, "query does not mix in scenario matches",
@@ -405,6 +427,39 @@ def main(argv=None):
         check(results, "oversize classified", "big.md" in {item["key"] for item in oversized["oversize"]}, oversized)
         config["ingest"]["max_source_bytes"] = 50_000_000
         config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+
+        config["publish"] = {"dir": "../x", "enabled": False, "topics": True, "scenarios": True}
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        disabled = run(root, "status", expect=2)
+        check(results, "invalid publish dir is rejected even when disabled",
+              disabled["error"]["code"] == "E_CONFIG", disabled)
+
+        config["publish"] = {"dir": "view", "enabled": True, "topics": True, "scenarios": True}
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        (root / "view").write_text("占位：同名文件不是目录\n", encoding="utf-8")
+        blocked = run(root, "status", expect=(0, 1, 2))
+        check(results, "publish dir that is a file reports E_STATE",
+              blocked.get("error", {}).get("code") == "E_STATE", blocked)
+        (root / "view").unlink()
+        outside_view = root.parent / f"{root.name}-view"
+        outside_view.mkdir()
+        try:
+            (root / "view").symlink_to(outside_view, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pass
+        else:
+            escaping = run(root, "status", expect=(0, 1, 2))
+            check(results, "publish dir symlink outside the workspace reports E_PATH",
+                  escaping.get("error", {}).get("code") == "E_PATH", escaping)
+            (root / "view").unlink()
+        shutil.rmtree(outside_view, ignore_errors=True)
+        seen = run(root, "status")["data"]
+        check(results, "a legal non-default publish dir is created",
+              (root / "view/raw").is_dir() and (root / "view/README.md").exists(), seen)
+        (root / "view/note.md").write_text("# 视图笔记\n\n用户放进视图的便签。\n", encoding="utf-8")
+        ingested = run(root, "ingest")["data"]["ingested"]
+        check(results, "the publish dir is skipped by ingest",
+              not any(item["key"].startswith("view/") for item in ingested), ingested)
 
         dry = root / "dry"
         dry.mkdir()
