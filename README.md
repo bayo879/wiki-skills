@@ -15,20 +15,15 @@
 # 安装到 agent 会扫描的技能目录（也可直接按路径加载 SKILL.md）
 python3 skills/llm-wiki/scripts/install.py --target auto --json
 
-# 在资料目录初始化并摄入
-cd /path/to/documents
+# 在资料所在的工作区根目录初始化并摄入（不要 cd 到工作区外）
 python3 <skill>/scripts/wiki.py ingest --json
 
-# 任务循环
+# 任务循环：next 返回 brief 与 template，填好 template 后 submit
 python3 <skill>/scripts/wiki.py next --json
-python3 <skill>/scripts/wiki.py read "raw:<key>" --limit 120 --json
-python3 <skill>/scripts/wiki.py submit <t_id> --epoch <n> --payload route.json --json
-python3 <skill>/scripts/wiki.py next --kind page --json
-python3 <skill>/scripts/wiki.py submit <t_id> --epoch <n> --payload page.json --json
-python3 <skill>/scripts/wiki.py doctor --json
+python3 <skill>/scripts/wiki.py submit <t_id> --payload .wiki/payloads/<t_id>.json --json
 ```
 
-完整命令与字段见 [技能内的 CLI 契约](skills/llm-wiki/references/cli.md)。
+完整命令与字段见 [CLI 契约](docs/readme/cli.md)。
 
 ## 工作方式
 
@@ -41,13 +36,17 @@ python3 <skill>/scripts/wiki.py doctor --json
 4. 页面以修订形式写入账本，并渲染到 `.wiki/pages/<type>/<id>.md`。来源变化会让引用页
    变 `stale`，下次 `ingest` 重新排队。
 
-任务有租约与 epoch：领取 15 分钟后可被回收，提交必须带回领取时的 epoch，避免过期结果
-覆盖新状态。提交失败时任务回到队列并记录原因，可修正后重交。
+任务由引擎排队和回收：`next` 一次给一个，返回 `brief`（做什么、怎么做、提交后的影响）与
+已固定结构的 `template`。agent 只填内容，不接触租约、重试或状态迁移；提交失败时任务回到
+队列，按返回的 `error.next` 修正后重交。
 
 ## 边界
 
 - **不 OCR、不下载依赖、不访问网络。** 扫描件与图片进入 `unsupported`，由人提供可复制
   文本后再摄入。
+- **不越出工作区。** 所有命令以会话工作区为根目录；`--root` 只能是当前目录或它下面的
+  子目录，草稿、载荷、导出与临时文件都放 `.wiki/` 下。资料在区外时请用户切换工作区，
+  不跨区读写。
 - **页面只能通过命令修改。** 直接改 `.wiki/pages/` 会在下次命令启动时被账本覆盖，原文
   存进 `.wiki/drift/` 留证。人工修改走 `page import`，回滚走 `page restore --rev N`。
 - **超限文件不解析。** 默认单文件 50 MB（`ingest.max_source_bytes`），按 `oversize` 报告，
@@ -57,9 +56,9 @@ python3 <skill>/scripts/wiki.py doctor --json
 ## 仓库结构
 
 ```text
-skills/llm-wiki/          技能：SKILL.md、references/、scripts/wiki.py
+skills/llm-wiki/          技能：SKILL.md、references/curation.md、scripts/
 skills/llm-wiki-session/   会话技能：从对话中提炼项目素材，不依赖 wiki 引擎
-docs/readme/              产品说明：设计原则
+docs/readme/              产品说明：设计原则、CLI、安装、恢复
 docs/agent/               开发指导：决策、引擎内部、维护守则
 docs/issues/              未决问题，一问题一文件
 ```
@@ -74,6 +73,6 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 skills/llm-wiki/scripts/selftest.py
 ```
 
-`selftest.py` 在临时目录跑 20 项端到端检查，不接触真实数据；CI 对多个 Python 版本重复
+`selftest.py` 在临时目录跑 30 项端到端检查，不接触真实数据；CI 对多个 Python 版本重复
 执行同一套检查。验证记录（含真实 PDF 语料结果）见
-[skills/llm-wiki/references/verification.md](skills/llm-wiki/references/verification.md)。
+[docs/agent/verification.md](docs/agent/verification.md)。

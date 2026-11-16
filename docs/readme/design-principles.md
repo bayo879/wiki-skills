@@ -2,8 +2,9 @@
 
 ## 交付物是技能，不是程序
 
-`skills/llm-wiki/` 整个目录就是交付物：`SKILL.md` 给 agent 读，`scripts/wiki.py` 是引擎，
-`references/` 是给人看的细节。复制目录即可使用，没有安装步骤、没有服务、没有全局状态。
+`skills/llm-wiki/` 整个目录就是交付物：`SKILL.md` 给 agent 读，`scripts/` 是引擎，
+`references/curation.md` 是页面质量标准。命令契约、安装、恢复与验证记录在
+`docs/readme/` 与 `docs/agent/`，不放进技能目录。复制目录即可使用，没有服务、没有全局状态。
 
 这是 2026-11-13 转型后的唯一形态。Rust CLI、单二进制分发、`output/` 发布包都已停止维护，
 源码归档在 tag `rust-archive-2026-11-13`。
@@ -15,8 +16,8 @@
 | 引擎 | 扫描、解析、哈希、任务状态、载荷校验、引文核对、修订与渲染、镜像修复 | 判断哪份材料值得建页、写正文、选标题与边界 |
 | agent | 读 raw 与已有页、决定来源归属、写正文与证据、提交载荷 | 直接改页面文件、手改数据库、跳过任务直接落盘 |
 
-分工的边界由命令面固定：agent 能执行的只有 `init/ingest/next/submit/release/read/query/
-page/export/status/doctor`。没有"直接写页"的入口。
+分工的边界由命令面固定：agent 日常只用 `init/ingest/next/submit/query/read`；`release/
+page/export/status/doctor` 是人工或维护入口，不写进技能流程。没有"直接写页"的入口。
 
 ## 账本是唯一事实源
 
@@ -35,7 +36,8 @@ page/export/status/doctor`。没有"直接写页"的入口。
 
 - 一个来源一条 route 任务；route 通过后，每个目标页一条 page 任务。
 - 任务有 `queued → leased → accepted`，领取带 15 分钟租约与递增 epoch。
-- 提交必须带回 epoch；过期或已关闭的任务返回 `E_TASK_STALE`，不会写入。
+- 提交按任务 id 关闭，不需要 epoch；过期或已关闭的任务返回 `E_TASK_STALE`，不会写入。
+- agent 看到的是 brief/template，租约与 epoch 只在引擎内部使用。
 - 校验失败零写入，任务退回队列并记录 `last_error`，修正后重新 `next`。
 
 这样 agent 即使想跳过校验也没有接口；流程本身不是靠提示词约束，而是靠状态与校验。

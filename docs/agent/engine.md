@@ -1,17 +1,20 @@
 # 引擎内部
 
-对象：`skills/llm-wiki/scripts/wiki.py`（约 1970 行，单文件上限 2000 行；再长就按
-解析 / 账本 / 任务 / 命令拆模块）。本文件只记录改代码时容易踩的内部约定，命令与字段以
-`skills/llm-wiki/references/cli.md` 为准。
+对象：`skills/llm-wiki/scripts/wiki.py`（1999 行，单文件上限 2000 行；公共错误在
+`errors.py`，工作区边界在 `workspace.py`，任务信息面在 `tasks.py`；再长就按解析 / 账本 /
+任务 / 命令拆模块）。本文件只记录改代码时容易踩的内部约定，命令与字段以
+`docs/readme/cli.md` 为准。
 
 ## 布局
 
 | 区段 | 位置 | 说明 |
 | --- | --- | --- |
-| 常量与配置 | 文件头、`DEFAULT_CONFIG`、`load_config` | `BODY_MAX_CHARS=60000`、`SUMMARY_MAX_CHARS=200`、`TASK_LEASE_SECONDS=900`、`DEFAULT_BATCH=20` |
-| 错误与输出 | `WikiError`、`emit`、`fail` | 错误码 + `next` + 退出码；所有命令走同一信封 |
+| 常量与配置 | 文件头、`DEFAULT_CONFIG`、`load_config` | `BODY_MAX_CHARS=60000`、`SUMMARY_MAX_CHARS=200`、`TASK_LEASE_SECONDS=900` |
+| 错误与输出 | `errors.py` 的 `WikiError`、`emit`、`fail` | 错误码 + `next` + 退出码；所有命令走同一信封 |
+| 工作区边界 | `workspace.py` | `WIKI_DIR`、`window_safe`、`inside_root`、`dry_store`；文件参数一律先过 `inside_root` |
 | 解析 | `extract_text` 及 `pdf_to_text`、`docx_to_text`、`html_to_text`、`decode_bytes` | 纯函数，不碰数据库；超限在 `read_bytes` 抛 |
 | 页面渲染 | `render_page`、`split_frontmatter`、`yaml_scalar` | 渲染与解析 frontmatter 必须对称；改动一侧要同步另一侧 |
+| 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 账本 | `class Wiki` | 表、来源、修订、镜像、任务全在这里 |
 | 命令层 | `command_*`、`submit_route`、`submit_page` | 只做参数解析、调用 `Wiki`、组装输出 |
 
@@ -50,6 +53,11 @@
    `record_drift` 再写回；孤儿 `.md` 移入 drift。`--dry-run` 不建库、不进镜像修复。
 10. **旧页面迁移只跑一次。** `migrate_legacy_pages` 仅在 `page_revs` 为空时把
     file-first 页面收为 rev1（`origin=external`），之后不再猜测文件内容。
+11. **工作区边界。** `open_wiki` 以 cwd 为 workspace，`--root` 必须是 workspace 或其子目录；
+    `read` 路径、`--payload`、`body_file`、`page import --from`、`export` 统一走
+    `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
+    解析后落在扫描根外的符号链接。导入 `errors.py` / `workspace.py` 前设
+    `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。
 
 ## 数据方向
 
@@ -62,10 +70,14 @@ page 载荷 → 校验 → page_revs + 镜像 + links
 
 `raw` 文件名带 digest 前缀，避免同名覆盖；`sources.raw` 存相对路径。
 
+`next` 只输出 `{id, brief, template, work}`；`epoch`、`lease_until`、`attempts` 留在账本里。
+`submit` 的 `--epoch` 只是兼容旧脚本的可选项，正常路径不要求。任务包由 `tasks.py` 生成，
+改任务设计时只改这一处，不要在 `SKILL.md` 里补流程说明。
+
 ## 改动检查表
 
-- 改字段或校验：同步 `references/cli.md`、`SKILL.md`、`selftest.py`。
-- 改表结构：在 `ensure()` 里做幂等迁移，并在 `verification.md` 记录旧库升级结果。
+- 改字段或校验：同步 `docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、`SKILL.md`、`selftest.py`。
+- 改表结构：在 `ensure()` 里做幂等迁移，并在 `docs/agent/verification.md` 记录旧库升级结果。
 - 改渲染：`render_page` 与 `split_frontmatter` 必须能往返；跑 `selftest.py` 的
   import/restore 用例。
-- 改任务：并发前提是单写者；不要为了"更快"去掉 CAS 或 epoch 校验。
+- 改任务：并发前提是单写者；不要为了"更快"去掉提交前的状态与租约检查。

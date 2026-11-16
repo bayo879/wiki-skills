@@ -25,6 +25,9 @@ PDF 支持按优先级降级：`pdftotext` → `pypdf` → 跳过并提示。不
 | Codex | `~/.codex/skills/` |
 | OpenCode | `~/.config/opencode/skills/` |
 
+安装位置（项目级或全局）只决定技能从哪里加载，不改变知识库位置：所有 wiki 命令仍在
+会话工作区根目录执行。不要把技能目录或数据目录当作知识库根。
+
 自动放置（只写入**已经存在**的技能根，不创建无关目录）：
 
 ```bash
@@ -51,20 +54,25 @@ python3 <安装路径>/scripts/wiki.py --version
 python3 <安装路径>/scripts/selftest.py
 ```
 
-`selftest.py` 在临时目录跑 20 项检查（建库、摄入与分类、route 决定、页面提交、
-镜像漂移、import/restore、导出、超限、dry-run、doctor），不接触真实数据。全部通过即
-安装可用。
+`selftest.py` 在临时目录跑 30 项检查（建库、摄入与分类、任务包、route 决定、页面提交、
+镜像漂移、import/restore、导出、越界拒绝、超限、dry-run、doctor），不接触真实数据。
+全部通过即安装可用。
 
 ## 4. 在业务目录启用
 
-技能安装位置与知识库位置是两件事。到要整理的资料目录执行：
+技能安装位置与知识库位置是两件事。**知识库根 = 会话工作区根。** 用会话工作区打开要
+整理的资料目录，在该目录执行（不要 `cd` 到工作区外）：
 
 ```bash
 python3 <安装路径>/scripts/wiki.py ingest --json
 ```
 
-首次运行会在**当前目录**创建 `.wiki/`（`wiki.json`、`wiki.db`、`raw/`、`pages/`、`drift/`）。
-也可以在任何位置用 `--root <资料目录>` 指向知识库，不需要 `cd`。
+首次运行会在**当前工作区**创建 `.wiki/`（`wiki.json`、`wiki.db`、`raw/`、`pages/`、
+`drift/`、`payloads/`、`drafts/`）。`--root` 只接受当前目录或它下面的子目录，不能指向工作区外；资料在区外时，
+请用户把那个目录作为工作区打开，或复制进来。
+
+草稿、载荷、导出与临时文件都放 `.wiki/` 下：`.wiki/drafts/`、`.wiki/payloads/`、
+`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源，缓存不要散落在根目录。
 
 摄入只负责把文件变成来源并排队 route 任务；建页由后续任务循环完成，见 `SKILL.md`
 的主循环。不要手工编辑 `.wiki/` 下的文件，页面只能通过 `submit`、`page import` 修改。

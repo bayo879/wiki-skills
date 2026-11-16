@@ -6,7 +6,14 @@
 环境：macOS，Python 3.15.2，SQLite 3.54.1，pdftotext 25.11.0（Poppler）。没有安装
 `pypdf`，PDF 全部走 `pdftotext` 分支。
 
-## 一、自测：20/20 通过
+## 2026-11-15 任务信息面改造后复跑
+
+`next` 改为只返回 `{id, brief, template, work}`，`submit` 不再要求 epoch；新建页面的
+正文章节由 `template.body` 固定。复跑 `python3 skills/llm-wiki/scripts/selftest.py`：
+30/30 通过，退出码 0。新增检查覆盖任务包字段、内部字段不暴露、route/page 模板骨架。
+下文表格是 2026-11-13 的 26 项基线，字段结构以本次改造后的契约为准。
+
+## 一、自测：26/26 通过
 
 ```bash
 python3 skills/llm-wiki/scripts/selftest.py
@@ -15,12 +22,16 @@ python3 skills/llm-wiki/scripts/selftest.py
 | 用例 | 覆盖点 |
 | --- | --- |
 | `init` 建库 | 生成 `.wiki/`、`wiki.db`、`wiki.json`，来源为 0 |
+| `--root` 区外 | 指向工作区外的根目录返回 `E_PATH`，退出码 2 |
+| `read` 区外 | 读工作区外文件返回 `E_PATH` |
 | `ingest` 排队 | 每个来源一条 route 任务，`pending_total` 正确 |
 | 图片分类 | `.png` 进 `unsupported`，不影响其他文件 |
 | route 领取 | 一个来源一条任务，`work.sources` 带 raw 路径 |
+| payload 区外 | 载荷文件在工作区外返回 `E_PATH` |
 | `read` raw | 返回解析文本，`content` 为正文 |
 | `skip` 决定 | 被拒决定返回可读错误，接受后来源变 `skipped` |
 | route `new` | 入队 page 任务，任务带来源与 raw |
+| `body_file` 区外 | 草稿路径越界返回 `E_PATH`，任务回队列 |
 | page 提交 | 生成 rev1 与 `.wiki/pages/<type>/<id>.md` |
 | 任务关闭后重交 | `E_TASK_STALE`，退出码 3 |
 | `status` | 页数、stale、开放任务统计正确 |
@@ -28,13 +39,15 @@ python3 skills/llm-wiki/scripts/selftest.py
 | `read` page | 读账本而不是镜像文件 |
 | 镜像被改 | 原文进 `.wiki/drift/`，镜像按账本还原 |
 | `page import` | 生成 rev2，`origin=import` |
+| import 区外 | `--from` 越界返回 `E_PATH` |
 | `page restore` | 回滚内容生成 rev3 |
 | `export` | 页面镜像复制到目标目录 |
+| export 区外 | 目标目录越界返回 `E_PATH`，不写文件 |
 | 超限 | `max_source_bytes=10` 时 100 字节文件进 `oversize`，退出码 1 |
 | `--dry-run` | 未初始化目录不创建 `.wiki/` |
 | `doctor` | 跑完并返回结构化 issues |
 
-输出以 `20/20 checks passed` 结尾，退出码 0。`--json` 输出可供 CI 解析。
+输出以 `26/26 checks passed` 结尾，退出码 0。`--json` 输出可供 CI 解析。
 
 ## 二、真实语料：4 份中国电信 PDF
 

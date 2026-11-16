@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent / "wiki.py"
+WIKI_CACHE = ".wiki"
 CHECKED = []
 
 
@@ -42,15 +43,21 @@ def run(root, *args, expect=0, stdin=None):
 
 
 def payload_file(root, name, data):
-    path = Path(root) / name
+    path = Path(root) / WIKI_CACHE / "payloads" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return str(path)
 
 
 def body_file(root):
-    path = Path(root) / ".drafts" / "page.md"
+    path = Path(root) / WIKI_CACHE / "drafts" / "page.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("## 结论\n\n停机后本人持证到厅复机，约两个工作日。\n", encoding="utf-8")
+    path.write_text(
+        "## 结论\n\n停机后本人持证到厅复机，约两个工作日。\n\n"
+        "## 步骤\n\n本人带身份证到营业厅提交复机申请。\n\n"
+        "## 注意事项\n\n异地办理与资费以当地营业厅为准。\n",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -74,19 +81,39 @@ def main(argv=None):
         data = run(root, "init")["data"]
         check(results, "init creates .wiki", (root / ".wiki/wiki.db").exists() and data["sources"] == 0, data)
 
+        outside_file = root.parent / f"{root.name}-outside.md"
+        outside_file.write_text("# 区外\n", encoding="utf-8")
+        escaped = run(root, "status", "--root", str(root.parent), expect=2)
+        check(results, "root outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
+        escaped = run(root, "read", str(outside_file), expect=2)
+        check(results, "read outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
+
         data = run(root, "ingest")["data"]
         check(results, "ingest queues route tasks", data["pending_total"] == 2, data)
         check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
 
         tasks = run(root, "next", "--kind", "route", "--batch", "5")["data"]["tasks"]
         check(results, "route claims one task per source", len(tasks) == 2, tasks)
-        routes = {task["subject"]: task for task in tasks}
-        source_key = routes["a.md"]["inputs"]["sources"][0]["key"]
+        check(results, "next returns brief and template", all(t.get("brief") and t.get("template") for t in tasks), tasks)
+        check(results, "next hides task internals",
+              not any(key in tasks[0] for key in ("epoch", "state", "inputs", "lease_until")), tasks[0])
+        routes = {task["work"]["sources"][0]["key"]: task for task in tasks}
+        check(results, "route template pre-fills the source",
+              routes["a.md"]["template"]["decisions"][0]["source"] == "a.md", routes["a.md"]["template"])
+        source_key = routes["a.md"]["work"]["sources"][0]["key"]
         raw = run(root, "read", f"raw:{source_key}")["data"]
         check(results, "read returns raw text", "复机" in raw["content"], raw)
 
+        outside_payload = root.parent / f"{root.name}-payload.json"
+        outside_payload.write_text("{}", encoding="utf-8")
+        escaped = run(
+            root, "submit", routes["b.md"]["id"],
+            "--payload", str(outside_payload), expect=2,
+        )
+        check(results, "payload outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
+        outside_payload.unlink()
         merged = run(
-            root, "submit", routes["b.md"]["id"], "--epoch", str(routes["b.md"]["epoch"]),
+            root, "submit", routes["b.md"]["id"],
             "--payload", payload_file(root, "skip.json",
                                       {"decisions": [{"source": "b.md", "action": "skip",
                                                       "reason": "与主题无关"}]}),
@@ -94,7 +121,7 @@ def main(argv=None):
         check(results, "skip decision accepted", merged["ok"], merged)
 
         submitted = run(
-            root, "submit", routes["a.md"]["id"], "--epoch", str(routes["a.md"]["epoch"]),
+            root, "submit", routes["a.md"]["id"],
             "--payload", payload_file(root, "route.json", {"decisions": [
                 {"source": source_key, "action": "new", "page": "anti-fraud-restore",
                  "title": "反诈复机", "type": "process", "reason": "完整的复机办理路径"},
@@ -104,22 +131,35 @@ def main(argv=None):
 
         body_file(root)
         task = run(root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"][0]
+        check(results, "page template fixes the section skeleton",
+              "## 结论" in task["template"]["body"] and "## 步骤" in task["template"]["body"], task["template"])
         payload = {
             "page": "anti-fraud-restore",
             "title": "反诈复机",
             "type": "process",
             "summary": "停机后本人持证到厅复机，约两个工作日。",
             "links": [],
-            "body_file": ".drafts/page.md",
+            "body_file": ".wiki/drafts/page.md",
             "evidence": [{"source": source_key, "quote": "需要本人持身份证到营业厅办理复机"}],
             "boundaries": {"covered": "停机后的复机路径", "not_covered": "异地办理与资费"},
         }
-        accepted = run(root, "submit", task["id"], "--epoch", str(task["epoch"]),
+        outside_body = root.parent / f"{root.name}-body.md"
+        outside_body.write_text("## 区外草稿\n", encoding="utf-8")
+        escaped = run(
+            root, "submit", task["id"],
+            "--payload", payload_file(root, "body-escape.json",
+                                      {**payload, "body_file": str(outside_body)}),
+            expect=2,
+        )
+        check(results, "body_file outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
+        outside_body.unlink()
+        task = run(root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"][0]
+        accepted = run(root, "submit", task["id"],
                        "--payload", payload_file(root, "page.json", payload))
         mirror = root / ".wiki/pages/process/anti-fraud-restore.md"
         check(results, "page submit writes rev 1", accepted["data"]["rev"] == 1 and mirror.exists(), accepted)
 
-        bad = run(root, "submit", task["id"], "--epoch", str(task["epoch"]),
+        bad = run(root, "submit", task["id"],
                   "--payload", payload_file(root, "again.json", payload), expect=3)
         check(results, "closed task rejects resubmit", bad["error"]["code"] == "E_TASK_STALE", bad)
 
@@ -136,15 +176,23 @@ def main(argv=None):
         check(results, "mirror edit kept as drift", drift and "手改" in drift[0].read_text(encoding="utf-8"), drift)
         check(results, "mirror restored from ledger", "两个工作日" in mirror.read_text(encoding="utf-8"), mirror)
 
-        edited = root / ".drafts/edited.md"
+        edited = root / ".wiki/drafts/edited.md"
         edited.write_text("---\ntitle: 反诈复机\n---\n## 结论\n\n人工补充：可拨打客服确认进度。\n", encoding="utf-8")
         imported = run(root, "page", "import", "anti-fraud-restore", "--from", str(edited))["data"]
         check(results, "page import adds a revision", imported["rev"] == 2, imported)
+        outside_edit = root.parent / f"{root.name}-edit.md"
+        outside_edit.write_text("## 区外\n", encoding="utf-8")
+        escaped = run(root, "page", "import", "anti-fraud-restore",
+                      "--from", str(outside_edit), expect=2)
+        check(results, "import outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
+        outside_edit.unlink()
         restored = run(root, "page", "restore", "anti-fraud-restore", "--rev", "1")["data"]
         check(results, "page restore rolls back content", restored["rev"] == 3 and "两个工作日" in mirror.read_text(encoding="utf-8"), restored)
 
-        exported = run(root, "export", str(root / ".drafts/export"))["data"]["files"]
+        exported = run(root, "export", str(root / ".wiki/export"))["data"]["files"]
         check(results, "export writes mirror copies", exported, exported)
+        escaped = run(root, "export", str(root.parent / "wiki-export"), expect=2)
+        check(results, "export outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
 
         config_path = root / ".wiki/wiki.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))

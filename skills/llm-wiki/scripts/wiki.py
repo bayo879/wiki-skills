@@ -9,13 +9,12 @@ page revisions, and the automatic page mirror. Semantic work -- deciding which
 pages exist, their boundaries, their prose, and which quotes support them --
 belongs to the agent, which submits JSON payloads and never writes `.wiki/`.
 
-Commands are documented by `wiki.py --help` and in `../references/cli.md`.
+Commands are documented by `wiki.py --help` and in `docs/readme/cli.md`.
 """
 
 from __future__ import annotations
 
 import argparse
-import atexit
 import hashlib
 import html
 import json
@@ -31,18 +30,25 @@ from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 
+# A global skill can live outside the workspace; never write `__pycache__` there.
+sys.dont_write_bytecode = True
+
+from errors import WikiError
+from tasks import missing_sections, task_packet
+from workspace import WIKI_DIR, dry_store, inside_root, window_safe
+
 VERSION = "0.2.0"
-WIKI_DIR = ".wiki"
 RAW_SUBDIR = "raw"
 PAGES_SUBDIR = "pages"
 DRIFT_SUBDIR = "drift"
+PAYLOAD_SUBDIR = "payloads"
+DRAFT_SUBDIR = "drafts"
 DB_NAME = "wiki.db"
 CONFIG_NAME = "wiki.json"
 MAX_RAW_CHARS = 4_000_000
 BODY_MAX_CHARS = 60_000
 SUMMARY_MAX_CHARS = 200
 TASK_LEASE_SECONDS = 900
-DEFAULT_BATCH = 20
 TASK_OPEN_STATES = ("queued", "leased")
 
 DEFAULT_CONFIG = {
@@ -53,7 +59,7 @@ DEFAULT_CONFIG = {
             "build", "vendor", ".venv", "venv", "__pycache__", ".idea", ".vscode",
         ]
     },
-    "ingest": {"max_source_bytes": 50_000_000, "batch": DEFAULT_BATCH},
+    "ingest": {"max_source_bytes": 50_000_000},
 }
 
 TEXT_SUFFIXES = {
@@ -65,17 +71,6 @@ HTML_SUFFIXES = {".html", ".htm"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 TITLE_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
-
-
-class WikiError(Exception):
-    """A failure with a stable code, an explanation, and a next action."""
-
-    def __init__(self, code, message, next_step="", exit_code=1):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.next_step = next_step
-        self.exit_code = exit_code
 
 
 class _TextExtractor(HTMLParser):
@@ -349,6 +344,8 @@ class Wiki:
         self.raw_dir = self.wiki_dir / RAW_SUBDIR
         self.pages_dir = self.wiki_dir / PAGES_SUBDIR
         self.drift_dir = self.wiki_dir / DRIFT_SUBDIR
+        self.payload_dir = self.wiki_dir / PAYLOAD_SUBDIR
+        self.draft_dir = self.wiki_dir / DRAFT_SUBDIR
         self.db_path = self.wiki_dir / DB_NAME
         self.config_path = self.wiki_dir / CONFIG_NAME
         self.conn = None
@@ -356,7 +353,8 @@ class Wiki:
 
     def ensure(self):
         created = []
-        for directory in (self.wiki_dir, self.raw_dir, self.pages_dir, self.drift_dir):
+        for directory in (self.wiki_dir, self.raw_dir, self.pages_dir, self.drift_dir,
+                          self.payload_dir, self.draft_dir):
             if not directory.exists():
                 directory.mkdir(parents=True)
                 created.append(norm_key(directory.relative_to(self.root)))
@@ -458,7 +456,10 @@ class Wiki:
             for name in sorted(filenames):
                 if name.startswith("."):
                     continue
-                found.append(Path(current) / name)
+                candidate = Path(current) / name
+                if candidate.is_symlink() and not window_safe(self.scan_root, candidate.resolve()):
+                    continue
+                found.append(candidate)
         return found
 
     def source_row(self, key):
@@ -893,12 +894,17 @@ class Wiki:
                 (error, task_id),
             )
 
-    def close_task(self, task_id, payload):
+    def close_task(self, task_id, payload, epoch=None):
+        sql = "UPDATE tasks SET state = 'accepted', payload = ?, lease_until = NULL, closed_at = ? WHERE id = ?"
+        params = [json.dumps(payload, ensure_ascii=False, sort_keys=True), now_iso(), task_id]
+        if epoch is not None:
+            sql += " AND epoch = ? AND state = 'leased'"
+            params.append(epoch)
         with self.conn:
-            self.conn.execute(
-                "UPDATE tasks SET state = 'accepted', payload = ?, lease_until = NULL, closed_at = ? WHERE id = ?",
-                (json.dumps(payload, ensure_ascii=False, sort_keys=True), now_iso(), task_id),
-            )
+            cursor = self.conn.execute(sql, params)
+        if epoch is not None and cursor.rowcount == 0:
+            raise WikiError("E_TASK_STALE", f"task {task_id} changed before it could be closed",
+                            "run `next` again and submit the fresh task", 3)
 
     def page_index(self):
         return [
@@ -919,13 +925,18 @@ class Wiki:
     def task_work(self, row):
         inputs = json.loads(row["inputs"])
         work = {
-            "sources": [self.source_view(item) for item in inputs.get("sources", [])],
+            "sources": [
+                {
+                    "key": view["key"],
+                    "raw": view["raw"],
+                    "chars": view["chars"],
+                }
+                for view in (self.source_view(item) for item in inputs.get("sources", []))
+            ],
             "page_index": self.page_index(),
         }
         if row["kind"] == "page":
             record = self.page_record(inputs["page"])
-            work["mode"] = inputs.get("mode")
-            work["base_rev"] = inputs.get("base_rev")
             if record:
                 work["page"] = {
                     "id": record["id"],
@@ -934,20 +945,6 @@ class Wiki:
                     "body": record["body"],
                 }
         return work
-
-
-def task_json(row):
-    return {
-        "id": row["id"],
-        "kind": row["kind"],
-        "subject": row["subject"],
-        "state": row["state"],
-        "epoch": row["epoch"],
-        "attempts": row["attempts"],
-        "lease_until": row["lease_until"],
-        "last_error": row["last_error"],
-        "inputs": json.loads(row["inputs"]),
-    }
 
 
 def emit(cmd, root, summary, data, human_lines, ok=True):
@@ -990,13 +987,21 @@ def fail(cmd, root, error):
 
 
 def open_wiki(require_sources=False, dry_run=False):
-    root = Path(ARGS.root).resolve() if ARGS.root else Path.cwd()
+    # The workspace is the directory the command runs in. A wiki may live in a
+    # subdirectory, but nothing may point above the workspace.
+    workspace = Path.cwd().resolve()
+    root = Path(ARGS.root).resolve() if ARGS.root else workspace
+    if not window_safe(workspace, root):
+        raise WikiError(
+            "E_PATH",
+            f"wiki root {root} is outside the workspace {workspace}",
+            "run the command from the workspace, or pass a subdirectory inside it",
+            2,
+        )
     if dry_run and not (root / WIKI_DIR / CONFIG_NAME).exists():
         # A dry run must not create `.wiki/` in a directory the user is only
-        # inspecting, so plan against a throwaway store that scans the real root.
-        ephemeral = Path(tempfile.mkdtemp(prefix="llm-wiki-dry-"))
-        atexit.register(shutil.rmtree, ephemeral, ignore_errors=True)
-        wiki = Wiki(ephemeral, scan_root=root)
+        # inspecting, so plan against a throwaway store under `.wiki/tmp/`.
+        wiki = Wiki(dry_store(root), scan_root=root)
     else:
         wiki = Wiki(root)
     created = wiki.ensure()
@@ -1235,23 +1240,23 @@ def command_status():
 
 def command_next():
     wiki, _ = open_wiki()
-    batch = ARGS.batch or int(wiki.config["ingest"].get("batch", DEFAULT_BATCH))
+    batch = ARGS.batch or 1
     rows = wiki.claim_tasks(kind=ARGS.kind, batch=max(1, batch))
     tasks = []
     lines = []
     for row in rows:
-        item = task_json(row)
-        item["work"] = wiki.task_work(row)
+        inputs = json.loads(row["inputs"])
+        item = task_packet(row["id"], row["kind"], inputs, wiki.task_work(row))
         tasks.append(item)
-        lines.append(f"{row['id']}  {row['kind']:<5}  {row['subject']}  (attempt {row['attempts']})")
-    data = {"tasks": tasks, "count": len(tasks), "lease_seconds": TASK_LEASE_SECONDS}
+        lines.append(f"{row['id']}  {item['brief']['goal']}")
+    data = {"tasks": tasks, "count": len(tasks)}
     if not tasks:
         emit("next", wiki.root, "no queued tasks", data, [])
         wiki.close()
         return 0
     emit(
         "next", wiki.root,
-        f"claimed {len(tasks)} task(s); submit with `submit <id> --epoch <n> --payload <file|->`",
+        f"{len(tasks)} task(s) ready; read each brief, fill its template, then submit",
         data,
         lines,
     )
@@ -1259,12 +1264,16 @@ def command_next():
     return 0
 
 
-def read_payload():
+def read_payload(wiki):
     if ARGS.payload == "-":
         raw = sys.stdin.read()
     else:
+        candidate = inside_root(
+            wiki.root, ARGS.payload, "payload",
+            "put payloads under .wiki/payloads/, or pass - for stdin",
+        )
         try:
-            raw = Path(ARGS.payload).read_text(encoding="utf-8")
+            raw = candidate.read_text(encoding="utf-8")
         except OSError as error:
             raise WikiError("E_PAYLOAD", f"cannot read payload: {error}", "pass a readable JSON file or -", 2)
     try:
@@ -1272,7 +1281,7 @@ def read_payload():
     except json.JSONDecodeError as error:
         raise WikiError(
             "E_PAYLOAD", f"payload is not valid JSON: {error}",
-            "emit one JSON object; `next --json` shows each task's inputs", 2,
+            "emit one JSON object; `next --json` includes a template for each task", 2,
         )
 
 
@@ -1286,19 +1295,19 @@ def command_submit():
         raise WikiError("E_TASK_STALE", f"task {task_id} is already accepted",
                         "run `next` for new work", 3)
     if row["state"] != "leased":
-        raise WikiError("E_TASK_STALE", f"task {task_id} is {row['state']}, not leased",
-                        "run `next` to claim it again", 3)
-    if row["epoch"] != ARGS.epoch:
+        raise WikiError("E_TASK_STALE", f"task {task_id} is no longer ready",
+                        "run `next` again to get fresh work", 3)
+    if ARGS.epoch is not None and row["epoch"] != ARGS.epoch:
         raise WikiError(
             "E_TASK_STALE",
-            f"task {task_id} epoch is {row['epoch']}, payload used {ARGS.epoch}",
-            "re-read `next --json` and resubmit with the current epoch", 3,
+            f"task {task_id} changed after it was claimed",
+            "run `next` again and submit the fresh task", 3,
         )
     if row["lease_until"] and parse_iso(row["lease_until"]) < datetime.now(timezone.utc):
         wiki.requeue_task(task_id, "lease expired")
-        raise WikiError("E_TASK_STALE", f"lease on {task_id} expired",
-                        "run `next` to claim it again", 3)
-    payload = read_payload()
+        raise WikiError("E_TASK_STALE", f"task {task_id} expired before submit",
+                        "run `next` again to get fresh work", 3)
+    payload = read_payload(wiki)
     try:
         if row["kind"] == "route":
             result = submit_route(wiki, row, payload)
@@ -1312,7 +1321,6 @@ def command_submit():
         result["summary"],
         {
             "task": task_id,
-            "kind": result["kind"],
             "page": result.get("page"),
             "rev": result.get("rev"),
             "sources": result.get("sources", []),
@@ -1332,7 +1340,7 @@ def submit_route(wiki, row, payload):
         raise WikiError(
             "E_PAYLOAD",
             "route payload must be {\"decisions\": [...]} with one decision per input source",
-            "see references/cli.md for the route schema",
+            "use the task template: one decision per input source",
             2,
         )
     seen = []
@@ -1426,7 +1434,7 @@ def submit_route(wiki, row, payload):
         else:
             inputs["mode"] = "update"
         page_tasks.append(wiki.enqueue_task("page", item["page"], inputs))
-    wiki.close_task(row["id"], payload)
+    wiki.close_task(row["id"], payload, row["epoch"])
     return {
         "kind": "route",
         "summary": f"route {row['id']} accepted; {len(set(page_tasks))} page task(s) queued",
@@ -1461,14 +1469,14 @@ def submit_page(wiki, row, payload):
         if record["rev"] != inputs.get("base_rev"):
             raise WikiError(
                 "E_PAGE_CONFLICT",
-                f"page {page_id} is at rev {record['rev']}, task was based on rev {inputs.get('base_rev')}",
-                "take a fresh page task and rewrite against the current revision", 3,
+                f"page {page_id} is now at rev {record['rev']}, the task started from rev {inputs.get('base_rev')}",
+                "run `next` again and rewrite against the current revision", 3,
             )
     meta, body, evidence, boundaries = validate_page_payload(wiki, row, payload, sources)
     rev = wiki.write_rev(page_id, meta, body, "submit")
     for item in sources:
         wiki.set_source_status(item["key"], "done")
-    wiki.close_task(row["id"], payload)
+    wiki.close_task(row["id"], payload, row["epoch"])
     return {
         "kind": "page",
         "page": page_id,
@@ -1512,9 +1520,10 @@ def validate_page_payload(wiki, row, payload, sources):
                             "create that page first, or drop the link", 2)
     body = payload.get("body")
     if body is None and payload.get("body_file"):
-        candidate = Path(str(payload["body_file"]))
-        if not candidate.is_absolute():
-            candidate = Path.cwd() / candidate
+        candidate = inside_root(
+            wiki.root, payload["body_file"], "body_file",
+            "put drafts under .wiki/drafts/",
+        )
         try:
             body = candidate.read_text(encoding="utf-8")
         except OSError as error:
@@ -1524,6 +1533,14 @@ def validate_page_payload(wiki, row, payload, sources):
     if body.lstrip().startswith("---"):
         raise WikiError("E_PAYLOAD", "body must not start with frontmatter",
                         "send only the markdown sections; the engine renders frontmatter", 2)
+    if inputs.get("mode") == "create":
+        missing = missing_sections(body, page_type)
+        if missing:
+            raise WikiError(
+                "E_PAYLOAD",
+                f"body is missing required section(s): {', '.join(missing)}",
+                "start from the task template.body and fill it; do not rename or drop sections", 2,
+            )
     if len(body) > BODY_MAX_CHARS:
         raise WikiError("E_PAYLOAD", f"body is {len(body)} chars, max {BODY_MAX_CHARS}",
                         "split the page or move detail into linked pages", 2)
@@ -1637,7 +1654,8 @@ def resolve_ref(wiki, ref):
         return wiki.root / row["raw"]
     candidate = (wiki.root / ref).resolve()
     if not window_safe(wiki.root, candidate):
-        raise WikiError("E_PATH", "ref escapes the wiki root", "use a repo-relative path", 2)
+        raise WikiError("E_PATH", "ref escapes the workspace root",
+                        "use a path inside the workspace", 2)
     if not candidate.exists():
         raise WikiError("E_NOT_FOUND", f"no file {ref}", "check the path, or use `query` first", 3)
     return candidate
@@ -1750,7 +1768,11 @@ def command_page_import():
     if not record:
         raise WikiError("E_NOT_FOUND", f"no page {page_id}", "import only edits existing pages", 3)
     try:
-        text = Path(ARGS.from_path).read_text(encoding="utf-8")
+        source = inside_root(
+            wiki.root, ARGS.from_path, "page import source",
+            "put the edited page under .wiki/drafts/",
+        )
+        text = source.read_text(encoding="utf-8")
     except OSError as error:
         raise WikiError("E_PAYLOAD", f"cannot read {ARGS.from_path}: {error}", "", 2)
     meta, body = split_frontmatter(text)
@@ -1802,7 +1824,10 @@ def command_page_restore():
 
 def command_export():
     wiki, _ = open_wiki()
-    target = Path(ARGS.dir).resolve()
+    target = inside_root(
+        wiki.root, ARGS.dir, "export target",
+        "export into a directory inside the workspace, e.g. .wiki/export",
+    )
     written = []
     for record in wiki.all_pages():
         meta = dict(record["meta"])
@@ -1882,7 +1907,7 @@ def command_version():
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--root", help="wiki root directory (default: current directory)")
+    common.add_argument("--root", help="wiki root inside the workspace (default: current directory)")
     common.add_argument("--json", action="store_true", help="machine-readable output")
     parser = argparse.ArgumentParser(
         prog="wiki.py",
@@ -1897,10 +1922,10 @@ def build_parser():
     ingest.add_argument("--force", action="store_true", help="reparse even when the digest is unchanged")
     next_p = sub.add_parser("next", parents=[common], help="claim queued tasks")
     next_p.add_argument("--kind", choices=["route", "page"])
-    next_p.add_argument("--batch", type=int, default=0, help="tasks to claim (default: ingest.batch)")
+    next_p.add_argument("--batch", type=int, default=0, help="tasks to claim (default: 1)")
     submit = sub.add_parser("submit", parents=[common], help="submit a task payload")
     submit.add_argument("id")
-    submit.add_argument("--epoch", type=int, required=True)
+    submit.add_argument("--epoch", type=int, help=argparse.SUPPRESS)
     submit.add_argument("--payload", required=True, help="JSON file, or - for stdin")
     release = sub.add_parser("release", parents=[common], help="return a task to the queue")
     release.add_argument("id")

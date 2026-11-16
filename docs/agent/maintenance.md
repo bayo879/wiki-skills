@@ -7,17 +7,18 @@
 
 | 内容 | 唯一定义处 | 其他位置只引用 |
 | --- | --- | --- |
-| 命令、载荷字段、错误码、退出码 | `skills/llm-wiki/references/cli.md` | `SKILL.md` 给主循环与最小示例，不复制字段表 |
+| 命令、载荷字段、错误码、退出码 | `docs/readme/cli.md` | `SKILL.md` 只给取任务/提交示例，不复制字段表 |
+| 任务 brief 与 template 的形状 | `skills/llm-wiki/scripts/tasks.py` | `cli.md` 给字段说明，`selftest.py` 给断言 |
 | agent 行为约束 | `skills/llm-wiki/SKILL.md` | `README.md` 只讲产品边界 |
 | 页面质量与证据标准 | `skills/llm-wiki/references/curation.md` | — |
-| 安装与目录约定 | `skills/llm-wiki/references/install.md` | `README.md` 给一行入口 |
-| 故障与恢复 | `skills/llm-wiki/references/recovery.md` | — |
-| 实测结果与未覆盖项 | `skills/llm-wiki/references/verification.md` | — |
+| 安装与目录约定 | `docs/readme/install.md` | `README.md` 给一行入口 |
+| 故障与恢复 | `docs/readme/recovery.md` | — |
+| 实测结果与未覆盖项 | `docs/agent/verification.md` | — |
 | 内部实现约定 | `docs/agent/engine.md` | — |
 | 已定方向 | `docs/agent/development-decisions.md` | — |
 
-改命令、载荷、错误码时，至少同时检查：`references/cli.md`、`SKILL.md`、`selftest.py`、
-`README.md` 中的示例。示例里的命令必须能直接跑通。
+改命令、载荷、错误码时，至少同时检查：`docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
+`SKILL.md`、`selftest.py`、`README.md` 中的示例。示例里的命令必须能直接跑通。
 
 ## 机器守卫
 
@@ -26,8 +27,8 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 skills/llm-wiki/scripts/selftest.py
 ```
 
-`selftest.py` 是端到端契约测试，覆盖 route/page 提交、epoch、镜像漂移、import/restore、
-超限与 dry-run。改引擎行为时先补一个检查再改实现；它同时被 CI 调用，不允许跳过或
+`selftest.py` 是端到端契约测试，覆盖 next 任务包、route/page 提交、工作区越界、镜像漂移、
+import/restore、超限与 dry-run。改引擎行为时先补一个检查再改实现；它同时被 CI 调用，不允许跳过或
 `--keep` 写入仓库。
 
 新增行为若无法在临时目录验证（真实 PDF、OCR、并发），写进 `verification.md` 的

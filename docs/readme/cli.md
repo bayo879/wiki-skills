@@ -1,7 +1,8 @@
 # CLI 契约
 
-所有命令在知识库根目录执行，或加 `--root <目录>`。除 `version` 外都接受 `--json`。
-引擎只依赖 Python 标准库。
+所有命令以会话工作区为根目录，在当前目录执行。`--root` 可选，只能是当前目录或它下面的
+子目录；指到工作区外返回 `E_PATH`。除 `version` 外都接受 `--json`。引擎只依赖 Python
+标准库。
 
 ## 输出信封
 
@@ -9,7 +10,8 @@
 
 ```json
 {"ok": true, "cmd": "next", "version": "0.2.0", "root": "/abs/root",
- "summary": "claimed 3 task(s)…", "data": {…}}
+ "summary": "1 task(s) ready; read each brief, fill its template, then submit",
+ "data": {…}}
 ```
 
 失败：
@@ -35,18 +37,26 @@
   `stable` 或 `stale`（引用来源变化或缺失）。
 - `.wiki/pages/<type>/<id>.md` 是按账本渲染的镜像，不是事实源。
 
+## 工作区边界
+
+- 根目录默认是当前工作目录；`--root` 只允许当前目录或它的子目录，不能指到区外。
+- 下列参数解析后必须落在根目录内，否则返回 `E_PATH`：`read` 的路径、`--payload`、
+  `body_file`、`page import --from`、`export <dir>`。
+- 草稿、载荷、导出与临时文件放 `<root>/.wiki/` 下（`.wiki/drafts/`、`.wiki/payloads/`、
+  `.wiki/export`、`.wiki/tmp/`）。`--dry-run` 的临时库在 `.wiki/tmp/`，退出时清理。
+
 ## 命令
 
 ### init
 
-创建 `.wiki/`（`wiki.db`、`wiki.json`、`raw/`、`pages/`、`drift/`）并报告状态。
+创建 `.wiki/`（`wiki.db`、`wiki.json`、`raw/`、`pages/`、`drift/`、`payloads/`、`drafts/`）并报告状态。
 `data`: `{created, config, pages, sources, open_tasks}`。
 
 ### ingest
 
 扫描根目录（跳过隐藏目录与 `scan.ignore`），解析新文件或内容变化的文件，写入
-`.wiki/raw/`，并为每个新来源入队一条 route 任务。`--dry-run` 不落盘、不建 `.wiki/`；
-`--force` 忽略哈希重新解析。
+`.wiki/raw/`，并为每个新来源入队一条 route 任务。`--dry-run` 不写账本，临时库在
+`.wiki/tmp/`，退出时清理；`--force` 忽略哈希重新解析。
 
 `data`: `{ingested[{key,raw,parser,digest,size,chars}], unchanged, unsupported[{key,suffix,reason,hint}],
 oversize[{key,message}], failed[{key,message}], vanished, restored, queued_tasks, pending_total, pending}`。
@@ -56,17 +66,26 @@ oversize[{key,message}], failed[{key,message}], vanished, restored, queued_tasks
 
 ### next
 
-领取 queued 任务，默认数量取 `ingest.batch`（默认 20），可 `--batch N`、`--kind`。
-route 任务优先。领取时 `epoch + 1`，租约 900 秒。
+领取 queued 任务，默认 1 个；`--batch N` 只用于调试或批量运维，`--kind` 可限定类型。
+route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包而不是内部状态：
 
-`data.tasks[]`: `{id, kind, subject, state, epoch, attempts, lease_until, last_error,
-inputs, work}`。`work.sources[]` 带 `key/digest/raw/status/chars`；page 任务另有
-`work.mode`、`work.base_rev`，以及当前页面 `work.page{id,rev,meta,body}`。
+`data.tasks[]`: `{id, brief, template, work}`。
+
+- `brief`: `{goal, steps[], submit, effect}`，说明做什么、怎么做、提交后发生什么。
+- `template`: 已固定结构的载荷；route 为 `decisions[]`，page 为 `page/title/type/
+  summary/body/links/evidence/boundaries`。
+- `work`: `sources[{key,raw,chars}]`、`page_index[{id,title,type}]`；更新页任务另有
+  `work.page{id,rev,meta,body}`。
+
+不再返回 `epoch`、`lease_until`、`attempts`、`last_error` 或原始 `inputs`。
 
 ### submit
 
-`submit <id> --epoch <n> --payload <file|->`。校验通过才写入并关闭任务；否则返回
-`E_*` 并把任务退回队列，`last_error` 记录原因，可重新 `next` 后再交。
+`submit <id> --payload <file|->`。`--payload` 文件须在根目录内，或传 `-` 从 stdin 读。
+校验通过才写入并关闭任务；否则返回 `E_*` 并把任务退回队列，可重新 `next` 后按新任务
+再交。`--epoch` 仅保留给旧脚本，日常提交不需要。
+
+载荷应从 `next` 返回的 `template` 直接填写，不要另造字段。
 
 **route 载荷**：
 
@@ -87,18 +106,21 @@ inputs, work}`。`work.sources[]` 带 `key/digest/raw/status/chars`；page 任�
 {"page": "refund-process", "title": "退款流程", "type": "process",
  "summary": "签收后 7 天内可申请，原路退回。",
  "links": ["refund-policy"],
- "body": "## 结论\n…", 
+ "body": "## 结论\n…\n\n## 步骤\n…\n\n## 注意事项\n…",
  "evidence": [{"source": "docs/a.md", "quote": "签收后七日内可申请退款"}],
  "boundaries": {"covered": "线上订单", "not_covered": "线下门店"}}
 ```
 
-- `body` 或 `body_file` 二选一；最长 60000 字符；不能以 `---` 开头。
+- `body` 或 `body_file` 二选一；最长 60000 字符；不能以 `---` 开头。`body_file` 须在
+  根目录内，建议放 `.wiki/drafts/`。
+- 新建页面的 `body` 必须保留模板给定的章节标题（如 `## 结论`、`## 步骤`、`## 注意事项`），
+  缺章节或改名会被拒绝；更新页面沿用原有结构。
 - `summary` 1–200 字符；`title` 1–120 字符；`type` 必须在 `schema.types` 里。
 - `links` 只能指向已存在页面。
 - `evidence` 至少一条；`quote` 去空白后须逐字命中该来源的 raw 文本。
 - `boundaries.covered`、`boundaries.not_covered` 必填。
 
-成功后 `data`: `{task, kind, page, rev, sources, queued_page_tasks}`。
+成功后 `data`: `{task, page, rev, sources, queued_page_tasks}`。
 
 ### release
 
@@ -125,7 +147,8 @@ inputs, work}`。`work.sources[]` 带 `key/digest/raw/status/chars`；page 任�
 
 ### export
 
-`export <dir>`：把所有页面按 `type/id.md` 写到目标目录，用于离线浏览或迁移。
+`export <dir>`：把所有页面按 `type/id.md` 写到目标目录，用于离线浏览或迁移。目标目录
+必须在工作区内，建议 `.wiki/export`。
 
 ### status
 
@@ -146,7 +169,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。
 | `E_USAGE` | 参数缺失或组合非法 | 看 `error.next`，不要重试同一载荷 |
 | `E_PAYLOAD` | 载荷字段缺失/类型/长度不合法 | 按 message 修正字段 |
 | `E_TASK_UNKNOWN` | 任务 id 不存在 | `next` 取新任务 |
-| `E_TASK_STALE` | 任务未领取、已关闭或 epoch 过期 | 重新 `next`，用新 epoch |
+| `E_TASK_STALE` | 任务已关闭、被替换或过期 | 重新 `next`，丢弃旧载荷 |
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
 | `E_STATE` | 目标页面正被其他任务写 | 等该任务提交后再试 |
 | `E_PAGE_CONFLICT` | 页面已存在（new）或版本已变（update） | 重新领任务，基于当前 rev 重写 |
@@ -159,7 +182,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。
 | `E_UNKNOWN_SOURCE` | 页面引用未登记的来源 | 先 `ingest` |
 | `E_EMPTY` | 还没有任何来源 | 先 `ingest` |
 | `E_NOT_FOUND` | 页面、版本或文件不存在 | 用 `query`/`read` 定位 |
-| `E_PATH` | 路径越出知识库根目录 | 用根目录内相对路径 |
+| `E_PATH` | 路径越出工作区根目录 | 用工作区内路径；资料在区外时切换工作区 |
 | `E_CONFIG` | `.wiki/wiki.json` 非法 | 按提示修正 JSON |
 | `E_SOURCE_TOO_LARGE` | 单文件超过 `max_source_bytes` | 调高阈值或拆分来源 |
 | `E_DB` | 数据库不可读 | 从备份恢复，不要手改 |
@@ -171,7 +194,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。
 ```json
 {"schema": {"types": ["concept", "entity", "process", "note"]},
  "scan": {"ignore": [".git", "node_modules", "target", "dist"]},
- "ingest": {"max_source_bytes": 50000000, "batch": 20}}
+ "ingest": {"max_source_bytes": 50000000}}
 ```
 
 改 `schema.types` 会立即影响后续校验；已存在的页面不会被自动迁移。
