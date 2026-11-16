@@ -75,8 +75,9 @@ Windows 首次使用运行
 - **页面只能通过命令修改。** 直接改 `.wiki/pages/` 会在下次命令启动时被账本覆盖，原文
   存进 `.wiki/drift/` 留证。人工修改走 `page import`，回滚走 `page restore --rev N`。
 - **观看区的所有权分开算。** `<view>/pages` 的手改不会被覆盖，只给告警，由人工 `sync`
-  收进账本；`<view>/raw` 与 `<view>/README.md` 以引擎为准；`topics/`、`scenarios/` 首次
-  投放后归用户，引擎不覆盖也不删除。详见[观看区与发布](#观看区与发布)。
+  收进账本；`<view>/raw` 由摄入维护（手改会在下一次 `ingest` 被采纳为事实），
+  `<view>/README.md` 每次推送重写；`topics/`、`scenarios/` 首次投放后归用户，引擎不覆盖
+  也不删除。详见[观看区与发布](#观看区与发布)。
 - **场景不是知识页。** `scenario/`（或 `场景能力/`）不摄入、不进账本、不生成任务；流程以
   `SCENARIO.md` 为准，事实依据仍以页面和 raw 为准。场景命令只读，不要求先 `init`。
 - **话题是 wiki 的探索层，不是知识页。** `话题/` 由 agent 按内置「话题探索」场景的格式
@@ -92,7 +93,8 @@ Windows 首次使用运行
 
 - `pages/`：知识页，按 `<type>/<标题>.md` 渲染。手改过的页面不会被覆盖，只给告警，需要
   运行 `sync` 收进账本。
-- `raw/`：原文唯一副本，由 `ingest` 维护；删掉或改坏只能靠源文件重新解析。
+- `raw/`：原文唯一副本，由 `ingest` 维护；手改会被下一次 `ingest` 采纳为账本事实，改坏后
+  删掉该文件再 `ingest`（或让源文件比它新），`touch` 与 `--force` 都不会还原。
 - `README.md`：目录说明与统计，每次推送重写。
 - `topics/`、`scenarios/`：首次推送各投放一次，之后归用户；引擎不覆盖、不删除。
 - 其他文件（包括 `.obsidian/`）不删不改。
@@ -140,7 +142,7 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 tests/selftest.py
 ```
 
-`tests/selftest.py` 在临时目录跑 174 项端到端检查，不接触真实数据；它和 `tests/` 留在
+`tests/selftest.py` 在临时目录跑 175 项端到端检查，不接触真实数据；它和 `tests/` 留在
 仓库、由开发/CI 执行，不复制进安装后的技能目录。验证记录（含真实 PDF 语料结果）见
 [docs/agent/verification.md](docs/agent/verification.md)。场景目录结构与写法见
 [docs/readme/scenarios.md](docs/readme/scenarios.md)，话题沉淀格式见

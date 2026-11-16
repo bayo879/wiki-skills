@@ -37,7 +37,8 @@
 
 观看区多了手工修改的回流通道：`<view>/pages` 被手改时推送只告警、不覆盖，由人工 `sync`
 收进账本；只同步正文用 `sync --body-only`，元数据也改过的改用 `page import`。`<view>/raw`
-与 `<view>/README.md` 以引擎为准，`topics/`、`scenarios/` 首次投放后归用户。
+由摄入维护：手改会在下一次 `ingest` 被采纳为账本事实；`<view>/README.md` 每次推送重写。
+`topics/`、`scenarios/` 首次投放后归用户。
 
 ## 场景是能力，不是页面
 
@@ -80,9 +81,10 @@
 来源被摄入后不是"agent 自己决定从哪开始"，而是引擎给出 route/page 任务：
 
 - 一个来源一条 route 任务；route 通过后，每个目标页一条 page 任务。
-- 任务有 `queued → leased → accepted`，另有终态 `expired`：来源或 raw 副本变化、或旧库
-  迁移时任务被关闭，行保留供审计；领取带 15 分钟租约与递增 epoch。
-- 提交按任务 id 关闭，不需要 epoch；过期或已关闭的任务返回 `E_TASK_STALE`，不会写入。
+- 任务有 `queued → leased → accepted`，另有终态 `expired`：来源或 raw 副本变化时任务被
+  关闭，行保留供审计；领取带 15 分钟租约与递增 epoch。
+- 提交按任务 id 关闭，不需要 epoch；租约过期或已关闭的任务返回 `E_TASK_STALE`，因来源或
+  raw 漂移而 `expired` 的任务返回 `E_SOURCE_DRIFT`，都不会写入。
 - agent 看到的是 brief/template，租约与 epoch 只在引擎内部使用。
 - 校验失败零写入，任务退回队列并记录 `last_error`，修正后重新 `next`。
 

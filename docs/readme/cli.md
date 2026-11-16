@@ -5,7 +5,7 @@
 标准库。
 
 除 `check`、`version`、`scenario` 外，命令启动时会准备 `.wiki/` 与观看区 `<view>/`
-（`publish.dir`，默认 `wiki/`），结束时按账本推送一次；`sync` 例外，它只回收、不推送。
+（`publish.dir`，默认 `wiki/`），并按账本推送一次；`sync` 例外，它只回收、不推送。
 
 ## 输出信封
 
@@ -73,7 +73,8 @@
 探索层，都不作为摄入来源，摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。场景与
 话题的检索分别由 `scenario search` 和 `query` 直接扫描文件完成。`--dry-run` 不写账本，
 临时库在 `.wiki/tmp/`，退出时清理；`--force` 忽略哈希重新解析。`--only` 按根目录相对 key
-精确匹配，不校验参数形状：传绝对路径或含 `..` 的值只会匹配不到来源。
+精确匹配，不校验参数形状：传绝对路径或含 `..` 的值只会匹配不到来源，命令仍成功退出 0，
+也不会摄入任何文件。
 
 `data`: `{ingested[{key,raw,parser,digest,size,chars}], unchanged, unsupported[{key,suffix,reason,hint}],
 oversize[{key,message}], failed[{key,message}], vanished, restored, queued_tasks, pending_total, pending}`。
@@ -154,8 +155,9 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 `data`: `{path, offset, limit, total_lines, next_offset, meta, content}`。
 
 对 `.md`，`read` 先看正文首行：以 `---` 开头就按 frontmatter 解析，`meta` 给出结果，
-`content` 只留正文。按路径读取的 `.md`（例如 `SCENARIO.md`）同样如此，原本的 frontmatter
-段不再出现在 `content` 里；`page:` 直接返回账本里的元数据与正文，不做切分。
+`content` 只留正文。按路径读取的 `.md`（例如 `SCENARIO.md`）同样如此，开头那段
+frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 raw 副本，返回的同样是
+去掉引擎前言后的正文。`page:` 直接返回账本里的元数据与正文，不做切分。
 
 ### query
 
@@ -218,7 +220,8 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 
 `status [--brief]`。`data`: `{created, sources{状态:数量}, source_total, pages,
 stale_pages, pending, tasks{open,queued,leased,route,page,expired,accepted}, next}`。
-`--brief` 只给一行摘要，摘要不计 `expired`；完整数量看 JSON 的 `tasks`。
+`--brief` 只返回 `brief` 一行摘要，没有 `tasks`；完整数量（含 `expired`、`accepted`）用
+`status --json`，不要加 `--brief`。
 
 ### sync
 
@@ -229,15 +232,19 @@ drift 处理。
 - 文件没有 `id` 或 `id` 不在账本里：跳过，`reason` 分别为 `no id`、`unknown id`；路径逃出
   观看区（例如符号链接指向外面）时记为 `escapes the publish dir`。
 - 同一 `id` 出现在多个文件：每个文件都记 `E_DUPLICATE`，不回收。
-- frontmatter 与账本不一致：该文件记 `E_META_CHANGED`；加 `--body-only` 只取正文与证据，
-  保留账本元数据（类型、来源、标题等）。
+- frontmatter 的 `title`、`type`、`summary`、`sources` 与账本不一致：该文件记
+  `E_META_CHANGED`；加 `--body-only` 只取正文与证据，保留账本元数据（类型、来源、标题等）。
+  `status`、`updated`、`aliases` 不参与比较，成功回收后按账本重写；`id` 改了会按
+  `unknown id` 跳过。
 - 正文为空 `E_PAYLOAD`；证据引用未登记来源 `E_UNKNOWN_SOURCE`；文件读不出 `E_IO`。
-- `## 证据` 段存在但格式不合法：整段保留为正文并在 stderr 警告，账本原证据不变。
+- `## 证据` 段存在但格式不合法：整段保留为正文并在 stderr 警告，账本原证据不变；同一条
+  警告也会追加到 `data.warnings`。
 - 回收成功后把规范化文本写回观看区；只是位置或字节与上次发布一致的文件记为 `written`，
   不产生新修订。
 
 `data`: `{imported[page], skipped[{file,reason}], failed[{file,page,code,message}],
-unchanged[page], written[{page,from,to}]}`。有失败项时 `ok=false`，退出码 1。
+unchanged[page], written[{page,from,to}], warnings[message]}`。有失败项时 `ok=false`，
+退出码 1；`warnings` 不改变成功状态。
 
 `sync` 之后，下一次任意命令启动时才把账本推回观看区。
 

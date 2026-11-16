@@ -2,21 +2,21 @@
 
 ## 问题
 
-`skills/llm-wiki/scripts/wiki.py` 在 2026-11-16 是 2712 行（`wc -l` 输出），超过仓库
-`AGENTS.md` 的单文件 2000 行警戒；本次发布/观看区改动开始时它已经是 1933 行，之后继续
-增长。文件同时承担：配置与 schema、工作区与扫描、文本解析、来源与修订、镜像、观看区
-推送、任务状态机、以及全部命令层。
+`skills/llm-wiki/scripts/wiki.py` 在 2026-11-16 是 2715 行（`wc -l` 输出），超过仓库
+`AGENTS.md` 的单文件 2000 行警戒；本次发布/观看区改动开始时（`60c1e5b`）它已经是 1937
+行，之后继续增长。文件同时承担：配置与 schema、工作区与扫描、文本解析、来源与修订、镜像、
+观看区推送、任务状态机、以及全部命令层。
 
 证据：
 
-- 类 `Wiki` 从 557 行到 1544 行，约 990 行，混了连接、建表、来源、修订、镜像、观看区与
+- 类 `Wiki` 从 558 行到 1544 行，约 990 行，混了连接、建表、来源、修订、镜像、观看区与
   任务。
-- `command_*` 从 `command_check`（1617）到 `command_version`（2597），约 980 行，参数解析、
+- `command_*` 从 `command_check`（1618）到 `command_version`（2600），约 980 行，参数解析、
   业务编排与输出组装交织。
 - 顶部已拆出 `errors.py`、`frontmatter.py`、`search.py`、`scenarios.py`、`topics.py`、
   `runtime.py`、`health.py`、`workspace.py`、`tasks.py`、`validation.py`，但核心仍在
   `wiki.py`。
-- `docs/agent/engine.md` 的行数声明本次刚改为 2712，说明体量已经成为需要持续维护的
+- `docs/agent/engine.md` 的行数声明本次刚改为 2715，说明体量已经成为需要持续维护的
   文档事实，而不是一次性偏差。
 
 ## 影响
@@ -37,12 +37,12 @@
 
 | 模块 | 职责 | 现有位置/符号 |
 | --- | --- | --- |
-| `ledger.py` | 连接、建表、配置加载、扫描根、来源行、`Wiki` 基础方法 | `Wiki.__init__`/`ensure`/`ensure_publish`/`_create_schema`/`ensure_columns`/`close`/`scan_files` 与来源方法（557–856） |
-| `ingest.py` | 字节读取、文本抽取、摄入判定与 `ingest` 命令 | `read_bytes`…`extract_text`（197–281）、`ingest_decision`（171）、`command_ingest`（1655–1855） |
+| `ledger.py` | 连接、建表、配置加载、扫描根、来源行、`Wiki` 基础方法 | `Wiki.__init__`/`ensure`/`ensure_publish`/`_create_schema`/`ensure_columns`/`close`/`scan_files` 与来源方法（558–856） |
+| `ingest.py` | 字节读取、文本抽取、摄入判定与 `ingest` 命令 | `read_bytes`…`extract_text`（197–281）、`ingest_decision`（171）、`command_ingest`（1656–1855） |
 | `pages.py` | 页面记录、修订写入、渲染、链接、镜像与 drift | `page_record`、`view_relpath`/`view_text`/`write_rev`、`rebuild_links`、`migrate_legacy_pages`、`ensure_mirror`、`record_drift`（857–1134） |
 | `task_store.py` | 任务入队、快照、漂移、领取、过期、关闭 | `enqueue_task`、`attach_page_source`、`task_drift`、`pin_open_task_raw`、`claim_tasks`、`release_task`、`requeue_task`、`expire_task`、`close_task`、`open_task_for_page`、`source_in_open_task`（1262–1544） |
-| `view.py` | 观看区命名、推送、主题/场景投放、`sync` | `view_name`、`render_view_readme`、`render_page`、`sync_view_file`、`sync_view`、`_sync_view_pages`、`_seed_view_topics`、`_seed_view_scenarios`、`command_sync`（283–466、1135–1261、2438–2517） |
-| `cli.py` | `emit`/`open_wiki`、参数解析、其余命令 | `emit`/`open_wiki`（1545–1632）、`build_parser`/`main`、`command_read`/`query`/`status`/`export`/`doctor`/`scenario`/`page` |
+| `view.py` | 观看区命名、推送、主题/场景投放、`sync` | `view_name`、`render_view_readme`、`render_page`、`sync_view_file`、`sync_view`、`_sync_view_pages`、`_seed_view_topics`、`_seed_view_scenarios`、`command_sync`（283–466、1136–1261、2439–2520） |
+| `cli.py` | `emit`/`open_wiki`、参数解析、其余命令 | `emit`（1546 起）、`open_wiki`（1585–1611）、`require_health`/`command_check`（1614–1632）、`build_parser`/`main`、`command_read`/`query`/`status`/`export`/`doctor`/`scenario`/`page` |
 
 拆分缝：
 
@@ -57,7 +57,7 @@
 ## 待确认与验收条件
 
 - [ ] 确认按上表拆分，并确认 `wiki.py` 的兼容导入面（是否保留 `from wiki import Wiki`）。
-- [ ] 每一步只搬代码、不改行为；每一步后 `python3 tests/selftest.py` 全绿（当前 174/174）。
+- [ ] 每一步只搬代码、不改行为；每一步后 `python3 tests/selftest.py` 全绿（当前 175/175）。
 - [ ] 拆完后单文件都不超过 2000 行，`docs/agent/engine.md` 的行数与布局表同步更新。
 - [ ] 命令输出、错误码、`docs/readme/cli.md` 的契约与 `.wiki/` 文件布局保持不变。
 - [ ] 若拆分中发现职责交叉（例如观看区读取修订的私有方法），先记录再动，不顺手改契约。

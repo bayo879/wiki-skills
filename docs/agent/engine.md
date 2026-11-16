@@ -1,6 +1,6 @@
 # 引擎内部
 
-对象：`skills/llm-wiki/scripts/wiki.py`（2712 行，已超过单文件 2000 行上限；拆分方案见
+对象：`skills/llm-wiki/scripts/wiki.py`（2715 行，已超过单文件 2000 行上限；拆分方案见
 `docs/issues/2026-11-16-P2-split-wiki-engine.md`）。公共错误在 `errors.py`，frontmatter
 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能力在 `scenarios.py`，话题沉淀在
 `topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，工作区边界在
@@ -39,7 +39,7 @@
   accepted_at)`
 - `drift(id, page, path, digest, found_at, note)`
 
-表结构只增不改；迁移写在 `ensure()` / `_create_schema()`，不要静默重建。
+表结构只增不改；旧库由 `ensure_columns` 拒绝（`E_STATE`），不写迁移。
 
 ## 不变量
 
@@ -136,7 +136,7 @@ scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不�
 - 改观看区或发布：同步 `docs/readme/cli.md`、`README.md`、
   `docs/readme/design-principles.md`、`SKILL.md`、`tests/selftest.py`；保持 `sync` 只回收、
   推送只发生在命令入口，且观看区目录名始终跳过扫描。
-- 改表结构：在 `ensure()` 里做幂等迁移，并在 `docs/agent/verification.md` 记录旧库升级结果。
+- 改表结构：同步 `ensure_columns` 的必需列检查；旧库直接 `E_STATE` 拒绝，不写迁移。
 - 改渲染：`render_page` 与 `split_frontmatter` 必须能往返；跑 `tests/selftest.py` 的
   import/restore 用例。
 - 改任务：并发前提是单写者；不要为了"更快"去掉提交前的状态与租约检查。

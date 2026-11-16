@@ -359,13 +359,10 @@ def main(argv=None):
         source_key = routes["a.md"]["work"]["sources"][0]["key"]
         raw = run(root, "read", f"raw:{source_key}")["data"]
         check(results, "read returns raw text", "复机" in raw["content"], raw)
-        raw_read = raw
         check(results, "read strips raw frontmatter",
-              not raw_read["content"].startswith("---")
-              and 'type: "raw"' not in raw_read["content"],
-              raw_read["content"][:80])
+              'type: "raw"' not in raw["content"], raw["content"][:80])
         check(results, "read returns raw meta",
-              raw_read["meta"].get("type") == "raw", raw_read["meta"])
+              raw["meta"].get("type") == "raw", raw["meta"])
 
         front = root / "front.md"
         front.write_text("---\ntitle: 手工标题\n---\n\n# 正文\n\n内容。\n", encoding="utf-8")
@@ -878,8 +875,9 @@ def main(argv=None):
         synced = run(root, "sync")["data"]
         check(results, "sync leaves an untouched view alone",
               synced["unchanged"] == ["anti-fraud-restore", "machine-room-inspection"], synced)
-        check(results, "sync reports the five buckets",
-              set(synced) == {"imported", "skipped", "failed", "unchanged", "written"}, synced)
+        check(results, "sync reports the six keys",
+              set(synced) == {"imported", "skipped", "failed", "unchanged", "written",
+                              "warnings"}, synced)
 
         room_view.write_text(
             room_text.replace("每周巡检一次；记录保留一年。", "每周巡检两次；记录保留两年。"),
@@ -998,6 +996,12 @@ def main(argv=None):
                                 capture_output=True, text=True)
         check(results, "an unparseable evidence block warns",
               broken.returncode == 0 and "warning" in broken.stderr, broken.stderr)
+        broken_data = json.loads(broken.stdout)["data"]
+        check(results, "an unparseable evidence block is reported in warnings",
+              len(broken_data["warnings"]) == 1
+              and broken_data["warnings"][0].startswith("pages/note/机房巡检.md:")
+              and "evidence block does not parse" in broken_data["warnings"][0],
+              broken_data["warnings"])
         page = run(root, "read", "page:machine-room-inspection")["data"]
         check(results, "a broken block keeps the ledger evidence",
               any(item["source"] == "d.md" and item["quote"] == "巡检周期为每周两次"

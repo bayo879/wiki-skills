@@ -308,7 +308,7 @@ def render_view_readme(wiki, records=None):
     lines = [
         "# Wiki 视图",
         "",
-        "pages/ 与 raw/ 由引擎维护：以引擎输出为准。",
+        "pages/ 由引擎维护：按账本推送。raw/ 是原文副本，手改会被 ingest 采纳为账本事实。",
         "topics/ 与 scenarios/ 首次投放后归你：引擎不再覆盖、不会删除。",
         "pages/ 里手改过的文件不会被覆盖，只给告警；运行 sync 把它收进账本。",
         "其他文件（包括 .obsidian/）不会被删除。",
@@ -326,7 +326,7 @@ def render_view_readme(wiki, records=None):
         "",
         "## 说明",
         "",
-        "- 原文只留一份：删掉或改坏 `raw/` 里的文件等于丢文本，只能靠源文件重新解析。",
+        "- 原文只留一份：删掉 `raw/` 里的文件后 `ingest` 会用源文件重建；改坏后删掉再 `ingest`，或让源文件比它新；`touch` 与 `--force` 不会还原。",
         "- `topics/`、`scenarios/` 是你自己的成果，改动与新增都不会被引擎同步或删除。",
     ])
     return "\n".join(lines) + "\n"
@@ -401,7 +401,7 @@ def meta_mismatch(file_meta, record_meta):
     return changed
 
 
-def sync_view_file(wiki, item, target, body_only):
+def sync_view_file(wiki, item, target, body_only, warnings=None):
     """回收一个已定位的文件；返回 "unchanged" / "written" / "imported"。
 
     拒绝时抛 WikiError，由 command_sync 记入 failed 后继续（R7）。
@@ -436,10 +436,11 @@ def sync_view_file(wiki, item, target, body_only):
     body, evidence = split_evidence(item["body"])
     if not evidence:
         if EVIDENCE_HEADING in item["body"]:
-            sys.stderr.write(
-                f"warning: {item['file']}: evidence block does not parse; "
-                "kept the ledger's evidence and adopted the text as body\n"
-            )
+            message = (f"{item['file']}: evidence block does not parse; "
+                       "kept the ledger's evidence and adopted the text as body")
+            sys.stderr.write(f"warning: {message}\n")
+            if warnings is not None:
+                warnings.append(message)
         evidence = list(record["meta"].get("evidence") or [])
     if not body.strip():
         raise WikiError("E_PAYLOAD", "the view copy has no body", "", 1)
@@ -2442,7 +2443,7 @@ def command_sync():
     pages_dir = wiki.publish_dir / "pages"
     base = wiki.publish_dir.resolve()
     imported, unchanged, written = [], [], []
-    skipped, failed = [], []
+    skipped, failed, warnings = [], [], []
     candidates = []
     paths = sorted(pages_dir.rglob("*.md")) if pages_dir.is_dir() else []
     for path in paths:
@@ -2484,7 +2485,8 @@ def command_sync():
             continue
         item = items[0]
         try:
-            bucket = sync_view_file(wiki, item, targets[page_id], ARGS.body_only)
+            bucket = sync_view_file(wiki, item, targets[page_id], ARGS.body_only,
+                                    warnings=warnings)
         except (WikiError, OSError, UnicodeDecodeError) as error:
             if isinstance(error, WikiError):
                 code, message = error.code, error.message
@@ -2505,7 +2507,8 @@ def command_sync():
     failed.sort(key=lambda item: item["file"])
     written.sort(key=lambda item: (item["page"], item["from"]))
     data = {"imported": imported, "skipped": skipped, "failed": failed,
-            "unchanged": unchanged, "written": written}
+            "unchanged": unchanged, "written": written,
+            "warnings": sorted(warnings)}
     summary = (f"sync: {len(imported)} imported, {len(skipped)} skipped, "
                f"{len(failed)} failed, {len(unchanged)} unchanged, {len(written)} written")
     lines = [f"imported: {page_id}" for page_id in imported]

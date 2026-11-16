@@ -53,8 +53,12 @@
 
 观看区（`<view>/pages`，默认 `wiki/pages/`）的手改不走 drift：推送发现副本与账本不一致
 时只告警、不覆盖。要保留就运行 `sync` 收成新修订；元数据也改过的用 `page import`，
-`sync --body-only` 只取正文与证据。`<view>/raw` 与 `<view>/README.md` 以引擎为准；`raw/`
-是原文唯一副本，被删或改坏只能重新 `ingest`，`pages/` 与 `README.md` 会按账本重建。
+`sync --body-only` 只取正文与证据。
+
+`<view>/raw` 是原文唯一副本：手改会在下一次 `ingest` 被采纳为账本事实，而不是被还原。
+改坏后删掉该文件再 `ingest`，会用源文件重建（源文件也没了才会丢）；只有源文件比 raw 新时
+`ingest` 才会主动重写 raw，`touch` 与 `--force` 都不还原。`<view>/README.md` 每次推送
+重写，`pages/` 按账本重建。
 
 ## 五、数据库损坏与并发
 
