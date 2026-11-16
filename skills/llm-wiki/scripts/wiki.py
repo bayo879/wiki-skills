@@ -413,28 +413,28 @@ class Wiki:
     def ensure_publish(self, created):
         """Create the view tree; the switch only stops the page-side output."""
         name = publish_dir_name(self.config)
-        view = self.root / name
-        if not window_safe(self.root, view.resolve()):
-            raise WikiError(
-                "E_PATH",
-                f"publish dir {name} resolves outside the workspace root",
-                "keep publish.dir inside the workspace, or remove the symlink",
-                2,
-            )
-        if not view.is_dir() and (view.exists() or view.is_symlink()):
-            raise WikiError(
-                "E_STATE",
-                f"publish.dir {name} exists but is not a directory",
-                "move it aside, or set publish.dir to another name",
-                2,
-            )
-        for directory in (view, self.publish_raw_dir):
+        for directory in (self.root / name, self.publish_raw_dir):
+            shown = norm_key(directory.relative_to(self.root))
+            if not window_safe(self.root, directory.resolve()):
+                raise WikiError(
+                    "E_PATH",
+                    f"publish dir {shown} resolves outside the workspace root",
+                    "keep publish.dir inside the workspace, or remove the symlink",
+                    2,
+                )
+            if not directory.is_dir() and (directory.exists() or directory.is_symlink()):
+                raise WikiError(
+                    "E_STATE",
+                    f"publish dir {shown} exists but is not a directory",
+                    "move it aside, or set publish.dir to another name",
+                    3,
+                )
             if not directory.exists():
                 directory.mkdir(parents=True)
-                created.append(norm_key(directory.relative_to(self.root)))
+                created.append(shown)
         if not self.config["publish"]["enabled"]:
             return
-        readme = view / "README.md"
+        readme = self.root / name / "README.md"
         if not readme.exists():
             write_atomic(readme, PUBLISH_README)
             created.append(norm_key(readme.relative_to(self.root)))
@@ -524,7 +524,7 @@ class Wiki:
                     "E_STATE",
                     "ledger schema is older than this skill",
                     "delete .wiki/ then run `init` and `ingest`",
-                    2,
+                    3,
                 )
 
     def close(self):

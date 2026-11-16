@@ -149,7 +149,7 @@ def main(argv=None):
             " mtime REAL, raw TEXT, parser TEXT, status TEXT, updated_at TEXT);"
         )
         legacy_db.close()
-        broken = run(root, "status", expect=(0, 1, 2))
+        broken = run(root, "status", expect=3)
         check(results, "missing columns report E_STATE",
               broken.get("error", {}).get("code") == "E_STATE", broken)
         shutil.rmtree(legacy)
@@ -437,7 +437,7 @@ def main(argv=None):
         config["publish"] = {"dir": "view", "enabled": True, "topics": True, "scenarios": True}
         config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         (root / "view").write_text("占位：同名文件不是目录\n", encoding="utf-8")
-        blocked = run(root, "status", expect=(0, 1, 2))
+        blocked = run(root, "status", expect=3)
         check(results, "publish dir that is a file reports E_STATE",
               blocked.get("error", {}).get("code") == "E_STATE", blocked)
         (root / "view").unlink()
@@ -448,7 +448,7 @@ def main(argv=None):
         except (OSError, NotImplementedError):
             pass
         else:
-            escaping = run(root, "status", expect=(0, 1, 2))
+            escaping = run(root, "status", expect=2)
             check(results, "publish dir symlink outside the workspace reports E_PATH",
                   escaping.get("error", {}).get("code") == "E_PATH", escaping)
             (root / "view").unlink()
@@ -456,6 +456,25 @@ def main(argv=None):
         seen = run(root, "status")["data"]
         check(results, "a legal non-default publish dir is created",
               (root / "view/raw").is_dir() and (root / "view/README.md").exists(), seen)
+        raw_dir = root / "view/raw"
+        shutil.rmtree(raw_dir)
+        raw_dir.write_text("占位：同名文件不是目录\n", encoding="utf-8")
+        blocked_raw = run(root, "status", expect=3)
+        check(results, "publish raw dir that is a file reports E_STATE",
+              blocked_raw.get("error", {}).get("code") == "E_STATE", blocked_raw)
+        raw_dir.unlink()
+        outside_raw = root.parent / f"{root.name}-raw"
+        outside_raw.mkdir()
+        try:
+            raw_dir.symlink_to(outside_raw, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pass
+        else:
+            escaping_raw = run(root, "status", expect=2)
+            check(results, "publish raw symlink outside the workspace reports E_PATH",
+                  escaping_raw.get("error", {}).get("code") == "E_PATH", escaping_raw)
+            raw_dir.unlink()
+        shutil.rmtree(outside_raw, ignore_errors=True)
         (root / "view/note.md").write_text("# 视图笔记\n\n用户放进视图的便签。\n", encoding="utf-8")
         ingested = run(root, "ingest")["data"]["ingested"]
         check(results, "the publish dir is skipped by ingest",
