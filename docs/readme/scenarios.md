@@ -4,6 +4,8 @@
 `场景能力/` 下。它借用 skill 的组织方式：一个主流程文件，加上按需读取的脚本和说明。
 和知识页不同，场景描述“怎么做”，不描述“是什么”；它不进入账本，也不参与页面引用。
 
+技能另带一个内置场景 `话题探索`，是回答知识问题时的默认流程；项目放同名场景即可覆盖它。
+
 ## 目录结构
 
 ```text
@@ -20,6 +22,24 @@
 - `SCENARIO.md` 是唯一入口，文件名固定；缺它、缺 `description` 或正文为空都视为不合法。
 - `scripts/` 放确定性操作的脚本，`references/` 放执行时才需要读的细节。
 - 其他文件也会列进资源清单，`kind` 为 `other`；它们不会自动执行或加载。
+
+## 内置场景
+
+`skills/llm-wiki/scenarios/` 下的场景随技能安装，不需要项目文件：
+
+```text
+skills/llm-wiki/scenarios/
+└── 话题探索/
+    └── SCENARIO.md         定主题、多轮检索、总结、按需沉淀
+```
+
+- `scenario list` 把项目场景和内置场景列在一起，每项带 `source`（`project` 或
+  `builtin`）；同 id 时项目版优先，内置版不重复列出。
+- `scenario load "话题探索"` 返回内置流程；它的 `path` 是展示标签
+  `内置场景/话题探索/SCENARIO.md`，不是磁盘路径，`resources` 恒为空（内置流程自包含）。
+- 内置场景不参与 `query` 的关键词匹配，但 `query` 的 `topic_scenario` 恒指向它，供
+  agent 默认进入话题探索；项目覆盖后 `source` 变为 `project`。
+- 内置场景只读，改流程请复制到 `场景能力/话题探索/` 再改，不要改技能安装目录。
 
 ## SCENARIO.md
 
@@ -88,11 +108,16 @@ frontmatter 字段：
 python3 <skill>/scripts/wiki.py query "开户" --json
 python3 <skill>/scripts/wiki.py scenario list --json
 python3 <skill>/scripts/wiki.py scenario load account-opening --json
+python3 <skill>/scripts/wiki.py scenario load "话题探索" --json
 ```
 
 `scenario load` 返回 `content`（`SCENARIO.md` 全文）、`meta`、`path` 和 `resources`。
 按 `content` 的步骤执行，需要细节时再读 `resources` 里的文件。结构不合法的场景不会出现在
 `query` 结果里，但会出现在 `scenario list` 中并带 `error`，方便修正。
+
+话题探索流程依次做：定主题、找现成能力、找已有话题、多轮查页面、补原始依据、判断收敛、
+总结，最后问用户是否沉淀到 `话题/<主题>.md`。`query` 的 `topics` 是已知话题，相关的先读
+再探索，避免重复劳动；话题格式见 [话题沉淀](topics.md)。
 
 ## 边界
 
@@ -100,5 +125,6 @@ python3 <skill>/scripts/wiki.py scenario load account-opening --json
 - 场景步骤与知识页冲突时，流程以场景为准；事实依据仍以页面和 raw 为准。
 - 场景文件是活文件，直接编辑即可生效；不要在 `.wiki/` 里另存副本。
 - `scenario list` / `scenario load` 只读，不要求先 `init`，也不会创建 `.wiki/`。
+- 话题探索的沉淀物是 `话题/`，不是场景；只有流程稳定、可重复执行时才另建场景。
 
 完整命令字段与错误码见 [CLI 契约](cli.md#scenario)。

@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query/read 查知识。也能检索并加载项目 `场景能力/` 下的流程场景，按 SCENARIO.md 的步骤完成任务；还能把会话里可复用的方法、经验、踩坑与方案取舍提炼成项目 `wiki-sources/` 素材（不摄入、不建页）。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「按开户/巡检等流程办事」「记录这次讨论」「蒸馏会话留给下次」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
+description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query/read 查知识。回答知识问题时默认按内置「话题探索」场景办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。也能检索并加载项目 `场景能力/` 下的流程场景。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
 ---
 
 # llm-wiki：按任务填内容
@@ -86,20 +86,30 @@ python3 <skill>/scripts/wiki.py submit <id> --payload .wiki/payloads/<id>.json -
 
 ## 查知识
 
+回答「是什么 / 怎么做 / 有哪些 / 有什么区别 / 帮我梳理」这类问题时，默认按内置
+「话题探索」场景办事：定主题、多轮检索、总结，最后问用户是否沉淀。
+
 ```bash
+python3 <skill>/scripts/wiki.py scenario load "话题探索" --json
 python3 <skill>/scripts/wiki.py query "关键词" --json
 python3 <skill>/scripts/wiki.py query --page <page-id> --json
 python3 <skill>/scripts/wiki.py read "page:<page-id>" --json
 python3 <skill>/scripts/wiki.py read "raw:<source-key>" --offset 1 --limit 120 --json
 ```
 
+`query` 的 `topic_scenario` 恒指向这个默认场景（项目有同名场景时以项目为准），`topics`
+是已沉淀话题，相关的先读再探索，不重复劳动。单点查页面、查字段或确认某个已知事实，
+直接用 `query`/`read`，不必走完整流程。
+
 回答时给出页面 id 和原始文件 key。页面与 raw 冲突时以 raw 为准，并说明冲突。
 
 ## 按场景执行
 
 项目可以把一类任务的流程写成场景，放在 `<root>/场景能力/<场景>/`：`SCENARIO.md` 是主流程，
-`scripts/` 和 `references/` 是配套脚本与说明。场景是能力，不是知识页：它不会被 `ingest`
-写进账本，但 `query` 会直接检索它，所以改完流程不用重新摄入。
+`scripts/` 和 `references/` 是配套脚本与说明。技能自带 `话题探索` 内置场景；项目放同名
+场景即可覆盖它。场景是能力，不是知识页：它不会被 `ingest` 写进账本，但 `query` 会直接
+检索它，所以改完流程不用重新摄入。内置场景的 `path` 只是展示标签
+（`内置场景/<id>/SCENARIO.md`），不是磁盘路径。
 
 `query` 结果的 `scenarios` 非空时，说明命中了场景。先加载再照做：
 
@@ -115,20 +125,18 @@ python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
   缺依据就说明，不要补编步骤。
 - 没有命中场景时按普通知识检索回答；不要凭目录名猜流程，也不要声称执行了不存在的场景。
 
-## 记录会话素材
+## 沉淀话题
 
-用户要求记录会话、蒸馏会话、留给下次，或一段讨论产生了值得跨项目复用的方法、经验、踩坑
-与方案取舍时，把可复用的部分写到**当前项目根目录**的 `wiki-sources/`。
+话题探索收尾时默认问用户是否沉淀；用户要求把一次讨论或调研留给下次时，写到**当前工作区
+根目录**的 `话题/<主题>.md`，一个主题一份。话题不是知识页：不运行 `ingest`，不写
+`.wiki/`，不建页面、不排任务；写入后报告“未执行摄入”。
 
-- 素材是供 wiki 后续处理的原料，不是知识页，也不是聊天记录；写入不代表已摄入。这条流程
-  不运行 `wiki.py`，不写 `.wiki/`，不建页面、不排任务。
-- 用户明确要求保存且主题清楚时直接执行；agent 主动发现值得保存的经验，先给标题和一句话
-  要点，征得同意后再写；范围含糊或含敏感内容先澄清，凭据不落盘。
-- 只维护本项目素材。项目事实归产品文档，强制规则归指导文档，未决问题归 issues，不把
-  不同归属的内容都塞进素材。
-
-归属判断、提炼标准、授权与完整写入流程见
-[references/session-materials.md](references/session-materials.md)。
+- 话题文件的 frontmatter、固定六节、归属判断、授权与完成标准，见内置场景
+  `scenario load "话题探索"` 的“话题文件”与“沉淀前的归属判断”两节。
+- 流程稳定、可重复执行时，同时给出 `场景能力/<id>/SCENARIO.md` 的能力候选草稿，用户确认
+  后再建；资料不足时列出待摄入来源与下一轮要查的关键词。
+- 项目事实归产品文档，强制规则归指导文档，未决问题归 issues；只有可复用的方法、经验、
+  踩坑、方案取舍和探索结论写话题。凭据不落盘。
 
 ## 提交失败
 

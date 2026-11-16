@@ -117,9 +117,16 @@ def main(argv=None):
         scenario_main = scenario_files(root)
 
         listing = run(root, "scenario", "list")["data"]
-        check(results, "scenario list reports valid and invalid entries",
-              listing["count"] == 2 and listing["valid"] == 1, listing)
+        check(results, "scenario list includes project and builtin entries",
+              listing["count"] == 3 and listing["valid"] == 2, listing)
         check(results, "scenario commands leave no .wiki", not (root / ".wiki").exists(), listing)
+        builtin = run(root, "scenario", "load", "话题探索")["data"]
+        check(results, "builtin scenario is loadable without project files",
+              builtin["scenario"]["source"] == "builtin"
+              and builtin["path"].startswith("内置场景/")
+              and "话题文件" in builtin["content"]
+              and builtin["resources"] == [], builtin)
+        check(results, "builtin scenario id cannot escape", run(root, "scenario", "load", "../x", expect=2)["error"]["code"] == "E_USAGE")
         loaded = run(root, "scenario", "load", "account-opening")["data"]
         check(results, "scenario load returns the whole flow",
               "核验身份" in loaded["content"] and loaded["path"].endswith("SCENARIO.md"), loaded)
@@ -145,10 +152,30 @@ def main(argv=None):
         escaped = run(root, "read", str(outside_file), expect=2)
         check(results, "read outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
 
+        topic = root / "话题" / "复机办理.md"
+        topic.parent.mkdir()
+        topic.write_text(
+            "---\n"
+            "name: 复机办理\n"
+            "description: 停机复机的办理路径与时长\n"
+            "status: open\n"
+            "updated: 2026-11-16\n"
+            "---\n\n"
+            "## 主题\n\n停机后如何复机、要多久。\n\n"
+            "## 结论\n\n本人持证到厅办理，约两个工作日。\n\n"
+            "## 依据\n\n- 页面：anti-fraud-restore — 复机路径与时长\n\n"
+            "## 未决问题\n\n异地办理是否一样。\n\n"
+            "## 下一步\n\n补异地办理的 raw。\n\n"
+            "## 能力候选\n\n无。\n",
+            encoding="utf-8",
+        )
+
         data = run(root, "ingest")["data"]
         check(results, "ingest queues route tasks", data["pending_total"] == 2, data)
         check(results, "ingest skips the scenario directory",
               not any(item["key"].startswith("场景能力") for item in data["ingested"]), data["ingested"])
+        check(results, "ingest skips topic files",
+              not any(item["key"].startswith("话题/") for item in data["ingested"]), data["ingested"])
         check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
 
         found = run(root, "query", "开户")["data"]
@@ -165,6 +192,19 @@ def main(argv=None):
         invalid = run(root, "query", "坏场景")["data"]
         check(results, "invalid scenarios stay out of query",
               invalid["scenario_matches"] == 0, invalid)
+
+        topics_hit = run(root, "query", "复机")["data"]
+        check(results, "query always offers the topic scenario",
+              topics_hit["topic_scenario"]["id"] == "话题探索"
+              and topics_hit["topic_scenario"]["source"] == "builtin",
+              topics_hit["topic_scenario"])
+        check(results, "query finds the saved topic",
+              topics_hit["topic_matches"] == 1
+              and topics_hit["topics"][0]["name"] == "复机办理"
+              and topics_hit["topics"][0]["read"].startswith("read "),
+              topics_hit["topics"])
+        check(results, "topic hits stay separate from page hits",
+              topics_hit["matches"] == 0, topics_hit)
 
         tasks = run(root, "next", "--kind", "route", "--batch", "5")["data"]["tasks"]
         check(results, "route claims one task per source", len(tasks) == 2, tasks)
@@ -359,6 +399,17 @@ def main(argv=None):
             cwd=dry, capture_output=True, text=True,
         )
         check(results, "dry run leaves no .wiki", dry_run.returncode == 0 and not (dry / ".wiki").exists(), dry_run.stderr)
+
+        override = root / "场景能力" / "话题探索"
+        override.mkdir()
+        (override / "SCENARIO.md").write_text(
+            "---\nname: 话题探索\ndescription: 项目自定义的话题流程\n---\n\n项目版流程。\n",
+            encoding="utf-8",
+        )
+        overridden = run(root, "scenario", "load", "话题探索")["data"]
+        check(results, "project scenario overrides the builtin",
+              overridden["scenario"]["source"] == "project"
+              and "项目版流程" in overridden["content"], overridden)
 
         healthy = run(root, "doctor", expect=(0, 1))["data"]
         check(results, "doctor runs", isinstance(healthy["issues"], list), healthy)

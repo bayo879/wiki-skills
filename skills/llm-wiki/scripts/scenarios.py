@@ -10,6 +10,12 @@ Scenarios are not knowledge pages: `ingest` skips the directory, nothing is
 written to `.wiki/`, and `query` reads the files directly. This keeps a flow
 editable without re-ingesting it, while `scenario load` still returns the full
 flow plus an inventory of the support files.
+
+The skill also ships built-in scenarios under `<skill>/scenarios/`. They are
+read-only and always available, and a project scenario with the same id takes
+precedence, so a project can override the default flow. Built-in flows are
+self-contained: they list no resources and their `path` values are display
+labels rather than workspace paths.
 """
 
 from __future__ import annotations
@@ -24,10 +30,18 @@ from frontmatter import split_frontmatter
 SCENARIO_DIR = "场景能力"
 SCENARIO_FILE = "SCENARIO.md"
 MAX_SCENARIO_CHARS = 200_000
+BUILTIN_DIR = "scenarios"
+BUILTIN_LABEL = "内置场景"
+DEFAULT_SCENARIO_ID = "话题探索"
+SKILL_ROOT = Path(__file__).resolve().parent.parent
 
 
 def scenario_root(root):
     return Path(root) / SCENARIO_DIR
+
+
+def builtin_root():
+    return SKILL_ROOT / BUILTIN_DIR
 
 
 def inventory(root):
@@ -41,36 +55,58 @@ def inventory(root):
     }
 
 
-def scan(root):
-    """Return full internal records for every scenario directory."""
+def scan(root, builtin=True):
+    """Return full internal records for project scenarios, then built-ins.
+
+    A project scenario shadows a built-in one with the same id.
+    """
     root = Path(root)
-    base = scenario_root(root)
+    entries = [
+        _entry(root, child)
+        for child in _children(scenario_root(root))
+    ]
+    if not builtin:
+        return entries
+    seen = {entry["id"] for entry in entries}
+    base = builtin_root()
+    for child in _children(base):
+        if child.name in seen:
+            continue
+        entries.append(_builtin_entry(base, child))
+    return entries
+
+
+def _children(base):
     if not base.is_dir():
         return []
     try:
-        children = sorted(base.iterdir(), key=lambda path: path.name)
+        return sorted(
+            (
+                child
+                for child in base.iterdir()
+                if child.is_dir() and not child.name.startswith(".")
+            ),
+            key=lambda path: path.name,
+        )
     except OSError:
         return []
-    return [
-        _entry(root, child)
-        for child in children
-        if child.is_dir() and not child.name.startswith(".")
-    ]
 
 
 def load(root, scenario_id):
     """Return one scenario's flow, metadata and resource inventory."""
     scenario_id = _valid_id(scenario_id)
     root = Path(root)
-    directory = scenario_root(root) / scenario_id
-    if not directory.is_dir():
+    entry = next(
+        (item for item in scan(root) if item["id"] == scenario_id),
+        None,
+    )
+    if entry is None:
         raise WikiError(
             "E_NOT_FOUND",
             f"no scenario {scenario_id}",
             "run `scenario list` to see available scenarios",
             3,
         )
-    entry = _entry(root, directory)
     if not entry["valid"]:
         raise WikiError(
             "E_SCENARIO_INVALID",
@@ -87,13 +123,27 @@ def load(root, scenario_id):
     }
 
 
+def default(root):
+    """Return the built-in topic exploration flow when it is loadable."""
+    for entry in scan(root):
+        if entry["id"] != DEFAULT_SCENARIO_ID or not entry["valid"]:
+            continue
+        return {
+            "id": entry["id"],
+            "name": entry["name"],
+            "source": entry["source"],
+            "load": f'scenario load "{entry["id"]}"',
+        }
+    return None
+
+
 def match(root, terms, limit):
-    """Rank valid scenarios against query terms; reads files, writes nothing."""
+    """Rank valid project scenarios against query terms; reads only files."""
     terms = [term for term in terms if term]
     if not terms:
         return []
     scored = []
-    for entry in scan(root):
+    for entry in scan(root, builtin=False):
         if not entry["valid"]:
             continue
         title = entry["name"]
@@ -125,10 +175,19 @@ def match(root, terms, limit):
     return scored[:max(1, int(limit))]
 
 
-def _entry(root, directory):
+def _builtin_entry(base, directory):
+    entry = _entry(base, directory, source="builtin")
+    entry["path"] = f"{BUILTIN_LABEL}/{entry['path']}"
+    entry["main"] = f"{BUILTIN_LABEL}/{entry['main']}"
+    entry["resources"] = []
+    return entry
+
+
+def _entry(root, directory, source="project"):
     root = Path(root)
     record = {
         "id": directory.name,
+        "source": source,
         "name": directory.name,
         "description": "",
         "triggers": [],
@@ -183,6 +242,7 @@ def _entry(root, directory):
 def _public(entry):
     return {
         "id": entry["id"],
+        "source": entry["source"],
         "name": entry["name"],
         "description": entry["description"],
         "triggers": entry["triggers"],

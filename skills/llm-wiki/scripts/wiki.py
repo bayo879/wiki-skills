@@ -37,13 +37,14 @@ require_python()
 import health
 import scenarios
 import search
+import topics
 from errors import WikiError
 from frontmatter import split_frontmatter, yaml_scalar
 from tasks import task_packet
 from validation import validate_page_payload
 from workspace import WIKI_DIR, dry_store, inside_root, window_safe
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 RAW_SUBDIR = "raw"
 PAGES_SUBDIR = "pages"
 DRIFT_SUBDIR = "drift"
@@ -412,7 +413,10 @@ class Wiki:
             dirnames[:] = sorted(
                 name for name in dirnames
                 if name not in ignores and not name.startswith(".")
-                and not (at_scan_root and name == scenarios.SCENARIO_DIR)
+                and not (
+                    at_scan_root
+                    and name in (scenarios.SCENARIO_DIR, topics.TOPIC_DIR)
+                )
             )
             for name in sorted(filenames):
                 if name.startswith("."):
@@ -1603,6 +1607,8 @@ def command_query():
         raise WikiError("E_USAGE", "query needs text or --page", "example: query 反诈 复机", 2)
     scored, results = search.search_pages(wiki, terms, ARGS.limit)
     scenario_hits = scenarios.match(wiki.root, terms, ARGS.limit)
+    topic_hits = topics.match(wiki.root, terms, ARGS.limit)
+    default_scenario = scenarios.default(wiki.root)
     data = {
         "query": " ".join(terms),
         "matches": len(scored),
@@ -1610,20 +1616,45 @@ def command_query():
         "results": results,
         "scenario_matches": len(scenario_hits),
         "scenarios": scenario_hits,
+        "topic_matches": len(topic_hits),
+        "topics": topic_hits,
+        "topic_scenario": default_scenario,
         "boundary": "hit count is a ranked subset, not proof of full coverage",
     }
-    lines = [
+    sections = []
+    if default_scenario:
+        sections.append(
+            [
+                f"default topic flow: {default_scenario['load']}  "
+                f"(source: {default_scenario['source']})"
+            ]
+        )
+    pages = [
         f"{item['id']}  [{item['type']}/{item['status']}]  {item['title']}\n    {item['snippet']}"
         for item in results
     ]
+    if pages:
+        sections.append(pages)
+    if topic_hits:
+        block = ["topics (read before exploring the same theme again):"]
+        for item in topic_hits:
+            block.append(f"{item['name']}  [{item['status'] or 'open'}]  {item['description']}")
+            block.append(f"    path: {item['path']}  read: {item['read']}")
+        sections.append(block)
     if scenario_hits:
+        block = ["scenarios (load before following a flow):"]
+        for item in scenario_hits:
+            block.append(f"{item['id']}  {item['description']}")
+            block.append(f"    path: {item['path']}  load: {item['load']}")
+        sections.append(block)
+    lines = []
+    for block in sections:
         if lines:
             lines.append("")
-        lines.append("scenarios (load before following a flow):")
-        for item in scenario_hits:
-            lines.append(f"{item['id']}  {item['description']}")
-            lines.append(f"    path: {item['path']}  load: {item['load']}")
+        lines.extend(block)
     summary = f"{len(scored)} matching pages"
+    if topic_hits:
+        summary += f", {len(topic_hits)} matching topics"
     if scenario_hits:
         summary += f", {len(scenario_hits)} matching scenarios"
     summary += f", showing {len(results)} pages for {' '.join(terms)}"

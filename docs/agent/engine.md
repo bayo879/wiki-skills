@@ -1,9 +1,10 @@
 # 引擎内部
 
-对象：`skills/llm-wiki/scripts/wiki.py`（1908 行，单文件上限 2000 行；公共错误在
+对象：`skills/llm-wiki/scripts/wiki.py`（1933 行，单文件上限 2000 行；公共错误在
 `errors.py`，frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能力在
-`scenarios.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，工作区边界在
-`workspace.py`，任务信息面在 `tasks.py`，页面载荷校验在 `validation.py`；再长就按解析 / 账本 / 任务 / 命令拆模块）。
+`scenarios.py`，话题沉淀在 `topics.py`，运行时基线在 `runtime.py`，安装自检在
+`health.py`，工作区边界在 `workspace.py`，任务信息面在 `tasks.py`，页面载荷校验在
+`validation.py`；再长就按解析 / 账本 / 任务 / 命令拆模块）。
 本文件只记录改代码时容易踩的内部约定，命令与字段以 `docs/readme/cli.md` 为准。
 
 ## 布局
@@ -16,7 +17,8 @@
 | 解析 | `extract_text` 及 `pdf_to_text`、`docx_to_text`、`html_to_text`、`decode_bytes` | 纯函数，不碰数据库；超限在 `read_bytes` 抛 |
 | frontmatter | `frontmatter.py` | `split_frontmatter`、`unquote_scalar`、`yaml_scalar`；页面渲染与场景加载共用一套语法 |
 | 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
-| 场景能力 | `scenarios.py` | `scan`/`inventory`/`match`/`load`；只读文件，不写 `.wiki/`，不生成任务 |
+| 场景能力 | `scenarios.py` | `scan`/`inventory`/`match`/`load`/`default`；项目场景与 `scenarios/` 内置场景合并，只读文件，不写 `.wiki/`，不生成任务 |
+| 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `话题/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
 | 页面渲染 | `render_page` | 依赖 `frontmatter.yaml_scalar`；改动一侧要同步另一侧 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 深检，门禁用轻检 |
@@ -66,9 +68,14 @@
     `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。
 12. **场景只读且不进账本。** `scan_files` 在扫描根一级跳过 `场景能力/`，不因旧
     `scan.ignore` 是否包含它而改变；`scenarios.py` 不打开数据库、不写 `.wiki/`、不排任务。
-    `query` 只匹配 `valid` 的场景；`scenario list` 仍列出非法项并带 `error`。`scenario load`
-    的 id 必须是 `场景能力/` 下的一级目录名，拒绝 `.`、`..`、路径分隔符和区外符号链接。
+    `query` 只匹配 `valid` 的项目场景；内置场景不参与关键词匹配，但 `default()` 让它恒出现在
+    `topic_scenario`。`scenario list` 仍列出非法项并带 `error`。`scenario load` 的 id 必须是
+    `场景能力/` 下的一级目录名或内置场景 id，拒绝 `.`、`..`、路径分隔符和区外符号链接。
     场景文件是活文件，不做缓存或 digest。
+13. **话题只读且不进账本。** `scan_files` 同时跳过 `话题/`，话题不会被当成来源。`topics.py`
+    只读 `话题/*.md`，取 frontmatter 的 `name/description/status/updated`；正文为空或文件超过
+    200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的 `topic_matches` 与页面
+    `matches`、场景 `scenario_matches` 分开计数；话题文件由 agent 直接写，不经账本。
 
 ## 数据方向
 
@@ -80,6 +87,8 @@ page 载荷 → 校验 → page_revs + 镜像 + links
 
 场景能力/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不落盘）
                               └─scenario load→ 全文 + resources
+
+话题/*.md ──query/scan──→ topics 命中（只读，不落盘）
 ```
 
 `raw` 文件名带 digest 前缀，避免同名覆盖；`sources.raw` 存相对路径。
@@ -94,8 +103,11 @@ page 载荷 → 校验 → page_revs + 镜像 + links
   `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
   `tests/selftest.py`。
 - 改场景：同步 `docs/readme/cli.md`、`docs/readme/scenarios.md`、`SKILL.md`、
-  `skills/llm-wiki/scripts/health.py` 的 `SCRIPT_FILES`、`tests/selftest.py`；保持 `query`
-  只匹配合法场景、`load` 只读。
+  `skills/llm-wiki/scripts/health.py` 的 `SCRIPT_FILES` 与 `BUILTIN_SCENARIOS`、
+  `tests/selftest.py`；保持 `query` 只匹配合法项目场景、`load` 只读、内置场景可覆盖。
+- 改话题：同步 `docs/readme/cli.md`、`docs/readme/topics.md`、`SKILL.md`、
+  `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`、`scripts/health.py` 的
+  `SCRIPT_FILES`、`tests/selftest.py`；保持 `ingest` 跳过 `话题/`、话题计数独立。
 - 改表结构：在 `ensure()` 里做幂等迁移，并在 `docs/agent/verification.md` 记录旧库升级结果。
 - 改渲染：`render_page` 与 `split_frontmatter` 必须能往返；跑 `tests/selftest.py` 的
   import/restore 用例。

@@ -22,6 +22,7 @@ SCRIPT_FILES = (
     "frontmatter.py",
     "search.py",
     "scenarios.py",
+    "topics.py",
     "tasks.py",
     "validation.py",
     "workspace.py",
@@ -29,6 +30,7 @@ SCRIPT_FILES = (
     "health.py",
 )
 TEMPLATES = ("concept.md", "entity.md", "process.md", "note.md")
+BUILTIN_SCENARIOS = ("话题探索",)
 TABLES = ("sources", "page_revs", "tasks", "task_sources", "links")
 
 
@@ -142,6 +144,16 @@ def check_installation(skill_dir, workspace, deep=True, allow_missing=False):
                 lambda name=name: (
                     (skill_dir.parent / "templates" / name).is_file(),
                     str(skill_dir.parent / "templates" / name),
+                ),
+            )
+        )
+    for name in BUILTIN_SCENARIOS:
+        checks.append(
+            _check(
+                f"scenario:{name}",
+                lambda name=name: (
+                    (skill_dir.parent / "scenarios" / name / "SCENARIO.md").is_file(),
+                    str(skill_dir.parent / "scenarios" / name / "SCENARIO.md"),
                 ),
             )
         )
