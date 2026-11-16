@@ -93,8 +93,10 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实
 `scenarios.SCENARIO_DIRS = ("scenario", "场景能力")`，`scenario_roots` 只返回实际存在的目录，
 `scan` 跨目录去重；`ingest` 两个目录都跳过，`publish.dir` 两个名字都算保留名。
 本节基于 `d5f4327`（漂移失效与单树重构之后）：main 单独跑 102/102 通过，叠加本节改动后
-`python3 tests/selftest.py`：105/105 通过，退出码 0。`60c1e5b..81e9e77` 的观看区与发布
-改动之后为 177/177（含 `sync`、发布事实、任务快照与 `ingest` 补偿入队）。本节新增检查：
+`python3 tests/selftest.py`：105/105 通过，退出码 0。观看区与发布改动（`60c1e5b..f2e40bb`）
+之后当前为 177/177（含 `sync`、发布事实、任务快照与 `ingest` 补偿入队）；中间版本 81e9e77 是
+175/175，177 与补偿入队同在 f2e40bb。套件只对墙钟有一处依赖：任务租约 900 秒
+（`TASK_LEASE_SECONDS`），机器挂起超过它会让 `submit` 报 `E_TASK_STALE`。本节新增检查：
 
 - `scenario list` 的 `roots == ["scenario", "场景能力"]`；
 - `scenario/deck-flow` 可 `load`，`path` 以 `scenario/deck-flow/` 开头；

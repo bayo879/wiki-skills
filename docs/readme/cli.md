@@ -71,8 +71,10 @@
 `<view>/`），解析新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），并为每个
 新来源入队一条 route 任务。`scenario/`（旧名 `场景能力/`）是流程能力、`话题/` 是 wiki 的
 探索层，都不作为摄入来源，摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。场景与
-话题的检索分别由 `scenario search` 和 `query` 直接扫描文件完成。`--dry-run` 不写账本，
-临时库在 `.wiki/tmp/`，退出时清理；`--force` 忽略哈希重新解析。`--only` 按根目录相对 key
+话题的检索分别由 `scenario search` 和 `query` 直接扫描文件完成。
+
+`--dry-run` 用 `.wiki/tmp/` 下的临时库，退出时清理，不写账本；它只列 `would_ingest`，不预告
+末尾补偿入队会补哪些来源。`--force` 忽略哈希重新解析。`--only` 按根目录相对 key
 精确匹配，不校验参数形状：传绝对路径或含 `..` 的值只会匹配不到来源，命令仍成功退出 0，
 也不会摄入任何文件。
 
@@ -210,7 +212,8 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 - `page import <id> --from <file>`：采用人工编辑的页面文件（可带 frontmatter），
   生成新修订（`origin=import`），不强制 evidence。只允许已存在的页面。
 - `page restore <id> --rev N`：把第 N 版内容写成新修订（`origin=restore`）。该页在观看区
-  有未收割手改时，推送会跳过它，恢复后的内容要到 `sync` 之后才出现在观看区。
+  有未收割手改时，推送跳过它，恢复内容不会出现；此时跑 `sync` 反而会把那份手改收成更新一版
+  并盖过 restore。先 `sync` 处理手改，再 `restore`。
 
 ### export
 
