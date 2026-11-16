@@ -64,7 +64,8 @@
 
 扫描根目录（跳过隐藏目录、`scan.ignore`、`场景能力/` 与 `话题/`），解析新文件或内容变化的
 文件，写入 `.wiki/raw/`，并为每个新来源入队一条 route 任务。`场景能力/` 是流程能力、
-`话题/` 是探索沉淀，都不是来源，摄入时整目录跳过；它们的检索由 `query` 直接扫描文件完成。`--dry-run` 不写账本，临时库在
+`话题/` 是 wiki 的探索层，都不作为摄入来源，摄入时整目录跳过；场景与话题的检索分别由
+`scenario search` 和 `query` 直接扫描文件完成。`--dry-run` 不写账本，临时库在
 `.wiki/tmp/`，退出时清理；`--force` 忽略哈希重新解析。
 
 `data`: `{ingested[{key,raw,parser,digest,size,chars}], unchanged, unsupported[{key,suffix,reason,hint}],

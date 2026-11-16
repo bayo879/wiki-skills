@@ -23,14 +23,16 @@
 [docs/readme/design-principles.md](docs/readme/design-principles.md)；未决设计统一放
 [docs/issues/](docs/issues/)，不能把候选方案写成已实现事实。
 
-## 概念边界：项目 wiki、话题、开发文档
+## 概念边界：wiki、话题、素材、开发文档
 
-- **项目 wiki**：工作区 `.wiki/` 下的 raw、pages 与账本，由 `ingest`/`next`/`submit`
-  维护，是 llm-wiki 在某个工作区生成的运行时产物。
-- **话题**：`话题/<主题>.md`（承接原 `wiki-sources/` 的跨项目知识职责），放可复用的
-  开发方法、经验、踩坑与方案分析，以及探索结论、未决问题与下一步。`wiki-sources` 和
-  `话题` 都不是当前项目的 wiki：不摄入、不写 `.wiki/`、不生成页面。
+- **wiki 正式层**：工作区 `.wiki/` 下的 raw、pages 与账本，由 `ingest`/`next`/`submit`
+  维护；页面必须能回到 raw 引文。
+- **话题（wiki 探索层）**：`话题/<主题>.md`，记录一次探索的主题、结论、依据、未决问题
+  与下一步，`query` 可直接检索。它属于 wiki 内容，不是 `wiki-sources/` 素材；不参与
+  `ingest`、不进账本、不要求逐字引文。
+- **素材**：`wiki-sources/`（项目按需使用）是待摄入的原始材料，由 wiki 内部完成摄入、
+  去重与知识页维护；素材不是 wiki 内容，也不等于话题。
 - **开发文档**：`README.md`、`docs/readme/`、`docs/agent/`、`docs/issues/`，记录
   llm-wiki 本项目自己的产品事实、开发决策与待办。
-- 三者不要互相替代：本项目产品事实与开发决策写开发文档，不写进话题；跨项目素材也
-  不要写成产品事实或项目 wiki 页面。归属拿不准时先问用户。
+- 四者不要互相替代：本项目产品事实与开发决策写开发文档，不写进话题；素材不要写成
+  wiki 内容或话题；话题也不要当素材摄入。归属拿不准时先问用户。

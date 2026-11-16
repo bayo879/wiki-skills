@@ -1,9 +1,10 @@
 """Read-only topic notes stored under `<root>/话题/`.
 
 A topic is one exploration record: the question, the answer, its evidence and
-what still needs digging. Topics are Markdown files written by the agent, not
-knowledge pages: `ingest` skips the directory, nothing enters the ledger, and
-`query` reads the files directly so a topic can be updated without re-ingesting.
+what still needs digging. Topics are the wiki's exploration layer: Markdown
+files written by the agent, not formal knowledge pages. `ingest` skips the
+directory, nothing enters the ledger, and `query` reads the files directly so a
+topic can be updated without re-ingesting.
 """
 
 from __future__ import annotations
