@@ -72,3 +72,22 @@
 - 技能目录只保留 `references/curation.md`（页面质量标准）。CLI、安装、恢复、验证记录
   移到 `docs/readme/` 与 `docs/agent/`，不再躺在技能可读范围内。
 - `selftest.py` 增加任务包断言，总计 30 项。
+
+## 2026-11-16：场景能力与知识页分离
+
+用户要求：检索到场景时，按场景流程完成任务；场景放项目根目录 `场景能力/`，组成参考
+skill 的主 Markdown + 关联脚本/说明。确认的取舍：
+
+- 入口扩展 `query`：一次检索同时返回知识页与场景，场景在 `scenarios` 字段；另提供
+  `scenario list` / `scenario load <id>` 做检查与加载。
+- 目录形状：`场景能力/<id>/SCENARIO.md`、`scripts/`、`references/`。`description` 必填，
+  `triggers` 可选，参与检索；正文是流程。
+- 不摄入：`ingest` 整目录跳过 `场景能力/`，不写 sources、不排任务、不进账本；`query`
+  直接扫描文件。这样改流程不需要重新摄入。
+- 加载返回：主文件全文 `content`、解析后的 `meta`、`path` 与 `resources[]`（`script` /
+  `reference` / `other`），由 agent 按流程执行。
+- 只读：`scenario list/load` 不创建 `.wiki/`，不要求先 `init`；非法场景不进 `query`，
+  但在 `list` 里带 `error` 可见。
+- 边界：场景是能力不是知识页；流程以 `SCENARIO.md` 为准，事实依据仍以页面和 raw 为准。
+- 代码拆出 `frontmatter.py`、`search.py`、`scenarios.py`，`wiki.py` 从 1954 行降到
+  1908 行，保持单文件 2000 行上限。

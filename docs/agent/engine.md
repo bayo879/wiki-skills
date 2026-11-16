@@ -1,7 +1,8 @@
 # 引擎内部
 
-对象：`skills/llm-wiki/scripts/wiki.py`（1954 行，单文件上限 2000 行；公共错误在
-`errors.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，工作区边界在
+对象：`skills/llm-wiki/scripts/wiki.py`（1908 行，单文件上限 2000 行；公共错误在
+`errors.py`，frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能力在
+`scenarios.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，工作区边界在
 `workspace.py`，任务信息面在 `tasks.py`，页面载荷校验在 `validation.py`；再长就按解析 / 账本 / 任务 / 命令拆模块）。
 本文件只记录改代码时容易踩的内部约定，命令与字段以 `docs/readme/cli.md` 为准。
 
@@ -13,7 +14,10 @@
 | 错误与输出 | `errors.py` 的 `WikiError`、`emit`、`fail` | 错误码 + `next` + 退出码；所有命令走同一信封 |
 | 工作区边界 | `workspace.py` | `WIKI_DIR`、`window_safe`、`inside_root`、`dry_store`；文件参数一律先过 `inside_root` |
 | 解析 | `extract_text` 及 `pdf_to_text`、`docx_to_text`、`html_to_text`、`decode_bytes` | 纯函数，不碰数据库；超限在 `read_bytes` 抛 |
-| 页面渲染 | `render_page`、`split_frontmatter`、`yaml_scalar` | 渲染与解析 frontmatter 必须对称；改动一侧要同步另一侧 |
+| frontmatter | `frontmatter.py` | `split_frontmatter`、`unquote_scalar`、`yaml_scalar`；页面渲染与场景加载共用一套语法 |
+| 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
+| 场景能力 | `scenarios.py` | `scan`/`inventory`/`match`/`load`；只读文件，不写 `.wiki/`，不生成任务 |
+| 页面渲染 | `render_page` | 依赖 `frontmatter.yaml_scalar`；改动一侧要同步另一侧 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 深检，门禁用轻检 |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留；纯函数，只读 `Wiki` |
@@ -60,6 +64,11 @@
     `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
     解析后落在扫描根外的符号链接。导入 `errors.py` / `workspace.py` 前设
     `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。
+12. **场景只读且不进账本。** `scan_files` 在扫描根一级跳过 `场景能力/`，不因旧
+    `scan.ignore` 是否包含它而改变；`scenarios.py` 不打开数据库、不写 `.wiki/`、不排任务。
+    `query` 只匹配 `valid` 的场景；`scenario list` 仍列出非法项并带 `error`。`scenario load`
+    的 id 必须是 `场景能力/` 下的一级目录名，拒绝 `.`、`..`、路径分隔符和区外符号链接。
+    场景文件是活文件，不做缓存或 digest。
 
 ## 数据方向
 
@@ -68,6 +77,9 @@
                                         ↓ enqueue route 任务
 route 载荷 → 校验 → 页面任务（new/merge）或来源结算（skip）
 page 载荷 → 校验 → page_revs + 镜像 + links
+
+场景能力/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不落盘）
+                              └─scenario load→ 全文 + resources
 ```
 
 `raw` 文件名带 digest 前缀，避免同名覆盖；`sources.raw` 存相对路径。
@@ -81,6 +93,9 @@ page 载荷 → 校验 → page_revs + 镜像 + links
 - 改字段或校验：同步 `docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
   `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
   `tests/selftest.py`。
+- 改场景：同步 `docs/readme/cli.md`、`docs/readme/scenarios.md`、`SKILL.md`、
+  `skills/llm-wiki/scripts/health.py` 的 `SCRIPT_FILES`、`tests/selftest.py`；保持 `query`
+  只匹配合法场景、`load` 只读。
 - 改表结构：在 `ensure()` 里做幂等迁移，并在 `docs/agent/verification.md` 记录旧库升级结果。
 - 改渲染：`render_page` 与 `split_frontmatter` 必须能往返；跑 `tests/selftest.py` 的
   import/restore 用例。

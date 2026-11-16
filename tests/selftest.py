@@ -69,6 +69,35 @@ def body_file(root):
     return path
 
 
+def scenario_files(root):
+    base = Path(root) / "场景能力"
+    good = base / "account-opening"
+    (good / "scripts").mkdir(parents=True)
+    (good / "references").mkdir(parents=True)
+    main = good / "SCENARIO.md"
+    main.write_text(
+        "---\n"
+        "name: 开户流程\n"
+        "description: 新客户开户时核验身份并登记资料\n"
+        "triggers:\n"
+        "  - 开户\n"
+        "  - 新客户\n"
+        "---\n"
+        "# 开户流程\n\n"
+        "1. 核验身份\n"
+        "2. 登记资料\n",
+        encoding="utf-8",
+    )
+    (good / "scripts/check.sh").write_text("echo check\n", encoding="utf-8")
+    (good / "references/notes.md").write_text("开户材料说明\n", encoding="utf-8")
+    broken = base / "broken"
+    broken.mkdir()
+    (broken / "SCENARIO.md").write_text(
+        "---\nname: 坏场景\n---\n\n缺少 description。\n", encoding="utf-8"
+    )
+    return main
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--keep", action="store_true", help="keep the temp workspace")
@@ -85,6 +114,20 @@ def main(argv=None):
         )
         (root / "b.md").write_text("# 无关材料\n\n用来验证 skip 分支。\n", encoding="utf-8")
         (root / "scan.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        scenario_main = scenario_files(root)
+
+        listing = run(root, "scenario", "list")["data"]
+        check(results, "scenario list reports valid and invalid entries",
+              listing["count"] == 2 and listing["valid"] == 1, listing)
+        check(results, "scenario commands leave no .wiki", not (root / ".wiki").exists(), listing)
+        loaded = run(root, "scenario", "load", "account-opening")["data"]
+        check(results, "scenario load returns the whole flow",
+              "核验身份" in loaded["content"] and loaded["path"].endswith("SCENARIO.md"), loaded)
+        check(results, "scenario load inventories support files",
+              {item["kind"] for item in loaded["resources"]} == {"script", "reference"}, loaded["resources"])
+        escaped = run(root, "scenario", "load", "../x", expect=2)
+        check(results, "scenario id cannot escape the scenario root",
+              escaped["error"]["code"] == "E_USAGE", escaped)
 
         data = run(root, "check")["data"]
         check(results, "check passes before init", data["ok"], data)
@@ -104,7 +147,24 @@ def main(argv=None):
 
         data = run(root, "ingest")["data"]
         check(results, "ingest queues route tasks", data["pending_total"] == 2, data)
+        check(results, "ingest skips the scenario directory",
+              not any(item["key"].startswith("场景能力") for item in data["ingested"]), data["ingested"])
         check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
+
+        found = run(root, "query", "开户")["data"]
+        check(results, "query returns scenario matches",
+              found["scenario_matches"] == 1 and found["scenarios"][0]["id"] == "account-opening", found)
+        check(results, "query keeps page and scenario counts separate", found["matches"] == 0, found)
+        scenario_main.write_text(
+            scenario_main.read_text(encoding="utf-8") + "\n补充：支持见证开户。\n",
+            encoding="utf-8",
+        )
+        live = run(root, "query", "见证开户")["data"]
+        check(results, "scenario edits are searchable without ingest",
+              live["scenario_matches"] == 1, live)
+        invalid = run(root, "query", "坏场景")["data"]
+        check(results, "invalid scenarios stay out of query",
+              invalid["scenario_matches"] == 0, invalid)
 
         tasks = run(root, "next", "--kind", "route", "--batch", "5")["data"]["tasks"]
         check(results, "route claims one task per source", len(tasks) == 2, tasks)

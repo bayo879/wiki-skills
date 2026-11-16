@@ -35,12 +35,15 @@ from runtime import require_python
 require_python()
 
 import health
+import scenarios
+import search
 from errors import WikiError
+from frontmatter import split_frontmatter, yaml_scalar
 from tasks import task_packet
 from validation import validate_page_payload
 from workspace import WIKI_DIR, dry_store, inside_root, window_safe
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 RAW_SUBDIR = "raw"
 PAGES_SUBDIR = "pages"
 DRIFT_SUBDIR = "drift"
@@ -208,53 +211,6 @@ def extract_text(path, data):
         text, _ = decode_bytes(data)
         return text, "text"
     return "", ""
-
-
-def split_frontmatter(text):
-    """Split a page into (metadata dict, body). Tolerant of missing fields."""
-    if not text.startswith("---"):
-        return {}, text
-    lines = text.splitlines()
-    if lines[0].strip() != "---":
-        return {}, text
-    meta = {}
-    end = None
-    current_list = None
-    for index in range(1, len(lines)):
-        line = lines[index]
-        if line.strip() == "---":
-            end = index
-            break
-        item = re.match(r"^([A-Za-z_][\w-]*):\s*(.*)$", line)
-        if item:
-            key, value = item.group(1), item.group(2).strip()
-            current_list = None
-            if value == "":
-                meta[key] = []
-                current_list = key
-            else:
-                meta[key] = unquote_scalar(value)
-            continue
-        entry = re.match(r"^\s+-\s*(.*)$", line)
-        if entry and current_list:
-            meta[current_list].append(unquote_scalar(entry.group(1).strip()))
-    if end is None:
-        return {}, text
-    return meta, "\n".join(lines[end + 1:]).lstrip("\n")
-
-
-def unquote_scalar(value):
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        try:
-            return json.loads(value) if value[0] == '"' else value[1:-1]
-        except json.JSONDecodeError:
-            return value[1:-1]
-    return value
-
-
-def yaml_scalar(value):
-    return json.dumps(str(value), ensure_ascii=False)
 
 
 def render_page(meta, body):
@@ -452,9 +408,11 @@ class Wiki:
         ignores = set(self.config["scan"]["ignore"])
         found = []
         for current, dirnames, filenames in os.walk(self.scan_root):
+            at_scan_root = Path(current) == Path(self.scan_root)
             dirnames[:] = sorted(
                 name for name in dirnames
                 if name not in ignores and not name.startswith(".")
+                and not (at_scan_root and name == scenarios.SCENARIO_DIR)
             )
             for name in sorted(filenames):
                 if name.startswith("."):
@@ -1614,17 +1572,8 @@ def resolve_ref(wiki, ref):
     return candidate
 
 
-def window_safe(root, candidate):
-    try:
-        candidate.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def command_query():
     wiki, _ = open_wiki()
-    pages = wiki.all_pages()
     if ARGS.page:
         record = wiki.page_record(ARGS.page)
         if not record:
@@ -1652,66 +1601,63 @@ def command_query():
     terms = [term for term in re.split(r"\s+", (ARGS.text or "").strip()) if term]
     if not terms:
         raise WikiError("E_USAGE", "query needs text or --page", "example: query 反诈 复机", 2)
-    scored = []
-    for record in pages:
-        meta = record["meta"]
-        title = str(meta.get("title", ""))
-        summary = str(meta.get("summary", ""))
-        body = record["body"]
-        haystack = f"{title}\n{summary}\n{body}"
-        hits = sum(haystack.lower().count(term.lower()) for term in terms)
-        if hits == 0:
-            continue
-        score = hits + 5 * sum(title.lower().count(t.lower()) for t in terms)
-        score += 3 * sum(summary.lower().count(t.lower()) for t in terms)
-        scored.append(
-            {
-                "id": record["id"],
-                "title": title,
-                "type": meta.get("type"),
-                "status": meta.get("status"),
-                "summary": summary,
-                "sources": meta.get("sources", []),
-                "rev": record["rev"],
-                "score": score,
-                "snippet": snippet(body, terms[0]),
-            }
-        )
-    scored.sort(key=rank_key)
-    limit = max(1, ARGS.limit)
-    results = scored[:limit]
+    scored, results = search.search_pages(wiki, terms, ARGS.limit)
+    scenario_hits = scenarios.match(wiki.root, terms, ARGS.limit)
     data = {
         "query": " ".join(terms),
         "matches": len(scored),
         "returned": len(results),
         "results": results,
+        "scenario_matches": len(scenario_hits),
+        "scenarios": scenario_hits,
         "boundary": "hit count is a ranked subset, not proof of full coverage",
     }
-    emit(
-        "query", wiki.root,
-        f"{len(scored)} matching pages, showing {len(results)} for {' '.join(terms)}",
-        data,
-        [f"{item['id']}  [{item['type']}/{item['status']}]  {item['title']}\n    {item['snippet']}"
-         for item in results],
-    )
+    lines = [
+        f"{item['id']}  [{item['type']}/{item['status']}]  {item['title']}\n    {item['snippet']}"
+        for item in results
+    ]
+    if scenario_hits:
+        if lines:
+            lines.append("")
+        lines.append("scenarios (load before following a flow):")
+        for item in scenario_hits:
+            lines.append(f"{item['id']}  {item['description']}")
+            lines.append(f"    path: {item['path']}  load: {item['load']}")
+    summary = f"{len(scored)} matching pages"
+    if scenario_hits:
+        summary += f", {len(scenario_hits)} matching scenarios"
+    summary += f", showing {len(results)} pages for {' '.join(terms)}"
+    emit("query", wiki.root, summary, data, lines)
     wiki.close()
     return 0
 
 
-def rank_key(item):
-    return (-item["score"], item["id"])
-
-
-def snippet(body, term):
-    flat = re.sub(r"\s+", " ", body)
-    index = flat.lower().find(term.lower())
-    if index < 0:
-        return flat[:120]
-    start = max(0, index - 60)
-    end = min(len(flat), index + len(term) + 90)
-    prefix = "..." if start > 0 else ""
-    suffix = "..." if end < len(flat) else ""
-    return prefix + flat[start:end] + suffix
+def command_scenario():
+    workspace = Path.cwd().resolve()
+    root = Path(ARGS.root).resolve() if ARGS.root else workspace
+    if not window_safe(workspace, root):
+        raise WikiError(
+            "E_PATH", "scenario root escapes the workspace",
+            "run from the workspace, or pass --root inside it", 2,
+        )
+    if ARGS.scenario_command == "list":
+        data = scenarios.inventory(root)
+        summary = f"{data['valid']} valid, {data['count'] - data['valid']} invalid scenarios"
+        lines = []
+        for item in data["scenarios"]:
+            state = "ok" if item["valid"] else f"invalid: {item['error']}"
+            lines.append(f"{item['id']}  [{state}]  {item['description']}")
+            lines.append(f"    path: {item['path']}  resources: {len(item['resources'])}")
+        emit("scenario list", root, summary, data, lines)
+        return 0
+    data = scenarios.load(root, ARGS.id)
+    emit(
+        "scenario load", root,
+        f"scenario {data['scenario']['id']}: {len(data['resources'])} resources",
+        data,
+        [f"path: {data['path']}", f"description: {data['scenario']['description']}", "", data["content"]],
+    )
+    return 0
 
 
 def command_page_import():
@@ -1887,10 +1833,15 @@ def build_parser():
     read.add_argument("ref")
     read.add_argument("--offset", type=int, default=1)
     read.add_argument("--limit", type=int, default=200)
-    query = sub.add_parser("query", parents=[common], help="search pages, or inspect one page")
+    query = sub.add_parser("query", parents=[common], help="search pages and scenarios, or inspect one page")
     query.add_argument("text", nargs="?")
     query.add_argument("--page")
     query.add_argument("--limit", type=int, default=8)
+    scenario = sub.add_parser("scenario", help="inspect project scenario capabilities")
+    scenario_sub = scenario.add_subparsers(dest="scenario_command", required=True)
+    scenario_sub.add_parser("list", parents=[common], help="list scenario capabilities and validity")
+    load_p = scenario_sub.add_parser("load", parents=[common], help="load one scenario flow and its resources")
+    load_p.add_argument("id")
     page = sub.add_parser("page", help="human edits to an existing page")
     page_sub = page.add_subparsers(dest="page_command", required=True)
     import_p = page_sub.add_parser("import", parents=[common], help="adopt a hand-edited page file")
@@ -1940,6 +1891,9 @@ def main(argv=None):
         handler = (
             command_page_import if ARGS.page_command == "import" else command_page_restore
         )
+    elif command == "scenario":
+        command = f"scenario {ARGS.scenario_command}"
+        handler = command_scenario
     else:
         handler = COMMANDS[command]
     try:

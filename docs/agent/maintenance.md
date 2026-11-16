@@ -13,6 +13,7 @@
 | 页面质量与证据标准 | `skills/llm-wiki/references/curation.md` | — |
 | 页面固定版式与正文模板 | `skills/llm-wiki/templates/`（按类型分文件） | — |
 | 安装与目录约定 | `docs/readme/install.md` | `README.md` 给一行入口 |
+| 场景目录、frontmatter 与写法 | `docs/readme/scenarios.md` | `SKILL.md` 只给加载与执行约束 |
 | 故障与恢复 | `docs/readme/recovery.md` | — |
 | 实测结果与未覆盖项 | `docs/agent/verification.md` | — |
 | 内部实现约定 | `docs/agent/engine.md` | — |
@@ -21,6 +22,8 @@
 改命令、载荷、错误码时，至少同时检查：`docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
 `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
 `tests/selftest.py`、`README.md` 中的示例。
+改场景行为时，同时检查 `docs/readme/scenarios.md`、`skills/llm-wiki/scripts/scenarios.py`
+与 `query`/`scenario` 的输出断言。
 示例里的命令必须能直接跑通。
 改章节骨架（`tasks.py` 的 `PAGE_SECTIONS`）时，同步 `templates/` 下对应类型的正文模板，
 保证模板章节与引擎一致。

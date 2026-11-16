@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query/read 查知识。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
+description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query/read 查知识。也能检索并加载项目 `场景能力/` 下的流程场景，按 SCENARIO.md 的步骤完成任务。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「按开户/巡检等流程办事」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
 ---
 
 # llm-wiki：按任务填内容
@@ -94,6 +94,26 @@ python3 <skill>/scripts/wiki.py read "raw:<source-key>" --offset 1 --limit 120 -
 ```
 
 回答时给出页面 id 和原始文件 key。页面与 raw 冲突时以 raw 为准，并说明冲突。
+
+## 按场景执行
+
+项目可以把一类任务的流程写成场景，放在 `<root>/场景能力/<场景>/`：`SCENARIO.md` 是主流程，
+`scripts/` 和 `references/` 是配套脚本与说明。场景是能力，不是知识页：它不会被 `ingest`
+写进账本，但 `query` 会直接检索它，所以改完流程不用重新摄入。
+
+`query` 结果的 `scenarios` 非空时，说明命中了场景。先加载再照做：
+
+```bash
+python3 <skill>/scripts/wiki.py scenario list --json
+python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
+```
+
+- 用 `content` 里的步骤执行任务，用 `resources` 找配套文件；需要细节时再读
+  `references/`，不要一次把所有脚本和说明都倒进上下文。
+- 运行 `scripts/` 前先看清用途与参数；没有把握时先向用户确认，不要盲跑。
+- 场景步骤与知识页冲突时，流程以 `SCENARIO.md` 为准；事实依据仍以 raw 和页面为准，
+  缺依据就说明，不要补编步骤。
+- 没有命中场景时按普通知识检索回答；不要凭目录名猜流程，也不要声称执行了不存在的场景。
 
 ## 提交失败
 

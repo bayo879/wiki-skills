@@ -12,7 +12,7 @@
 - `install.py --target auto` 在 Windows 技能根下的放置结果。
 
 `tests/selftest.py` 只覆盖 Python 引擎，不覆盖 PowerShell 引导脚本；`docs/agent/verification.md`
-的 40/40 不能作为 Windows 可用的依据。
+的 50/50 不能作为 Windows 可用的依据。
 
 ## 影响
 

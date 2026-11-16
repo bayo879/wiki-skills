@@ -34,6 +34,25 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实
   或半初始化目录锁死。
 - 安装到临时目标后 `health.py` 存在、`tests/` 不存在，`check` 通过。
 
+## 2026-11-16 场景能力后复跑
+
+新增 `frontmatter.py`、`search.py`、`scenarios.py`，`query` 同时返回页面与场景，
+新增 `scenario list/load`，`ingest` 跳过 `场景能力/`。复跑 `python3 tests/selftest.py`：
+50/50 通过，退出码 0。新增检查覆盖：
+
+- `scenario list` 同时报告合法与非法场景；
+- `scenario list/load` 不创建 `.wiki/`；
+- `scenario load` 返回主文件全文、路径与 `script`/`reference` 资源；
+- `scenario load ../x` 返回 `E_USAGE`；
+- `ingest` 不把场景目录当来源；
+- `query` 分别返回 `matches` 与 `scenario_matches`；
+- 修改场景正文后不重新摄入即可检索到；
+- 非法场景不进 `query`。
+
+手工临时目录复测：`scenario list/load` 在 `init` 前可用，执行后无 `.wiki/`；`query`
+只命中场景时 `matches=0`、`scenario_matches=1`，人类摘要同时给出场景数与页面数。
+本版本 `VERSION=0.3.0`。
+
 ## 一、自测：26/26 通过
 
 ```bash

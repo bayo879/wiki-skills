@@ -19,6 +19,9 @@ from runtime import MINIMUM, MINIMUM_TEXT
 SCRIPT_FILES = (
     "wiki.py",
     "errors.py",
+    "frontmatter.py",
+    "search.py",
+    "scenarios.py",
     "tasks.py",
     "validation.py",
     "workspace.py",
