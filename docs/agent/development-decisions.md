@@ -8,7 +8,8 @@
 用户原话："这个项目要开始转型了，把重心放在skills内的能力开发上，把之前使用rust的设定
 和坑点，可以借鉴的借鉴，不可以借鉴的删除，最终只会有python skill这版了"。
 
-- 交付物收敛为 `skills/llm-wiki/`（Python，标准库）与 `skills/llm-wiki-session/`。
+- 交付物收敛为 `skills/llm-wiki/`（Python，标准库）与 `skills/llm-wiki-session/`（会话技能
+  已于 2026-11-16 内化，见下）。
 - 删除 Rust 源码、`output/` 发布包、`.github` 的 release 构建、`scripts/build-output.sh`。
 - 归档：分支 `rust-final`、tag `rust-archive-2026-11-13`；旧解析器分支
   `fix/parser-content-reliability` 留 tag `rust-parser-archive`。
@@ -91,3 +92,14 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
 - 边界：场景是能力不是知识页；流程以 `SCENARIO.md` 为准，事实依据仍以页面和 raw 为准。
 - 代码拆出 `frontmatter.py`、`search.py`、`scenarios.py`，`wiki.py` 从 1954 行降到
   1908 行，保持单文件 2000 行上限。
+
+## 2026-11-16：会话素材内化为 llm-wiki 能力
+
+用户原话："我想把llm-wiki-session内化为llm-wiki的能力，其他设定不变"。
+
+- 交付物收敛为一个技能 `skills/llm-wiki/`，删除独立的 `skills/llm-wiki-session/`；技能
+  描述同时覆盖建库、场景与会话素材三类触发。
+- 会话素材的定位、归属分流、提炼标准、授权与写入流程原样保留，落在
+  `skills/llm-wiki/references/session-materials.md`；`SKILL.md` 只给触发条件、边界与入口。
+- 素材仍写当前项目根目录的 `wiki-sources/`，不运行 wiki CLI、不写 `.wiki/`、不摄入；
+  引擎、命令面、场景能力与安装方式都不变。

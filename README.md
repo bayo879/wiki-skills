@@ -3,7 +3,8 @@
 把本地文档整理成可检索、可追溯的 Markdown 知识库。交付物是一个 agent 技能目录
 `skills/llm-wiki/`：纯 Python 标准库，没有服务端、没有构建步骤、没有二进制的分发包。
 项目还可以把一类任务的执行流程写成**场景能力**，放在根目录 `场景能力/` 下；检索命中后按
-`SCENARIO.md` 的流程执行，不需要摄入成知识页。
+`SCENARIO.md` 的流程执行，不需要摄入成知识页。同一个技能也负责把会话里可复用的方法、
+经验、踩坑与方案取舍提炼成项目 `wiki-sources/` 下的素材。
 
 设计前提：**确定性的事交给引擎，语义的事交给 agent。** 扫描、解析、哈希、任务状态、
 引文校验、页面渲染都在 `scripts/wiki.py` 里；agent 只领任务、读原文、交 JSON 载荷。
@@ -67,6 +68,8 @@ Windows 首次使用运行
   存进 `.wiki/drift/` 留证。人工修改走 `page import`，回滚走 `page restore --rev N`。
 - **场景不是知识页。** `场景能力/` 不摄入、不进账本、不生成任务；流程以
   `SCENARIO.md` 为准，事实依据仍以页面和 raw 为准。场景命令只读，不要求先 `init`。
+- **会话素材不是知识页。** `wiki-sources/` 由 agent 按技能内的素材标准直接写入，不运行
+  wiki CLI、不写 `.wiki/`、不排任务；写入不代表已摄入。
 - **超限文件不解析。** 默认单文件 50 MB（`ingest.max_source_bytes`），按 `oversize` 报告，
   不中止其他文件。
 - 单机、单写者。SQLite 事务保证单进程一致性；多 agent 并发写不在承诺范围内。
@@ -74,8 +77,8 @@ Windows 首次使用运行
 ## 仓库结构
 
 ```text
-skills/llm-wiki/          技能：SKILL.md、references/（curation.md）、templates/（concept、entity、process、note）、scripts/
-skills/llm-wiki-session/   会话技能：从对话中提炼项目素材，不依赖 wiki 引擎
+skills/llm-wiki/          技能：SKILL.md、references/（curation.md、session-materials.md）、
+                          templates/（concept、entity、process、note）、scripts/
 tests/                    开发/CI 的端到端自测，不随技能安装
 docs/readme/              产品说明：设计原则、CLI、场景、安装、恢复
 docs/agent/               开发指导：决策、引擎内部、维护守则

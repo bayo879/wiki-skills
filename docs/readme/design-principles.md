@@ -3,7 +3,8 @@
 ## 交付物是技能，不是程序
 
 `skills/llm-wiki/` 整个目录就是交付物：`SKILL.md` 给 agent 读，`scripts/` 是引擎，
-`references/curation.md` 是页面质量标准，`templates/` 按类型放各页面的正文模板。
+`references/curation.md` 是页面质量标准，`references/session-materials.md` 是会话素材
+标准，`templates/` 按类型放各页面的正文模板。
 命令契约、安装、恢复与验证记录在
 `docs/readme/` 与 `docs/agent/`，不放进技能目录。复制目录即可使用，没有服务、没有全局状态。
 
