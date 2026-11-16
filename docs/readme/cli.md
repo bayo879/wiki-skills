@@ -62,8 +62,8 @@
 
 ### ingest
 
-扫描根目录（跳过隐藏目录、`scan.ignore`、`场景能力/` 与 `话题/`），解析新文件或内容变化的
-文件，写入 `.wiki/raw/`，并为每个新来源入队一条 route 任务。`场景能力/` 是流程能力、
+扫描根目录（跳过隐藏目录、`scan.ignore`、`scenario/`、`场景能力/` 与 `话题/`），解析新文件或内容变化的
+文件，写入 `.wiki/raw/`，并为每个新来源入队一条 route 任务。`scenario/`（旧名 `场景能力/`）是流程能力、
 `话题/` 是 wiki 的探索层，都不作为摄入来源，摄入时整目录跳过；场景与话题的检索分别由
 `scenario search` 和 `query` 直接扫描文件完成。`--dry-run` 不写账本，临时库在
 `.wiki/tmp/`，退出时清理；`--force` 忽略哈希重新解析。
@@ -161,10 +161,12 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 
 ### scenario
 
-`scenario list`：列出 `<root>/场景能力/` 下的一级场景目录与技能内置场景，包括结构不合法的项；
-项目场景与内置场景同 id 时只列项目版。
+`scenario list`：列出 `<root>/scenario/` 与 `<root>/场景能力/` 下的一级场景目录及技能内置场景，
+包括结构不合法的项；同一 id 出现在两个目录时只列 `scenario/` 那份，项目场景与内置场景
+同 id 时只列项目版。
 
-`data`: `{root, count, valid, scenarios[]}`；每项为
+`data`: `{root, roots, count, valid, scenarios[]}`；`root` 是生效的目录名，`roots` 是实际存在的
+场景目录（`scenario/` 在前）；每项为
 `{id, source, name, description, triggers, path, main, valid, error, resources[]}`，
 `source` 取 `project` 或 `builtin`。`resources[]` 为 `{path, kind, size}`，`kind` 取
 `script`（`scripts/` 下）、`reference`（`references/` 下）或 `other`。
@@ -185,7 +187,7 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 `path` 是展示标签 `内置场景/<id>/SCENARIO.md`，不是磁盘路径；其 `resources` 恒为空。
 
 三个命令都只读：不创建 `.wiki/`，不写账本，不要求先 `init` 或 `ingest`。场景文件改动后
-下一次 `scenario search` / `scenario load` 立即生效。`id` 必须是 `场景能力/` 下的一级目录名
+下一次 `scenario search` / `scenario load` 立即生效。`id` 必须是 `scenario/` 或 `场景能力/` 下的一级目录名
 （或内置场景 id），包含路径分隔符或试图跳出目录返回 `E_USAGE`；场景不存在返回
 `E_NOT_FOUND`；缺 `SCENARIO.md`、缺 `description`、正文为空、文件过大或场景目录/主文件
 指向区外返回 `E_SCENARIO_INVALID`。`scenario list` 不因个别场景不合法而失败。

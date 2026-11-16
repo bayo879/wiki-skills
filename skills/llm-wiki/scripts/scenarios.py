@@ -1,10 +1,13 @@
-"""Read-only scenario capabilities stored under `<root>/场景能力/`.
+"""Read-only scenario capabilities stored under `<root>/scenario/`.
 
 A scenario is shaped like a skill:
 
-    场景能力/<id>/SCENARIO.md      flow + frontmatter (name, description, triggers)
-    场景能力/<id>/scripts/         executable helpers
-    场景能力/<id>/references/      notes read on demand
+    scenario/<id>/SCENARIO.md      flow + frontmatter (name, description, triggers)
+    scenario/<id>/scripts/         executable helpers
+    scenario/<id>/references/      notes read on demand
+
+The legacy directory `场景能力/` is scanned as well, so workspaces created
+before the rename keep working; `scenario/` wins when both hold the same id.
 
 Scenarios are not knowledge pages: `ingest` skips the directory, nothing is
 written to `.wiki/`, and `query` reads the files directly. This keeps a flow
@@ -27,7 +30,11 @@ from pathlib import Path
 from errors import WikiError
 from frontmatter import split_frontmatter
 
-SCENARIO_DIR = "场景能力"
+SCENARIO_DIR = "scenario"
+SCENARIO_DIR_LEGACY = "场景能力"
+# Both names are scanned, English first: a leftover 场景能力/<id> must not
+# shadow the copy the project actually edits under scenario/<id>.
+SCENARIO_DIRS = (SCENARIO_DIR, SCENARIO_DIR_LEGACY)
 SCENARIO_FILE = "SCENARIO.md"
 MAX_SCENARIO_CHARS = 200_000
 BUILTIN_DIR = "scenarios"
@@ -39,6 +46,12 @@ def scenario_root(root):
     return Path(root) / SCENARIO_DIR
 
 
+def scenario_roots(root):
+    """Existing project scenario directories, in precedence order."""
+    root = Path(root)
+    return [root / name for name in SCENARIO_DIRS if (root / name).is_dir()]
+
+
 def builtin_root():
     return SKILL_ROOT / BUILTIN_DIR
 
@@ -46,8 +59,10 @@ def builtin_root():
 def inventory(root):
     """List every scenario directory, valid or not."""
     entries = scan(root)
+    roots = [path.name for path in scenario_roots(root)]
     return {
-        "root": SCENARIO_DIR,
+        "root": roots[0] if roots else SCENARIO_DIR,
+        "roots": roots,
         "count": len(entries),
         "valid": sum(1 for entry in entries if entry["valid"]),
         "scenarios": [_public(entry) for entry in entries],
@@ -57,16 +72,21 @@ def inventory(root):
 def scan(root, builtin=True):
     """Return full internal records for project scenarios, then built-ins.
 
-    A project scenario shadows a built-in one with the same id.
+    A project scenario shadows a built-in one with the same id, and a scenario
+    under `scenario/` shadows a `场景能力/` copy of the same id.
     """
     root = Path(root)
-    entries = [
-        _entry(root, child)
-        for child in _children(scenario_root(root))
-    ]
+    entries = []
+    seen = set()
+    for base in scenario_roots(root):
+        for child in _children(base):
+            if child.name in seen:
+                continue
+            seen.add(child.name)
+            entries.append(_entry(root, child))
     if not builtin:
         return entries
-    seen = {entry["id"] for entry in entries}
+    seen.update(entry["id"] for entry in entries)
     base = builtin_root()
     for child in _children(base):
         if child.name in seen:

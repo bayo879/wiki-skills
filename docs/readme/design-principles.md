@@ -35,7 +35,8 @@
 
 ## 场景是能力，不是页面
 
-知识页回答"是什么"，场景回答"怎么做"。场景放在 `<root>/场景能力/<id>/`，由
+知识页回答"是什么"，场景回答"怎么做"。场景放在 `<root>/scenario/<id>/`（旧名 `场景能力/`，
+两者都扫描，同名以 `scenario/` 为准），由
 `SCENARIO.md`、`scripts/`、`references/` 组成，只在显式 `scenario search` 后由
 `scenario load` 返回主流程和资源清单。
 

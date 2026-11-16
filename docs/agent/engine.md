@@ -17,7 +17,7 @@
 | 解析 | `extract_text` 及 `pdf_to_text`、`docx_to_text`、`html_to_text`、`decode_bytes` | 纯函数，不碰数据库；超限在 `read_bytes` 抛 |
 | frontmatter | `frontmatter.py` | `split_frontmatter`、`unquote_scalar`、`yaml_scalar`；页面渲染与场景加载共用一套语法 |
 | 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
-| 场景能力 | `scenarios.py` | `scan`/`inventory`/`match`/`load`/`default`；项目场景与 `scenarios/` 内置场景合并，只读文件，不写 `.wiki/`，不生成任务 |
+| 场景能力 | `scenarios.py` | `scan`/`inventory`/`match`/`load`/`default`；`scenario/` 与旧 `场景能力/` 都扫描（同 id 前者优先），再与 `scenarios/` 内置场景合并，只读文件，不写 `.wiki/`，不生成任务 |
 | 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `话题/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
 | 页面渲染 | `render_page` | 依赖 `frontmatter.yaml_scalar`；改动一侧要同步另一侧 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
@@ -66,12 +66,15 @@
     `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
     解析后落在扫描根外的符号链接。导入 `errors.py` / `workspace.py` 前设
     `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。
-12. **场景只读、不进账本、不随查询注入。** `scan_files` 在扫描根一级跳过 `场景能力/`，
-    不因旧 `scan.ignore` 是否包含它而改变；`scenarios.py` 不打开数据库、不写 `.wiki/`、不排
-    任务。`query` 不读场景文件，场景只通过显式 `scenario search` 检索，项目场景与内置场景
-    一起参与，只返回 `valid` 项。`scenario list` 仍列出非法项并带 `error`。`scenario load`
-    的 id 必须是 `场景能力/` 下的一级目录名或内置场景 id，拒绝 `.`、`..`、路径分隔符和区外
-    符号链接。场景文件是活文件，不做缓存或 digest。
+12. **场景只读、不进账本、不随查询注入。** `scan_files` 在扫描根一级跳过 `scenario/` 与
+    旧 `场景能力/`（`scenarios.SCENARIO_DIRS`），不因旧 `scan.ignore` 是否包含它们而改变；
+    `scenarios.py` 不打开数据库、不写 `.wiki/`、不排任务。`scenario_roots` 按
+    `(scenario, 场景能力)` 顺序返回实际存在的目录，`scan` 逐目录收一级子目录并跳过重复 id，
+    因此同名时英文目录生效。`query` 不读场景文件，场景只通过显式 `scenario search` 检索，
+    项目场景与内置场景一起参与，只返回 `valid` 项。`scenario list` 仍列出非法项并带 `error`，
+    并在 `roots` 里报告实际扫描到的目录。`scenario load` 的 id 必须是这两个目录之一的一级
+    目录名或内置场景 id，拒绝 `.`、`..`、路径分隔符和区外符号链接。场景文件是活文件，
+    不做缓存或 digest。
 13. **话题只读且不进账本。** `scan_files` 同时跳过 `话题/`，话题不会被当成来源。`topics.py`
     只读 `话题/*.md`，取 frontmatter 的 `name/description/status/updated`；正文为空或文件超过
     200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的 `topic_matches` 与页面
@@ -85,7 +88,7 @@
 route 载荷 → 校验 → 页面任务（new/merge）或来源结算（skip）
 page 载荷 → 校验 → page_revs + 镜像 + links
 
-场景能力/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不落盘）
+scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不落盘）
                               └─scenario load→ 全文 + resources
 
 话题/*.md ──query/scan──→ topics 命中（只读，不落盘）

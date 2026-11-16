@@ -105,7 +105,8 @@ python3 <skill>/scripts/wiki.py read "raw:<source-key>" --offset 1 --limit 120 -
 
 ## 按场景执行
 
-项目可以把一类任务的流程写成场景，放在 `<root>/场景能力/<场景>/`：`SCENARIO.md` 是主流程，
+项目可以把一类任务的流程写成场景，放在 `<root>/scenario/<场景>/`（旧名 `场景能力/`，二者同 id 时以
+`scenario/` 为准）：`SCENARIO.md` 是主流程，
 `scripts/` 和 `references/` 是配套脚本与说明。技能自带 `话题探索` 内置场景；项目放同名
 场景即可覆盖它。场景是能力，不是知识页：它不会被 `ingest` 写进账本；`query` 也不检索
 它，必须显式 `scenario search`，避免场景自动介入普通知识问答。改完流程不用重新摄入。

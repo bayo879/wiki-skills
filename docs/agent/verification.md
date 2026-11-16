@@ -88,6 +88,24 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实
 
 手工复测：`scenario search` 在 `init` 前可用且不创建 `.wiki/`。本版本 `VERSION=0.4.1`。
 
+## 2026-11-16 场景目录改用 `scenario/` 后复跑
+
+`scenarios.SCENARIO_DIRS = ("scenario", "场景能力")`，`scenario_roots` 只返回实际存在的目录，
+`scan` 跨目录去重；`ingest` 两个目录都跳过，`publish.dir` 两个名字都算保留名。
+本节基于 `d5f4327`（漂移失效与单树重构之后）：main 单独跑 102/102 通过，叠加本节改动后
+`python3 tests/selftest.py`：105/105 通过，退出码 0。新增检查：
+
+- `scenario list` 的 `roots == ["scenario", "场景能力"]`；
+- `scenario/deck-flow` 可 `load`，`path` 以 `scenario/deck-flow/` 开头；
+- 同一 id 在 `场景能力/deck-flow` 也有一份旧副本时，`load` 返回 `scenario/` 那份
+  （`name == "English flow"`）；
+- `ingest` 不摄入 `scenario/` 下的文件；
+- `publish.dir = "scenario"` 被判为保留名并返回 `E_CONFIG`。
+
+仓库根实测：`scenario list --json` → `2 valid, 0 invalid`，`roots: ["scenario"]`，
+`scenario/ppt_creator` 的 `resources` 识别到 `references/outline-template.md`；
+`scenario search "PPT"` 命中 1 条。
+
 ## 一、自测：26/26 通过
 
 ```bash

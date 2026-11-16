@@ -142,3 +142,18 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   `scenario search`。
 - `selftest.py` 改为断言 `query` 无场景字段、`scenario search` 命中项目/内置场景、
   场景改动即时可检索、非法场景不进检索，总计仍 57 项；`VERSION=0.4.1`。
+
+## 2026-11-16：场景目录改用英文名 `scenario/`
+
+用户要求：项目里不要用中文做路径命名，中文只出现在 Markdown 内容里；第一个外部场景落在
+仓库根的 `scenario/ppt_creator/`。
+
+- 扫描根从单一 `场景能力/` 扩为 `scenarios.SCENARIO_DIRS = ("scenario", "场景能力")`，
+  `scenario_roots(root)` 只返回实际存在的目录，`scan` 逐目录收一级子目录并跳过重复 id，
+  因此同名时 `scenario/` 生效，遗留的中文目录不会盖住改过的副本。
+- 旧目录继续可用，不迁移存量工作区；`ingest` 两个目录都整目录跳过，
+  `publish.dir` 两个名字都算保留名。
+- `scenario list` 增加 `roots` 字段，`root` 改为实际生效的目录名；`docs/readme/scenarios.md`
+  与 `cli.md` 同步。
+- `selftest.py` 增加 `scenario/` 场景可加载、同名时英文目录优先、两个目录都不被摄入、
+  `scenario` 不能作为 `publish.dir` 的断言；叠加在 `d5f4327` 上总计 105 项。

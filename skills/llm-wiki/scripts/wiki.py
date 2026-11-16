@@ -360,7 +360,7 @@ def publish_dir_name(config):
         reason = "must not be empty"
     elif name in (".", ".."):
         reason = "must name a directory, not a relative reference"
-    elif name in (WIKI_DIR, scenarios.SCENARIO_DIR, topics.TOPIC_DIR):
+    elif name in (WIKI_DIR, topics.TOPIC_DIR) or name in scenarios.SCENARIO_DIRS:
         reason = "is reserved for the engine or another wiki layer"
     elif Path(name).is_absolute() or name.startswith("\\"):
         reason = "must be relative to the wiki root"
@@ -576,7 +576,9 @@ class Wiki:
 
     def scan_files(self):
         ignores = set(self.config["scan"]["ignore"])
-        root_skips = {scenarios.SCENARIO_DIR, topics.TOPIC_DIR, publish_dir_name(self.config)}
+        root_skips = {
+            topics.TOPIC_DIR, publish_dir_name(self.config), *scenarios.SCENARIO_DIRS,
+        }
         found = []
         for current, dirnames, filenames in os.walk(self.scan_root):
             at_scan_root = Path(current) == Path(self.scan_root)

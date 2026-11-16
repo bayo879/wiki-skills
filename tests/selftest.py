@@ -99,6 +99,31 @@ def scenario_files(root):
     (broken / "SCENARIO.md").write_text(
         "---\nname: 坏场景\n---\n\n缺少 description。\n", encoding="utf-8"
     )
+    english = Path(root) / "scenario" / "deck-flow"
+    english.mkdir(parents=True)
+    (english / "SCENARIO.md").write_text(
+        "---\n"
+        "name: English flow\n"
+        "description: Flow stored under the English scenario directory\n"
+        "triggers:\n"
+        "  - deck\n"
+        "---\n"
+        "# English flow\n\n"
+        "1. draft\n"
+        "2. hand off\n",
+        encoding="utf-8",
+    )
+    legacy = base / "deck-flow"
+    legacy.mkdir()
+    (legacy / "SCENARIO.md").write_text(
+        "---\n"
+        "name: Legacy deck\n"
+        "description: Shadowed copy left behind in the Chinese directory\n"
+        "---\n"
+        "# Legacy deck\n\n"
+        "1. stale\n",
+        encoding="utf-8",
+    )
     return main
 
 
@@ -122,7 +147,9 @@ def main(argv=None):
 
         listing = run(root, "scenario", "list")["data"]
         check(results, "scenario list includes project and builtin entries",
-              listing["count"] == 3 and listing["valid"] == 2, listing)
+              listing["count"] == 4 and listing["valid"] == 3, listing)
+        check(results, "scenario list reports both project roots",
+              listing["roots"] == ["scenario", "场景能力"], listing.get("roots"))
         check(results, "scenario commands leave no .wiki", not (root / ".wiki").exists(), listing)
         builtin = run(root, "scenario", "load", "话题探索")["data"]
         check(results, "builtin scenario is loadable without project files",
@@ -136,6 +163,11 @@ def main(argv=None):
               "核验身份" in loaded["content"] and loaded["path"].endswith("SCENARIO.md"), loaded)
         check(results, "scenario load inventories support files",
               {item["kind"] for item in loaded["resources"]} == {"script", "reference"}, loaded["resources"])
+        english = run(root, "scenario", "load", "deck-flow")["data"]
+        check(results, "scenario under scenario/ is loadable",
+              english["path"].startswith("scenario/deck-flow/")
+              and english["scenario"]["name"] == "English flow"
+              and "hand off" in english["content"], english["path"])
         escaped = run(root, "scenario", "load", "../x", expect=2)
         check(results, "scenario id cannot escape the scenario root",
               escaped["error"]["code"] == "E_USAGE", escaped)
@@ -195,7 +227,7 @@ def main(argv=None):
         data = run(root, "ingest")["data"]
         check(results, "ingest queues route tasks", data["pending_total"] == 2, data)
         check(results, "ingest skips the scenario directory",
-              not any(item["key"].startswith("场景能力") for item in data["ingested"]), data["ingested"])
+              not any(item["key"].startswith(("场景能力", "scenario")) for item in data["ingested"]), data["ingested"])
         check(results, "ingest skips topic files",
               not any(item["key"].startswith("话题/") for item in data["ingested"]), data["ingested"])
         check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
@@ -493,7 +525,7 @@ def main(argv=None):
 
         config_path = root / ".wiki/wiki.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        for bad in ("../x", ".wiki", "a/b", "场景能力", "", ".", "..", ".hidden", "/abs", "a\\b", "话题"):
+        for bad in ("../x", ".wiki", "a/b", "场景能力", "scenario", "", ".", "..", ".hidden", "/abs", "a\\b", "话题"):
             config["publish"]["dir"] = bad
             config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
             escaped = run(root, "status", expect=2)

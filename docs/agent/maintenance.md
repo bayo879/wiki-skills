@@ -24,7 +24,8 @@
 `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
 `tests/selftest.py`、`README.md` 中的示例。
 改场景行为时，同时检查 `docs/readme/scenarios.md`、`skills/llm-wiki/scripts/scenarios.py`
-与 `query`/`scenario` 的输出断言。
+与 `query`/`scenario` 的输出断言。`scenarios.SCENARIO_DIRS` 改动时还要同步 `ingest` 的
+根级跳过、`publish.dir` 的保留名与 `docs/readme/cli.md`。
 改话题流程时，同时检查 `SKILL.md` 的触发描述、`docs/readme/topics.md` 与内置场景
 `skills/llm-wiki/scenarios/话题探索/SCENARIO.md` 的归属、授权与格式约束。
 示例里的命令必须能直接跑通。
