@@ -446,10 +446,11 @@ def main(argv=None):
               f"title: {wiki.yaml_scalar(record['meta']['title'])}\n"
               f"aliases: [anti-fraud-restore]" in published,
               published)
+        # R1（Task 6 取代 Task 5 的 R5）：view_digest/view_path 是"上一次发布出去的事实"，
+        # 不是本行文本的摘要；必须先写盘、成功之后才回写事实，所以新页两列为空。
         stored = engine.latest_rev_row("anti-fraud-restore")
-        check(results, "the revision stores matching view facts",
-              stored["view_path"] == "pages/process/反诈复机.md"
-              and stored["view_digest"] == wiki.digest_text(published),
+        check(results, "a fresh revision has no published facts yet",
+              stored["view_path"] == "" and stored["view_digest"] == "",
               (stored["view_path"], stored["view_digest"]))
         check(results, "the mirror stays alias-free",
               "aliases:" not in mirror.read_text(encoding="utf-8"), mirror)
@@ -495,6 +496,100 @@ def main(argv=None):
             "boundaries": {"covered": "停机后的复机路径", "not_covered": "异地办理与资费"},
         }
         run(root, "submit", task["id"], "--payload", payload_file(root, "update-page.json", update_payload))
+
+        # Task 6: 推送观看区（pages / raw / topics / scenarios / README）----
+        page_file = root / "wiki/pages/process/反诈复机.md"
+        check(results, "the first revision was published with its own text",
+              page_file.exists()
+              and update_body.strip() not in page_file.read_text(encoding="utf-8"))
+
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        carried = conn.execute(
+            "SELECT rev, view_path, view_digest FROM page_revs "
+            "WHERE page = 'anti-fraud-restore' ORDER BY rev DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        check(results, "a new revision carries the previous published facts",
+              carried[0] == 2
+              and carried[1] == "pages/process/反诈复机.md"
+              and carried[2] == wiki.digest_text(page_file.read_text(encoding="utf-8")),
+              carried)
+
+        run(root, "status")  # ensure() → sync_view()：推送 rev 2
+        published_text = page_file.read_text(encoding="utf-8")
+        check(results, "sync_view publishes the newest revision",
+              update_body.strip() in published_text)
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        facts = conn.execute(
+            "SELECT view_path, view_digest FROM page_revs "
+            "WHERE page = 'anti-fraud-restore' ORDER BY rev DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        clean_digest = wiki.digest_text(published_text)
+        check(results, "published facts describe the file on disk",
+              facts[0] == "pages/process/反诈复机.md" and facts[1] == clean_digest,
+              (facts[0], facts[1], clean_digest))
+
+        (root / "wiki/笔记.md").write_text("我自己的笔记\n", encoding="utf-8")
+        (root / "wiki/.obsidian").mkdir(exist_ok=True)
+        (root / "wiki/.obsidian/app.json").write_text("{}\n", encoding="utf-8")
+        (root / "wiki/raw/用户笔记.md").write_text("# 我的原文笔记\n", encoding="utf-8")
+
+        page_file.unlink()
+        run(root, "status")
+        check(results, "a deleted published page is restored",
+              page_file.exists() and update_body.strip() in page_file.read_text(encoding="utf-8"))
+
+        page_file.write_text(published_text + "\n手改一段。\n", encoding="utf-8")
+        hand_digest = wiki.digest_text(page_file.read_text(encoding="utf-8"))
+        run(root, "status")
+        check(results, "a hand edited published page is not overwritten",
+              "手改一段。" in page_file.read_text(encoding="utf-8"))
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        after_hand = conn.execute(
+            "SELECT view_digest FROM page_revs WHERE page = 'anti-fraud-restore' "
+            "ORDER BY rev DESC LIMIT 1"
+        ).fetchone()[0]
+        conn.close()
+        check(results, "a hand edit leaves the published facts untouched",
+              after_hand == clean_digest and after_hand != hand_digest,
+              (after_hand, clean_digest, hand_digest))
+
+        check(results, "user files in the view dir are untouched",
+              (root / "wiki/笔记.md").read_text(encoding="utf-8") == "我自己的笔记\n"
+              and (root / "wiki/.obsidian/app.json").exists()
+              and (root / "wiki/raw/用户笔记.md").exists())
+
+        readme = (root / "wiki/README.md").read_text(encoding="utf-8")
+        check(results, "view readme lists the directories",
+              all(word in readme for word in ("pages", "raw", "topics", "scenarios")), readme)
+        check(results, "view readme names who owns what",
+              "由引擎维护" in readme and "归你" in readme and "sync" in readme, readme)
+        (root / "wiki/README.md").unlink()
+        run(root, "status")
+        check(results, "view readme is rewritten on every push",
+              (root / "wiki/README.md").exists())
+
+        check(results, "topics are seeded into the view dir",
+              (root / "wiki/topics/复机办理.md").exists())
+        check(results, "scenarios are seeded into the view dir",
+              (root / "wiki/scenarios/account-opening/SCENARIO.md").exists()
+              and (root / "wiki/scenarios/account-opening/scripts/check.sh").exists())
+        deck = root / "wiki/scenarios/deck-flow/SCENARIO.md"
+        check(results, "the scenario copy follows the scenario/ precedence",
+              deck.exists()
+              and "English flow" in deck.read_text(encoding="utf-8")
+              and "Legacy deck" not in deck.read_text(encoding="utf-8"))
+        (root / "wiki/topics/复机办理.md").write_text("我改过的话题\n", encoding="utf-8")
+        run(root, "status")
+        check(results, "user owned topic copies are never overwritten",
+              (root / "wiki/topics/复机办理.md").read_text(encoding="utf-8") == "我改过的话题\n")
+
+        page_file.unlink()  # 手改件留在树上会持续告警，也会干扰后面的漂移检查
+        run(root, "status")
+        check(results, "the hand edit is cleaned up for later blocks",
+              page_file.exists() and "手改一段。" not in page_file.read_text(encoding="utf-8"))
+
         page = run(root, "read", "page:anti-fraud-restore")["data"]
         check(results, "update keeps old and new sources",
               set(page["meta"]["sources"]) == {"a.md", c_key}, page["meta"]["sources"])

@@ -68,11 +68,6 @@ DEFAULT_CONFIG = {
     "publish": {"dir": "wiki", "enabled": True, "topics": True, "scenarios": True},
 }
 
-PUBLISH_README = """# Wiki 视图
-
-- `raw/`：每份来源的原文视图
-"""
-
 TEXT_SUFFIXES = {
     ".md", ".markdown", ".txt", ".rst", ".log", ".csv", ".tsv", ".yaml", ".yml",
     ".toml", ".ini", ".cfg", ".json", ".xml", ".sql", ".py", ".rs", ".js", ".ts",
@@ -295,6 +290,47 @@ def view_name(title, page_id):
     return text or page_id
 
 
+def render_view_readme(wiki):
+    """Directory guide for the view tree; rewritten on every push."""
+    publish = wiki.publish_dir
+    records = wiki.all_pages()
+    by_type = {}
+    for record in records:
+        kind = str(record["meta"].get("type") or "unknown")
+        by_type[kind] = by_type.get(kind, 0) + 1
+    raw_count = sum(1 for path in wiki.publish_raw_dir.rglob("*") if path.is_file())
+    topic_count = sum(1 for path in (publish / "topics").rglob("*.md") if path.is_file())
+    scenario_count = sum(
+        1 for path in (publish / "scenarios").glob("*")
+        if (path / scenarios.SCENARIO_FILE).is_file()
+    )
+    lines = [
+        "# Wiki 视图",
+        "",
+        "pages/ 与 raw/ 由引擎维护：以引擎输出为准。",
+        "topics/ 与 scenarios/ 首次投放后归你：引擎不再覆盖、不会删除。",
+        "pages/ 里手改过的文件不会被覆盖，只给告警；运行 sync 把它收进账本。",
+        "其他文件（包括 .obsidian/）不会被删除。",
+        "",
+        "## 目录",
+        "",
+        f"- `pages/`：知识页，共 {len(records)} 篇。",
+    ]
+    for kind in sorted(by_type):
+        lines.append(f"  - `{kind}/`：{by_type[kind]} 篇")
+    lines.extend([
+        f"- `raw/`：原文视图，共 {raw_count} 个文件。",
+        f"- `topics/`：话题副本，共 {topic_count} 篇。",
+        f"- `scenarios/`：场景副本，共 {scenario_count} 个。",
+        "",
+        "## 说明",
+        "",
+        "- 原文只留一份：删掉或改坏 `raw/` 里的文件等于丢文本，只能靠源文件重新解析。",
+        "- `topics/`、`scenarios/` 是你自己的成果，改动与新增都不会被引擎同步或删除。",
+    ])
+    return "\n".join(lines) + "\n"
+
+
 def render_page(meta, body, aliases=None):
     """Deterministic mirror text: frontmatter, body, then the evidence block."""
     lines = ["---"]
@@ -428,6 +464,7 @@ class Wiki:
         self.config_path = self.wiki_dir / CONFIG_NAME
         self.conn = None
         self.config = None
+        self.view_events = []
 
     @property
     def publish_dir(self):
@@ -464,6 +501,10 @@ class Wiki:
             self.ensure_columns()
             self.migrate_legacy_pages()
         self.ensure_mirror()
+        self.view_events = self.sync_view()
+        for line in self.view_events:
+            if line.startswith("warning: "):
+                sys.stderr.write(line + "\n")
         return created
 
     def ensure_publish(self, created):
@@ -488,12 +529,10 @@ class Wiki:
             if not directory.exists():
                 directory.mkdir(parents=True)
                 created.append(shown)
+        # 目录本身始终存在（raw/ 是引擎数据，位置不随开关变化）；剩下的事情
+        # 归 sync_view，开关为假时它直接返回。
         if not self.config["publish"]["enabled"]:
             return
-        readme = self.root / name / "README.md"
-        if not readme.exists():
-            write_atomic(readme, PUBLISH_README)
-            created.append(norm_key(readme.relative_to(self.root)))
 
     def _create_schema(self):
         with self.conn:
@@ -712,16 +751,22 @@ class Wiki:
         row = self.latest_rev_row(page_id)
         if not row:
             return None
+        return self._page_row_to_record(row)
+
+    def _page_row_to_record(self, row):
+        """One ledger row as a page record, including the published view facts."""
         meta = json.loads(row["meta"])
         meta["status"] = self.computed_status(meta)
         return {
-            "id": page_id,
+            "id": row["page"],
             "rev": row["rev"],
             "meta": meta,
             "body": row["body"],
             "digest": row["digest"],
             "render_digest": row["render_digest"],
             "origin": row["origin"],
+            "view_digest": row["view_digest"],
+            "view_path": row["view_path"],
         }
 
     def all_pages(self):
@@ -732,22 +777,7 @@ class Wiki:
             ORDER BY r.page
             """
         ).fetchall()
-        records = []
-        for row in rows:
-            meta = json.loads(row["meta"])
-            meta["status"] = self.computed_status(meta)
-            records.append(
-                {
-                    "id": row["page"],
-                    "rev": row["rev"],
-                    "meta": meta,
-                    "body": row["body"],
-                    "digest": row["digest"],
-                    "render_digest": row["render_digest"],
-                    "origin": row["origin"],
-                }
-            )
-        return records
+        return [self._page_row_to_record(row) for row in rows]
 
     def page_ids(self):
         return {
@@ -812,10 +842,10 @@ class Wiki:
         meta["status"] = self.computed_status(meta)
         text = render_page(meta, body)
         render_digest = digest_text(text)
-        # 观看区的事实与文本在这里同时产生，同一条 INSERT 落库，不可能互相漂移。
-        view = self.view_text({"id": page, "meta": meta, "body": body})
-        view_digest = digest_text(view)
-        view_path = self.view_relpath({"id": page, "meta": meta})
+        # R1：view_digest/view_path 是"上一次发布出去的事实"，不是本行文本的摘要。
+        # 新行先继承上一版；只有 sync_view 把文件写成功之后才改它。
+        view_digest = record["view_digest"] if record else ""
+        view_path = record["view_path"] if record else ""
         canonical = json.dumps(
             {
                 "title": meta.get("title"),
@@ -986,6 +1016,111 @@ class Wiki:
                 (page, norm_key(destination.relative_to(self.root)), digest, now_iso(), note),
             )
         return norm_key(destination.relative_to(self.root))
+
+    # ------------------------------------------------------------------- view
+
+    def sync_view(self):
+        """Push the ledger into the view tree; return one line per action."""
+        if not self.config["publish"]["enabled"]:
+            return []
+        events = []
+        # raw/ 由 ingest 维护：这里只保证目录存在，绝不写、删其中任何文件。
+        self.publish_raw_dir.mkdir(parents=True, exist_ok=True)
+        self._sync_view_pages(events)
+        publish = self.config["publish"]
+        if publish.get("topics", True):
+            self._seed_view_topics(events)
+        if publish.get("scenarios", True):
+            self._seed_view_scenarios(events)
+        write_atomic(self.publish_dir / "README.md", render_view_readme(self))
+        events.append("README.md rewritten")
+        return events
+
+    def _sync_view_pages(self, events):
+        """Publish every page; a hand-edited copy is skipped, never overwritten."""
+        base = self.publish_dir.resolve()
+        for record in self.all_pages():
+            target = self.view_relpath(record)
+            desired = self.view_text(record)
+            target_digest = digest_text(desired)
+            published = record["view_path"]
+            known = record["view_digest"]
+            target_path = self.publish_dir / target
+            old_path = self.publish_dir / published if published else None
+            if not window_safe(base, target_path.resolve()) or (
+                    old_path is not None and not window_safe(base, old_path.resolve())):
+                events.append(f"warning: skip {record['id']}: view path escapes the publish dir")
+                continue
+            old_text = old_path.read_text(encoding="utf-8") if old_path and old_path.is_file() else None
+            target_text = target_path.read_text(encoding="utf-8") if target_path.is_file() else None
+
+            if old_text is not None and digest_text(old_text) != known:
+                # P 被手改。唯一例外：Q == P 且磁盘恰好已是 T —— 那不是手改，是我们上次
+                # 写完还没来得及回写事实（崩溃窗口），直接补事实，不覆盖任何东西。
+                if target == published and target_text == desired:
+                    self._publish_facts(record, target, target_digest, events)
+                else:
+                    events.append(
+                        f"warning: {record['id']} was edited by hand at {published}; "
+                        "published copy left alone (run `sync` to absorb it)"
+                    )
+                continue
+
+            if target_text != desired:  # 已等于 T 时只补事实
+                write_atomic(target_path, desired)
+                events.append(f"{target} written")
+            if published and published != target and old_text is not None \
+                    and digest_text(old_text) == known:
+                old_path.unlink()
+                events.append(f"{published} removed")
+            self._publish_facts(record, target, target_digest, events)
+
+    def _publish_facts(self, record, view_path, view_digest, events):
+        if record["view_path"] == view_path and record["view_digest"] == view_digest:
+            return
+        self.set_view_facts(record["id"], record["rev"], view_path, view_digest)
+        record["view_path"] = view_path
+        record["view_digest"] = view_digest
+        events.append(f"{record['id']} facts updated")
+
+    def set_view_facts(self, page_id, rev, view_path, view_digest):
+        """Record what is now published for one revision (R1)."""
+        self.conn.execute(
+            "UPDATE page_revs SET view_path = ?, view_digest = ? "
+            "WHERE page = ? AND rev = ?",
+            (view_path, view_digest, page_id, rev),
+        )
+        self.conn.commit()
+
+    def _seed_view_topics(self, events):
+        """Copy each topic once; afterwards the copy belongs to the user."""
+        destination = self.publish_dir / "topics"
+        for entry in topics.scan(self.root):
+            source = self.root / entry["path"]
+            target = destination / Path(entry["path"]).name
+            if target.exists():
+                continue
+            if not window_safe(self.root, source.resolve()):
+                events.append(f"warning: skip topic {entry['path']}: source escapes the workspace")
+                continue
+            destination.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            events.append(f"{norm_key(target.relative_to(self.root))} seeded")
+
+    def _seed_view_scenarios(self, events):
+        """Copy each project scenario once; built-in scenarios never enter the view."""
+        destination = self.publish_dir / "scenarios"
+        for entry in scenarios.scan(self.root, builtin=False):
+            source = self.root / entry["path"]
+            target = destination / entry["id"]
+            if target.exists() or not source.is_dir():
+                continue
+            if not window_safe(self.root, source.resolve()):
+                events.append(f"warning: skip scenario {entry['id']}: source escapes the workspace")
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, target)
+            events.append(f"{norm_key(target.relative_to(self.root))} seeded")
 
     # ------------------------------------------------------------------ tasks
 
