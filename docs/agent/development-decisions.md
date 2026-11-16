@@ -116,15 +116,15 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
 - 内置场景随技能分发，放在 `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`，自包含、
   无 `resources`，不参与隐式匹配，只通过 `scenario search` / `scenario load` 使用。
 - 旧的会话素材流程（写 `wiki-sources/` 待摄入）移除；沉淀物改为 `话题/<主题>.md`。
-  话题是 wiki 的探索层，不是 `wiki-sources/` 素材，二者不互相替代。位置按 2026-11-15
+  话题是 wiki 的探索层，与全局 `wiki-sources/` 的开发解决方案沉淀无关。位置按 2026-11-15
   的工作区边界落在 `<root>/话题/`；一个主题一份，固定六节：主题、结论、依据、未决问题、
   下一步、能力候选。`ingest` 跳过 `话题/`，`query` 用 `topics` 返回命中，计数与页面、
   场景分开。
 - 沉淀同时产出两类后续：能力候选（流程稳定时转 `场景能力/<id>/SCENARIO.md`）与资料深挖
   （待摄入来源、待补页面、下一轮关键词）。
 - `skills/llm-wiki/references/session-materials.md` 删除，其归属分流、可复用标准、授权与
-  去重约束并入内置场景。`~/.dsh/AGENTS.md` 的 wiki-sources 规则保持原样：素材不是话题，
-  不把两者合并。
+  去重约束并入内置场景。`~/.dsh/AGENTS.md` 的 wiki-sources 规则保持原样：它服务于各开发
+  项目的解决方案沉淀，与本项目 wiki/话题无关。
 - `selftest.py` 增加内置场景、话题跳过摄入、话题检索与项目覆盖内置场景用例，总计 57 项。
 
 ## 2026-11-16：场景改为显式检索，不随 query 注入
