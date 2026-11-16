@@ -151,6 +151,46 @@ def file_facts(path):
     return digest_bytes(Path(path).read_bytes()), stat.st_size, stat.st_mtime
 
 
+def raw_facts(root, row):
+    """(state, size, mtime)；state ∈ {"ok","missing","edited"}。"""
+    if row is None or not row["raw"]:
+        return "missing", 0, 0.0
+    path = Path(root) / row["raw"]
+    try:
+        stat = path.stat()
+    except OSError:
+        return "missing", 0, 0.0
+    if not row["raw_digest"]:
+        return "edited", stat.st_size, stat.st_mtime
+    if same_stamp(stat.st_size, stat.st_mtime, row["raw_size"], row["raw_mtime"]):
+        return "ok", stat.st_size, stat.st_mtime
+    try:
+        digest = digest_bytes(path.read_bytes())
+    except OSError:
+        return "missing", stat.st_size, stat.st_mtime
+    if digest == row["raw_digest"]:
+        return "ok", stat.st_size, stat.st_mtime
+    return "edited", stat.st_size, stat.st_mtime
+
+
+def ingest_decision(source_changed, raw_state, source_mtime, raw_mtime, force=False):
+    """规格 §源与原文判定 的一行 → 本次 ingest 对该来源的动作。"""
+    if force:
+        # 强制重算只看 mtime：原文不比源旧就绝不覆盖（原文是用户的文件）。
+        if raw_state == "missing" or source_mtime > raw_mtime:
+            return "rewrite"
+        return "parse_keep_raw"
+    if source_changed:
+        if raw_state != "edited" or source_mtime > raw_mtime:
+            return "rewrite"
+        return "bookkeep_source"
+    if raw_state == "missing":
+        return "rewrite"
+    if raw_state == "edited":
+        return "bookkeep_raw"
+    return "skip"
+
+
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -561,6 +601,10 @@ class Wiki:
 
     def all_sources(self):
         return self.conn.execute("SELECT * FROM sources ORDER BY key").fetchall()
+
+    def source_raw_state(self, row):
+        """规格 §判定表：raw 侧状态 ok / missing / edited。"""
+        return raw_facts(self.root, row)[0]
 
     def write_raw(self, key, text, meta):
         target = self.publish_raw_dir / f"{key2file(key)}.md"
@@ -1181,7 +1225,11 @@ def command_ingest():
     wiki, _ = open_wiki(dry_run=ARGS.dry_run)
     limit = int(wiki.config["ingest"].get("max_source_bytes", 50_000_000))
     force = ARGS.force
-    files = wiki.scan_files()
+    selected = {norm_key(Path(value)) for value in ARGS.only} if ARGS.only else None
+    files = [
+        path for path in wiki.scan_files()
+        if selected is None or norm_key(path.relative_to(wiki.scan_root)) in selected
+    ]
     seen = set()
     fresh, unchanged, unsupported, oversize, failed, queued = [], [], [], [], [], []
     restored = []
@@ -1190,31 +1238,60 @@ def command_ingest():
         seen.add(key)
         row = wiki.source_row(key)
         try:
-            data = read_bytes(path, limit)
-        except WikiError as error:
-            oversize.append({"key": key, "message": error.message})
-            if not ARGS.dry_run:
-                wiki.upsert_source(
-                    path.relative_to(wiki.scan_root),
-                    digest_text(key + str(path.stat().st_size)),
-                    path.stat().st_size,
-                    path.stat().st_mtime,
-                    "", "", "oversize", "", 0, 0.0,
-                )
-            continue
+            stat = path.stat()
         except OSError as error:
             failed.append({"key": key, "message": str(error)})
             continue
-        digest = digest_bytes(data)
-        mtime = path.stat().st_mtime
-        if row and row["digest"] == digest and not force:
-            if row["status"] == "missing":
+        # 第一段初筛：只有 stat 与账本不符、强制重算、或原文缺失时才读源文件。
+        # 其余情形（skip / bookkeep_raw）一次都不读，也不重算摘要。
+        stamp_changed = row is None or not same_stamp(
+            stat.st_size, stat.st_mtime, row["size"], row["mtime"]
+        )
+        if row is None:
+            raw_state, raw_mtime = "missing", 0.0
+        else:
+            raw_state, _, raw_mtime = raw_facts(wiki.root, row)
+        digest = row["digest"] if row is not None else ""
+        changed = False
+        data = None
+        if stamp_changed or force or raw_state == "missing":
+            try:
+                data = read_bytes(path, limit)
+            except WikiError as error:
+                oversize.append({"key": key, "message": error.message})
+                if not ARGS.dry_run:
+                    wiki.upsert_source(
+                        path.relative_to(wiki.scan_root),
+                        digest_text(key + str(stat.st_size)),
+                        stat.st_size,
+                        stat.st_mtime,
+                        "", "", "oversize", "", 0, 0.0,
+                    )
+                continue
+            except OSError as error:
+                failed.append({"key": key, "message": str(error)})
+                continue
+            digest = digest_bytes(data)
+            changed = row is None or row["digest"] != digest
+        action = ingest_decision(changed, raw_state, stat.st_mtime, raw_mtime, force=force)
+        if action in ("skip", "bookkeep_raw", "bookkeep_source"):
+            # 不解析、不写原文：只把账本对齐到磁盘上的事实。
+            if action == "skip" and row["status"] == "missing":
                 wiki.set_source_status(key, "pending" if not _cites(wiki, key) else "done")
                 restored.append(key)
                 continue
-            if row["status"] != "missing":
-                unchanged.append(key)
+            unchanged.append(key)
+            if action == "skip" and not stamp_changed:
                 continue
+            if not ARGS.dry_run:
+                raw_rel = row["raw"]
+                disk_digest, disk_size, disk_mtime = file_facts(wiki.root / raw_rel)
+                wiki.upsert_source(
+                    path.relative_to(wiki.scan_root), digest, stat.st_size, stat.st_mtime,
+                    raw_rel, row["parser"], row["status"],
+                    disk_digest, disk_size, disk_mtime,
+                )
+            continue
         text, parser = extract_text(path, data)
         if not text.strip():
             unsupported.append(
@@ -1227,7 +1304,7 @@ def command_ingest():
             )
             if not ARGS.dry_run:
                 wiki.upsert_source(
-                    path.relative_to(wiki.scan_root), digest, len(data), mtime,
+                    path.relative_to(wiki.scan_root), digest, len(data), stat.st_mtime,
                     "", "", "unsupported", "", 0, 0.0,
                 )
             continue
@@ -1254,9 +1331,13 @@ def command_ingest():
             "status": "raw",
             "updated": date.today().isoformat(),
         }
-        raw_rel = wiki.write_raw(key, text, meta)
+        if action == "rewrite":
+            raw_rel = wiki.write_raw(key, text, meta)
+        else:
+            # parse_keep_raw：保留用户那份原文，只刷新账本里的原文事实。
+            raw_rel = row["raw"]
         raw_digest, raw_size, raw_mtime = file_facts(wiki.root / raw_rel)
-        wiki.upsert_source(path.relative_to(wiki.scan_root), digest, len(data), mtime,
+        wiki.upsert_source(path.relative_to(wiki.scan_root), digest, len(data), stat.st_mtime,
                            raw_rel, parser, "pending", raw_digest, raw_size, raw_mtime)
         fresh.append(
             {
@@ -1279,6 +1360,9 @@ def command_ingest():
     vanished = []
     for row in wiki.all_sources():
         if row["key"] in seen or row["status"] == "missing":
+            continue
+        # --only 只看指定来源，未参与本轮扫描的来源不能被当成消失。
+        if selected is not None and row["key"] not in selected:
             continue
         vanished.append(row["key"])
         if ARGS.dry_run:
@@ -1987,6 +2071,8 @@ def build_parser():
     ingest = sub.add_parser("ingest", parents=[common], help="scan sources and queue route tasks")
     ingest.add_argument("--dry-run", action="store_true")
     ingest.add_argument("--force", action="store_true", help="reparse even when the digest is unchanged")
+    ingest.add_argument("--only", action="append", metavar="PATH",
+                        help="limit ingest to these sources (repeatable)")
     next_p = sub.add_parser("next", parents=[common], help="claim queued tasks")
     next_p.add_argument("--kind", choices=["route", "page"])
     next_p.add_argument("--batch", type=int, default=0, help="tasks to claim (default: 1)")

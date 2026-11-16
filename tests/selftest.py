@@ -27,6 +27,8 @@ sys.path.insert(0, str(SCRIPT.parent))
 from runtime import require_python
 
 require_python()
+import wiki  # noqa: E402  (the engine itself, for table-level checks)
+
 WIKI_CACHE = ".wiki"
 CHECKED = []
 
@@ -202,6 +204,53 @@ def main(argv=None):
         data = run(root, "ingest")["data"]
         raw_files = sorted(p.name for p in (root / "wiki/raw").glob("*.md"))
         check(results, "raw files are written into wiki/raw", len(raw_files) == 2, raw_files)
+
+        # --- Task 3: 两段式初筛、--only、判定表 -------------------------------------
+        raw_candidates = sorted((root / "wiki" / "raw").glob("a-*.md"))
+        check(results, "a.md publishes exactly one raw file", len(raw_candidates) == 1, raw_candidates)
+        raw_path = raw_candidates[0]
+
+        edited_raw = raw_path.read_text(encoding="utf-8") + "\n补充：可线上复机。\n"
+        raw_path.write_text(edited_raw, encoding="utf-8")
+
+        edited = run(root, "ingest")["data"]
+        check(results, "an edited raw survives ingest",
+              raw_path.read_text(encoding="utf-8") == edited_raw, edited["ingested"])
+        check(results, "an edited raw is not re-parsed", edited["ingested"] == [], edited["ingested"])
+
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        ledger_raw = conn.execute(
+            "SELECT raw_digest, raw_size, raw_mtime FROM sources WHERE key = ?", ("a.md",)
+        ).fetchone()
+        conn.close()
+        raw_digest, raw_size, raw_mtime = wiki.file_facts(raw_path)
+        check(results, "the ledger mirrors the edited raw file",
+              ledger_raw is not None and ledger_raw[0] == raw_digest and ledger_raw[1] == raw_size
+              and abs(ledger_raw[2] - raw_mtime) < 1e-6,
+              (ledger_raw, (raw_digest, raw_size, raw_mtime)))
+
+        forced = run(root, "ingest", "--force", "--only", "a.md")["data"]
+        check(results, "--only re-parses just the named source",
+              [item["key"] for item in forced["ingested"]] == ["a.md"], forced["ingested"])
+        check(results, "--force keeps the edited raw",
+              raw_path.read_text(encoding="utf-8") == edited_raw, forced["ingested"])
+        check(results, "the reported raw path is the edited file",
+              bool(forced["ingested"]) and forced["ingested"][0]["raw"] == f"wiki/raw/{raw_path.name}",
+              forced["ingested"])
+
+        cases = [
+            ((False, "ok", 10.0, 10.0), "skip"),
+            ((False, "missing", 10.0, 10.0), "rewrite"),
+            ((False, "edited", 10.0, 20.0), "bookkeep_raw"),
+            ((True, "ok", 10.0, 10.0), "rewrite"),
+            ((True, "edited", 20.0, 10.0), "rewrite"),
+            ((True, "edited", 10.0, 20.0), "bookkeep_source"),
+            ((False, "ok", 10.0, 10.0, True), "parse_keep_raw"),
+            ((False, "edited", 10.0, 20.0, True), "parse_keep_raw"),
+            ((True, "ok", 20.0, 10.0, True), "rewrite"),
+        ]
+        check(results, "the ingest decision table follows the spec",
+              [wiki.ingest_decision(*args) for args, _ in cases] == [want for _, want in cases], cases)
 
         found = run(root, "query", "开户")["data"]
         check(results, "query does not mix in scenario matches",
@@ -479,6 +528,35 @@ def main(argv=None):
         ingested = run(root, "ingest")["data"]["ingested"]
         check(results, "the publish dir is skipped by ingest",
               not any(item["key"].startswith("view/") for item in ingested), ingested)
+
+        # 回归护栏：任务排队后源文件又变了，submit 必须报 E_SOURCE_DRIFT（退出码 3）。
+        (root / "f.md").write_text("# 复机进度查询\n\n可拨打客服确认进度。\n", encoding="utf-8")
+        run(root, "ingest")
+        # 发布会切到 view 之后，旧的 wiki/ 目录成了普通素材，前面的 ingest 会为它排队；
+        # 这里一次取够所有路由任务，只留下 f.md 的那条，其余放回队列。
+        routes = run(root, "next", "--kind", "route", "--batch", "50")["data"]["tasks"]
+        drift_route = None
+        for task in routes:
+            if task["work"]["sources"][0]["key"] == "f.md":
+                drift_route = task
+            else:
+                run(root, "release", task["id"])
+        drift_key = drift_route["work"]["sources"][0]["key"]
+        run(root, "submit", drift_route["id"], "--payload", payload_file(root, "drift-route.json", {"decisions": [
+            {"source": drift_key, "action": "new", "page": "restore-progress",
+             "title": "复机进度查询", "type": "process", "reason": "独立主题"},
+        ]}))
+        drift_task = run(root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"][0]
+        (root / "f.md").write_text("# 复机进度查询\n\n拨打 10086 可查进度。\n", encoding="utf-8")
+        run(root, "ingest")
+        body_file(root)
+        drifted = run(root, "submit", drift_task["id"], "--payload", payload_file(
+            root, "drift-page.json",
+            {**payload, "page": "restore-progress", "title": "复机进度查询",
+             "summary": "可拨打客服确认进度。",
+             "evidence": [{"source": drift_key, "quote": "可拨打客服确认进度。"}]}), expect=3)
+        check(results, "a source change after the page task still reports E_SOURCE_DRIFT",
+              drifted["error"]["code"] == "E_SOURCE_DRIFT", drifted)
 
         dry = root / "dry"
         dry.mkdir()
