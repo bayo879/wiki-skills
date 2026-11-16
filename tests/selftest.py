@@ -11,6 +11,7 @@ Exit: 0 all checks passed, 1 a check failed.
 
 import argparse
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -229,14 +230,45 @@ def main(argv=None):
               and abs(ledger_raw[2] - raw_mtime) < 1e-6,
               (ledger_raw, (raw_digest, raw_size, raw_mtime)))
 
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        before_b = conn.execute(
+            "SELECT status, digest, raw_digest FROM sources WHERE key = ?", ("b.md",)
+        ).fetchone()
+        conn.close()
         forced = run(root, "ingest", "--force", "--only", "a.md")["data"]
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        after_b = conn.execute(
+            "SELECT status, digest, raw_digest FROM sources WHERE key = ?", ("b.md",)
+        ).fetchone()
+        conn.close()
         check(results, "--only re-parses just the named source",
-              [item["key"] for item in forced["ingested"]] == ["a.md"], forced["ingested"])
+              [item["key"] for item in forced["ingested"]] == ["a.md"]
+              and forced["vanished"] == [] and before_b is not None and before_b == after_b,
+              (forced["ingested"], forced["vanished"], before_b, after_b))
         check(results, "--force keeps the edited raw",
               raw_path.read_text(encoding="utf-8") == edited_raw, forced["ingested"])
         check(results, "the reported raw path is the edited file",
               bool(forced["ingested"]) and forced["ingested"][0]["raw"] == f"wiki/raw/{raw_path.name}",
               forced["ingested"])
+
+        # raw 只被 touch、字节没变：账本要吸收磁盘上的 size/mtime，否则每次 ingest
+        # 都会因为 same_stamp 不成立而重读重算原文。
+        touched_stamp = raw_path.stat().st_mtime + 30
+        os.utime(raw_path, (touched_stamp, touched_stamp))
+        after_touch = run(root, "ingest")["data"]
+        touched_digest, touched_size, touched_mtime = wiki.file_facts(raw_path)
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        touched_row = conn.execute(
+            "SELECT raw_digest, raw_size, raw_mtime FROM sources WHERE key = ?", ("a.md",)
+        ).fetchone()
+        conn.close()
+        again = run(root, "ingest")["data"]
+        check(results, "a touched raw refreshes the ledger stamps",
+              after_touch["ingested"] == [] and touched_row is not None
+              and touched_row[0] == touched_digest and touched_row[1] == touched_size
+              and abs(touched_row[2] - touched_mtime) < 1e-6 and again["ingested"] == [],
+              (after_touch["ingested"], touched_row,
+               (touched_digest, touched_size, touched_mtime), again["ingested"]))
 
         cases = [
             ((False, "ok", 10.0, 10.0), "skip"),

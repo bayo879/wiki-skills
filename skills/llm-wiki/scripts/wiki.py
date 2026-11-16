@@ -1248,9 +1248,9 @@ def command_ingest():
             stat.st_size, stat.st_mtime, row["size"], row["mtime"]
         )
         if row is None:
-            raw_state, raw_mtime = "missing", 0.0
+            raw_state, raw_size, raw_mtime = "missing", 0, 0.0
         else:
-            raw_state, _, raw_mtime = raw_facts(wiki.root, row)
+            raw_state, raw_size, raw_mtime = raw_facts(wiki.root, row)
         digest = row["digest"] if row is not None else ""
         changed = False
         data = None
@@ -1281,7 +1281,9 @@ def command_ingest():
                 restored.append(key)
                 continue
             unchanged.append(key)
-            if action == "skip" and not stamp_changed:
+            if action == "skip" and not stamp_changed and same_stamp(
+                raw_size, raw_mtime, row["raw_size"], row["raw_mtime"]
+            ):
                 continue
             if not ARGS.dry_run:
                 raw_rel = row["raw"]
