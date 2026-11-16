@@ -141,6 +141,9 @@ def main(argv=None):
 
         data = run(root, "init")["data"]
         check(results, "init creates .wiki", (root / ".wiki/wiki.db").exists() and data["sources"] == 0, data)
+        check(results, "init creates the publish directory",
+              (root / "wiki").is_dir() and not (root / ".wiki/raw").exists(), listing)
+        check(results, "publish README is written", (root / "wiki/README.md").exists())
 
         data = run(root, "check")["data"]
         check(results, "check passes after init", data["ok"], data)
@@ -387,6 +390,14 @@ def main(argv=None):
 
         config_path = root / ".wiki/wiki.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
+        for bad in ("../x", ".wiki", "a/b", "场景能力", "", ".", "..", ".hidden", "/abs", "a\\b", "话题"):
+            config["publish"]["dir"] = bad
+            config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+            escaped = run(root, "status", expect=2)
+            check(results, f"publish dir {bad} rejected",
+                  escaped["error"]["code"] == "E_CONFIG", escaped)
+        config["publish"]["dir"] = "wiki"
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         config["ingest"]["max_source_bytes"] = 10
         config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         (root / "big.md").write_text("x" * 100, encoding="utf-8")

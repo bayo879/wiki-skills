@@ -65,7 +65,13 @@ DEFAULT_CONFIG = {
         ]
     },
     "ingest": {"max_source_bytes": 50_000_000},
+    "publish": {"dir": "wiki", "enabled": True, "topics": True, "scenarios": True},
 }
+
+PUBLISH_README = """# Wiki 视图
+
+- `raw/`：每份来源的原文视图
+"""
 
 TEXT_SUFFIXES = {
     ".md", ".markdown", ".txt", ".rst", ".log", ".csv", ".tsv", ".yaml", ".yml",
@@ -278,6 +284,39 @@ def load_config(path):
     return config
 
 
+def publish_dir_name(config):
+    """Validated single-segment name of the browsable view directory.
+
+    The directory sits at the wiki root, next to `.wiki/`, so the name must be
+    one safe segment: no separators, no dot prefix, no absolute path, and no
+    name that already belongs to the engine or another wiki layer.
+    """
+    section = config.get("publish") or {}
+    value = section.get("dir")
+    name = value if isinstance(value, str) else ""
+    reason = ""
+    if not name.strip():
+        reason = "must not be empty"
+    elif name in (".", ".."):
+        reason = "must name a directory, not a relative reference"
+    elif name in (WIKI_DIR, scenarios.SCENARIO_DIR, topics.TOPIC_DIR):
+        reason = "is reserved for the engine or another wiki layer"
+    elif Path(name).is_absolute() or name.startswith("\\"):
+        reason = "must be relative to the wiki root"
+    elif "/" in name or "\\" in name:
+        reason = "must be a single directory name, not a path"
+    elif name.startswith("."):
+        reason = "must not start with a dot"
+    if reason:
+        raise WikiError(
+            "E_CONFIG",
+            f"publish.dir {value!r} {reason}",
+            "set publish.dir to one directory name such as \"wiki\"",
+            2,
+        )
+    return name
+
+
 def write_atomic(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=path.suffix)
@@ -301,6 +340,8 @@ class Wiki:
         self.scan_root = Path(scan_root).resolve() if scan_root else self.root
         self.report_root = self.scan_root
         self.wiki_dir = self.root / WIKI_DIR
+        # Where raw text lives before the config is known; ensure() repoints it
+        # at the publish tree when publishing is on.
         self.raw_dir = self.wiki_dir / RAW_SUBDIR
         self.pages_dir = self.wiki_dir / PAGES_SUBDIR
         self.drift_dir = self.wiki_dir / DRIFT_SUBDIR
@@ -311,9 +352,18 @@ class Wiki:
         self.conn = None
         self.config = None
 
+    @property
+    def publish_dir(self):
+        """Browsable view directory at the wiki root, named by `publish.dir`."""
+        return self.root / publish_dir_name(self.config)
+
+    @property
+    def publish_raw_dir(self):
+        return self.publish_dir / RAW_SUBDIR
+
     def ensure(self):
         created = []
-        for directory in (self.wiki_dir, self.raw_dir, self.pages_dir, self.drift_dir,
+        for directory in (self.wiki_dir, self.pages_dir, self.drift_dir,
                           self.payload_dir, self.draft_dir):
             if not directory.exists():
                 directory.mkdir(parents=True)
@@ -325,6 +375,10 @@ class Wiki:
             )
             created.append(norm_key(self.config_path.relative_to(self.root)))
         self.config = load_config(self.config_path)
+        publish_dir_name(self.config)  # an invalid dir is rejected even when disabled
+        if self.config["publish"]["enabled"]:
+            self.raw_dir = self.publish_raw_dir
+            self.ensure_publish(created)
         if self.conn is None:
             self.conn = sqlite3.connect(self.db_path)
             self.conn.row_factory = sqlite3.Row
@@ -333,6 +387,17 @@ class Wiki:
             self.migrate_legacy_pages()
         self.ensure_mirror()
         return created
+
+    def ensure_publish(self, created):
+        """Create the view tree and its README; users own what they add there."""
+        for directory in (self.publish_dir, self.publish_raw_dir):
+            if not directory.exists():
+                directory.mkdir(parents=True)
+                created.append(norm_key(directory.relative_to(self.root)))
+        readme = self.publish_dir / "README.md"
+        if not readme.exists():
+            write_atomic(readme, PUBLISH_README)
+            created.append(norm_key(readme.relative_to(self.root)))
 
     def _create_schema(self):
         with self.conn:
@@ -407,16 +472,14 @@ class Wiki:
 
     def scan_files(self):
         ignores = set(self.config["scan"]["ignore"])
+        root_skips = {scenarios.SCENARIO_DIR, topics.TOPIC_DIR, publish_dir_name(self.config)}
         found = []
         for current, dirnames, filenames in os.walk(self.scan_root):
             at_scan_root = Path(current) == Path(self.scan_root)
             dirnames[:] = sorted(
                 name for name in dirnames
                 if name not in ignores and not name.startswith(".")
-                and not (
-                    at_scan_root
-                    and name in (scenarios.SCENARIO_DIR, topics.TOPIC_DIR)
-                )
+                and not (at_scan_root and name in root_skips)
             )
             for name in sorted(filenames):
                 if name.startswith("."):
