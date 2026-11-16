@@ -246,7 +246,7 @@ drift 处理。
 unchanged[page], written[{page,from,to}], warnings[message]}`。有失败项时 `ok=false`，
 退出码 1；`warnings` 不改变成功状态。
 
-`sync` 之后，下一次任意命令启动时才把账本推回观看区。
+`sync` 之后，下一条会启动引擎的命令启动时才把账本推回观看区。
 
 ### doctor
 
@@ -261,7 +261,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。
 | `E_USAGE` | 参数缺失或组合非法 | 看 `error.next`，不要重试同一载荷 |
 | `E_PAYLOAD` | 载荷字段缺失/类型/长度不合法 | 按 message 修正字段 |
 | `E_TASK_UNKNOWN` | 任务 id 不存在 | `next` 取新任务 |
-| `E_TASK_STALE` | 任务已关闭、被替换或过期 | 重新 `next`，丢弃旧载荷 |
+| `E_TASK_STALE` | 任务已关闭或租约过期 | 重新 `next`，丢弃旧载荷；来源变化导致的过期是 `E_SOURCE_DRIFT` |
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
 | `E_TASK_CONFLICT` | 来源已属于另一棵未关闭的页面任务树 | 先完成或关闭那个页面任务 |
 | `E_STATE` | 状态不满足：账本结构过旧、观看区路径不是目录、页面正被其他任务写 | 按 message 处理，不要手改账本 |

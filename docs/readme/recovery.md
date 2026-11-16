@@ -35,7 +35,7 @@
 | --- | --- |
 | `E_EVIDENCE_NOT_FOUND` | 重读 raw，逐字复制引文（比较时忽略空白） |
 | `E_SOURCE_DRIFT` | 来源在领取后被改；重新 `next` 取新任务 |
-| `E_TASK_STALE` | 任务已关闭、被替换或过期；重新 `next`，丢弃旧载荷 |
+| `E_TASK_STALE` | 任务已关闭或租约过期；重新 `next`，丢弃旧载荷。来源变化导致的过期是 `E_SOURCE_DRIFT` |
 | `E_TASK_SCOPE` | 只提交任务 `work.sources` 里的来源 |
 | `E_PAGE_CONFLICT` | 页面已被别的任务改过；重新 `next`，基于新 rev 重写 |
 | `E_LINK_UNRESOLVED` | 先建链接目标页，或去掉该链接 |
@@ -44,7 +44,7 @@
 
 除了 `page import` / `page restore`，任何对 `.wiki/pages/*.md` 的直接修改都不生效：
 
-1. 下一次任意命令启动时，`ensure_mirror()` 发现文件与账本渲染结果不一致；
+1. 下一条会启动引擎的命令启动时，`ensure_mirror()` 发现文件与账本渲染结果不一致；
 2. 原文件先复制到 `.wiki/drift/<page>.<时间戳>.md`，并记入 `drift` 表；
 3. 镜像按账本重写；没有账本对应的孤儿文件也移入 `drift/`。
 
@@ -56,8 +56,8 @@
 `sync --body-only` 只取正文与证据。
 
 `<view>/raw` 是原文唯一副本：手改会在下一次 `ingest` 被采纳为账本事实，而不是被还原。
-改坏后删掉该文件再 `ingest`，会用源文件重建（源文件也没了才会丢）；只有源文件比 raw 新时
-`ingest` 才会主动重写 raw，`touch` 与 `--force` 都不还原。`<view>/README.md` 每次推送
+改坏后删掉该文件再 `ingest`，会用源文件重建（源文件也没了才会丢）。源文件内容改变且比 raw
+新时 `ingest` 会主动重写 raw；只改 mtime（`touch`）不会触发。`<view>/README.md` 每次推送
 重写，`pages/` 按账本重建。
 
 ## 五、数据库损坏与并发

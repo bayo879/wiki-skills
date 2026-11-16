@@ -93,8 +93,9 @@ Windows 首次使用运行
 
 - `pages/`：知识页，按 `<type>/<标题>.md` 渲染。手改过的页面不会被覆盖，只给告警，需要
   运行 `sync` 收进账本。
-- `raw/`：原文唯一副本，由 `ingest` 维护；手改会被下一次 `ingest` 采纳为账本事实，改坏后
-  删掉该文件再 `ingest`（或让源文件比它新），`touch` 与 `--force` 都不会还原。
+- `raw/`：原文唯一副本，由 `ingest` 维护；手改会被下一次 `ingest` 采纳为账本事实。改坏后
+  删掉该文件再 `ingest`，会用源文件重建（源文件也没了才会丢）。源文件内容改变且比 raw 新时
+  `ingest` 会主动重写；只改 mtime（`touch`）不会触发。
 - `README.md`：目录说明与统计，每次推送重写。
 - `topics/`、`scenarios/`：首次推送各投放一次，之后归用户；引擎不覆盖、不删除。
 - 其他文件（包括 `.obsidian/`）不删不改。
@@ -115,7 +116,7 @@ python3 <skill>/scripts/wiki.py sync --json              # 回收 <view>/pages �
 python3 <skill>/scripts/wiki.py sync --body-only --json  # 只取正文与证据，保留账本元数据
 ```
 
-`sync` 只回收、不推送；下一次任意命令启动时才把账本推回观看区。字段与失败码见
+`sync` 只回收、不推送；下一条会启动引擎的命令启动时才把账本推回观看区。字段与失败码见
 [CLI 契约的 sync 段](docs/readme/cli.md#sync)。
 
 ## 仓库结构

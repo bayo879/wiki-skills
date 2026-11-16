@@ -39,7 +39,7 @@
   accepted_at)`
 - `drift(id, page, path, digest, found_at, note)`
 
-表结构只增不改；旧库由 `ensure_columns` 拒绝（`E_STATE`），不写迁移。
+表结构每版固定；缺列的旧库由 `ensure_columns` 拒绝（`E_STATE`），不写迁移。
 
 ## 不变量
 

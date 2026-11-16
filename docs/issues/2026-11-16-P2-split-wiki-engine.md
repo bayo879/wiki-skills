@@ -38,7 +38,7 @@
 | 模块 | 职责 | 现有位置/符号 |
 | --- | --- | --- |
 | `ledger.py` | 连接、建表、配置加载、扫描根、来源行、`Wiki` 基础方法 | `Wiki.__init__`/`ensure`/`ensure_publish`/`_create_schema`/`ensure_columns`/`close`/`scan_files` 与来源方法（558–856） |
-| `ingest.py` | 字节读取、文本抽取、摄入判定与 `ingest` 命令 | `read_bytes`…`extract_text`（197–281）、`ingest_decision`（171）、`command_ingest`（1656–1855） |
+| `ingest.py` | 字节读取、文本抽取、摄入判定与 `ingest` 命令 | `read_bytes`…`extract_text`（197–280）、`ingest_decision`（171）、`command_ingest`（1656–1850） |
 | `pages.py` | 页面记录、修订写入、渲染、链接、镜像与 drift | `page_record`、`view_relpath`/`view_text`/`write_rev`、`rebuild_links`、`migrate_legacy_pages`、`ensure_mirror`、`record_drift`（857–1134） |
 | `task_store.py` | 任务入队、快照、漂移、领取、过期、关闭 | `enqueue_task`、`attach_page_source`、`task_drift`、`pin_open_task_raw`、`claim_tasks`、`release_task`、`requeue_task`、`expire_task`、`close_task`、`open_task_for_page`、`source_in_open_task`（1262–1544） |
 | `view.py` | 观看区命名、推送、主题/场景投放、`sync` | `view_name`、`render_view_readme`、`render_page`、`sync_view_file`、`sync_view`、`_sync_view_pages`、`_seed_view_topics`、`_seed_view_scenarios`、`command_sync`（283–466、1136–1261、2439–2520） |

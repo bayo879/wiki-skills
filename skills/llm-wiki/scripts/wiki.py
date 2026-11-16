@@ -326,7 +326,7 @@ def render_view_readme(wiki, records=None):
         "",
         "## 说明",
         "",
-        "- 原文只留一份：删掉 `raw/` 里的文件后 `ingest` 会用源文件重建；改坏后删掉再 `ingest`，或让源文件比它新；`touch` 与 `--force` 不会还原。",
+        "- 原文只留一份：删掉 `raw/` 里的文件后 `ingest` 会用源文件重建；改坏后删掉再 `ingest`。源文件内容改变且比 raw 新时 `ingest` 会主动重写；只改 mtime 不会触发。",
         "- `topics/`、`scenarios/` 是你自己的成果，改动与新增都不会被引擎同步或删除。",
     ])
     return "\n".join(lines) + "\n"
