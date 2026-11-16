@@ -22,3 +22,15 @@
 产品说明与使用从 [README](README.md) 进入；设计原则见
 [docs/readme/design-principles.md](docs/readme/design-principles.md)；未决设计统一放
 [docs/issues/](docs/issues/)，不能把候选方案写成已实现事实。
+
+## 概念边界：项目 wiki、话题、开发文档
+
+- **项目 wiki**：工作区 `.wiki/` 下的 raw、pages 与账本，由 `ingest`/`next`/`submit`
+  维护，是 llm-wiki 在某个工作区生成的运行时产物。
+- **话题**：`话题/<主题>.md`（承接原 `wiki-sources/` 的跨项目知识职责），放可复用的
+  开发方法、经验、踩坑与方案分析，以及探索结论、未决问题与下一步。`wiki-sources` 和
+  `话题` 都不是当前项目的 wiki：不摄入、不写 `.wiki/`、不生成页面。
+- **开发文档**：`README.md`、`docs/readme/`、`docs/agent/`、`docs/issues/`，记录
+  llm-wiki 本项目自己的产品事实、开发决策与待办。
+- 三者不要互相替代：本项目产品事实与开发决策写开发文档，不写进话题；跨项目素材也
+  不要写成产品事实或项目 wiki 页面。归属拿不准时先问用户。
