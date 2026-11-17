@@ -238,6 +238,17 @@ def main(argv=None):
         raw_files = sorted(p.name for p in (root / "wiki/raw").glob("*.md"))
         check(results, "raw files are written into wiki/raw", len(raw_files) == 2, raw_files)
 
+        # 初筛必须停在 stat：把源文件改成不可读，第二轮 ingest 仍要报 unchanged。
+        # 引擎只要读了它，就会拿到 EACCES 而不是 unchanged，这条断言就会失败。
+        if os.name == "posix" and os.geteuid() != 0:
+            (root / "a.md").chmod(0o000)
+            try:
+                blind = run(root, "ingest")["data"]
+            finally:
+                (root / "a.md").chmod(0o644)
+            check(results, "an unchanged source is never opened",
+                  "a.md" in blind["unchanged"] and blind["failed"] == [], blind)
+
         # --- Task 3: 两段式初筛、--only、判定表 -------------------------------------
         raw_candidates = sorted((root / "wiki" / "raw").glob("a-*.md"))
         check(results, "a.md publishes exactly one raw file", len(raw_candidates) == 1, raw_candidates)
