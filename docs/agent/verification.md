@@ -128,17 +128,18 @@ python3 tests/selftest.py
 | `read` raw | 返回解析文本，`content` 为正文 |
 | `skip` 决定 | 被拒决定返回可读错误，接受后来源变 `skipped` |
 | route `new` | 入队 page 任务，任务带来源与 raw |
+| route 拆页 | 同一来源两条 `new` 指向不同页 → 两个 page 任务，来源可挂两棵同源树；重复 `(source, page)` 与 `skip` 混用被拒 |
 | `body_file` 区外 | 草稿路径越界返回 `E_PATH`，任务回队列 |
-| page 提交 | 生成 rev1 与 `.wiki/pages/<type>/<id>.md` |
+| page 提交 | 生成 rev1，且不写 `.wiki/pages/` |
 | 任务关闭后重交 | `E_TASK_STALE`，退出码 3 |
 | `status` | 页数、stale、开放任务统计正确 |
 | `query` | 命中页数与 id 正确 |
-| `read` page | 读账本而不是镜像文件 |
-| 镜像被改 | 原文进 `.wiki/drift/`，镜像按账本还原 |
+| `read` page | 读账本，`path` 指向观看区 |
+| 观看区被改 | 推送只告警不覆盖，`sync` 收成新修订 |
 | `page import` | 生成 rev2，`origin=import` |
 | import 区外 | `--from` 越界返回 `E_PATH` |
 | `page restore` | 回滚内容生成 rev3 |
-| `export` | 页面镜像复制到目标目录 |
+| `export` | 渲染文本复制到目标目录 |
 | export 区外 | 目标目录越界返回 `E_PATH`，不写文件 |
 | 超限 | `max_source_bytes=10` 时 100 字节文件进 `oversize`，退出码 1 |
 | `--dry-run` | 未初始化目录不创建 `.wiki/` |

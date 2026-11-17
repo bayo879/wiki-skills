@@ -8,8 +8,9 @@
 
 设计前提：**确定性的事交给引擎，语义的事交给 agent。** 扫描、解析、哈希、任务状态、
 引文校验、页面渲染都在 `scripts/wiki.py` 里；agent 只领任务、读原文、交 JSON 载荷。
-知识库状态只存在 `.wiki/wiki.db` 账本中；引擎按账本渲染两份产物：`.wiki/pages/` 镜像与
-`<view>/` 观看区（`publish.dir`，默认 `wiki/`）。场景文件是只读能力，不写账本。
+知识库状态只存在 `.wiki/wiki.db` 账本中；引擎按账本把页面推送到 `<view>/` 观看区
+（`publish.dir`，默认 `wiki/`），`.wiki/` 里不再保存第二份页面正文。场景文件是只读能力，
+不写账本。
 
 ## 快速开始
 
@@ -46,13 +47,12 @@ Windows 首次使用运行
 
 1. `ingest` 扫描根目录（跳过隐藏目录、`scan.ignore`、场景/话题目录与观看区），把新文件或
    内容变化的文件解析到 `<view>/raw/`（默认 `wiki/raw/`），每个来源入队一条 **route** 任务。
-2. agent 对每个来源提交决定：`new`（新建页）、`merge`（并入已有页）或 `skip`（不要）。
-   `new` 与 `merge` 会生成 **page** 任务。
+2. agent 对每个来源提交决定：`new`（新建页）、`merge`（并入已有页）或 `skip`（不要）；
+   一份来源可拆成多条决定、指向不同页。`new` 与 `merge` 会生成 **page** 任务。
 3. agent 读 raw 与已有页，写正文、摘要、证据引文与边界，提交 page 任务。引文去掉空白后
    必须逐字命中来源文本，否则拒绝写入。
-4. 页面以修订形式写入账本，并同时渲染到 `.wiki/pages/<type>/<id>.md`（镜像）与
-   `<view>/pages/<type>/<标题>.md`（观看区）。来源变化会让引用页变 `stale`，下次 `ingest`
-   重新排队。
+4. 页面以修订形式写入账本，并由引擎推送到 `<view>/pages/<type>/<标题>.md`（观看区）；
+   正文只存在账本与观看区两处。来源变化会让引用页变 `stale`，下次 `ingest` 重新排队。
 5. 场景能力放在 `scenario/<场景>/`（旧名 `场景能力/`），由 `SCENARIO.md`、`scripts/`、`references/` 组成。
    `ingest` 跳过整个目录；`query` 不检索场景，需要时显式 `scenario search`，命中后按
    `scenario load` 得到的流程执行。改场景文件立即生效，不用重新摄入。技能自带
@@ -72,8 +72,8 @@ Windows 首次使用运行
 - **不越出工作区。** 所有命令以会话工作区为根目录；`--root` 只能是当前目录或它下面的
   子目录，草稿、载荷、导出与临时文件都放 `.wiki/` 下。资料在区外时请用户切换工作区，
   不跨区读写。
-- **页面只能通过命令修改。** 直接改 `.wiki/pages/` 会在下次命令启动时被账本覆盖，原文
-  存进 `.wiki/drift/` 留证。人工修改走 `page import`，回滚走 `page restore --rev N`。
+- **页面只能通过命令修改。** `<view>/pages` 里的手改不会被静默覆盖，引擎会告警，由人工
+  `sync` 决定是否收进账本。人工修改走 `page import`，回滚走 `page restore --rev N`。
 - **观看区的所有权分开算。** `<view>/pages` 的手改不会被覆盖，只给告警，由人工 `sync`
   收进账本；`<view>/raw` 由摄入维护（手改会在下一次 `ingest` 被采纳为事实），
   `<view>/README.md` 每次推送重写；`topics/`、`scenarios/` 首次投放后归用户，引擎不覆盖
@@ -147,7 +147,7 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 tests/selftest.py
 ```
 
-`tests/selftest.py` 在临时目录跑 175 项端到端检查，不接触真实数据；它和 `tests/` 留在
+`tests/selftest.py` 在临时目录跑 179 项端到端检查，不接触真实数据；它和 `tests/` 留在
 仓库、由开发/CI 执行，不复制进安装后的技能目录。验证记录（含真实 PDF 语料结果）见
 [docs/agent/verification.md](docs/agent/verification.md)。场景目录结构与写法见
 [docs/readme/scenarios.md](docs/readme/scenarios.md)，话题沉淀格式见

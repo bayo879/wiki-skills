@@ -39,8 +39,8 @@
   提交被拒时回到 `queued` 并记录 `last_error`。
 - 页面（page）：多版修订，每版有 `rev`、`meta`、`body`、`digest`。当前状态
   `stable` 或 `stale`（引用来源变化或缺失）。
-- 页面按账本渲染两份产物：`.wiki/pages/<type>/<id>.md` 镜像与观看区
-  `<view>/pages/<type>/<标题>.md`。两者都不是事实源，事实源是账本。
+- 页面按账本推送到观看区 `<view>/pages/<type>/<标题>.md`；`.wiki/` 里不存页面正文副本。
+  观看区不是事实源，事实源是账本。
 
 ## 工作区边界
 
@@ -62,7 +62,7 @@
 
 ### init
 
-创建 `.wiki/`（`wiki.db`、`wiki.json`、`pages/`、`drift/`、`payloads/`、`drafts/`），并准备
+创建 `.wiki/`（`wiki.db`、`wiki.json`、`payloads/`、`drafts/`），并准备
 观看区 `<view>/` 与 `<view>/raw/`。`data`: `{created, config, pages, sources, open_tasks}`。
 
 ### ingest
@@ -111,13 +111,19 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 **route 载荷**：
 
 ```json
-{"decisions": [{"source": "docs/a.md", "action": "new", "page": "refund-process",
-                "title": "退款流程", "type": "process", "reason": "完整办理步骤"}]}
+{"decisions": [
+  {"source": "docs/a.md", "action": "new", "page": "refund-process",
+   "title": "退款流程", "type": "process", "reason": "完整办理步骤"},
+  {"source": "docs/a.md", "action": "new", "page": "refund-policy",
+   "title": "退款政策", "type": "concept", "reason": "政策口径可独立检索"}]}
 ```
 
-每个输入来源恰好一条决定，`reason` 每条都必须非空，`action` 三选一：
+每个输入来源至少一条决定，`reason` 每条都必须非空，`action` 三选一。一份来源含多个
+可独立检索的主题时，提交多条决定指向不同页面；同一来源不得重复指向同一页面，
+`skip` 不能与 `new`/`merge` 并用：
 
-- `new`：`page`、`title`、`type` 必填；页面不能已存在。
+- `new`：`page`、`title`、`type` 必填；页面不能已存在，同一载荷里同一个页面只能
+  `new` 一次。
 - `merge`：`page` 必填；页面可以已存在，也可以已在 `pending_pages` 里排队
   （包括同一 route 载荷里的 `new`，顺序不限）。若该页已有未完成任务，来源并入该任务。
 - `skip`：标记 `skipped`。
@@ -154,7 +160,8 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 
 `read "raw:<key>" [--offset N] [--limit N]` 读解析后的来源文本；
 `read "page:<id>"` 读页面正文；也可传根目录内的相对路径。
-`data`: `{path, offset, limit, total_lines, next_offset, meta, content}`。
+`data`: `{path, offset, limit, total_lines, next_offset, meta, content}`；`page:` 的 `path`
+是观看区里的对应文件，发布关闭时为 `page:<id>`。
 
 对 `.md`，`read` 先看正文首行：以 `---` 开头就按 frontmatter 解析，`meta` 给出结果，
 `content` 只留正文。按路径读取的 `.md`（例如 `SCENARIO.md`）同样如此，开头那段
@@ -166,7 +173,7 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 `query <词...> [--limit N]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
 `话题/`，命中时在 `topics` 里返回。`query` **不检索场景**，场景必须显式
 `scenario search`。`query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
-`path`（`.wiki/pages` 镜像路径，不是观看区路径）、`outgoing`、`incoming`、`body`，不查话题。
+`path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`outgoing`、`incoming`、`body`，不查话题。
 
 `data`: `{query, matches, returned, results, topic_matches, topics, boundary}`。
 `matches` 只数页面，`topic_matches` 只数话题；`topics[]` 为
@@ -232,8 +239,8 @@ stale_pages, pending, tasks{open,queued,leased,route,page,expired,accepted}, nex
 ### sync
 
 `sync [--body-only]`：把观看区 `<view>/pages/**/*.md` 的手工修改回收进账本（新修订
-`origin=sync`），只回收、不推送。它针对观看区，不是 `.wiki/pages/` 镜像；镜像被改仍按
-drift 处理。手改未收割期间该页整体冻结：推送不覆盖、也不按新标题改名，`page import` 的
+`origin=sync`），只回收、不推送。页面正文只存在于账本与观看区两处，没有第二份镜像。
+手改未收割期间该页整体冻结：推送不覆盖、也不按新标题改名，`page import` 的
 改名要到回收之后才在观看区出现。
 
 - 文件没有 `id` 或 `id` 不在账本里：跳过，`reason` 分别为 `no id`、`unknown id`；路径逃出
@@ -258,8 +265,8 @@ unchanged[page], written[{page,from,to}], warnings[message]}`。有失败项时 
 
 ### doctor
 
-`doctor [--fix]`：`PRAGMA integrity_check`、镜像修复、stale 页、未注册来源、
-断链、过期租约。`--fix` 重建链接索引与镜像。`data`: `{issues[{severity,code,message}],
+`doctor [--fix]`：`PRAGMA integrity_check`、stale 页、未注册来源、
+断链、过期租约。`--fix` 重建链接索引。`data`: `{issues[{severity,code,message}],
 fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看区：未收割的手改只在
 推送时告警，`healthy:true` 不代表观看区没有待回收内容，用 `sync` 收割。
 
@@ -272,7 +279,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_TASK_UNKNOWN` | 任务 id 不存在 | `next` 取新任务 |
 | `E_TASK_STALE` | 任务已关闭或租约过期 | 重新 `next`，丢弃旧载荷；来源变化导致的过期是 `E_SOURCE_DRIFT` |
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
-| `E_TASK_CONFLICT` | 来源已属于另一棵未关闭的页面任务树 | 先完成或关闭那个页面任务 |
+| `E_TASK_CONFLICT` | 来源已属于另一棵未关闭的页面任务树（同一次 route 拆页除外） | 先完成或关闭那个页面任务；拆页请放在同一次 route 提交里 |
 | `E_STATE` | 状态不满足：账本结构过旧、观看区路径不是目录、页面正被其他任务写 | 按 message 处理，不要手改账本 |
 | `E_META_CHANGED` | `sync` 时观看区页面的 `title`/`type`/`summary`/`sources` 与账本不一致 | 只收正文加 `--body-only`；确实要改元数据用 `page import`（手改未收割时改名会被冻结） |
 | `E_DUPLICATE` | `sync` 时同一页面 id 在观看区出现两次 | 删掉重复文件后重跑 |

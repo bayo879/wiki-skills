@@ -2,7 +2,7 @@
 """End-to-end self test for the task-driven wiki engine.
 
 Runs a disposable knowledge base in a temp directory: ingest, route decisions,
-page submission, mirror drift, import/restore, classification, dry run. Never
+page submission, view push, import/restore, classification, dry run. Never
 touches real data and only uses the standard library.
 
 Run:  python3 tests/selftest.py [--keep] [--json]
@@ -443,8 +443,10 @@ def main(argv=None):
         task = run(root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"][0]
         accepted = run(root, "submit", task["id"],
                        "--payload", payload_file(root, "page.json", payload))
-        mirror = root / ".wiki/pages/process/anti-fraud-restore.md"
-        check(results, "page submit writes rev 1", accepted["data"]["rev"] == 1 and mirror.exists(), accepted)
+        check(results, "page submit writes rev 1", accepted["data"]["rev"] == 1, accepted)
+        # 镜像已删除：页面正文只存在账本与观看区两处。
+        check(results, "page submit writes no mirror copy",
+              not (root / ".wiki/pages").exists(), root / ".wiki/pages")
 
         # Task 5: 观看区文件名与别名只从标题生成，先把纯函数钉住。
         check(results, "view_name strips path separators",
@@ -483,8 +485,9 @@ def main(argv=None):
         check(results, "a fresh revision has no published facts yet",
               stored["view_path"] == "" and stored["view_digest"] == "",
               (stored["view_path"], stored["view_digest"]))
-        check(results, "the mirror stays alias-free",
-              "aliases:" not in mirror.read_text(encoding="utf-8"), mirror)
+        check(results, "the ledger render stays alias-free",
+              "aliases:" not in wiki.render_page(record["meta"], record["body"]),
+              wiki.render_page(record["meta"], record["body"]))
         engine.close()
 
         bad = run(root, "submit", task["id"],
@@ -665,12 +668,6 @@ def main(argv=None):
         check(results, "batch page keeps both sources",
               set(page["meta"]["sources"]) == {"d.md", "e.md"}, page["meta"]["sources"])
 
-        mirror.write_text("手改的内容\n", encoding="utf-8")
-        run(root, "status")
-        drift = list((root / ".wiki/drift").glob("*.md"))
-        check(results, "mirror edit kept as drift", drift and "手改" in drift[0].read_text(encoding="utf-8"), drift)
-        check(results, "mirror restored from ledger", "两个工作日" in mirror.read_text(encoding="utf-8"), mirror)
-
         edited = root / ".wiki/drafts/edited.md"
         edited.write_text("---\ntitle: 反诈复机\n---\n## 结论\n\n人工补充：可拨打客服确认进度。\n", encoding="utf-8")
         imported = run(root, "page", "import", "anti-fraud-restore", "--from", str(edited))["data"]
@@ -682,7 +679,9 @@ def main(argv=None):
         check(results, "import outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
         outside_edit.unlink()
         restored = run(root, "page", "restore", "anti-fraud-restore", "--rev", "1")["data"]
-        check(results, "page restore rolls back content", restored["rev"] == 4 and "两个工作日" in mirror.read_text(encoding="utf-8"), restored)
+        restored_page = run(root, "read", "page:anti-fraud-restore")["data"]
+        check(results, "page restore rolls back content",
+              restored["rev"] == 4 and "两个工作日" in restored_page["content"], restored)
 
         aliased = root / ".wiki/drafts/aliased.md"
         aliased.write_text(
@@ -700,7 +699,7 @@ def main(argv=None):
               "aliases" not in aliased_page["meta"], aliased_page["meta"])
 
         exported = run(root, "export", str(root / ".wiki/export"))["data"]["files"]
-        check(results, "export writes mirror copies", exported, exported)
+        check(results, "export writes rendered pages", exported, exported)
         escaped = run(root, "export", str(root.parent / "wiki-export"), expect=2)
         check(results, "export outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
 
@@ -1093,6 +1092,7 @@ def main(argv=None):
 
         # 树唯一性不变量：只统计 page 树。submit_route 在关闭 route 任务前先建 page 树，
         # route→page 的交接瞬间同一个 key 会同时挂两行，那是正常交接不是第二套树。
+        # 同一次 route 拆页是显式例外，下面单独测。
         conn = sqlite3.connect(root / ".wiki" / "wiki.db")
         twins = conn.execute(
             "SELECT ts.source_key, COUNT(DISTINCT ts.task_id) AS n "
@@ -1101,7 +1101,92 @@ def main(argv=None):
             "GROUP BY ts.source_key HAVING n > 1"
         ).fetchall()
         conn.close()
-        check(results, "one source never sits in two open page task trees", twins == [], twins)
+        check(results, "no source sits in two open page trees outside a route split",
+              twins == [], twins)
+
+        # 同一来源拆多页：同一次 route 提交的两条 new 决定共享 route_task，
+        # 是树唯一性的唯一例外；两个 page 任务都能领取、提交。
+        split_root = Path(tempfile.mkdtemp(prefix="llm-wiki-split-"))
+        try:
+            (split_root / "talk.md").write_text(
+                "# 云网安全讲话\n\n主题日活动启动。\n\n双零行动：变更操作零失误。\n",
+                encoding="utf-8",
+            )
+            run(split_root, "ingest")
+            split_route = run(split_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            split_key = split_route["work"]["sources"][0]["key"]
+            duplicate = run(
+                split_root, "submit", split_route["id"],
+                "--payload", payload_file(split_root, "split-dup.json", {"decisions": [
+                    {"source": split_key, "action": "new", "page": "same-page",
+                     "title": "同页", "type": "concept", "reason": "重复"},
+                    {"source": split_key, "action": "new", "page": "same-page",
+                     "title": "同页", "type": "concept", "reason": "重复"},
+                ]}),
+                expect=2,
+            )
+            check(results, "the same source cannot decide one page twice",
+                  duplicate["error"]["code"] == "E_PAYLOAD", duplicate)
+            split_route = run(split_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            mixed = run(
+                split_root, "submit", split_route["id"],
+                "--payload", payload_file(split_root, "split-mixed.json", {"decisions": [
+                    {"source": split_key, "action": "skip", "reason": "跳过"},
+                    {"source": split_key, "action": "new", "page": "mixed-page",
+                     "title": "混用", "type": "concept", "reason": "混用"},
+                ]}),
+                expect=2,
+            )
+            check(results, "skip cannot be combined with new or merge",
+                  mixed["error"]["code"] == "E_PAYLOAD", mixed)
+            split_route = run(split_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            split_submit = run(
+                split_root, "submit", split_route["id"],
+                "--payload", payload_file(split_root, "split-route.json", {"decisions": [
+                    {"source": split_key, "action": "new", "page": "theme-day",
+                     "title": "主题日活动", "type": "concept", "reason": "活动本身"},
+                    {"source": split_key, "action": "new", "page": "dual-zero",
+                     "title": "双零行动", "type": "concept", "reason": "独立行动"},
+                ]}),
+            )
+            check(results, "one source can be split into two queued pages",
+                  len(split_submit["data"]["queued_page_tasks"]) == 2, split_submit)
+            split_tasks = run(split_root, "next", "--kind", "page", "--batch", "5")["data"]["tasks"]
+            check(results, "both split page tasks are claimable", len(split_tasks) == 2, split_tasks)
+            split_bodies = {
+                "theme-day": "## 结论\n\n主题日活动启动。\n\n## 要点\n\n- 主题：云网安全。\n",
+                "dual-zero": "## 结论\n\n双零行动启动。\n\n## 要点\n\n- 目标：变更操作零失误。\n",
+            }
+            for index, split_task in enumerate(split_tasks):
+                page_id = split_task["template"]["page"]
+                draft = split_root / ".wiki/drafts" / f"{page_id}.md"
+                draft.parent.mkdir(parents=True, exist_ok=True)
+                draft.write_text(split_bodies[page_id], encoding="utf-8")
+                quote = "主题日活动启动。" if page_id == "theme-day" else "变更操作零失误"
+                accepted = run(
+                    split_root, "submit", split_task["id"],
+                    "--payload", payload_file(split_root, f"{page_id}.json", {
+                        "page": page_id,
+                        "title": "主题日活动" if page_id == "theme-day" else "双零行动",
+                        "type": "concept",
+                        "summary": "一句话摘要。",
+                        "links": [],
+                        "body_file": str(draft.relative_to(split_root)),
+                        "evidence": [{"source": split_key, "quote": quote}],
+                        "boundaries": {"covered": "这一页", "not_covered": "其他"},
+                    }),
+                )
+                check(results, f"split page {page_id} submits", accepted["data"]["rev"] == 1, accepted)
+                conn = sqlite3.connect(split_root / ".wiki" / "wiki.db")
+                source_status = conn.execute(
+                    "SELECT status FROM sources WHERE key = ?", (split_key,)
+                ).fetchone()[0]
+                conn.close()
+                expected = "done" if index == 1 else "pending"
+                check(results, f"the split source is {expected} after page {index + 1}",
+                      source_status == expected, source_status)
+        finally:
+            shutil.rmtree(split_root, ignore_errors=True)
 
         # 旧版三字段快照（b2af7c9 那代引擎建的库）：没有源指纹，只能整体判漂移。
         # 用独立工作区，避免动到上面 fixture 的任务状态。

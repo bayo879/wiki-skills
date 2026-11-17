@@ -1,6 +1,6 @@
 # 引擎内部
 
-对象：`skills/llm-wiki/scripts/wiki.py`（2715 行，已超过单文件 2000 行上限；拆分方案见
+对象：`skills/llm-wiki/scripts/wiki.py`（2601 行，已超过单文件 2000 行上限；拆分方案见
 `docs/issues/2026-11-16-P2-split-wiki-engine.md`）。公共错误在 `errors.py`，frontmatter
 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能力在 `scenarios.py`，话题沉淀在
 `topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，工作区边界在
@@ -24,7 +24,7 @@
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 深检，门禁用轻检 |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留；纯函数，只读 `Wiki` |
-| 账本 | `class Wiki` | 表、来源、修订、镜像、观看区、任务全在这里 |
+| 账本 | `class Wiki` | 表、来源、修订、观看区推送、任务全在这里 |
 | 命令层 | `command_*`、`submit_route`、`submit_page` | 只做参数解析、调用 `Wiki`、组装输出 |
 
 ## 表
@@ -37,7 +37,6 @@
 - `task_sources(task_id, source_key)`
 - `page_revs(page, rev, meta, body, digest, render_digest, view_digest, view_path, origin,
   accepted_at)`
-- `drift(id, page, path, digest, found_at, note)`
 
 表结构每版固定；缺列的旧库由 `ensure_columns` 拒绝（`E_STATE`），不写迁移。
 
@@ -48,15 +47,17 @@
 2. **`computed_status` 每次重算。** `meta.source_digests` 与当前 `sources.digest` 不一致，
    或来源 `missing/unsupported/oversize`，页面即 `stale`；不把 status 存成可漂移的字段。
 3. **修订只增不改。** `write_rev` 取 `MAX(rev)+1`，写 `digest`（元数据+正文的规范化哈希）
-   与 `render_digest`（渲染文本哈希），再原子写镜像、重建链接。
-4. **ledger 与镜像分离。** 渲染实现变化只会让 `render_digest` 变，不应被当成"文件被改"；
-   文件被改是"实际文本 ≠ 存储的 render_digest"。
+   与 `render_digest`（渲染文本哈希），再重建链接；页面文件只由观看区推送写出。
+4. **账本不写页面副本。** `.wiki/` 只放账本、载荷与草稿（原文在 `<view>/raw/`）；页面正文的唯一
+   落盘副本在 `<view>/pages/`，由 `sync_view` 按账本推送，`render_digest` 只是渲染文本的
+   历史哈希，不再用于比对文件。
 5. **任务 epoch 单调。** `claim_tasks` 先回收过期 lease，领取时 `epoch = epoch + 1`；
    `close_task` 用 `WHERE id=? AND epoch=? AND state='leased'` 的 CAS，rowcount=0 抛
    `E_TASK_STALE`。不要用先查后写替代 CAS。漂移任务不发出，`expire_task` 置终态
    `expired` 并写 `last_error`、`closed_at`；任务行只增不删，供审计。`enqueue_task` 做树
    唯一性：一个来源不能同时属于两棵未关闭的 page 任务树，冲突抛 `E_TASK_CONFLICT`；
-   route 任务只是临时持有者，不挡新树。
+   route 任务只是临时持有者，不挡新树。同一次 route 提交拆出的 page 任务共享
+   `route_task`，允许同一来源按主题进入多页，是这条不变量的唯一例外。
 6. **任务快照有 8 个来源指纹。** 入队时快照 `key`、`source_size`、`source_mtime`、
    `source_digest`、`raw`、`raw_size`、`raw_mtime`、`raw_digest`；`task_drift` 先比 stat，
    不一致再读字节比 digest（只是 touch 不算漂移），raw 副本同理，报错分别为
@@ -67,12 +68,11 @@
    `validate_page_payload`（字段、长度、slug、链接存在性、引文逐字命中）再 `write_rev`。
    任何一步失败都不得留下部分写入。
 8. **引文比较忽略空白。** 两侧都做 `re.sub(r"\s+", "", ...)`，其余逐字。
-9. **镜像与观看区都在命令入口修复。** `open_wiki()` 先 `ensure_mirror()`（一致跳过；被改
-   先 `record_drift` 再写回；孤儿 `.md` 移入 drift），再按 `publish` 开关调用 `sync_view()`
-   推送观看区。`sync` 用 `open_wiki(push=False)`，先读磁盘再改账本，避免推送把刚挪走的
-   文件重建出第二份。`--dry-run` 不建库、不进镜像修复。
-10. **旧页面迁移只跑一次。** `migrate_legacy_pages` 仅在 `page_revs` 为空时把
-    file-first 页面收为 rev1（`origin=external`），之后不再猜测文件内容。
+9. **观看区只在命令入口推送。** `open_wiki()` 按 `publish` 开关调用 `sync_view()` 推送
+   `<view>/pages`；`sync` 用 `open_wiki(push=False)`，先读磁盘再改账本，避免推送把刚挪走
+   的文件重建出第二份。`--dry-run` 不建库、不推送。
+10. **没有旧页面接管。** `page_revs` 为空时也不扫描 `.wiki/pages/`：该目录不再被读取，
+   账本里没有的页面不会被文件内容凭空生成；升级后残留的 `.wiki/pages/` 由用户手动删除。
 11. **工作区边界。** `open_wiki` 以 cwd 为 workspace，`--root` 必须是 workspace 或其子目录；
     `read` 路径、`--payload`、`body_file`、`page import --from`、`export` 统一走
     `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
@@ -105,7 +105,7 @@
 源文件 → scan_files → extract_text → <view>/raw/<key>-<digest>.md + sources 行
                                         ↓ enqueue route 任务
 route 载荷 → 校验 → 页面任务（new/merge）或来源结算（skip）
-page 载荷 → 校验 → page_revs + .wiki/pages 镜像 + <view>/pages 副本 + links
+page 载荷 → 校验 → page_revs + links → 推送 → <view>/pages 副本
 
 scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不落盘）
                               └─scenario load→ 全文 + resources
@@ -115,8 +115,9 @@ scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不�
 
 `raw` 文件名带 digest 后缀（`<basename>-<digest8>.md`），避免同名覆盖；`sources.raw` 存相对路径。
 
-观看区 `pages/` 是账本的另一份渲染（按标题命名，`view_digest` 记录上次推送的字节）；
-手改过的副本不覆盖，`sync` 收成新修订后才恢复推送。`sync` 只认 `<view>/pages/**/*.md`。
+观看区 `pages/` 是账本的唯一页面落盘副本（按标题命名，`view_digest` 记录上次推送的
+字节）；手改过的副本不覆盖，`sync` 收成新修订后才恢复推送。`sync` 只认
+`<view>/pages/**/*.md`。
 
 `next` 只输出 `{id, brief, template, work}`；`epoch`、`lease_until`、`attempts` 留在账本里。
 `submit` 的 `--epoch` 只是兼容旧脚本的可选项，正常路径不要求。任务包由 `tasks.py` 生成，

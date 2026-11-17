@@ -40,7 +40,7 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 tests/selftest.py
 ```
 
-`tests/selftest.py` 是端到端契约测试，覆盖 next 任务包、route/page 提交、工作区越界、镜像漂移、
+`tests/selftest.py` 是端到端契约测试，覆盖 next 任务包、route/page 提交、工作区越界、观看区推送、
 import/restore、超限与 dry-run。改引擎行为时先补一个检查再改实现；它同时被 CI 调用，不允许跳过或
 `--keep` 写入仓库。
 

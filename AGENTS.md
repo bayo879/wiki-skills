@@ -6,9 +6,9 @@
 ## 按工作主题查找
 
 - **确认开发边界或方向**：读 [开发方向与决策](docs/agent/development-decisions.md)。
-  记录 skills-only 转型、账本为唯一事实源、保留自动镜像、不引入 OCR/联网等已定决策。
+  记录 skills-only 转型、账本为唯一事实源、删除页面镜像、不引入 OCR/联网等已定决策。
 - **改引擎（`scripts/wiki.py`）**：读 [引擎内部](docs/agent/engine.md)，查任务状态机、
-  epoch/lease、修订与渲染、drift 处理、错误码约定与单文件规模边界。
+  epoch/lease、修订与渲染、观看区推送、错误码约定与单文件规模边界。
 - **改话题探索或沉淀流程**：读 [话题沉淀](docs/readme/topics.md) 与内置场景
   `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`，查 `scenario search` 的显式检索、
   `query` 的 `topics` 字段与 `ingest` 跳过 `话题/` 的约束。
@@ -25,8 +25,8 @@
 
 ## 概念边界：wiki、话题、开发文档
 
-- **wiki 正式层**：工作区 `.wiki/` 下的 raw、pages 与账本，由 `ingest`/`next`/`submit`
-  维护；页面必须能回到 raw 引文。
+- **wiki 正式层**：`.wiki/` 的账本，加上观看区（默认 `wiki/`）里的 `raw/`、`pages/`，
+  由 `ingest`/`next`/`submit` 维护；页面必须能回到 raw 引文。
 - **话题（wiki 探索层）**：`话题/<主题>.md`，记录一次探索的主题、结论、依据、未决问题
   与下一步，`query` 可直接检索。它属于 wiki 内容，不是正式知识页；不参与 `ingest`、
   不进账本、不要求逐字引文。

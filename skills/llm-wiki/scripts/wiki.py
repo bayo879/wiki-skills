@@ -5,9 +5,9 @@ One directory of source files in, one deterministic `.wiki/` state tree out.
 Only the Python standard library is required.
 
 The engine owns the ledger: scanning, parsing, hashing, task state, validation,
-page revisions, and the automatic page mirror. Semantic work -- deciding which
-pages exist, their boundaries, their prose, and which quotes support them --
-belongs to the agent, which submits JSON payloads and never writes `.wiki/`.
+page revisions, and the push into the publish view. Semantic work -- deciding
+which pages exist, their boundaries, their prose, and which quotes support them
+-- belongs to the agent, which submits JSON payloads and never writes `.wiki/`.
 
 Commands are documented by `wiki.py --help` and in `docs/readme/cli.md`.
 """
@@ -46,8 +46,6 @@ from workspace import WIKI_DIR, dry_store, inside_root, window_safe
 
 VERSION = "0.4.1"
 RAW_SUBDIR = "raw"
-PAGES_SUBDIR = "pages"
-DRIFT_SUBDIR = "drift"
 PAYLOAD_SUBDIR = "payloads"
 DRAFT_SUBDIR = "drafts"
 DB_NAME = "wiki.db"
@@ -333,7 +331,7 @@ def render_view_readme(wiki, records=None):
 
 
 def render_page(meta, body, aliases=None):
-    """Deterministic mirror text: frontmatter, body, then the evidence block."""
+    """Deterministic page text: frontmatter, body, then the evidence block."""
     lines = ["---"]
     for field in ("id", "title", "type", "summary"):
         lines.append(f"{field}: {yaml_scalar(meta[field])}")
@@ -566,8 +564,6 @@ class Wiki:
         # Placeholder until ensure() reads the config, which then repoints it at
         # the publish tree: raw text never lives in `.wiki/` any more.
         self.raw_dir = self.wiki_dir / RAW_SUBDIR
-        self.pages_dir = self.wiki_dir / PAGES_SUBDIR
-        self.drift_dir = self.wiki_dir / DRIFT_SUBDIR
         self.payload_dir = self.wiki_dir / PAYLOAD_SUBDIR
         self.draft_dir = self.wiki_dir / DRAFT_SUBDIR
         self.db_path = self.wiki_dir / DB_NAME
@@ -587,8 +583,7 @@ class Wiki:
 
     def ensure(self, push=True):
         created = []
-        for directory in (self.wiki_dir, self.pages_dir, self.drift_dir,
-                          self.payload_dir, self.draft_dir):
+        for directory in (self.wiki_dir, self.payload_dir, self.draft_dir):
             if not directory.exists():
                 directory.mkdir(parents=True)
                 created.append(norm_key(directory.relative_to(self.root)))
@@ -609,8 +604,6 @@ class Wiki:
             self.conn.execute("PRAGMA busy_timeout = 5000")
             self._create_schema()
             self.ensure_columns()
-            self.migrate_legacy_pages()
-        self.ensure_mirror()
         # R11：sync 要先看磁盘再让推送动手，否则挪走的文件会被重建出第二个副本。
         if push:
             self.view_events = self.sync_view()
@@ -706,14 +699,6 @@ class Wiki:
                     origin TEXT NOT NULL,
                     accepted_at TEXT NOT NULL,
                     PRIMARY KEY (page, rev)
-                );
-                CREATE TABLE IF NOT EXISTS drift (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    page TEXT NOT NULL,
-                    path TEXT NOT NULL,
-                    digest TEXT NOT NULL,
-                    found_at TEXT NOT NULL,
-                    note TEXT
                 );
                 """
             )
@@ -910,8 +895,12 @@ class Wiki:
                 return "stale"
         return "stable"
 
-    def page_path(self, meta):
-        return self.pages_dir / meta["type"] / f"{meta['id']}.md"
+    def page_ref(self, record):
+        """Where `read`/`query` point at a ledger page: the view copy, or `page:<id>`."""
+        if not self.config["publish"]["enabled"]:
+            return f"page:{record['id']}"
+        target = self.publish_dir / self.view_relpath(record)
+        return norm_key(target.relative_to(self.root))
 
     def view_relpath(self, record):
         """Publish path for one page record, relative to the publish dir."""
@@ -973,7 +962,6 @@ class Wiki:
             sort_keys=True,
             ensure_ascii=False,
         )
-        target = self.page_path(meta)
         with self.conn:
             self.conn.execute(
                 """
@@ -988,10 +976,6 @@ class Wiki:
                     origin, now_iso(),
                 ),
             )
-            write_atomic(target, text)
-            for path in list(self.pages_dir.rglob(f"{page}.md")):
-                if path != target:
-                    path.unlink()
             self.rebuild_links(page, body)
         return rev
 
@@ -1022,114 +1006,6 @@ class Wiki:
             )
         ]
         return outgoing, incoming
-
-    # ----------------------------------------------------------------- mirror
-
-    def migrate_legacy_pages(self):
-        """Adopt pages written by the old file-first version as revision 1."""
-        count = self.conn.execute("SELECT COUNT(*) FROM page_revs").fetchone()[0]
-        if count or not self.pages_dir.exists():
-            return
-        for path in sorted(self.pages_dir.rglob("*.md")):
-            text = path.read_text(encoding="utf-8", errors="replace")
-            meta, body = split_frontmatter(text)
-            page_id = str(meta.get("id") or path.stem)
-            sources = [str(item) for item in (meta.get("sources") or [])]
-            adopted = {
-                "id": page_id,
-                "title": str(meta.get("title") or page_id),
-                "type": str(meta.get("type") or "note"),
-                "summary": str(meta.get("summary") or ""),
-                "sources": sorted(set(sources)),
-                "source_digests": {
-                    key: (self.source_row(key)["raw_digest"] if self.source_row(key) else "")
-                    for key in set(sources)
-                },
-                "evidence": [],
-                "boundaries": {},
-                "status": "stable",
-                "updated": str(meta.get("updated") or date.today().isoformat()),
-            }
-            canonical = json.dumps(
-                {"title": adopted["title"], "type": adopted["type"],
-                 "summary": adopted["summary"], "sources": adopted["sources"],
-                 "evidence": [], "boundaries": {}, "body": body},
-                sort_keys=True, ensure_ascii=False,
-            )
-            with self.conn:
-                self.conn.execute(
-                    """
-                    INSERT OR IGNORE INTO page_revs
-                    (page, rev, meta, body, digest, render_digest, view_digest, view_path,
-                     origin, accepted_at)
-                    VALUES (?, 1, ?, ?, ?, ?, '', '', 'external', ?)
-                    """,
-                    (
-                        page_id,
-                        json.dumps(adopted, ensure_ascii=False, sort_keys=True),
-                        body, digest_text(canonical), digest_bytes(text.encode("utf-8")),
-                        now_iso(),
-                    ),
-                )
-        self.rebuild_all_links()
-
-    def ensure_mirror(self):
-        """Render every page from the ledger; keep external edits in drift/."""
-        events = []
-        self.pages_dir.mkdir(parents=True, exist_ok=True)
-        records = self.all_pages()
-        known = set()
-        for record in records:
-            page_id = record["id"]
-            known.add(page_id)
-            meta = dict(record["meta"])
-            meta["status"] = self.computed_status(meta)
-            text = render_page(meta, record["body"])
-            expected = digest_text(text)
-            target = self.page_path(meta)
-            current = next(
-                (path for path in self.pages_dir.rglob(f"{page_id}.md") if path.exists()),
-                None,
-            )
-            if current is None:
-                write_atomic(target, text)
-                events.append({"page": page_id, "action": "written", "path": norm_key(target.relative_to(self.root))})
-                continue
-            actual = digest_bytes(current.read_bytes())
-            if actual == expected:
-                if current != target:
-                    write_atomic(target, text)
-                    current.unlink()
-                continue
-            if actual != record["render_digest"]:
-                saved = self.record_drift(page_id, current, actual, "page mirror edited outside the engine")
-                events.append({"page": page_id, "action": "drift", "path": saved})
-            write_atomic(target, text)
-            if current != target and current.exists():
-                current.unlink()
-            events.append({"page": page_id, "action": "restored", "path": norm_key(target.relative_to(self.root))})
-        for path in sorted(self.pages_dir.rglob("*.md")):
-            if path.stem in known:
-                continue
-            saved = self.record_drift(path.stem, path, digest_bytes(path.read_bytes()), "page file without a ledger revision")
-            path.unlink()
-            events.append({"page": path.stem, "action": "orphan", "path": saved})
-        return events
-
-    def record_drift(self, page, path, digest, note):
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        destination = self.drift_dir / f"{page or 'unknown'}.{stamp}.md"
-        counter = 1
-        while destination.exists():
-            destination = self.drift_dir / f"{page or 'unknown'}.{stamp}-{counter}.md"
-            counter += 1
-        shutil.copy2(path, destination)
-        with self.conn:
-            self.conn.execute(
-                "INSERT INTO drift (page, path, digest, found_at, note) VALUES (?, ?, ?, ?, ?)",
-                (page, norm_key(destination.relative_to(self.root)), digest, now_iso(), note),
-            )
-        return norm_key(destination.relative_to(self.root))
 
     # ------------------------------------------------------------------- view
 
@@ -1292,7 +1168,9 @@ class Wiki:
         if existing:
             return existing["id"]
         # 树唯一性：一个源最多出现在一套未完成的任务树里。route 任务只是临时持有者，
-        # 提交时会把源交给 page 树，所以只有 page 持有者才挡新树。
+        # 提交时会把源交给 page 树，所以只有 page 持有者才挡新树。同一次 route 提交
+        # 拆出的多个 page 任务共享 route_task，是这条不变量的唯一例外。
+        route_task = inputs.get("route_task")
         for item in inputs.get("sources", []):
             holder = self.source_in_open_task(item["key"])
             if not holder:
@@ -1302,6 +1180,10 @@ class Wiki:
                 continue
             if kind == "page" and holder_row["subject"] == subject:
                 continue
+            if route_task:
+                holder_inputs = json.loads(holder_row["inputs"])
+                if holder_inputs.get("route_task") == route_task:
+                    continue
             raise WikiError(
                 "E_TASK_CONFLICT",
                 f"source {item['key']} already belongs to task {holder_row['id']} "
@@ -2037,11 +1919,14 @@ def submit_route(wiki, row, payload):
     if not isinstance(decisions, list) or not decisions:
         raise WikiError(
             "E_PAYLOAD",
-            "route payload must be {\"decisions\": [...]} with one decision per input source",
-            "use the task template: one decision per input source",
+            "route payload must be {\"decisions\": [...]} with at least one decision per input source",
+            "use the task template: at least one decision per input source",
             2,
         )
-    seen = []
+    seen = set()
+    targets = set()
+    new_ids = set()
+    skipped = set()
     for decision in decisions:
         if not isinstance(decision, dict):
             raise WikiError("E_PAYLOAD", "each decision must be an object", "", 2)
@@ -2049,7 +1934,6 @@ def submit_route(wiki, row, payload):
         if key not in available:
             raise WikiError("E_TASK_SCOPE", f"source {key!r} is not in this task",
                             f"task sources: {', '.join(available)}", 3)
-        seen.append(key)
         action = decision.get("action")
         if action not in ("new", "merge", "skip"):
             raise WikiError("E_PAYLOAD", f"action {action!r} must be new, merge or skip",
@@ -2057,11 +1941,43 @@ def submit_route(wiki, row, payload):
         if not str(decision.get("reason") or "").strip():
             raise WikiError("E_PAYLOAD", f"{key}: reason must not be empty",
                             "one sentence explaining the choice", 2)
-    if sorted(seen) != sorted(available) or len(seen) != len(available):
+        seen.add(key)
+        if action == "skip":
+            skipped.add(key)
+            continue
+        page_id = str(decision.get("page") or "").strip().lower()
+        if not ID_RE.match(page_id):
+            raise WikiError("E_BAD_ID", f"{key}: page id {page_id!r} is not a lowercase slug",
+                            "use e.g. `filing-process`", 2)
+        if (key, page_id) in targets:
+            raise WikiError(
+                "E_PAYLOAD",
+                f"{key}: page {page_id} is decided twice in one payload",
+                "one decision per source and page; split a source across different pages",
+                2,
+            )
+        targets.add((key, page_id))
+        if action == "new":
+            if page_id in new_ids:
+                raise WikiError(
+                    "E_PAYLOAD",
+                    f"page {page_id} is created by more than one decision",
+                    "create a page once, then merge the other sources into it", 2,
+                )
+            new_ids.add(page_id)
+    missing = [item for item in available if item not in seen]
+    if missing:
         raise WikiError(
             "E_PAYLOAD",
-            f"decisions must cover each input source exactly once; got {sorted(seen)} for {sorted(available)}",
-            "submit one decision per source", 2,
+            f"decisions must cover every input source; missing {sorted(missing)}",
+            "submit at least one decision per source", 2,
+        )
+    conflicting = sorted(skipped & {key for key, _ in targets})
+    if conflicting:
+        raise WikiError(
+            "E_PAYLOAD",
+            f"source {conflicting[0]}: skip cannot be combined with new or merge",
+            "skip a source on its own, or decide its pages without skip", 2,
         )
     # Validate every decision before touching the ledger, so a bad payload
     # never leaves a half-applied route behind.
@@ -2138,9 +2054,11 @@ def submit_route(wiki, row, payload):
             "sources": [entry],
         }
         if item["action"] == "new":
-            inputs.update({"mode": "create", "title": item["title"], "type": item["type"]})
+            inputs.update({"mode": "create", "title": item["title"], "type": item["type"],
+                           "route_task": row["id"]})
         else:
             inputs["mode"] = "update"
+            inputs["route_task"] = row["id"]
         page_tasks.append(wiki.enqueue_task("page", item["page"], inputs))
     wiki.close_task(row["id"], payload, row["epoch"])
     return {
@@ -2192,9 +2110,11 @@ def submit_page(wiki, row, payload):
             )
     meta, body, evidence, boundaries = validate_page_payload(wiki, row, payload, sources)
     rev = wiki.write_rev(page_id, meta, body, "submit")
-    for item in sources:
-        wiki.set_source_status(item["key"], "done")
     wiki.close_task(row["id"], payload, row["epoch"])
+    # 一个来源可能拆到多页：最后一个相关 page 任务关闭后才算写完。
+    for item in sources:
+        if wiki.source_in_open_task(item["key"]) is None:
+            wiki.set_source_status(item["key"], "done")
     return {
         "kind": "page",
         "page": page_id,
@@ -2228,7 +2148,7 @@ def command_read():
             raise WikiError("E_NOT_FOUND", f"no page {page_id}", "run `query` to find the page id", 3)
         meta = record["meta"]
         body = record["body"]
-        path = wiki.page_path(meta)
+        location = wiki.page_ref(record)
     else:
         path = resolve_ref(wiki, ref)
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -2236,13 +2156,14 @@ def command_read():
         # frontmatter 是文本属性，不是路径属性：原文搬到观看区 raw/ 后，不能再靠 .wiki 判定。
         if path.suffix == ".md" and text.startswith("---"):
             meta, body = split_frontmatter(text)
+        location = norm_key(path.relative_to(wiki.root)) if window_safe(wiki.root, path) else str(path)
     lines = body.splitlines()
     offset = max(1, ARGS.offset)
     limit = max(1, min(ARGS.limit, 2000))
     window = lines[offset - 1: offset - 1 + limit]
     next_offset = offset + len(window) if offset - 1 + len(window) < len(lines) else None
     data = {
-        "path": norm_key(path.relative_to(wiki.root)) if window_safe(wiki.root, path) else str(path),
+        "path": location,
         "offset": offset,
         "limit": limit,
         "total_lines": len(lines),
@@ -2289,7 +2210,7 @@ def command_query():
         data = {
             "page": dump_meta(record["meta"]),
             "rev": record["rev"],
-            "path": norm_key(wiki.page_path(record["meta"]).relative_to(wiki.root)),
+            "path": wiki.page_ref(record),
             "outgoing": outgoing,
             "incoming": incoming,
             "body": record["body"],
@@ -2424,7 +2345,7 @@ def command_page_import():
     emit(
         "page import", wiki.root,
         f"imported {page_id} at rev {rev}",
-        {"page": page_id, "rev": rev, "path": norm_key(wiki.page_path(merged).relative_to(wiki.root))},
+        {"page": page_id, "rev": rev, "path": wiki.page_ref(wiki.page_record(page_id))},
         [f"page: {page_id} rev {rev}"],
     )
     wiki.close()
@@ -2568,13 +2489,6 @@ def command_doctor():
                         "restore from backup; do not edit .wiki/wiki.db", 1)
     if integrity != "ok":
         issues.append({"severity": "fail", "code": "L1", "message": f"database integrity: {integrity}"})
-    events = wiki.ensure_mirror()
-    for event in events:
-        if event["action"] in ("drift", "orphan"):
-            issues.append({"severity": "warn", "code": "L2",
-                           "message": f"mirror drift kept at {event['path']} ({event['page']})"})
-        elif ARGS.fix:
-            fixed.append(f"{event['action']}: {event['page']}")
     pages = wiki.all_pages()
     known = {record["id"] for record in pages}
     for record in pages:
@@ -2669,7 +2583,7 @@ def build_parser():
     restore = page_sub.add_parser("restore", parents=[common], help="restore an older revision")
     restore.add_argument("id")
     restore.add_argument("--rev", type=int, required=True)
-    export = sub.add_parser("export", parents=[common], help="export mirrored pages to a directory")
+    export = sub.add_parser("export", parents=[common], help="export rendered pages to a directory")
     export.add_argument("dir")
     status = sub.add_parser("status", parents=[common], help="ledger, pages, tasks")
     status.add_argument("--brief", action="store_true")

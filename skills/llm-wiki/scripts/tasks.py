@@ -74,13 +74,14 @@ def route_brief(task_id, sources):
     keys = "、".join(item["key"] for item in sources)
     first = sources[0]["key"] if sources else ""
     return {
-        "goal": f"判断来源 {keys} 应归入哪一页知识，或跳过。",
+        "goal": f"判断来源 {keys} 应归入哪些页面，或跳过；一份来源可拆到多页。",
         "steps": [
             f"读原文：运行 `read \"raw:{first}\" --offset 1 --limit 120 --json`。",
             "在 work.page_index 里找同主题的已有页面；已有页面能覆盖时优先 merge。"
             "work.pending_pages 是已排队、尚未写入的页面，同主题也可以 merge 到它的 id。",
-            "填 template.decisions[0]：action 选 new/merge/skip；每条 decision 都必须写 reason；"
-            "new 还要给 page、title、type，merge 要给 page。",
+            "填 template.decisions[]：每个来源至少一条 decision，action 选 new/merge/skip；"
+            "一份文件含多个可独立检索的主题时拆成多条 decision、指向不同 page；"
+            "每条 decision 都必须写 reason；new 还要给 page、title、type，merge 要给 page。",
         ],
         "submit": submit_step(task_id),
         "effect": "提交后引擎自动创建或合并页面写作任务；skip 只留记录，不建页。之后重新运行 `next` 取下一个任务。",
@@ -137,7 +138,7 @@ def page_brief(task_id, inputs, record):
             "boundaries 写清这一页覆盖什么、不覆盖什么。",
         ],
         "submit": submit_step(task_id),
-        "effect": "提交后引擎写入新修订并更新 .wiki/pages 镜像；"
+        "effect": "提交后引擎写入新修订并按账本推送到观看区；"
         "旧来源和旧证据会保留，本任务的新来源会加入来源列表。"
         "页面立即可 query/read，来源后续变化会标记待更新。之后重新运行 `next` 取下一个任务。",
     }

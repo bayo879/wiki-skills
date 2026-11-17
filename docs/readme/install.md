@@ -89,9 +89,9 @@ python3 <安装路径>/scripts/wiki.py check --json
 python3 <安装路径>/scripts/wiki.py ingest --json
 ```
 
-首次运行会在**当前工作区**创建 `.wiki/`（`wiki.json`、`wiki.db`、`pages/`、`drift/`、
-`payloads/`、`drafts/`），以及观看区 `<view>/` 与 `<view>/raw/`（`publish.dir`，默认
-`wiki/`）；原文副本在观看区的 `raw/`，不在 `.wiki/` 下。`--root` 只接受当前目录或它下面的子目录，不能指向工作区外；资料在区外时，
+首次运行会在**当前工作区**创建 `.wiki/`（`wiki.json`、`wiki.db`、`payloads/`、
+`drafts/`），以及观看区 `<view>/` 与 `<view>/raw/`（`publish.dir`，默认 `wiki/`）；
+原文副本与页面副本都在观看区，不在 `.wiki/` 下。`--root` 只接受当前目录或它下面的子目录，不能指向工作区外；资料在区外时，
 请用户把那个目录作为工作区打开，或复制进来。
 
 草稿、载荷、导出与临时文件都放 `.wiki/` 下：`.wiki/drafts/`、`.wiki/payloads/`、
@@ -114,5 +114,6 @@ python3 <安装路径>/scripts/wiki.py ingest --json
 
 本技能是独立实现，只认自己的 `.wiki/wiki.json` 与 `.wiki/wiki.db`。旧版（Rust CLI 或
 0.1.x Python 版）初始化的 `.wiki/` 表结构与命令面不同，不要直接指向；在新目录重新
-`ingest` 一次原始文件即可。旧版按"页面文件为源"写出的 `.wiki/pages/*.md` 会在首次
-运行时被收为 rev1（`origin=external`），但页面元数据不完整，建议对照 raw 复核后重交一版。
+`ingest` 一次原始文件即可。旧版按"页面文件为源"写出的 `.wiki/pages/*.md` 已不再被接管：
+升级到本版本后这些文件留在原地，请人工核对后删除 `.wiki/pages/` 与 `.wiki/drift/`，
+页面内容以账本为准。
