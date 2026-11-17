@@ -60,7 +60,7 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实
 `python3 tests/selftest.py`：57/57 通过，退出码 0。新增检查覆盖：
 
 - `scenario list` 同时列出项目场景与内置场景（3 个，2 个合法）；
-- `scenario load topic-exploration` 返回内置正文，`source=builtin`，`path` 以 `builtin/` 开头，
+- `scenario load topic-exploration` 返回内置正文，`source=builtin`，`name` 为英文、`alias_name` 为中文，`path` 以 `builtin/` 开头，
   `resources` 为空；
 - 项目放同名 `scenario/topic-exploration/` 时覆盖内置，`source=project`；
 - `ingest` 不把 `话题/` 当来源，话题文件存在时 `pending_total` 不变；

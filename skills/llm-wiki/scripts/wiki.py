@@ -2365,7 +2365,8 @@ def command_scenario():
         data = {"query": " ".join(terms), "matches": len(hits), "scenarios": hits}
         lines = []
         for item in hits:
-            lines.append(f"{item['id']}  {item['description']}")
+            alias = f"（{item['alias_name']}）" if item["alias_name"] else ""
+            lines.append(f"{item['id']}{alias}  {item['description']}")
             lines.append(f"    path: {item['path']}  load: {item['load']}")
         emit("scenario search", root, f"{len(hits)} matching scenarios", data, lines)
         return 0
@@ -2375,7 +2376,8 @@ def command_scenario():
         lines = []
         for item in data["scenarios"]:
             state = "ok" if item["valid"] else f"invalid: {item['error']}"
-            lines.append(f"{item['id']}  [{state}]  {item['description']}")
+            alias = f"（{item['alias_name']}）" if item["alias_name"] else ""
+            lines.append(f"{item['id']}{alias}  [{state}]  {item['description']}")
             lines.append(f"    path: {item['path']}  resources: {len(item['resources'])}")
         emit("scenario list", root, summary, data, lines)
         return 0

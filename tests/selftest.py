@@ -156,11 +156,14 @@ def main(argv=None):
               builtin["scenario"]["source"] == "builtin"
               and builtin["path"].startswith("builtin/")
               and "话题文件" in builtin["content"]
+              and builtin["scenario"]["name"] == "topic-exploration"
+              and builtin["scenario"]["alias_name"] == "话题探索"
               and builtin["resources"] == [], builtin)
         check(results, "builtin scenario id cannot escape", run(root, "scenario", "load", "../x", expect=2)["error"]["code"] == "E_USAGE")
         loaded = run(root, "scenario", "load", "account-opening")["data"]
         check(results, "scenario load returns the whole flow",
-              "核验身份" in loaded["content"] and loaded["path"].endswith("SCENARIO.md"), loaded)
+              "核验身份" in loaded["content"] and loaded["path"].endswith("SCENARIO.md")
+              and loaded["scenario"]["alias_name"] == "", loaded)
         check(results, "scenario load inventories support files",
               {item["kind"] for item in loaded["resources"]} == {"script", "reference"}, loaded["resources"])
         english = run(root, "scenario", "load", "deck-flow")["data"]

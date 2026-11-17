@@ -134,6 +134,8 @@ python3 <skill>/scripts/wiki.py sync --body-only --json
 场景即可覆盖它。场景是能力，不是知识页：它不会被 `ingest` 写进账本；`query` 也不检索
 它，必须显式 `scenario search`，避免场景自动介入普通知识问答。改完流程不用重新摄入。
 内置场景的 `path` 只是展示标签（`builtin/<id>/SCENARIO.md`），不是磁盘路径。
+场景 frontmatter 的 `name` 写英文机器名，中文展示名放 `alias_name`；`scenario list` 会
+以 `id（alias_name）` 显示。
 
 需要场景能力时，先显式检索，再加载照做：
 

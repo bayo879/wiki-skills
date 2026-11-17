@@ -152,13 +152,15 @@ def match(root, terms, limit, builtin=True):
         if not entry["valid"]:
             continue
         title = entry["name"]
+        alias = entry["alias_name"]
         description = entry["description"]
         triggers = " ".join(entry["triggers"])
-        haystack = f"{title}\n{description}\n{triggers}\n{entry['body']}"
+        haystack = f"{title}\n{alias}\n{description}\n{triggers}\n{entry['body']}"
         hits = sum(haystack.lower().count(term.lower()) for term in terms)
         if hits == 0:
             continue
-        score = hits + 5 * sum(title.lower().count(term.lower()) for term in terms)
+        labels = f"{title}\n{alias}"
+        score = hits + 5 * sum(labels.lower().count(term.lower()) for term in terms)
         score += 3 * sum(
             description.lower().count(term.lower()) + triggers.lower().count(term.lower())
             for term in terms
@@ -168,6 +170,7 @@ def match(root, terms, limit, builtin=True):
                 "id": entry["id"],
                 "source": entry["source"],
                 "name": title,
+                "alias_name": alias,
                 "description": description,
                 "triggers": entry["triggers"],
                 "path": entry["path"],
@@ -195,6 +198,7 @@ def _entry(root, directory, source="project"):
         "id": directory.name,
         "source": source,
         "name": directory.name,
+        "alias_name": "",
         "description": "",
         "triggers": [],
         "path": directory.relative_to(root).as_posix(),
@@ -225,10 +229,12 @@ def _entry(root, directory, source="project"):
     meta, body = split_frontmatter(text)
     body = body.strip()
     name = str(meta.get("name") or directory.name).strip() or directory.name
+    alias_name = str(meta.get("alias_name") or "").strip()
     description = str(meta.get("description") or "").strip()
     record.update(
         {
             "name": name,
+            "alias_name": alias_name,
             "description": description,
             "triggers": _triggers(meta.get("triggers")),
             "meta": meta,
@@ -250,6 +256,7 @@ def _public(entry):
         "id": entry["id"],
         "source": entry["source"],
         "name": entry["name"],
+        "alias_name": entry["alias_name"],
         "description": entry["description"],
         "triggers": entry["triggers"],
         "path": entry["path"],
