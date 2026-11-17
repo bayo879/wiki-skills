@@ -10,7 +10,6 @@ import hashlib
 import os
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 
 
 def norm_key(path):

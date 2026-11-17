@@ -13,7 +13,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from errors import WikiError
-from tasks import TASK_DIR, render_brief, task_dir_relative, task_packet
+from tasks import render_brief, task_packet
 from util import digest_bytes, dump_meta, now_iso, same_stamp
 
 
