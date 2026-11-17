@@ -143,10 +143,11 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 
 ```json
 {"decisions": [
-  {"source": "docs/a.md", "action": "new", "page": "refund-process",
-   "title": "退款流程", "type": "process", "reason": "完整办理步骤"},
   {"source": "docs/a.md", "action": "new", "page": "refund-policy",
-   "title": "退款政策", "type": "concept", "reason": "政策口径可独立检索"}]}
+   "title": "退款政策", "type": "concept", "reason": "政策口径可独立检索"},
+  {"source": "docs/a.md", "action": "new", "page": "refund-process",
+   "title": "退款流程", "type": "process", "reason": "完整办理步骤",
+   "links": ["refund-policy"]}]}
 ```
 
 每个输入来源至少一条决定，`reason` 每条都必须非空，`action` 三选一。一份来源含多个
@@ -158,6 +159,11 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 - `merge`：`page` 必填；页面可以已存在，也可以已在 `pending_pages` 里排队
   （包括同一 route 载荷里的 `new`，顺序不限）。若该页已有未完成任务，来源并入该任务。
 - `skip`：标记 `skipped`。
+
+decision 可带可选 `links`，声明这页与哪些页面相关。目标只能是提交时已存在的页，或同一
+载荷里 `new` 的兄弟页；兄弟页要等被链页面先提交，顺序错会报 `E_LINK_UNRESOLVED`，重新
+`next` 后按顺序重试。`new` 的 `links` 原样进入 page 模板；`merge` 的 `links` 是增量，
+提交时与页面已有链接取并集。
 
 **page 载荷**：
 
@@ -175,7 +181,8 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 - 新建页面的 `body` 必须保留模板给定的章节标题（如 `## 结论`、`## 步骤`、`## 注意事项`），
   缺章节或改名会被拒绝；更新页面沿用原有结构。
 - `summary` 必填，1–200 字符；`title` 1–120 字符；`type` 必须在 `schema.types` 里。
-- `links` 只能指向已存在页面。
+- `links` 只能指向提交时已存在的页；更新页取模板带入的旧链接与本次新增的并集，只增不删。
+  `body` 里不要写 `## 关联`，引擎会剥掉；观看区按 `links` 表在页末渲染出链与入链。
 - `evidence` 至少一条；`quote` 去空白后须逐字命中该来源的 raw 文本。
 - 更新页时 `sources` 取旧来源与本任务来源的并集，旧 evidence 未在本次载荷中重写时保留；
   更新任务模板会带出旧 evidence。

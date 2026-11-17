@@ -10,11 +10,26 @@ import json
 import re
 
 from errors import WikiError
+from pages import normalize_links, split_relations
 from tasks import missing_sections
 from workspace import inside_root
 
 BODY_MAX_CHARS = 60_000
 SUMMARY_MAX_CHARS = 200
+
+
+def check_links(page_id, links, known, context=""):
+    """Every edge must point at a page that exists at submit time."""
+    prefix = f"{context}: " if context else ""
+    for link in links:
+        if link == page_id:
+            continue
+        if link not in known:
+            raise WikiError(
+                "E_LINK_UNRESOLVED",
+                f"{prefix}link {link!r} points at no page",
+                "create that page first, or drop the link", 2,
+            )
 
 
 def validate_page_payload(wiki, row, payload, sources):
@@ -41,16 +56,12 @@ def validate_page_payload(wiki, row, payload, sources):
     if len(summary) > SUMMARY_MAX_CHARS:
         raise WikiError("E_PAYLOAD", f"summary is {len(summary)} chars, max {SUMMARY_MAX_CHARS}",
                         "move detail into the body", 2)
-    links = payload.get("links") or []
-    if not isinstance(links, list) or any(not isinstance(item, str) for item in links):
+    raw_links = payload.get("links") or []
+    if not isinstance(raw_links, list) or any(not isinstance(item, str) for item in raw_links):
         raise WikiError("E_PAYLOAD", "links must be a list of page ids", "", 2)
+    links = normalize_links(raw_links)
     known = wiki.page_ids()
-    for link in links:
-        if link.strip().lower() == page_id:
-            continue
-        if link.strip().lower() not in known:
-            raise WikiError("E_LINK_UNRESOLVED", f"link {link!r} points at no page",
-                            "create that page first, or drop the link", 2)
+    check_links(page_id, links, known)
     body = payload.get("body")
     if body is None and payload.get("body_file"):
         candidate = inside_root(
@@ -66,6 +77,9 @@ def validate_page_payload(wiki, row, payload, sources):
     if body.lstrip().startswith("---"):
         raise WikiError("E_PAYLOAD", "body must not start with frontmatter",
                         "send only the markdown sections; the engine renders frontmatter", 2)
+    # Relations are engine-owned. An older template (or a copied view file) may
+    # still carry the section; drop it instead of storing a second edge source.
+    body = split_relations(body)
     if inputs.get("mode") == "create":
         missing = missing_sections(body, page_type)
         if missing:
@@ -112,17 +126,16 @@ def validate_page_payload(wiki, row, payload, sources):
             or not str(boundaries.get("not_covered") or "").strip():
         raise WikiError("E_PAYLOAD", "boundaries.covered and boundaries.not_covered are required",
                         "state what the page covers and what it deliberately leaves out", 2)
+    old_links = (old_meta.get("links") or []) if old_meta else []
+    merged_links = normalize_links(list(links) + list(old_links))
     meta = {
         "id": page_id,
         "title": title,
         "type": page_type,
         "summary": summary,
         "sources": sorted(available),
+        "links": [link for link in merged_links if link != page_id],
         "evidence": evidence,
         "boundaries": boundaries,
     }
-    cleaned_links = sorted({link.strip().lower() for link in links if link.strip()})
-    if cleaned_links:
-        trailer = "\n\n## 关联\n" + "\n".join(f"- [[{link}]]" for link in cleaned_links)
-        body = body.rstrip() + trailer
     return meta, body, evidence, boundaries

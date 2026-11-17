@@ -185,6 +185,19 @@ class TaskStoreMixin:
                 (task_id, source_key),
             )
 
+    def attach_page_links(self, task_id, links):
+        """Union route-decided edges into an open page task (add-only)."""
+        row = self.task_row(task_id)
+        inputs = json.loads(row["inputs"])
+        current = {str(item).strip().lower() for item in inputs.get("links") or []}
+        current.update(str(item).strip().lower() for item in links if str(item).strip())
+        inputs["links"] = sorted(current)
+        with self.conn:
+            self.conn.execute(
+                "UPDATE tasks SET inputs = ? WHERE id = ?",
+                (json.dumps(inputs, ensure_ascii=False, sort_keys=True), task_id),
+            )
+
     def task_drift(self, row):
         """First reason this task's snapshot no longer matches the files, or None when it is fresh."""
         inputs = json.loads(row["inputs"])

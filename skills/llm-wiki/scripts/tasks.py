@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import re
 
+from pages import normalize_links, split_relations
+
 DEFAULT_TYPE = "concept"
 PAGE_SECTIONS = {
     "concept": ("结论", "要点"),
@@ -87,6 +89,7 @@ def route_template(sources):
                 "page": "",
                 "title": "",
                 "type": "",
+                "links": [],
                 "reason": "",
             }
             for item in sources
@@ -106,6 +109,8 @@ def route_brief(task_id, sources):
             "填 `payload.json` 的 `decisions[]`：每个来源至少一条 decision，action 选 new/merge/skip；"
             "一份文件含多个可独立检索的主题时拆成多条 decision、指向不同 page；"
             "每条 decision 都必须写 reason；new 还要给 page、title、type，merge 要给 page。",
+            "可选的 `links` 声明这页与哪些页面相关：只填已存在页，或同一载荷里 new 的兄弟页。"
+            "兄弟页要等被链页面先提交；顺序错会报 `E_LINK_UNRESOLVED`，重新领取后按顺序重试。",
         ],
         "submit": submit_step(task_id),
         "effect": "提交后引擎自动创建或合并页面写作任务；skip 只留记录，不建页。之后重新运行 `next` 取下一个任务。",
@@ -123,13 +128,16 @@ def page_template(inputs, record):
             {"source": item["key"], "quote": ""}
             for item in inputs["sources"] if item["key"] not in cited
         )
+        links = normalize_links(
+            list(meta.get("links") or []) + list(inputs.get("links") or [])
+        )
         return {
             "page": page_id,
             "title": meta.get("title") or page_id,
             "type": page_type,
             "summary": meta.get("summary") or "",
-            "body": record.get("body") or skeleton_body(page_type),
-            "links": [],
+            "body": split_relations(record.get("body") or skeleton_body(page_type)),
+            "links": links,
             "evidence": evidence,
             "boundaries": meta.get("boundaries") or {"covered": "", "not_covered": ""},
         }
@@ -140,7 +148,7 @@ def page_template(inputs, record):
         "type": page_type,
         "summary": "",
         "body": skeleton_body(page_type),
-        "links": [],
+        "links": normalize_links(inputs.get("links") or []),
         "evidence": [{"source": item["key"], "quote": ""} for item in inputs["sources"]],
         "boundaries": {"covered": "", "not_covered": ""},
     }
@@ -158,7 +166,8 @@ def page_brief(task_id, inputs, record):
             "证据要保留，不要删。",
             "给 `evidence` 的每条来源填一到两句逐字 `quote`；"
             "数字、日期、文号、责任主体都要能回到原文。",
-            "`links` 只填 `work.json` 里 `page_index` 已有的页面 id；"
+            "`links` 由 route 预填，只可新增已存在或本批已提交的页面 id；更新页会保留旧链接，"
+            "只能新增。被链页面还没提交时先提交它，再重试本任务。"
             "`boundaries` 写清这一页覆盖什么、不覆盖什么。",
         ],
         "submit": submit_step(task_id),

@@ -143,6 +143,10 @@ scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不�
 
 `raw` 文件名带 digest 后缀（`<basename>-<digest8>.md`），避免同名覆盖；`sources.raw` 存相对路径。
 
+`links` 是 `page_revs.meta` 里的页面 id 数组，并镜像到 `links` 表；`write_rev` 按 meta 重建，
+不再从 body 的 `[[...]]` 或 `## 关联` 段解析。观看区由 `links_for` 取出链与入链，渲染成一个
+`## 关联` 段；正文里的该段在提交与推送时剥掉。
+
 观看区 `pages/` 是账本的唯一页面落盘副本（按标题命名，`view_digest` 记录上次推送的
 字节）；手改过的副本不覆盖，`sync` 收成新修订后才恢复推送。`sync` 只认
 `<view>/pages/**/*.md`。

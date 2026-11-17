@@ -98,7 +98,8 @@ python3 <skill>/scripts/wiki.py submit <id> --json
   按 `template` 的类型读对应文件。
 - 新建页面的 `summary` 必填，1–200 字，一句完整的话；更新页面时 `template.evidence`
   里旧来源的证据要保留，不要删。
-- `links` 只填 `work.page_index` 里已有的页面 id；`boundaries` 写清覆盖与不覆盖。
+- `links` 由 route 预填，只含提交时已存在或同批已提交的页面 id；更新页只增不删，正文里
+  不要写 `[[page-id]]` 或 `## 关联`；`boundaries` 写清覆盖与不覆盖。
 - 推断要标“据此推断”；个人联系方式不写入页面。
 - 页面边界、标题、摘要、合并优先等标准见 [references/curation.md](references/curation.md)。
 

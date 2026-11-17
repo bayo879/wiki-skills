@@ -29,7 +29,7 @@ from ingest import (
     read_bytes,
 )
 from ledger import CONFIG_NAME, Wiki
-from pages import render_page
+from pages import normalize_links, render_page
 from tasks import task_dir_relative
 from util import (
     digest_bytes,
@@ -41,7 +41,7 @@ from util import (
     same_stamp,
     write_atomic,
 )
-from validation import validate_page_payload
+from validation import check_links, validate_page_payload
 from view import sync_view_file
 from workspace import (
     WIKI_DIR,
@@ -628,12 +628,24 @@ def submit_route(wiki, row, payload):
         key = decision["source"]
         action = decision["action"]
         if action == "skip":
+            if decision.get("links"):
+                raise WikiError(
+                    "E_PAYLOAD", f"{key}: skip decision cannot carry links",
+                    "drop links, or decide the page without skip", 2,
+                )
             plan.append({"action": "skip", "key": key})
             continue
         page_id = str(decision.get("page") or "").strip().lower()
         if not ID_RE.match(page_id):
             raise WikiError("E_BAD_ID", f"{key}: page id {page_id!r} is not a lowercase slug",
                             "use e.g. `filing-process`", 2)
+        raw_links = decision.get("links") or []
+        if not isinstance(raw_links, list) or any(not isinstance(item, str) for item in raw_links):
+            raise WikiError("E_PAYLOAD", f"{key}: links must be a list of page ids", "", 2)
+        links = normalize_links(raw_links)
+        # Siblings created by this same payload are legal targets; they may not
+        # exist yet, and submitting in the wrong order is retried later.
+        check_links(page_id, links, wiki.page_ids() | new_pages, context=key)
         record = wiki.page_record(page_id)
         existing = wiki.open_task_for_page(page_id)
         if existing and existing["state"] == "leased":
@@ -658,7 +670,7 @@ def submit_route(wiki, row, payload):
                     f"choose one of: {', '.join(wiki.config['schema']['types'])}", 2,
                 )
             plan.append({"action": "new", "key": key, "page": page_id,
-                         "title": title, "type": page_type})
+                         "title": title, "type": page_type, "links": links})
         else:
             pending_create = bool(
                 existing and json.loads(existing["inputs"]).get("mode") == "create"
@@ -670,7 +682,7 @@ def submit_route(wiki, row, payload):
                     "use action new, or check `next --json` page_index and pending_pages", 3,
                 )
             plan.append({"action": "merge", "key": key, "page": page_id,
-                         "rev": record["rev"] if record else None})
+                         "rev": record["rev"] if record else None, "links": links})
     # A page created in this same payload must be queued before sources merge
     # into it; otherwise the merge would create an update task for a missing page.
     plan.sort(key=lambda item: 0 if item["action"] == "new" else 1)
@@ -684,12 +696,15 @@ def submit_route(wiki, row, payload):
         existing = wiki.open_task_for_page(item["page"])
         if existing:
             wiki.attach_page_source(existing["id"], key)
+            if item["links"]:
+                wiki.attach_page_links(existing["id"], item["links"])
             page_tasks.append(existing["id"])
             continue
         inputs = {
             "page": item["page"],
             "base_rev": None if item["action"] == "new" else item["rev"],
             "sources": [entry],
+            "links": item["links"],
         }
         if item["action"] == "new":
             inputs.update({"mode": "create", "title": item["title"], "type": item["type"],
@@ -1097,7 +1112,11 @@ def command_export():
         meta = dict(record["meta"])
         meta["status"] = wiki.computed_status(meta)
         destination = target / meta["type"] / f"{record['id']}.md"
-        write_atomic(destination, render_page(meta, record["body"]))
+        outgoing, incoming = wiki.links_for(record["id"])
+        write_atomic(
+            destination,
+            render_page(meta, record["body"], links=sorted(set(outgoing) | set(incoming))),
+        )
         written.append(norm_key(destination.relative_to(target)))
     emit(
         "export", wiki.root,

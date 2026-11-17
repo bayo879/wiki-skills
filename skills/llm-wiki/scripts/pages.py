@@ -16,9 +16,39 @@ VIEW_NAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f-\x9f]')
 
 EVIDENCE_HEADING = "## 证据"
 
+RELATION_HEADING = "## 关联"
+
 EVIDENCE_ROW = re.compile(r"^- `([^`]+)`：(.+)$")
 
-LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
+RELATION_HEADING_RE = re.compile(r"^##\s+关联\s*$")
+
+
+def normalize_links(links):
+    """Stable page-id list for a relation edge set; order never depends on input."""
+    return sorted({str(item).strip().lower() for item in (links or []) if str(item).strip()})
+
+
+def split_relations(body):
+    """Drop every legacy ``## 关联`` section from a body.
+
+    Relational text is engine-owned and rendered from ``meta.links``; a body
+    section left by an older revision (or copied back from the view tree) must
+    never become a second source of edges.
+    """
+    lines = body.split("\n")
+    kept = []
+    skipping = False
+    for line in lines:
+        if RELATION_HEADING_RE.match(line):
+            skipping = True
+            continue
+        if skipping:
+            if line.startswith("## "):
+                skipping = False
+            else:
+                continue
+        kept.append(line)
+    return "\n".join(kept).rstrip()
 
 
 def view_name(title, page_id):
@@ -31,8 +61,14 @@ def view_name(title, page_id):
     return text or page_id
 
 
-def render_page(meta, body, aliases=None):
-    """Deterministic page text: frontmatter, body, then the evidence block."""
+def render_page(meta, body, aliases=None, links=None):
+    """Deterministic page text: frontmatter, body, evidence, then relations.
+
+    Relations are rendered only when ``links`` is passed (the published view);
+    the ledger's internal render stays relation-free so ``meta.links`` is the
+    single stored edge set.
+    """
+    body = split_relations(body)
     lines = ["---"]
     for field in ("id", "title", "type", "summary"):
         lines.append(f"{field}: {yaml_scalar(meta[field])}")
@@ -51,6 +87,10 @@ def render_page(meta, body, aliases=None):
         rows = ["", "## 证据", ""]
         for item in evidence:
             rows.append(f"- `{item['source']}`：{item['quote']}")
+        text += "\n".join(rows) + "\n"
+    if links:
+        rows = ["", RELATION_HEADING, ""]
+        rows.extend(f"- [[{link}]]" for link in normalize_links(links))
         text += "\n".join(rows) + "\n"
     return text
 
@@ -114,6 +154,9 @@ class PagesMixin:
     def _page_row_to_record(self, row):
         """One ledger row as a page record, including the published view facts."""
         meta = json.loads(row["meta"])
+        # Older revisions stored edges only in the links index. Read them back
+        # once so every later write migrates the page to meta.links naturally.
+        meta.setdefault("links", self.links_for(row["page"])[0])
         meta["status"] = self.computed_status(meta)
         return {
             "id": row["page"],
@@ -187,14 +230,28 @@ class PagesMixin:
         return relpath
 
     def view_text(self, record):
-        """Page text as published in the view tree: same template, id alias."""
-        return render_page(record["meta"], record["body"], aliases=[record["id"]])
+        """Page text as published in the view tree: same template, id alias.
+
+        Relations are outgoing and incoming edges mixed together: a reader who
+        lands on an older page still sees newer pages that point at it.
+        """
+        outgoing, incoming = self.links_for(record["id"])
+        links = sorted(set(outgoing) | set(incoming))
+        return render_page(
+            record["meta"], record["body"], aliases=[record["id"]], links=links
+        )
 
     def write_rev(self, page, meta, body, origin):
         record = self.page_record(page)
         rev = (record["rev"] if record else 0) + 1
+        body = split_relations(body)
         meta = dict(meta)
         meta["id"] = page
+        # Add-only at the storage boundary: no caller (submit, import, restore,
+        # sync) can silently drop an edge, because there is no delete command.
+        existing = (record or {}).get("meta", {}).get("links") or []
+        links = normalize_links(list(meta.get("links") or []) + list(existing))
+        meta["links"] = [link for link in links if link != page]
         meta["sources"] = sorted(set(meta.get("sources") or []))
         meta["source_digests"] = {
             key: (self.source_row(key)["raw_digest"] if self.source_row(key) else "")
@@ -214,6 +271,7 @@ class PagesMixin:
                 "type": meta.get("type"),
                 "summary": meta.get("summary"),
                 "sources": meta["sources"],
+                "links": meta["links"],
                 "evidence": meta.get("evidence") or [],
                 "boundaries": meta.get("boundaries") or {},
                 "body": body,
@@ -235,23 +293,28 @@ class PagesMixin:
                     origin, now_iso(),
                 ),
             )
-            self.rebuild_links(page, body)
+            self.rebuild_links(page, meta["links"])
         return rev
 
-    def rebuild_links(self, page_id, body):
+    def rebuild_links(self, page_id, links):
         with self.conn:
             self.conn.execute("DELETE FROM links WHERE src = ?", (page_id,))
-            for target in sorted(set(LINK_RE.findall(body))):
+            for target in normalize_links(links):
+                if target == page_id:
+                    continue
                 self.conn.execute(
                     "INSERT OR IGNORE INTO links (src, dst) VALUES (?, ?)",
-                    (page_id, target.strip().lower()),
+                    (page_id, target),
                 )
 
     def rebuild_all_links(self):
+        # Read the fallback (old rows have no meta.links) before deleting the
+        # index, otherwise the snapshot used for the rebuild would be empty.
+        records = self.all_pages()
         with self.conn:
             self.conn.execute("DELETE FROM links")
-        for record in self.all_pages():
-            self.rebuild_links(record["id"], record["body"])
+        for record in records:
+            self.rebuild_links(record["id"], record["meta"].get("links") or [])
 
     def links_for(self, page_id):
         outgoing = [
