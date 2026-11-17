@@ -32,8 +32,8 @@
 改章节骨架（`tasks.py` 的 `PAGE_SECTIONS`）时，同步 `templates/` 下对应类型的正文模板，
 保证模板章节与引擎一致。
 改 Windows 入口行为（`scripts/bootstrap.ps1`、`scripts/install.py`）时，同步 `README.md`、
-`docs/readme/install.md`、`SKILL.md`、`references/recovery.md` 的运行时小节，并更新
-`docs/issues/` 里的 Windows 验收场景表；脚本行为没有实机证据前不要写成已验证。
+`docs/readme/install.md`、`SKILL.md`、`references/recovery.md` 的运行时小节；这两个脚本是
+可选的手动安装工具，不在默认使用路径上，行为没有实机证据前不要写成已验证。
 
 ## 机器守卫
 

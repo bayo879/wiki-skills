@@ -21,8 +21,8 @@
 `pending_pages` 对下一条 route 可见、pending merge 合并两来源、批量页面双来源、
 read page 的 meta 不含 `source_digests`。
 手工 `/tmp/llm-wiki-fix-test` 复测：A/B 首批合并为 rev1 双来源双证据；C 更新为 rev2 后
-sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实机验证，见
-[Windows 引导验收](../issues/2026-11-16-P2-windows-bootstrap-acceptance.md)。
+sources 为 A/B/C，evidence 保留 A/B 并加入 C。Windows 侧没有跑过 PowerShell：技能目录由
+上游放置、运行时自带，安装脚本不在使用路径上。
 
 ## 2026-11-16 自检门禁与测试拆分
 
@@ -255,8 +255,8 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
 - 并发写入与多 agent 同时提交：只验证了 lease 与 epoch 的单进程语义。
 - 万级文件、`MAX_RAW_CHARS` 截断边界、超大页面的渲染性能。
 - DSH 之外的 agent 运行时：按目录约定复制，未逐个实测其技能加载器。
-- Windows 引导脚本：当前环境没有 PowerShell。脚本已精简为「查找已有的 Python 3.12+ →
-  调用 `install.py`」，不再下载或安装 Python，因此镜像、静默安装、PATH 刷新三条风险
-  随之消失；语法、参数与退出码透传、`E_PYTHON`、`-Target` 放置仍待 Windows 实机验收，
-  见 `docs/issues/2026-11-16-P2-windows-bootstrap-acceptance.md`。
+- Windows 引导脚本：没有实机执行过（当前环境没有 PowerShell）。脚本已精简为「查找已有的
+  Python 3.12+ → 调用 `install.py`」，不再下载或安装 Python。Windows 上的技能目录由上游
+  放置、agent 自带 3.12+ 运行时，这两个脚本是可选手动工具、不在默认使用路径上，因此不再
+  作为未覆盖项跟踪；需要手动安装时再补测语法、参数透传与 `E_PYTHON`。
 - 页面删除：当前没有命令，未验证。

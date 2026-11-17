@@ -274,6 +274,9 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
 - 不再下载、不装 Python、不改 PATH；找不到运行时输出 `E_PYTHON`、退出码 1，错误对象带
   `doc`（`references/recovery.md`）与 `section`（「运行时与安装」）。
 - 版本判定改为 ≥3.12（旧版只认恰好 3.12，会把只有 3.13 的机器强行降到 3.12.8）。
-- 同步 `README.md`、`docs/readme/install.md`、`skills/llm-wiki/SKILL.md`、
-  `skills/llm-wiki/references/recovery.md` 与 issue「Windows 引导脚本尚未实机验收」的场景表。
-- `VERSION=0.4.3`；`selftest.py` 仍 208 项（PowerShell 脚本不进自测，Windows 实机验收另算）。
+- 同步 `README.md`、`docs/readme/install.md`、`skills/llm-wiki/SKILL.md` 与
+  `skills/llm-wiki/references/recovery.md` 的运行时小节。
+- `VERSION=0.4.3`；`selftest.py` 仍 208 项（PowerShell 脚本不进自测）。
+- 关闭 issue「Windows 引导脚本尚未实机验收」（已删除，历史见 Git）：Windows 上技能目录由
+  上游放置、agent 自带 3.12+ 运行时，没有安装这一步，`bootstrap.ps1` 与 `install.py` 只在
+  手动安装时才涉及，不为它们单独排验收。验收改为在真实环境里走一遍 `ingest` 到 `query`。
