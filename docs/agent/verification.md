@@ -55,16 +55,16 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实
 
 ## 2026-11-16 话题探索与话题沉淀后复跑
 
-新增 `topics.py`、内置场景 `scenarios/话题探索/`，`query` 增加 `topic_scenario` 与
+新增 `topics.py`、内置场景 `scenarios/topic-exploration/`，`query` 增加 `topic_scenario` 与
 `topics`，`ingest` 跳过 `话题/`。`python3 -m py_compile skills/llm-wiki/scripts/*.py` 通过；
 `python3 tests/selftest.py`：57/57 通过，退出码 0。新增检查覆盖：
 
 - `scenario list` 同时列出项目场景与内置场景（3 个，2 个合法）；
-- `scenario load 话题探索` 返回内置正文，`source=builtin`，`path` 以 `内置场景/` 开头，
+- `scenario load topic-exploration` 返回内置正文，`source=builtin`，`path` 以 `builtin/` 开头，
   `resources` 为空；
-- 项目放同名 `场景能力/话题探索/` 时覆盖内置，`source=project`；
+- 项目放同名 `scenario/topic-exploration/` 时覆盖内置，`source=project`；
 - `ingest` 不把 `话题/` 当来源，话题文件存在时 `pending_total` 不变；
-- `query` 恒返回 `topic_scenario`（id 为 `话题探索`），且 `topic_matches` 与页面
+- `query` 恒返回 `topic_scenario`（id 为 `topic-exploration`），且 `topic_matches` 与页面
   `matches`、场景 `scenario_matches` 分开计数；
 - `topics` 命中项带 `path` 与可直接执行的 `read "<path>"`。
 

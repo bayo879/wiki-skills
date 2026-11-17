@@ -30,7 +30,7 @@ SCRIPT_FILES = (
     "health.py",
 )
 TEMPLATES = ("concept.md", "entity.md", "process.md", "note.md")
-BUILTIN_SCENARIOS = ("话题探索",)
+BUILTIN_SCENARIOS = ("topic-exploration",)
 TABLES = ("sources", "page_revs", "tasks", "task_sources", "links")
 
 

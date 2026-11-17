@@ -112,8 +112,8 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
 
 - `query` 直接回答知识问题的默认路径固定为「话题探索」：定主题 → 找现成能力 → 找已有
   话题 → 多轮检索 → 补原始依据 → 判断收敛 → 总结 → 问是否沉淀。入口是内置场景
-  `话题探索`；项目放同名场景即覆盖。0.4.1 起改为显式 `scenario load`（见下条）。
-- 内置场景随技能分发，放在 `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`，自包含、
+  `topic-exploration`；项目放同名场景即覆盖。0.4.1 起改为显式 `scenario load`（见下条）。
+- 内置场景随技能分发，放在 `skills/llm-wiki/scenarios/topic-exploration/SCENARIO.md`，自包含、
   无 `resources`，不参与隐式匹配，只通过 `scenario search` / `scenario load` 使用。
 - 旧的会话素材流程（写 `wiki-sources/` 待摄入）移除；沉淀物改为 `话题/<主题>.md`。
   话题是 wiki 的探索层，与全局 `wiki-sources/` 的开发解决方案沉淀无关。位置按 2026-11-15
@@ -137,7 +137,7 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
 - 新增 `scenario search <词...> [--limit N]`：显式检索项目场景与内置场景，返回 `source`
   与 `load`；只有检索并 `scenario load` 之后才按场景流程执行。
 - 内置场景不再自动出现在 `query`；话题探索默认流程仍保留，但入口是显式
-  `scenario load "话题探索"`，由 `SKILL.md` 与内置场景约定，不靠查询字段注入。
+  `scenario load "topic-exploration"`，由 `SKILL.md` 与内置场景约定，不靠查询字段注入。
 - 场景只读、不进账本、不参与 `ingest` 不变；`scenario list` 仍列非法项，非法场景不进
   `scenario search`。
 - `selftest.py` 改为断言 `query` 无场景字段、`scenario search` 命中项目/内置场景、

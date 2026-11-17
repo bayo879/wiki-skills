@@ -38,7 +38,7 @@ SCENARIO_DIRS = (SCENARIO_DIR, SCENARIO_DIR_LEGACY)
 SCENARIO_FILE = "SCENARIO.md"
 MAX_SCENARIO_CHARS = 200_000
 BUILTIN_DIR = "scenarios"
-BUILTIN_LABEL = "内置场景"
+BUILTIN_LABEL = "builtin"
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 
 

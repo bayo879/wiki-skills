@@ -151,10 +151,10 @@ def main(argv=None):
         check(results, "scenario list reports both project roots",
               listing["roots"] == ["scenario", "场景能力"], listing.get("roots"))
         check(results, "scenario commands leave no .wiki", not (root / ".wiki").exists(), listing)
-        builtin = run(root, "scenario", "load", "话题探索")["data"]
+        builtin = run(root, "scenario", "load", "topic-exploration")["data"]
         check(results, "builtin scenario is loadable without project files",
               builtin["scenario"]["source"] == "builtin"
-              and builtin["path"].startswith("内置场景/")
+              and builtin["path"].startswith("builtin/")
               and "话题文件" in builtin["content"]
               and builtin["resources"] == [], builtin)
         check(results, "builtin scenario id cannot escape", run(root, "scenario", "load", "../x", expect=2)["error"]["code"] == "E_USAGE")
@@ -348,7 +348,7 @@ def main(argv=None):
         builtin_hit = run(root, "scenario", "search", "话题")["data"]
         check(results, "scenario search finds the builtin explicitly",
               builtin_hit["matches"] >= 1
-              and builtin_hit["scenarios"][0]["id"] == "话题探索"
+              and builtin_hit["scenarios"][0]["id"] == "topic-exploration"
               and builtin_hit["scenarios"][0]["source"] == "builtin",
               builtin_hit)
         check(results, "query finds the saved topic",
@@ -1144,13 +1144,13 @@ def main(argv=None):
         )
         check(results, "dry run leaves no .wiki", dry_run.returncode == 0 and not (dry / ".wiki").exists(), dry_run.stderr)
 
-        override = root / "场景能力" / "话题探索"
+        override = root / "scenario" / "topic-exploration"
         override.mkdir()
         (override / "SCENARIO.md").write_text(
-            "---\nname: 话题探索\ndescription: 项目自定义的话题流程\n---\n\n项目版流程。\n",
+            "---\nname: topic-exploration\ndescription: 项目自定义的话题流程\n---\n\n项目版流程。\n",
             encoding="utf-8",
         )
-        overridden = run(root, "scenario", "load", "话题探索")["data"]
+        overridden = run(root, "scenario", "load", "topic-exploration")["data"]
         check(results, "project scenario overrides the builtin",
               overridden["scenario"]["source"] == "project"
               and "项目版流程" in overridden["content"], overridden)

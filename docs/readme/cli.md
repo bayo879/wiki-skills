@@ -199,7 +199,7 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 
 `data`: `{scenario, path, content, meta, resources}`。`content` 是 `SCENARIO.md`
 全文（含 frontmatter），`path` 是主文件的根目录相对路径，`resources` 同上。内置场景的
-`path` 是展示标签 `内置场景/<id>/SCENARIO.md`，不是磁盘路径；其 `resources` 恒为空。
+`path` 是展示标签 `builtin/<id>/SCENARIO.md`，不是磁盘路径；其 `resources` 恒为空。
 
 三个命令都只读：不创建 `.wiki/`，不写账本，不要求先 `init` 或 `ingest`。场景文件改动后
 下一次 `scenario search` / `scenario load` 立即生效。`id` 必须是 `scenario/` 或 `场景能力/` 下的一级目录名

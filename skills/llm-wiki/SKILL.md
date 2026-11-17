@@ -94,14 +94,14 @@ python3 <skill>/scripts/wiki.py submit <id> --payload .wiki/payloads/<id>.json -
 「话题探索」场景办事：定主题、多轮检索、总结，最后问用户是否沉淀。
 
 ```bash
-python3 <skill>/scripts/wiki.py scenario load "话题探索" --json
+python3 <skill>/scripts/wiki.py scenario load "topic-exploration" --json
 python3 <skill>/scripts/wiki.py query "关键词" --json
 python3 <skill>/scripts/wiki.py query --page <page-id> --json
 python3 <skill>/scripts/wiki.py read "page:<page-id>" --json
 python3 <skill>/scripts/wiki.py read "raw:<source-key>" --offset 1 --limit 120 --json
 ```
 
-`query` **不检索场景**；话题探索是先显式 `scenario load "话题探索"` 再照着走的流程，
+`query` **不检索场景**；话题探索是先显式 `scenario load "topic-exploration"` 再照着走的流程，
 不是查询时自动注入的分支。`topics` 是已沉淀话题，相关的先读再探索，不重复劳动。单点查
 页面、查字段或确认某个已知事实，直接用 `query`/`read`，不必走完整流程。
 
@@ -130,10 +130,10 @@ python3 <skill>/scripts/wiki.py sync --body-only --json
 
 项目可以把一类任务的流程写成场景，放在 `<root>/scenario/<场景>/`（旧名 `场景能力/`，二者同 id 时以
 `scenario/` 为准）：`SCENARIO.md` 是主流程，
-`scripts/` 和 `references/` 是配套脚本与说明。技能自带 `话题探索` 内置场景；项目放同名
+`scripts/` 和 `references/` 是配套脚本与说明。技能自带 `topic-exploration` 内置场景；项目放同名
 场景即可覆盖它。场景是能力，不是知识页：它不会被 `ingest` 写进账本；`query` 也不检索
 它，必须显式 `scenario search`，避免场景自动介入普通知识问答。改完流程不用重新摄入。
-内置场景的 `path` 只是展示标签（`内置场景/<id>/SCENARIO.md`），不是磁盘路径。
+内置场景的 `path` 只是展示标签（`builtin/<id>/SCENARIO.md`），不是磁盘路径。
 
 需要场景能力时，先显式检索，再加载照做：
 
@@ -159,7 +159,7 @@ python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
 只是首次推送时的副本，之后归用户；改话题仍以根目录 `话题/` 为准。
 
 - 话题文件的 frontmatter、固定六节、归属判断、授权与完成标准，见内置场景
-  `scenario load "话题探索"` 的“话题文件”与“沉淀前的归属判断”两节。
+  `scenario load "topic-exploration"` 的“话题文件”与“沉淀前的归属判断”两节。
 - 流程稳定、可重复执行时，同时给出 `场景能力/<id>/SCENARIO.md` 的能力候选草稿，用户确认
   后再建；资料不足时列出待摄入来源与下一轮要查的关键词。
 - 项目事实归产品文档，强制规则归指导文档，未决问题归 issues；只有可复用的方法、经验、

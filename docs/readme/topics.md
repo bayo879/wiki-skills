@@ -46,7 +46,7 @@ updated: 2026-11-16
 
 - 页面：`anti-fraud-restore` — 复机路径与时长
 - 原文：`raw:docs/a.md` — 关键数字或日期的出处
-- 场景：`话题探索` — 流程依据（不是事实依据）
+- 场景：`topic-exploration` — 流程依据（不是事实依据）
 
 ## 未决问题
 

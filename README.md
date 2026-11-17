@@ -33,7 +33,7 @@ python3 <skill>/scripts/wiki.py scenario search "开户" --json
 python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
 
 # 默认话题探索：先加载内置流程，再检索、总结，最后按需沉淀
-python3 <skill>/scripts/wiki.py scenario load "话题探索" --json
+python3 <skill>/scripts/wiki.py scenario load "topic-exploration" --json
 ```
 
 Windows 首次使用运行
@@ -56,7 +56,7 @@ Windows 首次使用运行
 5. 场景能力放在 `scenario/<场景>/`（旧名 `场景能力/`），由 `SCENARIO.md`、`scripts/`、`references/` 组成。
    `ingest` 跳过整个目录；`query` 不检索场景，需要时显式 `scenario search`，命中后按
    `scenario load` 得到的流程执行。改场景文件立即生效，不用重新摄入。技能自带
-   `话题探索` 内置场景，项目放同名场景即可覆盖，显式检索时同样能被检出。
+   `topic-exploration` 内置场景，项目放同名场景即可覆盖，显式检索时同样能被检出。
 6. 话题沉淀放在 `话题/<主题>.md`，一个主题一份，固定六节（主题、结论、依据、未决问题、
    下一步、能力候选）。`ingest` 跳过 `话题/`；`query` 把命中话题放在 `topics`，与页面
    计数分开。话题由 agent 直接写，不进账本、不排任务。

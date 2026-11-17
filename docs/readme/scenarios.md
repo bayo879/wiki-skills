@@ -7,7 +7,7 @@
 旧工作区使用的 `场景能力/` 仍然有效：两个目录都会被扫描，同一 id 同时存在时
 `scenario/` 优先，避免改过的英文目录被遗留的中文目录盖住。
 
-技能另带一个内置场景 `话题探索`，是回答知识问题时的默认流程；项目放同名场景即可覆盖它。
+技能另带一个内置场景 `topic-exploration`，是回答知识问题时的默认流程；项目放同名场景即可覆盖它。
 
 ## 目录结构
 
@@ -33,17 +33,17 @@
 
 ```text
 skills/llm-wiki/scenarios/
-└── 话题探索/
+└── topic-exploration/
     └── SCENARIO.md         定主题、多轮检索、总结、按需沉淀
 ```
 
 - `scenario list` 把项目场景和内置场景列在一起，每项带 `source`（`project` 或
   `builtin`）；同 id 时项目版优先，内置版不重复列出。
-- `scenario load "话题探索"` 返回内置流程；它的 `path` 是展示标签
-  `内置场景/话题探索/SCENARIO.md`，不是磁盘路径，`resources` 恒为空（内置流程自包含）。
+- `scenario load "topic-exploration"` 返回内置流程；它的 `path` 是展示标签
+  `builtin/topic-exploration/SCENARIO.md`，不是磁盘路径，`resources` 恒为空（内置流程自包含）。
 - 内置场景不自动进入 `query` 结果；需要时显式 `scenario search`，内置场景同样会被检出，
   `source` 为 `builtin`。项目覆盖后 `source` 变为 `project`。
-- 内置场景只读，改流程请复制到 `scenario/话题探索/` 再改，不要改技能安装目录。
+- 内置场景只读，改流程请复制到 `scenario/topic-exploration/` 再改，不要改技能安装目录。
 
 ## SCENARIO.md
 
@@ -113,7 +113,7 @@ python3 <skill>/scripts/wiki.py query "开户" --json
 python3 <skill>/scripts/wiki.py scenario search "开户" --json
 python3 <skill>/scripts/wiki.py scenario list --json
 python3 <skill>/scripts/wiki.py scenario load account-opening --json
-python3 <skill>/scripts/wiki.py scenario load "话题探索" --json
+python3 <skill>/scripts/wiki.py scenario load "topic-exploration" --json
 ```
 
 `scenario search` 返回命中的项目场景与内置场景，按分数排序；`scenario load` 返回

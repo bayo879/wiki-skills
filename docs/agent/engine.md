@@ -131,7 +131,7 @@ scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不�
   `skills/llm-wiki/scripts/health.py` 的 `SCRIPT_FILES` 与 `BUILTIN_SCENARIOS`、
   `tests/selftest.py`；保持场景只经显式 `scenario search` 检索、`load` 只读、内置可覆盖。
 - 改话题：同步 `docs/readme/cli.md`、`docs/readme/topics.md`、`SKILL.md`、
-  `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`、`scripts/health.py` 的
+  `skills/llm-wiki/scenarios/topic-exploration/SCENARIO.md`、`scripts/health.py` 的
   `SCRIPT_FILES`、`tests/selftest.py`；保持 `ingest` 跳过 `话题/`、`query` 只带话题。
 - 改观看区或发布：同步 `docs/readme/cli.md`、`README.md`、
   `docs/readme/design-principles.md`、`SKILL.md`、`tests/selftest.py`；保持 `sync` 只回收、

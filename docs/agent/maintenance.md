@@ -11,7 +11,7 @@
 | 任务 brief 与 template 的形状 | `skills/llm-wiki/scripts/tasks.py` | `cli.md` 给字段说明，`tests/selftest.py` 给断言 |
 | agent 行为约束 | `skills/llm-wiki/SKILL.md` | `README.md` 只讲产品边界 |
 | 页面质量与证据标准 | `skills/llm-wiki/references/curation.md` | — |
-| 话题的文件格式、归属与写入流程 | `docs/readme/topics.md`（流程细节在内置场景 `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`） | `SKILL.md` 只给触发、边界与入口 |
+| 话题的文件格式、归属与写入流程 | `docs/readme/topics.md`（流程细节在内置场景 `skills/llm-wiki/scenarios/topic-exploration/SCENARIO.md`） | `SKILL.md` 只给触发、边界与入口 |
 | 页面固定版式与正文模板 | `skills/llm-wiki/templates/`（按类型分文件） | — |
 | 安装与目录约定 | `docs/readme/install.md` | `README.md` 给一行入口 |
 | 场景目录、frontmatter 与写法 | `docs/readme/scenarios.md` | `SKILL.md` 只给加载与执行约束 |
@@ -27,7 +27,7 @@
 与 `query`/`scenario` 的输出断言。`scenarios.SCENARIO_DIRS` 改动时还要同步 `ingest` 的
 根级跳过、`publish.dir` 的保留名与 `docs/readme/cli.md`。
 改话题流程时，同时检查 `SKILL.md` 的触发描述、`docs/readme/topics.md` 与内置场景
-`skills/llm-wiki/scenarios/话题探索/SCENARIO.md` 的归属、授权与格式约束。
+`skills/llm-wiki/scenarios/topic-exploration/SCENARIO.md` 的归属、授权与格式约束。
 示例里的命令必须能直接跑通。
 改章节骨架（`tasks.py` 的 `PAGE_SECTIONS`）时，同步 `templates/` 下对应类型的正文模板，
 保证模板章节与引擎一致。
