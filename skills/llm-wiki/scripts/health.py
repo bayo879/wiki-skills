@@ -18,9 +18,15 @@ from runtime import MINIMUM, MINIMUM_TEXT
 
 SCRIPT_FILES = (
     "wiki.py",
+    "cli.py",
+    "ledger.py",
+    "pages.py",
+    "view.py",
+    "task_store.py",
+    "ingest.py",
+    "util.py",
     "errors.py",
     "frontmatter.py",
-    "ledger.py",
     "search.py",
     "scenarios.py",
     "topics.py",
