@@ -389,8 +389,23 @@ class TaskStoreMixin:
             self.clear_task_dir(task_id)
 
     def page_index(self):
+        outgoing = {
+            row["src"]: row["n"]
+            for row in self.conn.execute("SELECT src, COUNT(*) AS n FROM links GROUP BY src")
+        }
+        incoming = {
+            row["dst"]: row["n"]
+            for row in self.conn.execute("SELECT dst, COUNT(*) AS n FROM links GROUP BY dst")
+        }
         return [
-            {"id": record["id"], "title": record["meta"].get("title"), "type": record["meta"].get("type")}
+            {
+                "id": record["id"],
+                "title": record["meta"].get("title"),
+                "type": record["meta"].get("type"),
+                "summary": record["meta"].get("summary") or "",
+                "outgoing": outgoing.get(record["id"], 0),
+                "incoming": incoming.get(record["id"], 0),
+            }
             for record in self.all_pages()
         ]
 

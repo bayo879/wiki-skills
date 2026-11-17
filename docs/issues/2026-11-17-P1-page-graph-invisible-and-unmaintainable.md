@@ -1,6 +1,7 @@
 # 页面关联不可见、不可维护，关联图随写入退化
 
-状态（2026-11-17）：B+F 已实现并通过自测；A、C、D、E、G 仍未定案。
+状态（2026-11-17）：A、B+F 已实现；E 的无可用来源孤儿页检查与自动清理已实现；
+C、D、G 及 E 的缺页/同题检查仍未定案。
 
 ## 问题
 
@@ -137,7 +138,8 @@ README 只输出各目录篇数（`skills/llm-wiki/scripts/view.py:17-56`），�
 **D. 分类与目录**：`schema` 增加受控 domain 或 tags；观看区生成带 summary 与链接数的目录/
 枢纽页。成本中等；需先定 domain 是自由标签还是受控词表，并做 schema 迁移与回填。
 
-**E. 巡检补项**：`doctor` 增加孤儿页（零入零出）、零出链、同题近似（标题/summary 相似）、
+**E. 巡检补项**：`doctor` 增加无可用来源的孤儿页（`sources` 为空或全部失效，且零入零出，
+标 removable）、指向未建页的链接、同题近似（标题/summary 相似）；
 指向未建页的链接。成本小；近似检查需定阈值，避免噪声。
 
 **F. 反向链接**：页末渲染 incoming；页面修订影响他人时，需重推所有引用页。成本中高，
@@ -166,7 +168,7 @@ README 只输出各目录篇数（`skills/llm-wiki/scripts/view.py:17-56`），�
 
 ## 已确认的关联规则（2026-11-17，已实现）
 
-以下为讨论后确认的方向，B+F 已在 2026-11-17 实现；C/D/E/G 仍未定。
+以下为讨论后确认的方向，A、B+F 与 E 的孤儿页部分已在 2026-11-17 实现；C/D/G 仍未定。
 
 - `body` 不保留 `## 关联`。观看区由 links 表渲染，出链与入链混排、按 page id 去重，不标
   「出链/入链」。
@@ -185,6 +187,10 @@ README 只输出各目录篇数（`skills/llm-wiki/scripts/view.py:17-56`），�
   合并。merge 页的 links = 目标页现有 links（更新模板必须带入，不再重置为空）+ decision
   显式给出的新增（只能已存在页）。**只增不删**；当前版本不提供删链入口。
 - 更新任务模板必须回传现有 `links`，不再重置为空数组。
+- 巡检只报「无可用来源的孤儿页」：`sources` 为空，或所有来源都已失效（不存在 / missing /
+  unsupported / oversize），且零入链、零出链；`doctor` 用 L7 标 removable 并直接删除
+  （内部处理，不新增命令、不逐页问 agent；有来源的零出链页不删）。
+  正常页即使暂时零出链，只要还有可用来源，就不报。
 
 实现落点（2026-11-17）：`pages.py` 的 `normalize_links`/`split_relations`/`render_page`/
 `view_text`/`write_rev`/`rebuild_links`；`validation.py` 的 `check_links` 与 meta `links`；
@@ -201,7 +207,8 @@ README 只输出各目录篇数（`skills/llm-wiki/scripts/view.py:17-56`），�
       探索，2026-11-17 确认）。
 - [ ] 是否允许红链/待建页，以及待建页由谁、在什么时机补建（方案 C）。
 - [ ] 类型之外是否引入 domain/tags；受控词表还是自由标签（方案 D）。
-- [ ] 孤儿、零出链、同题近似的判定口径与阈值（方案 E）。
+- [x] 孤儿口径（2026-11-17 确认）：只报无可用来源、且零入零出的页；有来源的零出链页不报。
+- [ ] 同题近似的判定口径与阈值（方案 E 剩余部分）。
 - [x] 目前不做深度探索（2026-11-17 确认）：不新增补链任务，旧 → 新存储边暂缺，留待以后
       需要时批量回填。
 - [ ] route 是否强制「先列主题卡再逐组 query」，以及「仅关联」是否作为独立 decision
@@ -224,10 +231,14 @@ README 只输出各目录篇数（`skills/llm-wiki/scripts/view.py:17-56`），�
       去重，且与 links 表一致。
 - [x] 入库后旧页 body 不变、不新增出边；旧页观看区通过入链显示新页。
 - [x] merge 只增链，不删除既有 links；links = 模板带入的现有 links ∪ decision 新增。
-- [ ] 建页 brief 在决策前能看到邻域（至少 title + summary + 出入链数）。
+- [x] 建页 brief 在决策前能看到邻域（至少 title + summary + 出入链数）。
+      （2026-11-17：`page_index` 已带 summary/outgoing/incoming，route brief 要求先看再
+      读 boundaries。）
 - [ ] route brief 按方案 G 改写后，用一篇含 2–3 个主题、且已有近义页的来源实测，能查到
       近义页并给出 merge，而不是按标题新建。
-- [ ] `doctor` 能报出孤儿页、零出链页与指向未建页的链接。
+- [x] `doctor` 能报出无可用来源的孤儿页并标 removable（2026-11-17 实现，L7）。
+- [x] `doctor` 直接删除 removable 页，不新增删页命令（2026-11-17 实现）。
+- [ ] `doctor` 能报出指向未建页的链接（依赖方案 C）。
 - [ ] 观看区有带 summary 与链接数的目录入口（若采纳方案 D）。
 - [x] 同步文档：`curation.md` 链接规则、`docs/readme/cli.md` 载荷契约、
       `docs/agent/development-decisions.md` 新决策。

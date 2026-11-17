@@ -104,8 +104,9 @@ def route_brief(task_id, sources):
         "goal": f"判断来源 {keys} 应归入哪些页面，或跳过；一份来源可拆到多页。",
         "steps": [
             f"读原文：运行 `read \"raw:{first}\" --offset 1 --limit 120 --json`。",
-            "在 `work.json` 的 `page_index` 里找同主题的已有页面；已有页面能覆盖时优先"
-            " merge。`pending_pages` 是已排队、尚未写入的页面，同主题也可以 merge 到它的 id。",
+            "在 `work.json` 的 `page_index` 里找同主题的已有页面：先看 title、summary 与"
+            "出入链数，再按需 `query --page <id>` 读 covered/not_covered；能覆盖时优先 merge。"
+            "`pending_pages` 是已排队、尚未写入的页面，同主题也可以 merge 到它的 id。",
             "填 `payload.json` 的 `decisions[]`：每个来源至少一条 decision，action 选 new/merge/skip；"
             "一份文件含多个可独立检索的主题时拆成多条 decision、指向不同 page；"
             "每条 decision 都必须写 reason；new 还要给 page、title、type，merge 要给 page。",

@@ -180,6 +180,28 @@ class PagesMixin:
         ).fetchall()
         return [self._page_row_to_record(row) for row in rows]
 
+    def delete_page(self, page_id):
+        """Remove a page that no source or relation can justify keeping."""
+        record = self.page_record(page_id)
+        if record is None:
+            return False
+        open_task = self.conn.execute(
+            "SELECT 1 FROM tasks WHERE subject = ? AND state IN ('queued', 'leased')",
+            (page_id,),
+        ).fetchone()
+        if open_task:
+            return False
+        if self.config["publish"]["enabled"]:
+            target = self.publish_dir / self.view_relpath(record)
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+        with self.conn:
+            self.conn.execute("DELETE FROM links WHERE src = ? OR dst = ?", (page_id, page_id))
+            self.conn.execute("DELETE FROM page_revs WHERE page = ?", (page_id,))
+        return True
+
     def page_ids(self):
         return {
             row["page"]

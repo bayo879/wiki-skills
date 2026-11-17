@@ -188,6 +188,38 @@ def links_flow(results):
             outgoing, incoming = engine.links_for("page-b")
             check(results, "only the newer page stores the edge",
                   outgoing == ["page-a"] and incoming == [], (outgoing, incoming))
+            index = {item["id"]: item for item in engine.page_index()}
+            check(results, "page index exposes summaries and relation counts",
+                  index["page-a"]["summary"] == "甲的定义。"
+                  and index["page-a"]["incoming"] == 1
+                  and index["page-b"]["outgoing"] == 1,
+                  (index.get("page-a"), index.get("page-b")))
+            engine.write_rev(
+                "orphan-page",
+                {"title": "孤页", "type": "concept", "summary": "没有来源的孤页。",
+                 "sources": [], "evidence": [],
+                 "boundaries": {"covered": "无", "not_covered": "无"}},
+                "## 结论\n\n孤页。\n\n## 要点\n\n无来源。\n",
+                "import",
+            )
+            engine.write_rev(
+                "linked-orphan",
+                {"title": "无来源但有链接", "type": "concept", "summary": "无来源，但链到 page-a。",
+                 "sources": [], "evidence": [], "links": ["page-a"],
+                 "boundaries": {"covered": "无", "not_covered": "无"}},
+                "## 结论\n\n无来源。\n\n## 要点\n\n有链接。\n",
+                "import",
+            )
+            doctor = run(root, "doctor")["data"]
+            check(results, "doctor removes unprovenanced orphans internally",
+                  any("deleted 1 unprovenanced orphan" in item for item in doctor["fixed"])
+                  and engine.page_record("orphan-page") is None
+                  and engine.page_record("linked-orphan") is not None,
+                  doctor)
+            check(results, "doctor still reports linked pages without sources",
+                  any(item["code"] == "L7" and "linked-orphan" in item["message"]
+                      for item in doctor["issues"]),
+                  doctor["issues"])
         finally:
             engine.close()
 

@@ -118,7 +118,7 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 - `brief`: `{goal, steps[], submit, effect}`，说明做什么、怎么做、提交后发生什么。
 - `template`: 已固定结构的载荷；route 为 `decisions[]`，page 为 `page/title/type/
   summary/body/links/evidence/boundaries`。
-- `work`: `sources[{key,raw,chars}]`、`page_index[{id,title,type}]`、
+- `work`: `sources[{key,raw,chars}]`、`page_index[{id,title,type,summary,outgoing,incoming}]`、
   `pending_pages[{id,title,type}]`（已排队、尚未写入的页面）；更新页任务另有
   `work.page{id,rev,meta,body}`。
 
@@ -304,7 +304,9 @@ unchanged[page], written[{page,from,to}], warnings[message]}`。有失败项时 
 ### doctor
 
 `doctor [--fix]`：`PRAGMA integrity_check`、stale 页、未注册来源、
-断链、过期租约。`--fix` 重建链接索引。`data`: `{issues[{severity,code,message}],
+无可用来源的页（`sources` 为空或全部缺失/失效，L7；其中零入零出的标 `removable`，
+doctor 直接删除，不新增命令、不逐页确认；有来源的零出链页不报）、断链、过期租约。
+`--fix` 重建链接索引。`data`: `{issues[{severity,code,message}],
 fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看区：未收割的手改只在
 推送时告警，`healthy:true` 不代表观看区没有待回收内容，用 `sync` 收割。
 

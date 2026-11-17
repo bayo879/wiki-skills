@@ -1148,6 +1148,34 @@ def command_doctor():
             if not wiki.source_row(key):
                 issues.append({"severity": "warn", "code": "L4",
                                "message": f"{record['id']} cites unregistered source {key}"})
+    unprovenanced = {}
+    removable = []
+    for record in pages:
+        keys = record["meta"].get("sources") or []
+        usable = any(
+            (wiki.source_row(key) is not None
+             and wiki.source_row(key)["status"] not in ("missing", "unsupported", "oversize"))
+            for key in keys
+        )
+        if usable:
+            continue
+        outgoing, incoming = wiki.links_for(record["id"])
+        label = record["id"]
+        if not outgoing and not incoming:
+            label += " (orphan, removable)"
+            removable.append(record)
+        unprovenanced[record["id"]] = label
+    deleted = []
+    for record in removable:
+        if wiki.delete_page(record["id"]):
+            deleted.append(record["id"])
+            unprovenanced.pop(record["id"], None)
+    if deleted:
+        fixed.append(f"deleted {len(deleted)} unprovenanced orphan page(s)")
+    if unprovenanced:
+        issues.append({"severity": "warn", "code": "L7",
+                       "message": "pages without usable sources: "
+                                  + ", ".join(sorted(unprovenanced.values())[:10])})
     broken = []
     for row in wiki.conn.execute("SELECT src, dst FROM links"):
         if row["dst"] not in known and row["src"] in known:
