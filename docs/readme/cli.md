@@ -182,7 +182,7 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 
 `data`: `{root, roots, count, valid, scenarios[]}`；`root` 是生效的目录名，`roots` 是实际存在的
 场景目录（`scenario/` 在前）；每项为
-`{id, source, name, alias_name, description, triggers, path, main, valid, error, resources[]}`，
+`{id, source, name, alias_name, description, tags, path, main, valid, error, resources[]}`，
 其中 `name` 是场景机器名、`alias_name` 是可选的中文展示名（人类可读行优先显示它），
 `source` 取 `project` 或 `builtin`。`resources[]` 为 `{path, kind, size}`，`kind` 取
 `script`（`scripts/` 下）、`reference`（`references/` 下）或 `other`。
@@ -192,7 +192,7 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 介入普通知识问答。
 
 `data`: `{query, matches, scenarios[]}`；`matches` 只数场景，`scenarios[]` 为
-`{id, source, name, alias_name, description, triggers, path, main, load, score, resources}`，
+`{id, source, name, alias_name, description, tags, path, main, load, score, resources}`，
 `source` 取 `project` 或 `builtin`；`load` 是建议的加载命令，`resources` 是配套文件数量。
 非法场景不进 `scenario search` 结果。
 

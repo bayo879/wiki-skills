@@ -2,7 +2,7 @@
 
 A scenario is shaped like a skill:
 
-    scenario/<id>/SCENARIO.md      flow + frontmatter (name, description, triggers)
+    scenario/<id>/SCENARIO.md      flow + frontmatter (name, description, tags)
     scenario/<id>/scripts/         executable helpers
     scenario/<id>/references/      notes read on demand
 
@@ -154,15 +154,15 @@ def match(root, terms, limit, builtin=True):
         title = entry["name"]
         alias = entry["alias_name"]
         description = entry["description"]
-        triggers = " ".join(entry["triggers"])
-        haystack = f"{title}\n{alias}\n{description}\n{triggers}\n{entry['body']}"
+        tags = " ".join(entry["tags"])
+        haystack = f"{title}\n{alias}\n{description}\n{tags}\n{entry['body']}"
         hits = sum(haystack.lower().count(term.lower()) for term in terms)
         if hits == 0:
             continue
         labels = f"{title}\n{alias}"
         score = hits + 5 * sum(labels.lower().count(term.lower()) for term in terms)
         score += 3 * sum(
-            description.lower().count(term.lower()) + triggers.lower().count(term.lower())
+            description.lower().count(term.lower()) + tags.lower().count(term.lower())
             for term in terms
         )
         scored.append(
@@ -172,7 +172,7 @@ def match(root, terms, limit, builtin=True):
                 "name": title,
                 "alias_name": alias,
                 "description": description,
-                "triggers": entry["triggers"],
+                "tags": entry["tags"],
                 "path": entry["path"],
                 "main": entry["main"],
                 "load": f'scenario load "{entry["id"]}"',
@@ -200,7 +200,7 @@ def _entry(root, directory, source="project"):
         "name": directory.name,
         "alias_name": "",
         "description": "",
-        "triggers": [],
+        "tags": [],
         "path": directory.relative_to(root).as_posix(),
         "main": (directory / SCENARIO_FILE).relative_to(root).as_posix(),
         "valid": False,
@@ -236,7 +236,7 @@ def _entry(root, directory, source="project"):
             "name": name,
             "alias_name": alias_name,
             "description": description,
-            "triggers": _triggers(meta.get("triggers")),
+            "tags": _tags(meta.get("tags")),
             "meta": meta,
             "text": text,
             "body": body,
@@ -258,7 +258,7 @@ def _public(entry):
         "name": entry["name"],
         "alias_name": entry["alias_name"],
         "description": entry["description"],
-        "triggers": entry["triggers"],
+        "tags": entry["tags"],
         "path": entry["path"],
         "main": entry["main"],
         "valid": entry["valid"],
@@ -267,15 +267,15 @@ def _public(entry):
     }
 
 
-def _triggers(value):
+def _tags(value):
     raw = value if isinstance(value, list) else [value] if value else []
-    triggers = []
+    tags = []
     for item in raw:
         for part in re.split(r"[,，、;；]+", str(item)):
             part = part.strip()
-            if part and part not in triggers:
-                triggers.append(part)
-    return triggers
+            if part and part not in tags:
+                tags.append(part)
+    return tags
 
 
 def _resources(directory, root):

@@ -1,7 +1,7 @@
 ---
 name: PPT 编写
 description: 从 wiki 取材料、组论点、出带依据的逐页大纲，再把大纲交给 pptx 技能制作演示文稿
-triggers:
+tags:
   - PPT
   - 演示文稿
   - 幻灯片

@@ -2,7 +2,7 @@
 name: topic-exploration
 alias_name: 话题探索
 description: 回答知识类问题时的默认流程：定主题、多轮检索、总结，并按需把主题沉淀成话题
-triggers:
+tags:
   - 话题
   - 探索
   - 调研

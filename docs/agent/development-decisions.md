@@ -82,7 +82,7 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
 - 入口扩展 `query`：一次检索同时返回知识页与场景，场景在 `scenarios` 字段；另提供
   `scenario list` / `scenario load <id>` 做检查与加载。
 - 目录形状：`场景能力/<id>/SCENARIO.md`、`scripts/`、`references/`。`description` 必填，
-  `triggers` 可选，参与检索；正文是流程。
+  `tags` 可选，参与检索；正文是流程。
 - 不摄入：`ingest` 整目录跳过 `场景能力/`，不写 sources、不排任务、不进账本；`query`
   直接扫描文件。这样改流程不需要重新摄入。
 - 加载返回：主文件全文 `content`、解析后的 `meta`、`path` 与 `resources[]`（`script` /
