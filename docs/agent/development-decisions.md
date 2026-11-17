@@ -228,3 +228,18 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   出现重复记录。
 - `release` 不进技能流程，只作为运维口子保留；`SKILL.md` 仍不出现租约、epoch 字样，
   只说「同一个任务会再发回来，`payload.json` 保留」。
+
+## 2026-11-17：`wiki.py` 按职责拆分，入口只留转发
+
+关闭 `docs/issues/2026-11-16-P2-split-wiki-engine.md`：`wiki.py` 长到 2868 行，命令、账本、
+观看区与任务混在一个文件里，超过单文件 2000 行的可维护边界。
+
+- 落地：命令层进 `cli.py`；`ledger.py` 收拢 DDL、`LedgerMixin` 与组合根 `Wiki`；页面、
+  观看区、任务、摄入分别进 `pages.py`、`view.py`、`task_store.py`、`ingest.py`；纯函数公共
+  部分进 `util.py`。`wiki.py` 只保留 `python3 wiki.py <cmd>` 入口与 `tests/selftest.py`
+  用到的再导出。
+- 取舍：`Wiki` 仍是唯一持有连接的对象，四个 mixin 组合成一个类，拆分只「按职责搬方法」，
+  不改命令输出、错误码、`docs/readme/cli.md` 契约与 `.wiki/` 布局；新增 `util.py` 是为了
+  让页面与观看区不反向依赖账本模块。
+- 约束：新增或再拆 `scripts/` 模块时，同步 `docs/agent/engine.md` 的布局表与 `health.py`
+  的 `SCRIPT_FILES`，`wiki.py` 不再回长。

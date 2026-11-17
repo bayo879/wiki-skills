@@ -1,8 +1,9 @@
 # 引擎内部
 
-对象：`skills/llm-wiki/scripts/wiki.py`（2575 行，仍超过单文件 2000 行上限；拆分方案见
-`docs/issues/2026-11-16-P2-split-wiki-engine.md`）。公共错误在 `errors.py`，frontmatter
-解析在 `frontmatter.py`，账本表结构在 `ledger.py`，页面检索在 `search.py`，场景能力在
+对象：`skills/llm-wiki/scripts/`。`wiki.py` 只是入口（命令行转发与兼容再导出），命令层在
+`cli.py`，账本表结构与 `Wiki` 组合根在 `ledger.py`，其余按职责分在 `pages.py`、`view.py`、
+`task_store.py`、`ingest.py`、`util.py`；单文件都不超过 2000 行。公共错误在 `errors.py`，
+frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能力在
 `scenarios.py`，话题沉淀在 `topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，
 工作区边界在 `workspace.py`，任务信息面在 `tasks.py`，页面载荷校验在 `validation.py`。
 本文件只记录改代码时容易踩的内部约定，命令与字段以 `docs/readme/cli.md` 为准。
@@ -11,22 +12,26 @@
 
 | 区段 | 位置 | 说明 |
 | --- | --- | --- |
-| 常量与配置 | 文件头、`DEFAULT_CONFIG`、`load_config` | `TASK_LEASE_SECONDS=900`；正文/摘要上限在 `validation.py` |
-| 错误与输出 | `errors.py` 的 `WikiError`、`emit`、`fail` | 错误码 + `next` + 退出码；所有命令走同一信封 |
+| 入口与兼容面 | `wiki.py` | 调 `runtime.require_python()`、`__main__` 转发到 `cli.main()`；再导出 `tests/selftest.py` 用到的函数，不承载逻辑 |
+| 命令层 | `cli.py` 的 `command_*`、`submit_route`、`submit_page` | 只做参数解析、调用 `Wiki`、组装输出；`main`、`COMMANDS`、`build_parser` 也在这里 |
+| 常量与配置 | `ledger.py` 的目录常量、`DEFAULT_CONFIG`、`load_config` | `TASK_LEASE_SECONDS=900` 在 `task_store.py`；正文/摘要上限在 `validation.py` |
+| 错误与输出 | `errors.py` 的 `WikiError`；`emit`、`fail` 在 `cli.py` | 错误码 + `next` + 退出码；所有命令走同一信封 |
+| 工具 | `util.py` | `norm_key`、`digest_bytes`/`digest_text`、`same_stamp`、`now_iso`/`parse_iso`、`dump_meta`、`write_atomic` |
 | 工作区边界 | `workspace.py` | `WIKI_DIR`、`window_safe`、`inside_root`、`dry_store`；文件参数一律先过 `inside_root` |
-| 解析 | `extract_text` 及 `pdf_to_text`、`docx_to_text`、`html_to_text`、`decode_bytes` | 纯函数，不碰数据库；超限在 `read_bytes` 抛 |
+| 摄入与解析 | `ingest.py` | `extract_text`/`pdf_to_text`/`docx_to_text`/`html_to_text`、`decode_bytes`、`file_facts`、`raw_facts`、`ingest_decision`；纯函数，不碰数据库；超限在 `read_bytes` 抛 |
 | frontmatter | `frontmatter.py` | `split_frontmatter`、`unquote_scalar`、`yaml_scalar`；页面渲染与场景加载共用一套语法 |
+| 页面层 | `pages.py` 的 `PagesMixin` | `page_record`、`write_rev`、`rebuild_links`、`links_for`、`view_text`、`page_ids` |
+| 页面渲染 | `pages.py` 的 `render_page` | 依赖 `frontmatter.yaml_scalar`；改动一侧要同步另一侧 |
 | 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
+| 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`topics/`、`scenarios/` 只首次投放；手改只告警，`sync` 回收 |
+| 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；并发走同一条 CAS 约定 |
+| 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 场景能力 | `scenarios.py` | `scan`/`inventory`/`match`/`load`/`default`；`scenario/` 与旧 `场景能力/` 都扫描（同 id 前者优先），再与 `scenarios/` 内置场景合并，只读文件，不写 `.wiki/`，不生成任务 |
 | 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `话题/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
-| 页面渲染 | `render_page` | 依赖 `frontmatter.yaml_scalar`；改动一侧要同步另一侧 |
-| 观看区与发布 | `sync_view`、`sync_view_file`、`render_view_readme`、`command_sync` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`topics/`、`scenarios/` 只首次投放；手改只告警，`sync` 回收 |
-| 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
-| 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 深检，门禁用轻检 |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留；纯函数，只读 `Wiki` |
 | 账本结构 | `ledger.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用 |
-| 账本 | `class Wiki` | 表、来源、修订、观看区推送、任务全在这里 |
-| 命令层 | `command_*`、`submit_route`、`submit_page` | 只做参数解析、调用 `Wiki`、组装输出 |
+| 账本 | `ledger.py` 的 `LedgerMixin` | `__init__`/`ensure`/`close`、来源与 raw、推送入口；`Wiki` 在文件末尾由四个 mixin 组合 |
+| 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 深检，门禁用轻检 |
 
 ## 表
 
@@ -147,6 +152,8 @@ scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不�
 
 ## 改动检查表
 
+- 新增或拆分 `scripts/` 模块：同步本文件布局表与 `health.py` 的 `SCRIPT_FILES`；
+  `wiki.py` 只保留入口与兼容再导出。
 - 改字段或校验：同步 `docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
   `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
   `tests/selftest.py`。
