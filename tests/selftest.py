@@ -28,6 +28,7 @@ sys.path.insert(0, str(SCRIPT.parent))
 from runtime import require_python
 
 require_python()
+import scenarios  # noqa: E402  (frontmatter normalisation, for tag checks)
 import wiki  # noqa: E402  (the engine itself, for table-level checks)
 
 WIKI_CACHE = ".wiki"
@@ -151,6 +152,9 @@ def main(argv=None):
         check(results, "scenario list reports both project roots",
               listing["roots"] == ["scenario", "场景能力"], listing.get("roots"))
         check(results, "scenario commands leave no .wiki", not (root / ".wiki").exists(), listing)
+        check(results, "scenario tags follow the obsidian rules",
+              scenarios._tags(["#话题", "见证 开户", "2024", "a/b#c", "话题"])
+              == ["话题", "见证", "开户", "a/b", "c"], scenarios._tags(["#话题", "见证 开户"]))
         builtin = run(root, "scenario", "load", "topic-exploration")["data"]
         check(results, "builtin scenario is loadable without project files",
               builtin["scenario"]["source"] == "builtin"

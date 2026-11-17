@@ -183,7 +183,8 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 `data`: `{root, roots, count, valid, scenarios[]}`；`root` 是生效的目录名，`roots` 是实际存在的
 场景目录（`scenario/` 在前）；每项为
 `{id, source, name, alias_name, description, tags, path, main, valid, error, resources[]}`，
-其中 `name` 是场景机器名、`alias_name` 是可选的中文展示名（人类可读行优先显示它），
+其中 `name` 是场景机器名、`alias_name` 是可选的中文展示名（人类可读行优先显示它）；
+`tags` 按 Obsidian 规则规范化（去 `#`、空白切分、保留 `a/b` 层级、丢弃纯数字），
 `source` 取 `project` 或 `builtin`。`resources[]` 为 `{path, kind, size}`，`kind` 取
 `script`（`scripts/` 下）、`reference`（`references/` 下）或 `other`。
 

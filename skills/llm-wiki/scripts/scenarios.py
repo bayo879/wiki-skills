@@ -270,12 +270,30 @@ def _public(entry):
 def _tags(value):
     raw = value if isinstance(value, list) else [value] if value else []
     tags = []
+    seen = set()
     for item in raw:
-        for part in re.split(r"[,，、;；]+", str(item)):
-            part = part.strip()
-            if part and part not in tags:
-                tags.append(part)
+        for part in re.split(r"[,，、;；#\s]+", str(item)):
+            tag = _tag(part)
+            if not tag or tag.lower() in seen:
+                continue
+            seen.add(tag.lower())
+            tags.append(tag)
     return tags
+
+
+def _tag(part):
+    """Normalise one fragment to an Obsidian tag: no '#', no spaces, nesting via '/'."""
+    chars = []
+    for char in str(part).strip():
+        if char == "#":
+            continue
+        if char.isspace():
+            chars.append("-")
+        elif char.isalnum() or char in "_-/":
+            chars.append(char)
+    tag = re.sub(r"-{2,}", "-", "".join(chars))
+    tag = re.sub(r"/{2,}", "/", tag).strip("-/")
+    return "" if not tag or tag.isdigit() else tag
 
 
 def _resources(directory, root):

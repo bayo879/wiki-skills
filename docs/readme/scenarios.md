@@ -49,7 +49,8 @@ skills/llm-wiki/scenarios/
 
 ```markdown
 ---
-name: 开户流程
+name: account-opening
+alias_name: 开户流程
 description: 新客户开户时核验身份、登记资料并完成激活
 tags:
   - 开户
@@ -89,7 +90,7 @@ frontmatter 字段：
 | `name` | 否 | 机器名（英文），`scenario list` 与检索按它展示；缺省用目录名 |
 | `alias_name` | 否 | 中文展示名，只用于 `scenario list` 的显示 |
 | `description` | 是 | 一句话说明场景解决什么问题，参与检索与展示 |
-| `tags` | 否 | 关键词列表；逗号、顿号、分号分隔的字符串也可以 |
+| `tags` | 否 | Obsidian 风格的标签列表：不带 `#`、不能含空格（空白与 `,`、`、`、`;` 都当分隔符），可用 `a/b` 表示层级；`#` 前缀会被去掉，纯数字标签会被丢弃 |
 
 正文写给执行者看，重点写清顺序、判断点、完成标准和失败时怎么处理。步骤要能执行，
 不要只写原则；需要事实依据的地方，指向知识页或原始文件，而不是把事实抄进场景。
