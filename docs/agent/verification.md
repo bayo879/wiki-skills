@@ -121,6 +121,35 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实
 - `next keeps reporting no work when nothing is open`：队列与租约都空时仍返回
   `no queued tasks`，agent 才停止。
 
+## 2026-11-17 账本自愈与错误带手册定位
+
+去掉「先 `check` 再 `init`」的门禁：打开账本的命令补齐缺的目录、`wiki.json` 与表，补出的
+路径放在 `data.repaired`；`check`/`doctor` 退回只读诊断。旧结构有数据时 `E_STATE` 拒绝，
+旧表全空时按当前结构原地重建（不写迁移）。`E_HEALTH`、`E_STATE`、`E_CONFIG`、`E_DB`、
+`E_PATH` 的错误对象新增 `doc`（技能内 `references/recovery.md` 的绝对路径）与 `section`
+（手册小节标题）。
+
+`python3 tests/selftest.py`：208/208 通过，退出码 0。新增与改写的检查：
+
+- 空目录直接 `ingest` 成功并返回 `repaired`，不依赖 `init`；
+- 旧结构 + 有数据 → `E_STATE`，`section` 为「旧账本」，`doc` 指向 `references/recovery.md`；
+- 旧结构 + 全空 → 原地按新结构重建（`sources` 出现 `raw_digest` 列）；
+- 非数据库文件冒充 `wiki.db` → `E_DB`，`section` 为「账本损坏」；
+- 只有 `wiki.json` 的半初始化工作区 → `ingest` 成功，`repaired` 含 `.wiki/wiki.db`；
+- 只读工作区 → `E_HEALTH`，`section` 为「工作区不可写」，`next` 不指向 `check`；
+- `check` 在无账本的工作区仍 `ok:true`。
+
+手工复测（macOS，Python 3.15.2）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 空目录 `ingest` | `ok:true`，`repaired` 含 `.wiki/tasks`、`.wiki/drafts`、`.wiki/wiki.json`、`wiki/raw` |
+| 只有 `.wiki/wiki.json` | `ingest` 成功，`repaired` 含 `.wiki/wiki.db` |
+| 空 db 文件（0 张表） | `ingest` 建表成功 |
+| 旧库有行 | `E_STATE`，退出码 3，`section`「旧账本」 |
+| `wiki.db` 写成文本 | `E_DB`，`message` 为 `ledger cannot be opened: file is not a database`，退出码 3 |
+| 半初始化目录 `check` | `ok:true`，ledger 项 `detail` 以 `repairable:` 开头 |
+
 ## 一、自测：203/203 通过
 
 ```bash
@@ -226,7 +255,8 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
 - 并发写入与多 agent 同时提交：只验证了 lease 与 epoch 的单进程语义。
 - 万级文件、`MAX_RAW_CHARS` 截断边界、超大页面的渲染性能。
 - DSH 之外的 agent 运行时：按目录约定复制，未逐个实测其技能加载器。
-- Windows 引导脚本：当前环境没有 PowerShell，`scripts/bootstrap.ps1` 未在 Windows 实机
-  验证；镜像下载、静默安装、PATH 刷新与技能根放置都待验收，见
-  `docs/issues/2026-11-16-P2-windows-bootstrap-acceptance.md`。
+- Windows 引导脚本：当前环境没有 PowerShell。脚本已精简为「查找已有的 Python 3.12+ →
+  调用 `install.py`」，不再下载或安装 Python，因此镜像、静默安装、PATH 刷新三条风险
+  随之消失；语法、参数与退出码透传、`E_PYTHON`、`-Target` 放置仍待 Windows 实机验收，
+  见 `docs/issues/2026-11-16-P2-windows-bootstrap-acceptance.md`。
 - 页面删除：当前没有命令，未验证。

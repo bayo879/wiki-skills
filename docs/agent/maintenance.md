@@ -15,14 +15,14 @@
 | 页面固定版式与正文模板 | `skills/llm-wiki/templates/`（按类型分文件） | — |
 | 安装与目录约定 | `docs/readme/install.md` | `README.md` 给一行入口 |
 | 场景目录、frontmatter 与写法 | `docs/readme/scenarios.md` | `SKILL.md` 只给加载与执行约束 |
-| 故障与恢复 | `docs/readme/recovery.md` | — |
+| 故障与恢复 | `skills/llm-wiki/references/recovery.md`（随技能安装，按错误码分节） | `docs/readme/recovery.md` 只留原则与入口 |
 | 实测结果与未覆盖项 | `docs/agent/verification.md` | — |
 | 内部实现约定 | `docs/agent/engine.md` | — |
 | 已定方向 | `docs/agent/development-decisions.md` | — |
 
 改命令、载荷、错误码时，至少同时检查：`docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
 `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
-`tests/selftest.py`、`README.md` 中的示例。
+`skills/llm-wiki/references/recovery.md`、`tests/selftest.py`、`README.md` 中的示例。
 改场景行为时，同时检查 `docs/readme/scenarios.md`、`skills/llm-wiki/scripts/scenarios.py`
 与 `query`/`scenario` 的输出断言。`scenarios.SCENARIO_DIRS` 改动时还要同步 `ingest` 的
 根级跳过、`publish.dir` 的保留名与 `docs/readme/cli.md`。
@@ -31,6 +31,9 @@
 示例里的命令必须能直接跑通。
 改章节骨架（`tasks.py` 的 `PAGE_SECTIONS`）时，同步 `templates/` 下对应类型的正文模板，
 保证模板章节与引擎一致。
+改 Windows 入口行为（`scripts/bootstrap.ps1`、`scripts/install.py`）时，同步 `README.md`、
+`docs/readme/install.md`、`SKILL.md`、`references/recovery.md` 的运行时小节，并更新
+`docs/issues/` 里的 Windows 验收场景表；脚本行为没有实机证据前不要写成已验证。
 
 ## 机器守卫
 

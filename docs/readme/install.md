@@ -12,8 +12,8 @@ command -v pdftotext # 可选；没有也能用，PDF 会走 pypdf 或报告 uns
 
 ### Windows（PowerShell 5.1+）
 
-Windows 上通常没有 `python3`，用 `py -3.12` 或指向 3.12 的 `python` 替代。首次使用可以直接运行引导脚本，
-它会找 Python 3.12，缺失时按国内镜像安装，再调用 `install.py`：
+Windows 上通常没有 `python3`，用 `py -3.12` 或指向 3.12+ 的 `python` 替代。首次使用可以运行引导脚本，
+它查找已有的 Python 3.12+，找到后调用 `install.py`：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
@@ -22,15 +22,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 在 cmd 或 Windows Terminal 里执行同一条命令即可，参数原样追加（如 `-DryRun`）。技能包不附带
 `.cmd`/`.bat` 包装：下游分发不接受批处理脚本，`bootstrap.ps1` 是唯一的 Windows 入口。
 
-- 镜像顺序：华为云 → 清华 TUNA → npmmirror → 官方源；都失败才回退 `winget`。
-- 安装 Python 3.12.8 的 per-user 版本（`InstallAllUsers=0`），只装核心组件，不要求管理员；
-  安装后把 Machine/User 的 PATH 补进当前进程。
+- 查找顺序：`%LOCALAPPDATA%\Programs\Python\Python3*` → `py -3` → `python` → `python3`，
+  跳过 WindowsApps 的转发桩；只要求 3.12 及以上，不要求恰好 3.12。
+- 运行时由调用方提供：agent 自带解释器时用 `-Python <python.exe>` 直接指定，跳过搜索。
+- 脚本不下载、不安装 Python，也不改 PATH；找不到合适运行时时输出 `E_PYTHON` 并退出 1，
+  错误对象里带 `references/recovery.md` 的路径与小节名。
 - 不需要 `pip install`：引擎只用标准库；PDF 解析器仍是可选项，不阻塞安装。
 - 放置失败时用 `-Target` 指定技能根，例如
-  `-Target "$env:USERPROFILE\.dsh\skills"`；`-DryRun` 只检查并打印计划，不下载、不复制。
-- 引导脚本只负责运行时和放置技能，不创建 `.wiki/`；知识库仍要在资料目录里 `init`/`ingest`。
+  `-Target "$env:USERPROFILE\.dsh\skills"`；`-DryRun` 只打印计划，不复制。
+- 引导脚本只负责运行时和放置技能，不创建 `.wiki/`；知识库仍要在资料目录里 `ingest`。
 
-整个项目基线是 Python 3.12（最低版本）；Windows 引导安装 3.12.8，避免 3.11 及更早版本。
+整个项目基线是 Python 3.12（最低版本），更新的 3.x 都能用。
 
 PDF 支持按优先级降级：`pdftotext` → `pypdf` → 跳过并提示。不要为了装 PDF 解析器
 阻塞其他格式的使用。
@@ -76,9 +78,10 @@ python3 <安装路径>/scripts/wiki.py --version
 python3 <安装路径>/scripts/wiki.py check --json
 ```
 
-`check` 验证解释器、技能必需文件与模板、当前工作区可写、已有账本可读，不接触真实页面
-内容；`ok: true` 才表示安装可用。完整回归测试在仓库的 `tests/selftest.py`，属于开发/CI
-资产，不随技能复制到安装目录。
+`--version` 能打印版本，就说明解释器与技能目录可用。`check` 是只读诊断：验证解释器、技能
+必需文件与模板、当前工作区可写、已有账本可读，不接触真实页面内容，也不修任何东西。不必先
+跑 `check` 再 `ingest`：第一次命令会自己建出 `.wiki/`，补了什么写在 `repaired` 里。完整回归
+测试在仓库的 `tests/selftest.py`，属于开发/CI 资产，不随技能复制到安装目录。
 
 ## 4. 在业务目录启用
 
@@ -108,7 +111,8 @@ python3 <安装路径>/scripts/wiki.py ingest --json
 - **卸载**：删除技能目录。知识库在业务目录的 `.wiki/` 与观看区里，独立存在；不需要时手动
   删除这两个目录即可，删除前先备份 `pages/` 与 `raw/`。
 - **升级**：用新版本目录替换技能目录；替换前备份整个 `.wiki/` 与观看区。`.wiki/wiki.db`
-  缺少本版本新增的列时会被拒绝（`E_STATE`），需要先 `export` 备份再删库重来。
+  有数据且缺少本版本新增的列时会被拒绝（`E_STATE`）：备份后删 `.wiki/` 重新 `ingest`；
+  旧库全空时按新结构自动重建。
 
 ## 6. 与旧版本的关系
 

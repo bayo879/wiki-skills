@@ -105,6 +105,8 @@ REQUIRED_COLUMNS = (
     ("page_revs", ("view_digest", "view_path")),
 )
 
+TABLES = ("sources", "raws", "page_revs", "tasks", "task_sources", "links")
+
 
 def create_schema(conn):
     """Create every table this skill version expects; existing rows stay put."""
@@ -112,19 +114,47 @@ def create_schema(conn):
         conn.executescript(SCHEMA_SQL)
 
 
-def ensure_columns(conn):
-    """Refuse a ledger from an older skill; there is no migration on purpose."""
+def _stale_tables(conn):
+    """Tables that exist but lack the columns this version expects."""
+    stale = []
     for table, columns in REQUIRED_COLUMNS:
-        present = {
-            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
-        }
-        if not set(columns) <= present:
-            raise WikiError(
-                "E_STATE",
-                "ledger schema is older than this skill",
-                "delete .wiki/ then run `init` and `ingest`",
-                3,
-            )
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if present and not set(columns) <= present:
+            stale.append(table)
+    return stale
+
+
+def _ledger_empty(conn):
+    for table in TABLES:
+        try:
+            row = conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+        except sqlite3.OperationalError:
+            continue
+        if row:
+            return False
+    return True
+
+
+def ensure_columns(conn):
+    """Refuse a ledger from an older skill; there is no migration on purpose.
+
+    唯一的例外是没有数据的旧表：没有内容可保，直接按当前 schema 重建，不算迁移。
+    """
+    stale = _stale_tables(conn)
+    if not stale:
+        return
+    if not _ledger_empty(conn):
+        raise WikiError(
+            "E_STATE",
+            f"ledger schema is older than this skill: {', '.join(stale)}",
+            "back up .wiki/ if the pages matter, delete it, then run `ingest`; "
+            "pages in the view dir have to be re-created by hand",
+            3,
+        )
+    with conn:
+        for table in stale:
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+    create_schema(conn)
 
 
 OPEN_PAGE_INDEX = """
@@ -289,12 +319,26 @@ class LedgerMixin:
         self.raw_dir = self.publish_raw_dir
         self.ensure_publish(created)
         if self.conn is None:
-            self.conn = sqlite3.connect(self.db_path)
-            self.conn.row_factory = sqlite3.Row
-            self.conn.execute("PRAGMA busy_timeout = 5000")
-            create_schema(self.conn)
-            ensure_columns(self.conn)
-            ensure_open_page_index(self.conn)
+            fresh_db = not self.db_path.exists()
+            try:
+                self.conn = sqlite3.connect(self.db_path)
+                self.conn.row_factory = sqlite3.Row
+                self.conn.execute("PRAGMA busy_timeout = 5000")
+                create_schema(self.conn)
+                ensure_columns(self.conn)
+                ensure_open_page_index(self.conn)
+            except sqlite3.DatabaseError as error:
+                conn, self.conn = self.conn, None
+                if conn is not None:
+                    conn.close()
+                raise WikiError(
+                    "E_DB",
+                    f"ledger cannot be opened: {error}",
+                    "stop writing; restore the whole .wiki/ from a backup",
+                    3,
+                )
+            if fresh_db:
+                created.append(norm_key(self.db_path.relative_to(self.root)))
         # R11：sync 要先看磁盘再让推送动手，否则挪走的文件会被重建出第二个副本。
         if push:
             self.view_events = self.sync_view()

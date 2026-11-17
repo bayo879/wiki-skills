@@ -106,7 +106,16 @@ def workspace_lock(root, wait=None):
     that check is unsafe.
     """
     path = lock_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise WikiError(
+            "E_HEALTH",
+            f"workspace is not writable: {error}",
+            "run the command from a writable directory inside the workspace",
+            1,
+            section="工作区不可写",
+        ) from error
     deadline = time.monotonic() + (LOCK_WAIT_SECONDS if wait is None else wait)
     while True:
         try:

@@ -243,3 +243,37 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   让页面与观看区不反向依赖账本模块。
 - 约束：新增或再拆 `scripts/` 模块时，同步 `docs/agent/engine.md` 的布局表与 `health.py`
   的 `SCRIPT_FILES`，`wiki.py` 不再回长。
+
+## 2026-11-17：账本自愈，`check`/`init` 不再是前置门禁
+
+关闭 issue「初始化与自检仍写在提示词里」（已删除，历史见 Git）：提示词里的「先 `check`，通过
+再 `init`，然后 `ingest`」把初始化责任推给 agent，空目录、半初始化目录都会先撞一次错误。
+
+- 自愈在打开账本时做：`Wiki.ensure` 补目录、`wiki.json`、表与索引；补出的路径收进
+  `data.repaired`（路径数组，与 `created` 同形），每个命令的 JSON 输出都带。`command_init`
+  不再单独给 `created`。
+- `check`/`doctor` 退回只读诊断；命令入口只跑安装级检查（解释器、技能文件、工作区可写），
+  失败 `E_HEALTH`。账本缺失或残缺不再阻塞任何命令。
+- 致命错误对象加 `doc`（技能内 `references/recovery.md` 绝对路径）与 `section`（小节标题）；
+  新增 `references/recovery.md` 作为按错误码分节的处置手册，`docs/readme/recovery.md` 留入口。
+- 不做迁移（用户原话「不用考虑已有库，迁移，就按照全新的来，不要留历史包袱」）：有数据的
+  旧结构直接 `E_STATE`；旧表全空时按当前 `SCHEMA_SQL` 原地重建，不算迁移。
+- 不加 `init --reset`（用户原话「手动直接把.wiki删了也能做到」）：重置就是删 `.wiki/` 重新
+  `ingest`，手册里写清步骤，不再加命令。
+- `VERSION=0.4.2`；`selftest.py` 208 项。
+
+## 2026-11-17：Windows 引导脚本不再安装 Python
+
+下游 agent 都自带 Python 运行时（用户验证：运行时为 3.12.13 以上），`bootstrap.ps1` 里
+「下载并静默安装 Python 3.12.8」这条路无人走，镜像列表、安装器参数、`winget` 回退与
+「只认恰好 3.12」的判定都是净负债。
+
+- `scripts/bootstrap.ps1` 精简为两步：找 3.12+ 运行时（`-Python <python.exe>` 可直接指定，
+  否则依次 `%LOCALAPPDATA%\Programs\Python\Python3*` → `py -3` → `python` → `python3`，跳过
+  WindowsApps 转发桩），然后把参数透传给 `install.py` 并照传退出码。
+- 不再下载、不装 Python、不改 PATH；找不到运行时输出 `E_PYTHON`、退出码 1，错误对象带
+  `doc`（`references/recovery.md`）与 `section`（「运行时与安装」）。
+- 版本判定改为 ≥3.12（旧版只认恰好 3.12，会把只有 3.13 的机器强行降到 3.12.8）。
+- 同步 `README.md`、`docs/readme/install.md`、`skills/llm-wiki/SKILL.md`、
+  `skills/llm-wiki/references/recovery.md` 与 issue「Windows 引导脚本尚未实机验收」的场景表。
+- `VERSION=0.4.3`；`selftest.py` 仍 208 项（PowerShell 脚本不进自测，Windows 实机验收另算）。

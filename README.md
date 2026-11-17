@@ -21,9 +21,7 @@
 # 安装到 agent 会扫描的技能目录（也可直接按路径加载 SKILL.md）
 python3 skills/llm-wiki/scripts/install.py --target auto --json
 
-# 在资料所在的工作区根目录先自检，通过后再初始化和摄入（不要 cd 到工作区外）
-python3 <skill>/scripts/wiki.py check --json
-python3 <skill>/scripts/wiki.py init --json
+# 在资料所在的工作区根目录摄入（不要 cd 到工作区外；首次运行会自己建 .wiki/）
 python3 <skill>/scripts/wiki.py ingest --json
 
 # 任务循环：next 把任务写进 .wiki/tasks/<id>/，填好其中的 payload.json 后 submit
@@ -40,7 +38,8 @@ python3 <skill>/scripts/wiki.py scenario load "topic-exploration" --json
 
 Windows 首次使用运行
 `powershell -NoProfile -ExecutionPolicy Bypass -File skills\llm-wiki\scripts\bootstrap.ps1`；
-其余命令里的 `python3` 用 `py -3.12` 或指向 3.12 的 `python` 替代。
+它只查找已有的 Python 3.12+，不下载也不安装，找不到时用 `-Python <python.exe>` 指定运行时。
+其余命令里的 `python3` 用该解释器替代。
 
 完整命令与字段见 [CLI 契约](docs/readme/cli.md)。
 

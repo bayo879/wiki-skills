@@ -31,7 +31,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留；纯函数，只读 `Wiki` |
 | 账本结构 | `ledger.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用 |
 | 账本 | `ledger.py` 的 `LedgerMixin` | `__init__`/`ensure`/`close`、来源与 raw、推送入口；`Wiki` 在文件末尾由四个 mixin 组合 |
-| 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 深检，门禁用轻检 |
+| 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 只读深检，命令入口只跑安装级轻检（`require_install`） |
 
 ## 表
 
@@ -45,7 +45,8 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
 - `page_revs(page, rev, meta, body, digest, render_digest, view_digest, view_path, origin,
   accepted_at)`
 
-表结构每版固定；缺列的旧库由 `ledger.ensure_columns` 拒绝（`E_STATE`），不写迁移。
+表结构每版固定，不写迁移：`ledger.ensure_columns` 遇到有数据的旧结构直接 `E_STATE` 拒绝；
+旧表全空时按当前 `SCHEMA_SQL` 重建那几张表（没有内容可保，不算迁移）。
 
 ## 不变量
 
@@ -166,8 +167,8 @@ scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不�
 - 改观看区或发布：同步 `docs/readme/cli.md`、`README.md`、
   `docs/readme/design-principles.md`、`SKILL.md`、`tests/selftest.py`；保持 `sync` 只回收、
   推送只发生在命令入口，且观看区目录名始终跳过扫描。
-- 改表结构：同步 `ledger.REQUIRED_COLUMNS` 与本文件的表清单；旧库由 `ledger.ensure_columns`
-  直接 `E_STATE` 拒绝，不写迁移。
+- 改表结构：同步 `ledger.REQUIRED_COLUMNS`、`ledger.TABLES` 与本文件的表清单；有数据的旧库
+  由 `ledger.ensure_columns` 直接 `E_STATE` 拒绝，全空的旧表按新结构重建，不写迁移。
 - 改渲染：`render_page` 与 `split_frontmatter` 必须能往返；跑 `tests/selftest.py` 的
   import/restore 用例。
 - 改任务：并发前提是单写者；不要为了"更快"去掉提交前的状态与租约检查。

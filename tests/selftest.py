@@ -181,21 +181,84 @@ def main(argv=None):
               escaped["error"]["code"] == "E_USAGE", escaped)
 
         data = run(root, "check")["data"]
-        check(results, "check passes before init", data["ok"], data)
+        check(results, "check passes in a workspace with no ledger", data["ok"], data)
 
-        # A ledger from an older skill is refused, not half-used.
-        legacy = root / ".wiki"
-        legacy.mkdir()
-        legacy_db = sqlite3.connect(legacy / "wiki.db")
-        legacy_db.executescript(
-            "CREATE TABLE sources (key TEXT PRIMARY KEY, path TEXT, digest TEXT, size INTEGER,"
-            " mtime REAL, raw TEXT, parser TEXT, status TEXT, updated_at TEXT);"
-        )
-        legacy_db.close()
+        # 不需要 init：第一条打开账本的命令自己建库，并把补出来的路径列在 repaired
+        fresh = Path(tempfile.mkdtemp(prefix="llm-wiki-fresh-"))
+        try:
+            (fresh / "n.md").write_text("# 新库\n\n直接摄入。\n", encoding="utf-8")
+            born = run(fresh, "ingest")
+            check(results, "ingest works without init and reports what it repaired",
+                  born["ok"] and (fresh / ".wiki/wiki.db").exists() and born["data"].get("repaired"), born)
+        finally:
+            shutil.rmtree(fresh, ignore_errors=True)
+
+        # 只有配置没有库：普通命令当场建库，并把补出来的库文件列进 repaired
+        half = Path(tempfile.mkdtemp(prefix="llm-wiki-half-"))
+        try:
+            (half / ".wiki").mkdir()
+            (half / ".wiki/wiki.json").write_text("{}", encoding="utf-8")
+            (half / "h.md").write_text("# 半初始化\n\n直接摄入。\n", encoding="utf-8")
+            grew = run(half, "ingest")
+            check(results, "ingest fills a half-initialized workspace",
+                  grew["ok"] and (half / ".wiki/wiki.db").exists()
+                  and ".wiki/wiki.db" in grew["data"].get("repaired", []), grew)
+        finally:
+            shutil.rmtree(half, ignore_errors=True)
+
+        # 工作区不可写：E_HEALTH + 手册小节，不能是 traceback
+        locked = Path(tempfile.mkdtemp(prefix="llm-wiki-ro-"))
+        try:
+            locked.chmod(0o555)
+            if not os.access(locked, os.W_OK):
+                denied = run(locked, "status", expect=1)
+                error = denied.get("error", {})
+                check(results, "an unwritable workspace reports E_HEALTH with the manual section",
+                      error.get("code") == "E_HEALTH"
+                      and error.get("section") == "工作区不可写"
+                      and error.get("doc", "").endswith("/references/recovery.md")
+                      and "check" not in error.get("next", ""), denied)
+        finally:
+            locked.chmod(0o755)
+            shutil.rmtree(locked, ignore_errors=True)
+
+        def legacy_ledger(rows):
+            legacy = root / ".wiki"
+            legacy.mkdir(exist_ok=True)
+            conn = sqlite3.connect(legacy / "wiki.db")
+            conn.executescript(
+                "DROP TABLE IF EXISTS sources;"
+                "CREATE TABLE sources (key TEXT PRIMARY KEY, path TEXT, digest TEXT, size INTEGER,"
+                " mtime REAL, raw TEXT, parser TEXT, status TEXT, updated_at TEXT);"
+            )
+            conn.executemany("INSERT INTO sources (key) VALUES (?)", [(row,) for row in rows])
+            conn.commit()
+            conn.close()
+            return legacy
+
+        # 旧结构但没有数据：按当前结构重建，不算迁移
+        legacy_ledger([])
+        rebuilt = run(root, "status")
+        columns = [row[1] for row in sqlite3.connect(root / ".wiki/wiki.db").execute("PRAGMA table_info(sources)")]
+        check(results, "an empty old schema is rebuilt in place",
+              rebuilt["ok"] and "raw_digest" in columns, {"run": rebuilt, "columns": columns})
+
+        # 旧结构里有数据：拒绝继续，并指向恢复手册
+        legacy_ledger(["old.md"])
         broken = run(root, "status", expect=3)
-        check(results, "missing columns report E_STATE",
-              broken.get("error", {}).get("code") == "E_STATE", broken)
-        shutil.rmtree(legacy)
+        error = broken.get("error", {})
+        check(results, "rows in an old schema report E_STATE with the manual section",
+              error.get("code") == "E_STATE" and error.get("section") == "旧账本"
+              and error.get("doc", "").endswith("/references/recovery.md"), broken)
+
+        # 账本文件本身坏了：E_DB，不要当成旧结构
+        (root / ".wiki/wiki.db").write_bytes(b"not a database")
+        corrupt = run(root, "status", expect=3)
+        error = corrupt.get("error", {})
+        check(results, "a corrupt ledger reports E_DB with the manual section",
+              error.get("code") == "E_DB" and error.get("section") == "账本损坏", corrupt)
+
+        shutil.rmtree(root / ".wiki")
         shutil.rmtree(root / "wiki", ignore_errors=True)  # the probe touched the view too
 
         data = run(root, "init")["data"]

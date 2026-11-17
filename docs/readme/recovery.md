@@ -3,6 +3,23 @@
 原则：**`.wiki/wiki.db` 是账本与资产，观看区里的页面只是导出。** 旧版可以"删库重跑"，
 这一版不行：页面正文、修订、证据都在账本里。备份优先，重跑其次。
 
+按错误码逐条处置的速查表由技能自带，随安装一起分发：
+[references/recovery.md](../../skills/llm-wiki/references/recovery.md)。命令失败时错误对象里的
+`doc` 就指向这份文件，`section` 是其中的小节标题。
+
+## 零、命令自愈
+
+打开账本的命令（`init`、`ingest`、`next`、`submit`、`query`、`status` 等）会补齐缺的目录、
+缺的 `wiki.json`、缺的表，补了什么写在返回值的 `repaired`（路径数组，和 `created` 同形）。
+看到 `repaired` 不是故障，不要去手工补 `.wiki/`；`check`、`doctor` 只诊断，不修东西。
+
+不能自修的问题按错误码分开：`E_HEALTH`（运行时与安装、工作区不可写）、`E_STATE`（旧账本，
+或另一进程正持有同一份账本）、`E_CONFIG`、`E_DB`、`E_PATH`。每类的判断与手动步骤只在技能
+内手册里写一份：错误对象的 `doc` 是手册路径，`section` 是其中小节标题。
+
+两条与旧版不同的规矩：旧版本写过数据的账本不做迁移，只有 `E_STATE` 一条路；观看区的 `.md`
+是输出，没有反向导入索引的命令，所以删 `.wiki/` 之前先留档。
+
 ## 一、来源解析失败
 
 `ingest` 的 `unsupported` 给出后缀与提示，`oversize` 给出限额。按顺序处理：

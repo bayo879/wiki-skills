@@ -1,13 +1,16 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  Bootstrap llm-wiki on Windows: ensure Python 3.12, then install the skill.
+  Find a Python 3.12+ runtime on Windows and install the llm-wiki skill.
 
 .DESCRIPTION
-  Finds an existing Python 3.12 (per-user install, py -3.12, python, or python3).
-  If none is usable, downloads Python 3.12.8 from China mirrors (Huawei Cloud,
-  TUNA, npmmirror), falls back to the official source and then winget, installs
-  it per-user, refreshes PATH, and runs install.py.
+  Looks for an existing Python 3.12 or newer: the path given with -Python, a
+  per-user install under %LOCALAPPDATA%\Programs\Python, the py launcher, or
+  python/python3 on PATH (WindowsApps redirect stubs are skipped).
+
+  It never downloads or installs Python. When no suitable runtime is found it
+  writes one JSON error object to stdout and exits 1, so the caller can hand
+  the interpreter path over with -Python and rerun.
 
 .PARAMETER Target
   Passed to install.py --target. Defaults to auto.
@@ -16,28 +19,35 @@
   Passed to install.py --all.
 
 .PARAMETER DryRun
-  Check and print the plan only. Does not download, install, or copy.
+  Passed to install.py --dry-run: print the plan, copy nothing.
 
 .PARAMETER Force
   Passed to install.py --force.
+
+.PARAMETER Python
+  Path to a python.exe to use. Skips the search; the version is still checked.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Target "$env:USERPROFILE\.dsh\skills"
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Python C:\runtime\python.exe -Target "$env:USERPROFILE\.dsh\skills"
 #>
 [CmdletBinding()]
 param(
     [string]$Target = 'auto',
     [switch]$All,
     [switch]$DryRun,
-    [switch]$Force
+    [switch]$Force,
+    [string]$Python = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$MINIMUM = @(3, 12)
+$MINIMUM_TEXT = '3.12'
+$MANUAL = Join-Path (Split-Path $PSScriptRoot -Parent) 'references\recovery.md'
 
 function Write-Step {
     param([string]$Message)
@@ -50,9 +60,11 @@ function Write-Failure {
     $payload = [pscustomobject]@{
         ok = $false
         error = [pscustomobject]@{
-            code = $Code
+            code    = $Code
             message = $Message
-            next = $Next
+            next    = $Next
+            doc     = $MANUAL
+            section = '运行时与安装'
         }
     } | ConvertTo-Json -Depth 4 -Compress
     Write-Output $payload
@@ -80,24 +92,46 @@ function Get-PythonVersion {
     return $null
 }
 
-function Find-Python {
-    $directCandidates = @()
-    if ($env:LOCALAPPDATA) {
-        $directCandidates += (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe')
-    }
-    foreach ($direct in $directCandidates) {
-        if (-not (Test-Path $direct)) { continue }
-        $version = Get-PythonVersion -Exe $direct -PrefixArgs @()
-        if ($null -ne $version -and $version.Major -eq 3 -and $version.Minor -eq 12) {
-            return [pscustomobject]@{
-                Exe     = $direct
-                Args    = @()
-                Version = $version.Text
-            }
+function Test-NewEnough {
+    param($Version)
+    if ($null -eq $Version) { return $false }
+    return ($Version.Major -gt $MINIMUM[0]) -or
+        ($Version.Major -eq $MINIMUM[0] -and $Version.Minor -ge $MINIMUM[1])
+}
+
+function Test-Candidate {
+    param([string]$Exe, [string[]]$PrefixArgs = @())
+    if (-not $Exe) { return $null }
+    if (-not (Test-Path -LiteralPath $Exe)) { return $null }
+    $version = Get-PythonVersion -Exe $Exe -PrefixArgs $PrefixArgs
+    if (Test-NewEnough $version) {
+        return [pscustomobject]@{
+            Exe     = $Exe
+            Args    = @($PrefixArgs)
+            Version = $version.Text
         }
     }
+    return [pscustomobject]@{ Exe = $null; Args = @(); Version = $(if ($version) { $version.Text } else { $null }) }
+}
+
+function Find-Python {
+    $directs = @()
+    if ($env:LOCALAPPDATA) {
+        $root = Join-Path $env:LOCALAPPDATA 'Programs\Python'
+        if (Test-Path -LiteralPath $root) {
+            $directs += @(
+                Get-ChildItem -LiteralPath $root -Directory -Filter 'Python3*' -ErrorAction SilentlyContinue |
+                    Sort-Object Name -Descending |
+                    ForEach-Object { Join-Path $_.FullName 'python.exe' }
+            )
+        }
+    }
+    foreach ($direct in $directs) {
+        $found = Test-Candidate -Exe $direct
+        if ($found.Exe) { return $found }
+    }
     $candidates = @(
-        [pscustomobject]@{ Name = 'py';      Args = @('-3.12') },
+        [pscustomobject]@{ Name = 'py';      Args = @('-3') },
         [pscustomobject]@{ Name = 'python';  Args = @() },
         [pscustomobject]@{ Name = 'python3'; Args = @() }
     )
@@ -110,201 +144,51 @@ function Find-Python {
         if (-not $path) { continue }
         # Redirection stubs in WindowsApps are not usable runtimes.
         if ($path -like '*\WindowsApps\*') { continue }
-        $version = Get-PythonVersion -Exe $path -PrefixArgs $candidate.Args
-        if ($null -eq $version) { continue }
-        if ($version.Major -eq 3 -and $version.Minor -eq 12) {
-            return [pscustomobject]@{
-                Exe     = $path
-                Args    = $candidate.Args
-                Version = $version.Text
-            }
-        }
-        if ($null -eq $old) { $old = $version.Text }
+        $found = Test-Candidate -Exe $path -PrefixArgs $candidate.Args
+        if ($found.Exe) { return $found }
+        if ($found.Version -and -not $old) { $old = $found.Version }
     }
     return [pscustomobject]@{ Exe = $null; Args = @(); Version = $old }
 }
 
-function Refresh-Path {
-    $current = @($env:Path -split ';' | Where-Object { $_ })
-    foreach ($scope in @('Machine', 'User')) {
-        $value = [Environment]::GetEnvironmentVariable('Path', $scope)
-        if (-not $value) { continue }
-        foreach ($entry in @($value -split ';')) {
-            if (-not $entry) { continue }
-            if ($current -notcontains $entry) {
-                $env:Path = $env:Path + ';' + $entry
-                $current += $entry
-            }
-        }
-    }
-}
-
-function Get-PythonUrls {
-    param([string]$Arch)
-    $version = '3.12.8'
-    $file = "python-$version-$Arch.exe"
-    if (-not $Arch) { $file = "python-$version.exe" }
-    return @(
-        "https://mirrors.huaweicloud.com/python/$version/$file",
-        "https://mirrors.tuna.tsinghua.edu.cn/python/$version/$file",
-        "https://registry.npmmirror.com/-/binary/python/$version/$file",
-        "https://www.python.org/ftp/python/$version/$file"
-    )
-}
-
-function Save-PythonInstaller {
-    param([string]$Url, [string]$Path)
-    try {
-        Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
-    } catch {
-        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-        if ($null -eq $curl) { return $false }
-        $curlPath = $curl.Path
-        if (-not $curlPath) { $curlPath = $curl.Source }
-        & $curlPath -L --connect-timeout 15 --max-time 300 -o $Path $Url 2>$null
-        if ($LASTEXITCODE -ne 0) { return $false }
-    }
-    if (-not (Test-Path $Path)) { return $false }
-    try {
-        $item = Get-Item $Path
-        if ($item.Length -lt 1MB) { return $false }
-        $stream = [IO.File]::OpenRead($Path)
-        try {
-            $buffer = New-Object byte[] 2
-            $read = $stream.Read($buffer, 0, 2)
-            if ($read -lt 2) { return $false }
-            # Reject HTML error pages saved by a proxy or a login redirect.
-            return ($buffer[0] -eq 0x4D -and $buffer[1] -eq 0x5A)
-        } finally {
-            $stream.Close()
-        }
-    } catch {
-        return $false
-    }
-}
-
-function Install-Python {
-    param([string]$Arch, [string[]]$Urls)
-    $dir = Join-Path $env:TEMP 'llm-wiki-bootstrap'
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    $fileName = Split-Path -Leaf $Urls[0]
-    $installer = Join-Path $dir $fileName
-    foreach ($url in $Urls) {
-        Write-Step "trying $url"
-        if (-not (Save-PythonInstaller -Url $url -Path $installer)) {
-            Write-Step 'download failed or the file is not a Windows installer'
-            continue
-        }
-        Write-Step 'installing Python 3.12.8 for the current user'
-        Unblock-File -Path $installer -ErrorAction SilentlyContinue
-        $arguments = @(
-            '/quiet',
-            'InstallAllUsers=0',
-            'PrependPath=1',
-            'Include_test=0',
-            'Include_doc=0',
-            'Include_dev=0',
-            'Include_tcltk=0',
-            'Include_launcher=1'
-        )
-        try {
-            $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
-        } catch {
-            Write-Step "could not start the installer: $($_.Exception.Message)"
-            continue
-        }
-        if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
-            Refresh-Path
-            $found = Find-Python
-            if ($found.Exe) { return $found }
-            $direct = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'
-            if (Test-Path $direct) {
-                $version = Get-PythonVersion -Exe $direct -PrefixArgs @()
-                if ($null -ne $version -and $version.Major -eq 3 -and $version.Minor -eq 12) {
-                    return [pscustomobject]@{
-                        Exe     = $direct
-                        Args    = @()
-                        Version = $version.Text
-                    }
-                }
-            }
-        } else {
-            Write-Step "installer exited with code $($process.ExitCode)"
-        }
-    }
-    return $null
-}
-
-function Install-PythonWithWinget {
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if ($null -eq $winget) { return $null }
-    $wingetPath = $winget.Path
-    if (-not $wingetPath) { $wingetPath = $winget.Source }
-    Write-Step 'falling back to winget'
-    & $wingetPath install --id Python.Python.3.12 -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Step "winget exited with code $LASTEXITCODE"
-        return $null
-    }
-    Refresh-Path
-    return Find-Python
-}
-
 try {
-$arch = 'amd64'
-if ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64') { $arch = 'amd64' }
-elseif ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { $arch = 'arm64' }
-elseif ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { $arch = 'arm64' }
-elseif ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $arch = '' }
-$urls = Get-PythonUrls -Arch $arch
-
-$python = Find-Python
-if (-not $python.Exe) {
-    if ($python.Version) {
-        Write-Step "found Python $($python.Version), but this bootstrap requires 3.12"
+    if ($Python) {
+        $python = Test-Candidate -Exe $Python
+        if (-not $python.Exe) {
+            $seen = if ($python.Version) { " found version $($python.Version);" } else { '' }
+            Write-Failure -Code 'E_PYTHON' `
+                -Message "the interpreter given with -Python is not usable:$seen need $MINIMUM_TEXT+ at $Python" `
+                -Next "pass the python.exe of the runtime your agent already ships with -Python, or install Python $MINIMUM_TEXT+ and rerun"
+        }
+    } else {
+        $python = Find-Python
+        if (-not $python.Exe) {
+            $seen = if ($python.Version) { " newest found is $($python.Version)," } else { '' }
+            Write-Failure -Code 'E_PYTHON' `
+                -Message "no Python $MINIMUM_TEXT+ runtime was found;$seen nothing was downloaded because this script does not install Python" `
+                -Next "pass -Python <path-to-python.exe> (for example the interpreter your agent ships), or install Python $MINIMUM_TEXT+ and rerun"
+        }
     }
-    if ($DryRun) {
-        $plan = [pscustomobject]@{
-            ok     = $true
-            action = 'would-install-python'
-            version = '3.12.8'
-            arch   = $arch
-            urls   = $urls
-        } | ConvertTo-Json -Depth 4 -Compress
-        Write-Output $plan
-        exit 0
+    Write-Step "using Python $($python.Version) at $($python.Exe)"
+
+    $installer = Join-Path $PSScriptRoot 'install.py'
+    if (-not (Test-Path -LiteralPath $installer)) {
+        Write-Failure -Code 'E_INSTALLER' -Message 'install.py was not found next to bootstrap.ps1.' -Next 'run bootstrap.ps1 from the llm-wiki scripts directory'
     }
-    Write-Step 'Python 3.12 not found; trying China mirrors'
-    $python = Install-Python -Arch $arch -Urls $urls
-    if (-not $python.Exe) {
-        $python = Install-PythonWithWinget
-    }
-}
-if (-not $python.Exe) {
-    Write-Failure -Code 'E_PYTHON' -Message 'Python 3.12 is required but was not found or installed.' -Next 'Install Python 3.12 manually from https://www.python.org/downloads/windows/ (select Add python.exe to PATH), then rerun bootstrap.ps1.'
-}
-Write-Step "using Python $($python.Version) at $($python.Exe)"
 
-$installer = Join-Path $PSScriptRoot 'install.py'
-if (-not (Test-Path $installer)) {
-    Write-Failure -Code 'E_INSTALLER' -Message 'install.py was not found next to bootstrap.ps1.' -Next 'Run bootstrap.ps1 from the llm-wiki scripts directory.'
-}
+    # Keep JSON and non-ASCII paths stable when the agent captures stdout.
+    $env:PYTHONUTF8 = '1'
+    $env:PYTHONIOENCODING = 'utf-8'
 
-# Keep JSON and non-ASCII paths stable when the agent captures stdout.
-$env:PYTHONUTF8 = '1'
-$env:PYTHONIOENCODING = 'utf-8'
+    $installerArgs = @($installer, '--json')
+    if ($Target -ne 'auto') { $installerArgs += @('--target', $Target) }
+    if ($All) { $installerArgs += '--all' }
+    if ($DryRun) { $installerArgs += '--dry-run' }
+    if ($Force) { $installerArgs += '--force' }
 
-$installerArgs = @($installer, '--json')
-if ($Target -ne 'auto') { $installerArgs += @('--target', $Target) }
-if ($All) { $installerArgs += '--all' }
-if ($DryRun) { $installerArgs += '--dry-run' }
-if ($Force) { $installerArgs += '--force' }
-
-$pythonArgs = @()
-if ($python.Args) { $pythonArgs = @($python.Args) }
-$allArgs = $pythonArgs + $installerArgs
-& $python.Exe @allArgs
-exit $LASTEXITCODE
+    $allArgs = @($python.Args) + $installerArgs
+    & $python.Exe @allArgs
+    exit $LASTEXITCODE
 } catch {
-    Write-Failure -Code 'E_BOOTSTRAP' -Message $_.Exception.Message -Next 'Rerun bootstrap.ps1 -DryRun to inspect the plan. If it still fails, install Python 3.12 manually and run install.py.'
+    Write-Failure -Code 'E_BOOTSTRAP' -Message $_.Exception.Message -Next 'rerun with -DryRun to inspect the plan; if it still fails, run install.py with the same interpreter yourself'
 }

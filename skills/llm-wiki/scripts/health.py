@@ -1,8 +1,12 @@
 """Runtime self-check for an installed llm-wiki skill.
 
-This is deliberately small: it verifies the interpreter, the files an installed
-copy must contain, the workspace probe, and the existing ledger when there is
-one. The end-to-end test suite lives in tests/selftest.py and is not shipped.
+Two kinds of checks live here, and they are not interchangeable:
+
+- 安装级：解释器版本、技能文件是否齐全、工作区是否可写。修不了，要人处理。
+- 账本级：账本缺失、缺表、缺列、缺配置。引擎在打开账本时自己补齐。
+
+`require_install` 只跑前者；后者只用于 `check` / `doctor` 的诊断输出，任何命令都不会
+因为它拒绝执行。The end-to-end test suite lives in tests/selftest.py and is not shipped.
 """
 
 from __future__ import annotations
@@ -13,7 +17,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from errors import WikiError
+from errors import MANUAL_PATH, WikiError
+from ledger import REQUIRED_COLUMNS, TABLES
 from runtime import MINIMUM, MINIMUM_TEXT
 
 SCRIPT_FILES = (
@@ -37,8 +42,17 @@ SCRIPT_FILES = (
     "health.py",
 )
 TEMPLATES = ("concept.md", "entity.md", "process.md", "note.md")
+REFERENCES = ("curation.md", "recovery.md")
 BUILTIN_SCENARIOS = ("topic-exploration",)
-TABLES = ("sources", "raws", "page_revs", "tasks", "task_sources", "links")
+
+LEDGER_OK = "ok"
+LEDGER_REPAIRABLE = "repairable"
+LEDGER_BROKEN = "broken"
+
+INSTALL_NEXT = {
+    "python": f"install Python {MINIMUM_TEXT}+ and rerun; on Windows run scripts\\bootstrap.ps1",
+    "workspace": "run the command from a writable directory inside the workspace",
+}
 
 
 def _check(name, fn):
@@ -73,50 +87,78 @@ def _workspace_probe(workspace):
                 pass
 
 
-def _ledger_probe(workspace, deep, allow_missing):
+def _column_gaps(conn, tables):
+    gaps = []
+    for table, columns in REQUIRED_COLUMNS:
+        if table not in tables:
+            continue
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        missing = [name for name in columns if name not in present]
+        if missing:
+            gaps.append(f"{table}({', '.join(missing)})")
+    return gaps
+
+
+def _has_rows(conn, tables):
+    for table in TABLES:
+        if table in tables and conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+            return True
+    return False
+
+
+def _ledger_probe(workspace, deep):
+    """Return (state, detail); state is ok, repairable, or broken.
+
+    Repairable means the next command that opens the ledger can fix it without
+    losing anything; broken means it needs a human and a backup.
+    """
     wiki_dir = workspace / ".wiki"
     db = wiki_dir / "wiki.db"
     config = wiki_dir / "wiki.json"
     if not wiki_dir.exists():
-        return True, "no wiki yet"
+        return LEDGER_OK, "no wiki yet"
     if not db.is_file():
         if not config.is_file():
-            # 只有锁文件、任务目录这类工作区脚手架，没有账本也没有配置：
-            # 等同于未初始化，init/ingest 会建库。
-            return True, "no ledger yet"
-        if allow_missing:
-            return True, "ledger missing; init will create it"
-        return False, f"{wiki_dir} exists but wiki.db is missing"
+            # 只有锁文件、任务目录这类工作区脚手架，没有账本也没有配置：等同于未初始化。
+            return LEDGER_OK, "no ledger yet"
+        return LEDGER_REPAIRABLE, f"{wiki_dir} has no wiki.db; the next command creates it"
     if not config.is_file():
-        if allow_missing:
-            return True, "config missing; init will recreate it"
-        return False, f"{wiki_dir} exists but wiki.json is missing"
+        return LEDGER_REPAIRABLE, "wiki.json is missing; the next command recreates it"
+    conn = None
     try:
         conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
-        try:
-            if deep:
-                integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-                if integrity != "ok":
-                    return False, f"database integrity: {integrity}"
-            names = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
-            }
-            if not deep:
-                conn.execute("SELECT 1 FROM tasks LIMIT 1").fetchone()
-        finally:
-            conn.close()
+        if deep:
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            if integrity != "ok":
+                return LEDGER_BROKEN, f"database integrity: {integrity}"
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        missing = sorted(set(TABLES) - tables)
+        if missing:
+            return LEDGER_REPAIRABLE, f"missing tables: {', '.join(missing)}"
+        gaps = _column_gaps(conn, tables)
+        if gaps:
+            if _has_rows(conn, tables):
+                return LEDGER_BROKEN, f"schema is older than this skill: {', '.join(gaps)}"
+            return LEDGER_REPAIRABLE, f"empty tables with an older schema: {', '.join(gaps)}"
+        return LEDGER_OK, "integrity ok" if deep else "readable"
     except sqlite3.DatabaseError as error:
-        return False, f"database unreadable: {error}"
-    missing = sorted(set(TABLES) - names)
-    if missing:
-        return False, f"missing tables: {', '.join(missing)}"
-    return True, "integrity ok" if deep else "readable"
+        return LEDGER_BROKEN, f"database unreadable: {error}"
+    finally:
+        if conn is not None:
+            conn.close()
 
 
-def check_installation(skill_dir, workspace, deep=True, allow_missing=False):
+def _ledger_check(workspace, deep):
+    state, detail = _ledger_probe(workspace, deep)
+    if state == LEDGER_REPAIRABLE:
+        return True, f"repairable: {detail}"
+    return state == LEDGER_OK, detail
+
+
+def check_installation(skill_dir, workspace, deep=True, include_ledger=True):
     """Return one report; every check runs even if an earlier one failed."""
     skill_dir = Path(skill_dir)
     workspace = Path(workspace)
@@ -158,6 +200,16 @@ def check_installation(skill_dir, workspace, deep=True, allow_missing=False):
                 ),
             )
         )
+    for name in REFERENCES:
+        checks.append(
+            _check(
+                f"reference:{name}",
+                lambda name=name: (
+                    (skill_dir.parent / "references" / name).is_file(),
+                    str(skill_dir.parent / "references" / name),
+                ),
+            )
+        )
     for name in BUILTIN_SCENARIOS:
         checks.append(
             _check(
@@ -169,22 +221,36 @@ def check_installation(skill_dir, workspace, deep=True, allow_missing=False):
             )
         )
     checks.append(_check("workspace", lambda: _workspace_probe(workspace)))
-    checks.append(_check("ledger", lambda: _ledger_probe(workspace, deep, allow_missing)))
+    if include_ledger:
+        checks.append(_check("ledger", lambda: _ledger_check(workspace, deep)))
     return {
         "ok": all(item["ok"] for item in checks),
+        "doc": str(MANUAL_PATH),
         "checks": checks,
     }
 
 
-def require(skill_dir, workspace, allow_missing=False):
-    """Raise E_HEALTH before a state-changing command if any check fails."""
-    report = check_installation(skill_dir, workspace, deep=False, allow_missing=allow_missing)
+def _next_for(name):
+    if name in INSTALL_NEXT:
+        return INSTALL_NEXT[name]
+    if name.startswith(("file:", "template:", "scenario:", "reference:")):
+        return "reinstall the skill so its files are complete, then rerun"
+    return "fix the reported item, then rerun"
+
+
+def require_install(skill_dir, workspace):
+    """Raise E_HEALTH for problems no command can repair by itself."""
+    report = check_installation(
+        skill_dir, workspace, deep=False, include_ledger=False
+    )
     if report["ok"]:
         return report
     failed = next(item for item in report["checks"] if not item["ok"])
+    section = "工作区不可写" if failed["name"] == "workspace" else "运行时与安装"
     raise WikiError(
         "E_HEALTH",
         f"self-check failed: {failed['name']}: {failed['detail']}",
-        "run `wiki.py check --json`; reinstall the skill if files are missing",
+        _next_for(failed["name"]),
         1,
+        section=section,
     )

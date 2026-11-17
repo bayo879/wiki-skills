@@ -52,12 +52,17 @@ from workspace import (
 )
 
 
-VERSION = "0.4.1"
+VERSION = "0.4.3"
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+# 当前命令打开账本时补齐的东西；emit 把它作为 repaired 输出。
+REPAIRED = []
 
 
 def emit(cmd, root, summary, data, human_lines, ok=True):
     if ARGS.json:
+        if REPAIRED:
+            data = dict(data, repaired=list(REPAIRED))
         payload = {
             "ok": ok,
             "cmd": cmd,
@@ -80,11 +85,7 @@ def fail(cmd, root, error):
             "cmd": cmd,
             "version": VERSION,
             "root": str(root),
-            "error": {
-                "code": error.code,
-                "message": error.message,
-                "next": error.next_step,
-            },
+            "error": error.as_dict(),
         }
         sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     else:
@@ -112,6 +113,7 @@ def open_wiki(require_sources=False, dry_run=False, push=True):
     else:
         wiki = Wiki(root)
     created = wiki.ensure(push=push)
+    REPAIRED[:] = created
     if require_sources and not wiki.all_sources():
         raise WikiError(
             "E_EMPTY",
@@ -121,8 +123,8 @@ def open_wiki(require_sources=False, dry_run=False, push=True):
         )
     return wiki, created
 
-def require_health(allow_missing=False):
-    health.require(Path(__file__).resolve().parent, Path.cwd(), allow_missing=allow_missing)
+def require_install():
+    health.require_install(Path(__file__).resolve().parent, Path.cwd())
 
 def command_check():
     report = health.check_installation(Path(__file__).resolve().parent, Path.cwd())
@@ -140,12 +142,11 @@ def command_check():
     return 0 if report["ok"] else 1
 
 def command_init():
-    require_health(allow_missing=True)
+    require_install()
     wiki, created = open_wiki()
     rows = wiki.all_sources()
     pages = wiki.all_pages()
     data = {
-        "created": created,
         "config": norm_key(wiki.config_path.relative_to(wiki.root)),
         "pages": len(pages),
         "sources": len(rows),
@@ -161,7 +162,7 @@ def command_init():
     return 0
 
 def command_ingest():
-    require_health()
+    require_install()
     wiki, _ = open_wiki(dry_run=ARGS.dry_run)
     wiki.cleanup_task_dirs()
     limit = int(wiki.config["ingest"].get("max_source_bytes", 50_000_000))
@@ -428,7 +429,7 @@ def command_status():
     return 0
 
 def command_next():
-    require_health()
+    require_install()
     wiki, _ = open_wiki()
     wiki.cleanup_task_dirs()
     batch = ARGS.batch or 1
@@ -493,7 +494,7 @@ def read_payload(wiki, row):
         )
 
 def command_submit():
-    require_health()
+    require_install()
     wiki, _ = open_wiki()
     task_id = ARGS.id
     row = wiki.task_row(task_id)

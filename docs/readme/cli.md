@@ -5,14 +5,16 @@
 标准库。
 
 除 `check`、`version`、`scenario` 外，命令启动时会准备 `.wiki/` 与观看区 `<view>/`
-（`publish.dir`，默认 `wiki/`），并按账本推送一次；`sync` 例外，它只回收、不推送。
+（`publish.dir`，默认 `wiki/`）：缺的目录、缺的 `wiki.json`、缺的账本表当场补齐，补了什么
+列在 `data.repaired`（路径数组，和 `created` 同形），并按账本推送一次；`sync` 例外，它只
+回收、不推送。
 
 ## 输出信封
 
 成功：
 
 ```json
-{"ok": true, "cmd": "next", "version": "0.4.1", "root": "/abs/root",
+{"ok": true, "cmd": "next", "version": "0.4.3", "root": "/abs/root",
  "summary": "1 task(s) ready; read each brief, fill its payload.json, then submit",
  "data": {…}}
 ```
@@ -20,15 +22,19 @@
 失败：
 
 ```json
-{"ok": false, "cmd": "submit", "version": "0.4.1", "root": "/abs/root",
+{"ok": false, "cmd": "submit", "version": "0.4.3", "root": "/abs/root",
  "error": {"code": "E_EVIDENCE_NOT_FOUND", "message": "quote not found in docs/a.md: '…'",
            "next": "re-read the raw source and copy an exact sentence"}}
 ```
 
+致命错误（`E_HEALTH`、`E_STATE`、`E_CONFIG`、`E_DB`、`E_PATH`）的错误对象另带两项：
+`doc` 是恢复手册的绝对路径（`references/recovery.md`），`section` 是手册里的对应小节标题。
+先按 `next` 处理，不够再读那一节。
+
 不加 `--json` 时输出人类可读文本，错误写 stderr。
 
 退出码：`0` 成功；`1` 有阻断项（解析失败、超限、数据库损坏）；`2` 用法或载荷错误；
-`3` 状态不满足（任务过期、来源漂移、页面冲突）。
+`3` 状态不满足（任务过期、来源漂移、页面冲突、旧账本）；`4` 工作区被另一个进程占用。
 
 ## 语义模型
 
@@ -59,16 +65,22 @@
 
 ### check
 
-检查当前安装的运行时：Python 3.12+、技能必需文件与模板、工作区可写、已有账本可读。
-不创建 `.wiki/`，不读写页面内容。`data`: `{ok, checks[{name,ok,detail}]}`；`ok` 与退出码
-一致（`0` 通过，`1` 有失败项）。`init`、`ingest`、`next`、`submit` 会先做同一项轻量检查，
-失败返回 `E_HEALTH`。`check` 是安装/日常流程的门禁；完整回归测试在仓库的
-`tests/selftest.py`，不随技能分发。
+只读诊断：Python 3.12+、技能必需文件与模板、场景与手册文件、工作区可写、已有账本可读。
+不创建 `.wiki/`，不读写页面内容，也不修任何东西。`data`: `{ok, doc, checks[{name,ok,detail}]}`；
+`doc` 是恢复手册路径，失败时用它找到对应小节；`ok` 与退出码一致（`0` 通过，`1` 有失败项）。
+账本项可以给出 `repairable`（结构能补，例如有 `wiki.json` 却缺 `wiki.db`）：仍算通过，
+`detail` 以 `repairable:` 开头，下一条打开账本的命令会补上。
+
+`check` 不是前置门禁：`init`、`ingest`、`next`、`submit`、`release` 只做安装级检查
+（解释器、技能文件、工作区可写），失败返回 `E_HEALTH`；账本缺失或残缺在打开账本时自愈。
+完整回归测试在仓库的 `tests/selftest.py`，不随技能分发。
 
 ### init
 
 创建 `.wiki/`（`wiki.db`、`wiki.json`、`tasks/`、`drafts/`），并准备
-观看区 `<view>/` 与 `<view>/raw/`。`data`: `{created, config, pages, sources, open_tasks}`。
+观看区 `<view>/` 与 `<view>/raw/`。不是前置步骤：任何打开账本的命令都会补同样的东西；
+只建库、暂不摄入时才单独跑。`data`: `{config, pages, sources, open_tasks}`，本次补出的
+路径在 `data.repaired`。
 
 ### ingest
 
@@ -299,7 +311,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_TASK_STALE` | 任务已关闭或租约过期 | 重新 `next`，丢弃旧载荷；来源变化导致的过期是 `E_SOURCE_DRIFT` |
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
 | `E_TASK_CONFLICT` | 来源已属于另一棵未关闭的页面任务树（同一次 route 拆页除外） | 先完成或关闭那个页面任务；拆页请放在同一次 route 提交里 |
-| `E_STATE` | 状态不满足：账本结构过旧、观看区路径不是目录、页面正被其他任务写 | 按 message 处理，不要手改账本 |
+| `E_STATE` | 状态不满足：旧账本（有数据的旧结构）、观看区路径不是目录、页面正被其他任务写 | 旧库按恢复手册「旧账本」：备份后删 `.wiki/` 重新 `ingest`；其余按 message 处理，不要手改账本 |
 | `E_META_CHANGED` | `sync` 时观看区页面的 `title`/`type`/`summary`/`sources` 与账本不一致 | 只收正文加 `--body-only`；确实要改元数据用 `page import`（手改未收割时改名会被冻结） |
 | `E_DUPLICATE` | `sync` 时同一页面 id 在观看区出现两次 | 删掉重复文件后重跑 |
 | `E_PAGE_CONFLICT` | 页面已存在（new）或版本已变（update） | 重新领任务，基于当前 rev 重写 |
@@ -313,11 +325,11 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_EMPTY` | 还没有任何来源 | 先 `ingest` |
 | `E_NOT_FOUND` | 页面、版本、场景或文件不存在 | 用 `query`/`read`/`scenario list` 定位 |
 | `E_PATH` | 路径越出工作区根目录 | 用工作区内路径；资料在区外时切换工作区 |
-| `E_CONFIG` | `.wiki/wiki.json` 非法 | 按提示修正 JSON |
+| `E_CONFIG` | `.wiki/wiki.json` 非法，或 `publish.dir` 不合规 | 修正 JSON，或删掉让它按默认重建；见「配置损坏」 |
 | `E_SCENARIO_INVALID` | 场景缺主文件、`description`、正文，或超过 200000 字符 | 按 `scenario list` 的 `error` 修正场景目录 |
 | `E_SOURCE_TOO_LARGE` | 单文件超过 `max_source_bytes` | 调高阈值或拆分来源 |
-| `E_DB` | 数据库不可读 | 从备份恢复，不要手改 |
-| `E_HEALTH` | 安装自检未通过 | 运行 `check --json`；缺文件时重装技能 |
+| `E_DB` | 账本打不开或完整性检查失败 | 停写，从备份恢复整个 `.wiki/`；见「账本损坏」 |
+| `E_HEALTH` | 安装检查未通过：解释器太旧、技能文件缺失、工作区不可写 | 按 `error.next`；见「运行时与安装」 |
 | `E_BUSY` | 另一个 wiki 进程正占着工作区文件锁 `.wiki/lock` | 等它结束再重试；确认它已崩溃才删锁 |
 
 ## 配置

@@ -25,34 +25,39 @@ description: 把工作区里的本地文档整理成可检索、可追溯的 Mar
 
 ## 运行时
 
-命令示例用 `python3`（项目基线 Python 3.12）。Windows 没有 `python3` 时改用 `py -3.12` 或指向 3.12 的 `python`；首次使用可运行
-`scripts\bootstrap.ps1` 检查/安装 Python 3.12 并把技能放到 agent 的技能目录。安装只在
-技能目录外进行，不要把它当成 wiki 任务的一步。
-
-## 自检
-
-安装后、建库前，以及每次开始日常操作前，先运行：
-
-```bash
-python3 <skill>/scripts/wiki.py check --json
-```
-
-只有返回 `ok: true` 才能继续 `init`、`ingest`、`next` 或 `submit`。`ok: false` 时停止，
-把 `data.checks` 里失败项告诉用户；不要跳过自检，也不要用 `doctor` 或手改 `.wiki/`
-绕过。`check` 只检查解释器、技能文件、工作区可写和现有账本可读，不接触真实页面内容。
-`init`、`ingest`、`next`、`submit` 也会先做同一项轻量检查；失败返回 `E_HEALTH`，按
-`error.next` 处理。
+命令示例用 `python3`（项目基线 Python 3.12，更新的 3.x 也能用）。Windows 没有 `python3` 时改用
+`py -3.12` 或指向 3.12+ 的 `python`；首次使用可运行 `scripts\bootstrap.ps1`，它查找已有的
+Python 3.12+（agent 自带运行时用 `-Python <python.exe>` 指定）并把技能放进 agent 的技能目录。
+脚本不下载、不安装 Python；放置只在技能目录外进行，不要把它当成 wiki 任务的一步。
 
 ## 建库或增量摄入
 
+不需要先跑 `check` 或 `init`：打开账本的命令发现缺目录、缺配置、缺表会当场补齐，补了什么
+写在返回值的 `repaired` 里。直接干活：
+
 ```bash
-python3 <skill>/scripts/wiki.py init --json
 python3 <skill>/scripts/wiki.py ingest --json
 ```
 
 `ingest` 扫描当前工作区，把新增或变化的文件排成任务。已有 wiki 重复执行即可；不要为了
 “刷新”而删 `.wiki/`。返回的 `queue.open` 是摄入后的未完成任务数：大于 0 就继续 `next`，
-为 0 就不用再取。
+为 0 就不用再取。只建库不摄入才用 `init`，它不是前置步骤。
+
+`check` 与 `doctor` 只是诊断，不修东西：跑不动时再用它们定位，不要当日常步骤。空目录里
+跑命令会建出空账本，这是正常的，不是“脏数据”。
+
+出错时错误对象带 `code`、`message`、`next`，以及 `doc`（恢复手册绝对路径）和 `section`
+（手册里的小节标题）：先按 `next` 处理，`next` 不够就打开 `doc` 读 `section` 那一节。
+
+| 错误码 | 手册小节 |
+| --- | --- |
+| `E_HEALTH` | 运行时与安装 / 工作区不可写 |
+| `E_STATE` | 旧账本 |
+| `E_CONFIG` | 配置损坏 |
+| `E_DB` | 账本损坏 |
+| `E_PATH` | 工作区边界 |
+
+完整处置与「何时停下来问人」见 [references/recovery.md](references/recovery.md)。
 
 ## 取任务
 
