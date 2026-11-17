@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
+from pathlib import Path
 
 import scenarios
+import topics
 from errors import WikiError
-from pages import EVIDENCE_HEADING, meta_mismatch, split_evidence
-from util import digest_text, write_atomic
+from pages import EVIDENCE_HEADING, meta_mismatch, split_evidence, view_name
+from util import digest_text, norm_key, write_atomic
+from workspace import window_safe
 
 
 def render_view_readme(wiki, records=None):
@@ -114,3 +118,132 @@ def sync_view_file(wiki, item, target, body_only, warnings=None):
         item["path"].unlink()
     wiki.set_view_facts(page_id, rev, target, digest_text(text))
     return "imported"
+
+
+class ViewMixin:
+    """把账本推成观看区，并把用户的改动吸收回账本；由 Wiki 组合。"""
+
+    def sync_view(self):
+        """Push the ledger into the view tree; return one line per action."""
+        if not self.config["publish"]["enabled"]:
+            return []
+        events = []
+        # raw/ 由 ingest 维护：这里只保证目录存在，绝不写、删其中任何文件。
+        self.publish_raw_dir.mkdir(parents=True, exist_ok=True)
+        records = self.all_pages()
+        self._sync_view_pages(events, records)
+        publish = self.config["publish"]
+        if publish.get("topics", True):
+            self._seed_view_topics(events)
+        if publish.get("scenarios", True):
+            self._seed_view_scenarios(events)
+        write_atomic(self.publish_dir / "README.md", render_view_readme(self, records))
+        events.append("README.md rewritten")
+        return events
+
+    def _view_targets(self, records):
+        """Publish path per page for one snapshot; same rules as view_relpath."""
+        shared = {}
+        for record in records:
+            key = (record["meta"].get("type"),
+                   view_name(record["meta"].get("title"), record["id"]))
+            shared[key] = shared.get(key, 0) + 1
+        targets = {}
+        for record in records:
+            meta = record["meta"]
+            base = view_name(meta.get("title"), record["id"])
+            relpath = f"pages/{meta['type']}/{base}.md"
+            taken = shared[(meta.get("type"), base)] > 1 or (
+                (self.publish_dir / relpath).exists() and record["view_path"] != relpath
+            )
+            if taken:
+                relpath = f"pages/{meta['type']}/{base} ({record['id']}).md"
+            targets[record["id"]] = relpath
+        return targets
+
+    def _sync_view_pages(self, events, records):
+        """Publish every page; a hand-edited copy is skipped, never overwritten."""
+        base = self.publish_dir.resolve()
+        targets = self._view_targets(records)
+        for record in records:
+            target = targets[record["id"]]
+            desired = self.view_text(record)
+            target_digest = digest_text(desired)
+            published = record["view_path"]
+            known = record["view_digest"]
+            target_path = self.publish_dir / target
+            old_path = self.publish_dir / published if published else None
+            if not window_safe(base, target_path.resolve()) or (
+                    old_path is not None and not window_safe(base, old_path.resolve())):
+                events.append(f"warning: skip {record['id']}: view path escapes the publish dir")
+                continue
+            old_text = old_path.read_text(encoding="utf-8") if old_path and old_path.is_file() else None
+            target_text = target_path.read_text(encoding="utf-8") if target_path.is_file() else None
+
+            if old_text is not None and digest_text(old_text) != known:
+                # P 被手改。唯一例外：Q == P 且磁盘恰好已是 T —— 那不是手改，是我们上次
+                # 写完还没来得及回写事实（崩溃窗口），直接补事实，不覆盖任何东西。
+                if target == published and target_text == desired:
+                    self._publish_facts(record, target, target_digest, events)
+                else:
+                    events.append(
+                        f"warning: {record['id']} was edited by hand at {published}; "
+                        "published copy left alone (run `sync` to absorb it)"
+                    )
+                continue
+
+            if target_text != desired:  # 已等于 T 时只补事实
+                write_atomic(target_path, desired)
+                events.append(f"{target} written")
+            if published and published != target and old_text is not None \
+                    and digest_text(old_text) == known:
+                old_path.unlink()
+                events.append(f"{published} removed")
+            self._publish_facts(record, target, target_digest, events)
+
+    def _publish_facts(self, record, view_path, view_digest, events):
+        if record["view_path"] == view_path and record["view_digest"] == view_digest:
+            return
+        self.set_view_facts(record["id"], record["rev"], view_path, view_digest)
+        record["view_path"] = view_path
+        record["view_digest"] = view_digest
+        events.append(f"{record['id']} facts updated")
+
+    def set_view_facts(self, page_id, rev, view_path, view_digest):
+        """Record what is now published for one revision (R1)."""
+        self.conn.execute(
+            "UPDATE page_revs SET view_path = ?, view_digest = ? "
+            "WHERE page = ? AND rev = ?",
+            (view_path, view_digest, page_id, rev),
+        )
+        self.conn.commit()
+
+    def _seed_view_topics(self, events):
+        """Copy each topic once; afterwards the copy belongs to the user."""
+        destination = self.publish_dir / "topics"
+        for entry in topics.scan(self.root):
+            source = self.root / entry["path"]
+            target = destination / Path(entry["path"]).name
+            if target.exists():
+                continue
+            if not window_safe(self.root, source.resolve()):
+                events.append(f"warning: skip topic {entry['path']}: source escapes the workspace")
+                continue
+            destination.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            events.append(f"{norm_key(target.relative_to(self.root))} seeded")
+
+    def _seed_view_scenarios(self, events):
+        """Copy each project scenario once; built-in scenarios never enter the view."""
+        destination = self.publish_dir / "scenarios"
+        for entry in scenarios.scan(self.root, builtin=False):
+            source = self.root / entry["path"]
+            target = destination / entry["id"]
+            if target.exists() or not source.is_dir():
+                continue
+            if not window_safe(self.root, source.resolve()):
+                events.append(f"warning: skip scenario {entry['id']}: source escapes the workspace")
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, target)
+            events.append(f"{norm_key(target.relative_to(self.root))} seeded")

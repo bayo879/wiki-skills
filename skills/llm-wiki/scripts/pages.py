@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import date
 
 from frontmatter import yaml_scalar
-from util import digest_text
+from util import digest_text, norm_key, now_iso
 
 
 VIEW_NAME_LIMIT = 60
 
-
 VIEW_NAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f-\x9f]')
-
 
 EVIDENCE_HEADING = "## 证据"
 
-
 EVIDENCE_ROW = re.compile(r"^- `([^`]+)`：(.+)$")
-
 
 LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 
@@ -96,3 +94,174 @@ def meta_mismatch(file_meta, record_meta):
     if set(file_meta.get("sources") or []) != set(record_meta.get("sources") or []):
         changed.append("sources")
     return changed
+
+
+class PagesMixin:
+    """页面记录、修订与链接索引；由 Wiki 组合，不自带初始化。"""
+
+    def latest_rev_row(self, page_id):
+        return self.conn.execute(
+            "SELECT * FROM page_revs WHERE page = ? ORDER BY rev DESC LIMIT 1",
+            (page_id,),
+        ).fetchone()
+
+    def page_record(self, page_id):
+        row = self.latest_rev_row(page_id)
+        if not row:
+            return None
+        return self._page_row_to_record(row)
+
+    def _page_row_to_record(self, row):
+        """One ledger row as a page record, including the published view facts."""
+        meta = json.loads(row["meta"])
+        meta["status"] = self.computed_status(meta)
+        return {
+            "id": row["page"],
+            "rev": row["rev"],
+            "meta": meta,
+            "body": row["body"],
+            "digest": row["digest"],
+            "render_digest": row["render_digest"],
+            "origin": row["origin"],
+            "view_digest": row["view_digest"],
+            "view_path": row["view_path"],
+        }
+
+    def all_pages(self):
+        rows = self.conn.execute(
+            """
+            SELECT r.* FROM page_revs r
+            WHERE r.rev = (SELECT MAX(x.rev) FROM page_revs x WHERE x.page = r.page)
+            ORDER BY r.page
+            """
+        ).fetchall()
+        return [self._page_row_to_record(row) for row in rows]
+
+    def page_ids(self):
+        return {
+            row["page"]
+            for row in self.conn.execute("SELECT DISTINCT page FROM page_revs")
+        }
+
+    def computed_status(self, meta):
+        """A page is stale when any cited source changed or vanished."""
+        snapshot = meta.get("source_digests") or {}
+        for key in meta.get("sources") or []:
+            row = self.source_row(key)
+            if row is None or row["status"] in ("missing", "unsupported", "oversize"):
+                return "stale"
+            if snapshot.get(key) != row["raw_digest"]:
+                return "stale"
+        return "stable"
+
+    def page_ref(self, record):
+        """Where `read`/`query` point at a ledger page: the view copy, or `page:<id>`."""
+        if not self.config["publish"]["enabled"]:
+            return f"page:{record['id']}"
+        target = self.publish_dir / self.view_relpath(record)
+        return norm_key(target.relative_to(self.root))
+
+    def view_relpath(self, record):
+        """Publish path for one page record, relative to the publish dir."""
+        meta = record["meta"]
+        page_id = record["id"]
+        base = view_name(meta.get("title"), page_id)
+        relpath = f"pages/{meta['type']}/{base}.md"
+        collision = False
+        for other in self.all_pages():
+            if other["id"] == page_id:
+                continue
+            if other["meta"].get("type") != meta.get("type"):
+                continue
+            if view_name(other["meta"].get("title"), other["id"]) == base:
+                collision = True
+                break
+        if not collision:
+            row = self.latest_rev_row(page_id)
+            stored = row["view_path"] if row else ""
+            collision = (
+                (self.publish_dir / relpath).exists() and stored != relpath
+            )
+        if collision:
+            relpath = f"pages/{meta['type']}/{base} ({page_id}).md"
+        return relpath
+
+    def view_text(self, record):
+        """Page text as published in the view tree: same template, id alias."""
+        return render_page(record["meta"], record["body"], aliases=[record["id"]])
+
+    def write_rev(self, page, meta, body, origin):
+        record = self.page_record(page)
+        rev = (record["rev"] if record else 0) + 1
+        meta = dict(meta)
+        meta["id"] = page
+        meta["sources"] = sorted(set(meta.get("sources") or []))
+        meta["source_digests"] = {
+            key: (self.source_row(key)["raw_digest"] if self.source_row(key) else "")
+            for key in meta["sources"]
+        }
+        meta["updated"] = date.today().isoformat()
+        meta["status"] = self.computed_status(meta)
+        text = render_page(meta, body)
+        render_digest = digest_text(text)
+        # R1：view_digest/view_path 是"上一次发布出去的事实"，不是本行文本的摘要。
+        # 新行先继承上一版；只有 sync_view 把文件写成功之后才改它。
+        view_digest = record["view_digest"] if record else ""
+        view_path = record["view_path"] if record else ""
+        canonical = json.dumps(
+            {
+                "title": meta.get("title"),
+                "type": meta.get("type"),
+                "summary": meta.get("summary"),
+                "sources": meta["sources"],
+                "evidence": meta.get("evidence") or [],
+                "boundaries": meta.get("boundaries") or {},
+                "body": body,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO page_revs
+                (page, rev, meta, body, digest, render_digest, view_digest, view_path,
+                 origin, accepted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    page, rev, json.dumps(meta, ensure_ascii=False, sort_keys=True),
+                    body, digest_text(canonical), render_digest, view_digest, view_path,
+                    origin, now_iso(),
+                ),
+            )
+            self.rebuild_links(page, body)
+        return rev
+
+    def rebuild_links(self, page_id, body):
+        with self.conn:
+            self.conn.execute("DELETE FROM links WHERE src = ?", (page_id,))
+            for target in sorted(set(LINK_RE.findall(body))):
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO links (src, dst) VALUES (?, ?)",
+                    (page_id, target.strip().lower()),
+                )
+
+    def rebuild_all_links(self):
+        with self.conn:
+            self.conn.execute("DELETE FROM links")
+        for record in self.all_pages():
+            self.rebuild_links(record["id"], record["body"])
+
+    def links_for(self, page_id):
+        outgoing = [
+            row["dst"] for row in self.conn.execute(
+                "SELECT dst FROM links WHERE src = ? ORDER BY dst", (page_id,)
+            )
+        ]
+        incoming = [
+            row["src"] for row in self.conn.execute(
+                "SELECT src FROM links WHERE dst = ? ORDER BY src", (page_id,)
+            )
+        ]
+        return outgoing, incoming
