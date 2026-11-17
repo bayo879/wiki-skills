@@ -15,19 +15,13 @@ Commands are documented by `wiki.py --help` and in `docs/readme/cli.md`.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import html
 import json
 import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
-import tempfile
-import zipfile
 from datetime import date, datetime, timezone
-from html.parser import HTMLParser
 from pathlib import Path
 
 sys.dont_write_bytecode = True  # never write __pycache__ into a global skill
@@ -44,13 +38,32 @@ from frontmatter import split_frontmatter, yaml_scalar
 from tasks import TASK_DIR, render_brief, task_dir_relative, task_packet
 from validation import validate_page_payload
 from workspace import WIKI_DIR, dry_store, inside_root, window_safe, workspace_lock
+from ingest import (
+    MAX_RAW_CHARS,
+    extract_text,
+    file_facts,
+    ingest_decision,
+    raw_facts,
+    read_bytes,
+)
+from pages import LINK_RE, meta_mismatch, render_page, split_evidence, view_name
+from util import (
+    digest_bytes,
+    digest_text,
+    dump_meta,
+    norm_key,
+    now_iso,
+    parse_iso,
+    same_stamp,
+    write_atomic,
+)
+from view import render_view_readme, sync_view_file
 
 VERSION = "0.4.1"
 RAW_SUBDIR = "raw"
 DRAFT_SUBDIR = "drafts"
 DB_NAME = "wiki.db"
 CONFIG_NAME = "wiki.json"
-MAX_RAW_CHARS = 4_000_000
 TASK_LEASE_SECONDS = 900
 TASK_OPEN_STATES = ("queued", "leased")
 
@@ -66,416 +79,8 @@ DEFAULT_CONFIG = {
     "publish": {"dir": "wiki", "enabled": True, "topics": True, "scenarios": True},
 }
 
-TEXT_SUFFIXES = {
-    ".md", ".markdown", ".txt", ".rst", ".log", ".csv", ".tsv", ".yaml", ".yml",
-    ".toml", ".ini", ".cfg", ".json", ".xml", ".sql", ".py", ".rs", ".js", ".ts",
-    ".css", ".sh", ".java", ".go", ".rb", ".c", ".h", ".cpp",
-}
-HTML_SUFFIXES = {".html", ".htm"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 TITLE_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
-
-
-class _TextExtractor(HTMLParser):
-    """Turn HTML into readable text: keep block boundaries, drop scripts."""
-
-    BLOCK_TAGS = {
-        "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
-        "section", "article", "header", "footer", "table", "blockquote", "pre",
-    }
-    SKIP_TAGS = {"script", "style", "noscript", "template"}
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts = []
-        self.depth = 0
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP_TAGS:
-            self.depth += 1
-        elif tag in self.BLOCK_TAGS:
-            self.parts.append("\n")
-        elif tag == "td" or tag == "th":
-            self.parts.append("\t")
-
-    def handle_endtag(self, tag):
-        if tag in self.SKIP_TAGS and self.depth > 0:
-            self.depth -= 1
-        elif tag in self.BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_data(self, data):
-        if self.depth == 0:
-            self.parts.append(data)
-
-
-def norm_key(path):
-    """Repo-relative POSIX key, stable across platforms."""
-    return path.as_posix()
-
-
-def digest_bytes(data):
-    return hashlib.blake2b(data, digest_size=16).hexdigest()
-
-
-def digest_text(text):
-    return digest_bytes(text.encode("utf-8", "replace"))
-
-
-def same_stamp(size, mtime, known_size, known_mtime):
-    """First-stage change filter: same byte size and (nearly) the same mtime.
-
-    Hashing only happens when this returns False, so the recorded size/mtime
-    pair is the whole cheap path for both the source file and its raw view.
-    """
-    try:
-        return (
-            int(size) == int(known_size)
-            and abs(float(mtime) - float(known_mtime)) < 1e-6
-        )
-    except (TypeError, ValueError):
-        return False
-
-
-def file_facts(path):
-    """(digest, size, mtime) of one file, read once; used right after a write."""
-    stat = Path(path).stat()
-    return digest_bytes(Path(path).read_bytes()), stat.st_size, stat.st_mtime
-
-
-def raw_facts(root, row):
-    """(state, size, mtime)；state ∈ {"ok","missing","edited"}。"""
-    if row is None or not row["raw"]:
-        return "missing", 0, 0.0
-    path = Path(root) / row["raw"]
-    try:
-        stat = path.stat()
-    except OSError:
-        return "missing", 0, 0.0
-    if not row["raw_digest"]:
-        return "edited", stat.st_size, stat.st_mtime
-    if same_stamp(stat.st_size, stat.st_mtime, row["raw_size"], row["raw_mtime"]):
-        return "ok", stat.st_size, stat.st_mtime
-    try:
-        digest = digest_bytes(path.read_bytes())
-    except OSError:
-        return "missing", stat.st_size, stat.st_mtime
-    if digest == row["raw_digest"]:
-        return "ok", stat.st_size, stat.st_mtime
-    return "edited", stat.st_size, stat.st_mtime
-
-
-def ingest_decision(source_changed, raw_state, source_mtime, raw_mtime, force=False):
-    """规格 §源与原文判定 的一行 → 本次 ingest 对该来源的动作。"""
-    if force:
-        # 强制重算只看 mtime：原文不比源旧就绝不覆盖（原文是用户的文件）。
-        if raw_state == "missing" or source_mtime > raw_mtime:
-            return "rewrite"
-        return "parse_keep_raw"
-    if source_changed:
-        if raw_state != "edited" or source_mtime > raw_mtime:
-            return "rewrite"
-        return "bookkeep_source"
-    if raw_state == "missing":
-        return "rewrite"
-    if raw_state == "edited":
-        return "bookkeep_raw"
-    return "skip"
-
-
-def now_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def parse_iso(value):
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-
-
-def read_bytes(path, limit):
-    size = path.stat().st_size
-    if limit and size > limit:
-        raise WikiError(
-            "E_SOURCE_TOO_LARGE",
-            f"{path.name} is {size} bytes, above ingest.max_source_bytes={limit}",
-            "raise ingest.max_source_bytes, or move this file outside the wiki root",
-            2,
-        )
-    return path.read_bytes()
-
-
-def decode_bytes(data):
-    for encoding in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
-        try:
-            return data.decode(encoding), encoding
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", "replace"), "utf-8"
-
-
-def html_to_text(data):
-    _, encoding = decode_bytes(data)
-    parser = _TextExtractor()
-    parser.feed(data.decode(encoding, "replace"))
-    parser.close()
-    return re.sub(r"\n{3,}", "\n\n", "".join(parser.parts)).strip()
-
-
-def docx_to_text(path):
-    with zipfile.ZipFile(path) as archive:
-        xml = archive.read("word/document.xml").decode("utf-8", "replace")
-    xml = xml.replace("</w:p>", "\n").replace("<w:tab/>", "\t")
-    return html.unescape(re.sub(r"<[^>]+>", "", xml)).strip()
-
-
-def pdf_to_text(path):
-    """Best effort, in order: pdftotext, then pypdf. No silent fake success."""
-    tool = shutil.which("pdftotext")
-    if tool:
-        try:
-            completed = subprocess.run(
-                [tool, "-layout", "-q", str(path), "-"],
-                capture_output=True,
-                timeout=180,
-                check=False,
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            completed = None
-        if completed is not None and completed.returncode == 0:
-            text, _ = decode_bytes(completed.stdout)
-            if text.strip():
-                return text, "pdftotext"
-    try:
-        from pypdf import PdfReader  # optional dependency
-    except ImportError:
-        PdfReader = None
-    if PdfReader is not None:
-        reader = PdfReader(str(path))
-        pages = [page.extract_text() or "" for page in reader.pages]
-        text = "\n\n".join(pages).strip()
-        if text:
-            return text, "pypdf"
-    return "", ""
-
-
-def extract_text(path, data):
-    """Return (text, parser_name). Empty text means the file is unsupported."""
-    suffix = path.suffix.lower()
-    if suffix == ".pdf":
-        text, parser = pdf_to_text(path)
-        return text or "", parser
-    if suffix == ".docx":
-        return docx_to_text(path), "docx"
-    if suffix in HTML_SUFFIXES:
-        return html_to_text(data), "html"
-    if suffix in TEXT_SUFFIXES or not suffix:
-        text, _ = decode_bytes(data)
-        return text, "text"
-    return "", ""
-
-
-VIEW_NAME_LIMIT = 60
-VIEW_NAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f-\x9f]')
-
-
-def view_name(title, page_id):
-    """Filesystem-safe page name for the published view tree."""
-    text = VIEW_NAME_BAD.sub("-", str(title or ""))
-    text = re.sub(r"\s+", " ", text)
-    text = text.strip(" .-")
-    if len(text) > VIEW_NAME_LIMIT:
-        text = text[:VIEW_NAME_LIMIT].strip(" .-")
-    return text or page_id
-
-
-def render_view_readme(wiki, records=None):
-    """Directory guide for the view tree; rewritten on every push."""
-    publish = wiki.publish_dir
-    if records is None:
-        records = wiki.all_pages()
-    by_type = {}
-    for record in records:
-        kind = str(record["meta"].get("type") or "unknown")
-        by_type[kind] = by_type.get(kind, 0) + 1
-    raw_count = sum(1 for path in wiki.publish_raw_dir.rglob("*") if path.is_file())
-    topic_count = sum(1 for path in (publish / "topics").rglob("*.md") if path.is_file())
-    scenario_count = sum(
-        1 for path in (publish / "scenarios").glob("*")
-        if (path / scenarios.SCENARIO_FILE).is_file()
-    )
-    lines = [
-        "# Wiki 视图",
-        "",
-        "pages/ 由引擎维护：按账本推送。raw/ 是原文副本，手改会被 ingest 采纳为账本事实。",
-        "topics/ 与 scenarios/ 首次投放后归你：引擎不再覆盖、不会删除。",
-        "pages/ 里手改过的文件不会被覆盖，只给告警；运行 sync 把它收进账本。",
-        "其他文件（包括 .obsidian/）不会被删除。",
-        "",
-        "## 目录",
-        "",
-        f"- `pages/`：知识页，共 {len(records)} 篇。",
-    ]
-    for kind in sorted(by_type):
-        lines.append(f"  - `{kind}/`：{by_type[kind]} 篇")
-    lines.extend([
-        f"- `raw/`：原文视图，共 {raw_count} 个文件。",
-        f"- `topics/`：话题副本，共 {topic_count} 篇。",
-        f"- `scenarios/`：场景副本，共 {scenario_count} 个。",
-        "",
-        "## 说明",
-        "",
-        "- 原文只留一份：删掉 `raw/` 里的文件后 `ingest` 会用源文件重建；改坏后删掉再 `ingest`。源文件内容改变且比 raw 新时 `ingest` 会主动重写；只改 mtime 不会触发。",
-        "- `topics/`、`scenarios/` 是你自己的成果，改动与新增都不会被引擎同步或删除。",
-    ])
-    return "\n".join(lines) + "\n"
-
-
-def render_page(meta, body, aliases=None):
-    """Deterministic page text: frontmatter, body, then the evidence block."""
-    lines = ["---"]
-    for field in ("id", "title", "type", "summary"):
-        lines.append(f"{field}: {yaml_scalar(meta[field])}")
-        if field == "title" and aliases:
-            lines.append(f"aliases: [{', '.join(str(alias) for alias in aliases)}]")
-    lines.append("sources:")
-    for source in meta["sources"]:
-        lines.append(f"  - {yaml_scalar(source)}")
-    lines.append(f"status: {yaml_scalar(meta['status'])}")
-    lines.append(f"updated: {yaml_scalar(meta['updated'])}")
-    lines.append("---")
-    lines.append("")
-    text = "\n".join(lines) + body.rstrip() + "\n"
-    evidence = meta.get("evidence") or []
-    if evidence:
-        rows = ["", "## 证据", ""]
-        for item in evidence:
-            rows.append(f"- `{item['source']}`：{item['quote']}")
-        text += "\n".join(rows) + "\n"
-    return text
-
-
-EVIDENCE_HEADING = "## 证据"
-EVIDENCE_ROW = re.compile(r"^- `([^`]+)`：(.+)$")
-
-
-def split_evidence(body):
-    """把已发布正文末尾的 `## 证据` 段切下来（R5）。
-
-    返回 (正文, 行列表)。末尾标题之后只要有一行不是 ``- `source`：quote``，就整段留在
-    正文里、返回空列表：调用方沿用账本证据并打 warning。空行忽略。
-    """
-    lines = body.split("\n")
-    start = None
-    for index in range(len(lines) - 1, -1, -1):
-        if lines[index].strip() == EVIDENCE_HEADING:
-            start = index
-            break
-    if start is None:
-        return body, []
-    rows = []
-    for line in lines[start + 1:]:
-        if not line.strip():
-            continue
-        match = EVIDENCE_ROW.match(line)
-        if not match:
-            return body, []
-        rows.append({"source": match.group(1).strip(), "quote": match.group(2).strip()})
-    if not rows:
-        return body, []
-    return "\n".join(lines[:start]).rstrip(), rows
-
-
-def meta_mismatch(file_meta, record_meta):
-    """观看区手改动了哪些元数据字段；只改正文时返回空列表（R4）。
-
-    id/status/updated/aliases 不参与比较：id 决定归位，后三者是渲染出来的，改了也无害。
-    """
-    changed = [
-        field for field in ("title", "type", "summary")
-        if str(file_meta.get(field) or "") != str(record_meta.get(field) or "")
-    ]
-    if set(file_meta.get("sources") or []) != set(record_meta.get("sources") or []):
-        changed.append("sources")
-    return changed
-
-
-def sync_view_file(wiki, item, target, body_only, warnings=None):
-    """回收一个已定位的文件；返回 "unchanged" / "written" / "imported"。
-
-    拒绝时抛 WikiError，由 command_sync 记入 failed 后继续（R7）。
-    """
-    page_id = item["page"]
-    record = item["record"]
-    target_path = wiki.publish_dir / target
-    canonical = wiki.view_text(record)
-    if item["text"] == canonical:
-        if item["path"] == target_path:
-            if record["view_path"] != target or record["view_digest"] != digest_text(canonical):
-                wiki.set_view_facts(page_id, record["rev"], target, digest_text(canonical))
-            return "unchanged"
-        write_atomic(target_path, canonical)
-        item["path"].unlink()
-        wiki.set_view_facts(page_id, record["rev"], target, digest_text(canonical))
-        return "written"
-    if record["view_digest"] and digest_text(item["text"]) == record["view_digest"]:
-        # 这份字节正是上一次发布出去的（账本已前进，如账本侧改名）：不是手改（R11）。
-        write_atomic(target_path, canonical)
-        if item["path"] != target_path:
-            item["path"].unlink()
-        wiki.set_view_facts(page_id, record["rev"], target, digest_text(canonical))
-        return "written"
-    changed = meta_mismatch(item["meta"], record["meta"])
-    if changed and not body_only:
-        raise WikiError(
-            "E_META_CHANGED",
-            f"view copy changed {', '.join(changed)}；保留账本元数据、只收正文用 sync --body-only；确实要改元数据用 page import",
-            "", 1,
-        )
-    body, evidence = split_evidence(item["body"])
-    if not evidence:
-        if EVIDENCE_HEADING in item["body"]:
-            message = (f"{item['file']}: evidence block does not parse; "
-                       "kept the ledger's evidence and adopted the text as body")
-            sys.stderr.write(f"warning: {message}\n")
-            if warnings is not None:
-                warnings.append(message)
-        evidence = list(record["meta"].get("evidence") or [])
-    if not body.strip():
-        raise WikiError("E_PAYLOAD", "the view copy has no body", "", 1)
-    for entry in evidence:
-        if not wiki.source_row(entry["source"]):
-            raise WikiError(
-                "E_UNKNOWN_SOURCE",
-                f"evidence cites unregistered source {entry['source']}",
-                "run `ingest` first, or fix the evidence block", 1,
-            )
-    merged = dict(record["meta"])
-    merged["evidence"] = evidence
-    if merged.get("type") not in wiki.config["schema"]["types"]:
-        raise WikiError("E_PAYLOAD", f"type {merged.get('type')!r} not in schema.types", "", 1)
-    rev = wiki.write_rev(page_id, merged, body, "sync")
-    fresh = wiki.page_record(page_id)
-    text = wiki.view_text(fresh)
-    write_atomic(target_path, text)
-    if item["path"] != target_path:
-        item["path"].unlink()
-    wiki.set_view_facts(page_id, rev, target, digest_text(text))
-    return "imported"
-
-
-def dump_meta(meta):
-    """Frontmatter values as JSON-friendly types for command output."""
-    clean = {}
-    for key, value in meta.items():
-        if key == "source_digests":
-            continue
-        if isinstance(value, list):
-            clean[key] = [item if isinstance(item, (dict, list)) else str(item) for item in value]
-        elif isinstance(value, dict):
-            clean[key] = value
-        else:
-            clean[key] = str(value)
-    return clean
 
 
 def load_config(path):
@@ -528,21 +133,6 @@ def publish_dir_name(config):
             2,
         )
     return name
-
-
-def write_atomic(path, text):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=path.suffix)
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(text)
-        os.replace(temp_name, path)
-    except BaseException:
-        try:
-            os.unlink(temp_name)
-        except OSError:
-            pass
-        raise
 
 
 class Wiki:
@@ -2335,7 +1925,6 @@ def submit_page(wiki, row, payload):
         "summary": f"page {page_id} accepted at rev {rev} ({len(meta['sources'])} sources)",
         "lines": [f"page: {page_id} rev {rev}"],
     }
-
 
 
 def command_release():
