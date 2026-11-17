@@ -2,9 +2,11 @@
 
 ## 问题
 
-`skills/llm-wiki/scripts/bootstrap.ps1` 与 `bootstrap.cmd` 已加入，用于在 Windows 上检测/
-安装 Python 3.12、按国内镜像下载 Python 3.12.8，并调用 `install.py` 放置技能。当前开发
-环境是 macOS，没有 PowerShell，无法执行脚本；因此以下行为都还没有实机证据：
+`skills/llm-wiki/scripts/bootstrap.ps1` 已加入，用于在 Windows 上检测/安装 Python 3.12、
+按国内镜像下载 Python 3.12.8，并调用 `install.py` 放置技能。技能包不再附带
+`bootstrap.cmd`：下游分发禁止 `.cmd`，cmd 与 Windows Terminal 里直接执行
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1`，参数原样追加。
+当前开发环境是 macOS，没有 PowerShell，无法执行脚本；因此以下行为都还没有实机证据：
 
 - `py -3.12` / `python` / `python3` 的检测与 3.12 版本判断；
 - 华为云、清华 TUNA、npmmirror、官方源的下载与 MZ 校验；
@@ -39,4 +41,5 @@
 - [ ] Windows 11 + PowerShell 7 完成场景 1、4、6。
 - [ ] 场景 2、3、5 至少各完成一次。
 - [ ] 实机输出补进 `docs/agent/verification.md`，或把本 issue 关闭并在提交信息中说明。
-- [ ] 确认 `bootstrap.cmd` 双击和带参数调用都能正确传递退出码。
+- [ ] 确认在 cmd 里用 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -DryRun`
+  调用时，参数与退出码都能原样传递。

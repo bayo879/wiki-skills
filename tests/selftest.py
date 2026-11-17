@@ -1164,6 +1164,13 @@ def main(argv=None):
 
         healthy = run(root, "doctor", expect=(0, 1))["data"]
         check(results, "doctor runs", isinstance(healthy["issues"], list), healthy)
+
+        wrappers = sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "skills").rglob("*")
+            if path.is_file() and path.suffix.lower() in {".cmd", ".bat"}
+        )
+        check(results, "the skill package ships no .cmd/.bat wrapper", not wrappers, wrappers)
     except AssertionError as error:
         results.append(("failed", False, str(error)))
     finally:

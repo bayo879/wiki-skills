@@ -208,7 +208,7 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
 - 并发写入与多 agent 同时提交：只验证了 lease 与 epoch 的单进程语义。
 - 万级文件、`MAX_RAW_CHARS` 截断边界、超大页面的渲染性能。
 - DSH 之外的 agent 运行时：按目录约定复制，未逐个实测其技能加载器。
-- Windows 引导脚本：当前环境没有 PowerShell，`scripts/bootstrap.ps1` 与 `bootstrap.cmd`
-  未在 Windows 实机验证；镜像下载、静默安装、PATH 刷新与技能根放置都待验收，见
+- Windows 引导脚本：当前环境没有 PowerShell，`scripts/bootstrap.ps1` 未在 Windows 实机
+  验证；镜像下载、静默安装、PATH 刷新与技能根放置都待验收，见
   `docs/issues/2026-11-16-P2-windows-bootstrap-acceptance.md`。
 - 页面删除：当前没有命令，未验证。

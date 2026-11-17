@@ -19,7 +19,8 @@ Windows 上通常没有 `python3`，用 `py -3.12` 或指向 3.12 的 `python` �
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 ```
 
-也可以在终端运行 `scripts\bootstrap.cmd`，它等价于上面的命令，参数原样传递。
+在 cmd 或 Windows Terminal 里执行同一条命令即可，参数原样追加（如 `-DryRun`）。技能包不附带
+`.cmd`/`.bat` 包装：下游分发不接受批处理脚本，`bootstrap.ps1` 是唯一的 Windows 入口。
 
 - 镜像顺序：华为云 → 清华 TUNA → npmmirror → 官方源；都失败才回退 `winget`。
 - 安装 Python 3.12.8 的 per-user 版本（`InstallAllUsers=0`），只装核心组件，不要求管理员；

@@ -157,3 +157,11 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   与 `cli.md` 同步。
 - `selftest.py` 增加 `scenario/` 场景可加载、同名时英文目录优先、两个目录都不被摄入、
   `scenario` 不能作为 `publish.dir` 的断言；叠加在 `d5f4327` 上总计 105 项。
+
+## 2026-11-17：技能包不携带 `.cmd`/`.bat`
+
+- 下游分发禁止 `.cmd` 后缀，`skills/llm-wiki/scripts/bootstrap.cmd` 删除，Windows 入口只保留
+  `bootstrap.ps1`。cmd 与 Windows Terminal 里执行文档给出的
+  `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1`，参数原样追加，
+  退出码由 PowerShell 透传；双击启动不再作为交付要求。
+- `tests/selftest.py` 增加守卫：`skills/` 下出现 `.cmd`/`.bat` 即失败。
