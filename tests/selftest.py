@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -233,6 +234,9 @@ def main(argv=None):
 
         data = run(root, "ingest")["data"]
         check(results, "ingest queues route tasks", data["pending_total"] == 2, data)
+        check(results, "ingest reports the open queue",
+              data["queue"]["open"] == data["queue"]["queued"] + data["queue"]["leased"]
+              and data["queue"]["route"] == 2, data.get("queue"))
         check(results, "ingest skips the scenario directory",
               not any(item["key"].startswith(("场景能力", "scenario")) for item in data["ingested"]), data["ingested"])
         check(results, "ingest skips topic files",
@@ -257,7 +261,7 @@ def main(argv=None):
                   "a.md" in blind["unchanged"] and blind["failed"] == [], blind)
 
         # --- Task 3: 两段式初筛、--only、判定表 -------------------------------------
-        raw_candidates = sorted((root / "wiki" / "raw").glob("a-*.md"))
+        raw_candidates = sorted((root / "wiki" / "raw").glob("a*.md"))
         check(results, "a.md publishes exactly one raw file", len(raw_candidates) == 1, raw_candidates)
         raw_path = raw_candidates[0]
 
@@ -1188,6 +1192,32 @@ def main(argv=None):
         finally:
             shutil.rmtree(split_root, ignore_errors=True)
 
+        # raw 是内容寻址的一等对象：同一份正文只落一份，人工排版另起一行。
+        raw_root = Path(tempfile.mkdtemp(prefix="llm-wiki-raw-"))
+        try:
+            shared = "# 共享正文\n\n同一份内容，两个路径。\n"
+            (raw_root / "a.md").write_text(shared, encoding="utf-8")
+            (raw_root / "copy").mkdir()
+            (raw_root / "copy" / "a.md").write_text(shared, encoding="utf-8")
+            run(raw_root, "ingest")
+            raw_files = sorted(p.name for p in (raw_root / "wiki/raw").glob("*.md"))
+            conn = sqlite3.connect(raw_root / ".wiki" / "wiki.db")
+            raws = conn.execute("SELECT id, name, path FROM raws").fetchall()
+            mounted = conn.execute("SELECT key, raw_id FROM sources ORDER BY key").fetchall()
+            conn.close()
+            check(results, "two sources with one body share one raw",
+                  len(raw_files) == 1 and len(raws) == 1
+                  and {row[1] for row in mounted} == {raws[0][0]},
+                  (raw_files, raws, mounted))
+            again = run(raw_root, "ingest")["data"]
+            check(results, "a shared raw is not parsed twice",
+                  again["ingested"] == []
+                  and len(list((raw_root / "wiki/raw").glob("*.md"))) == 1,
+                  again["ingested"])
+
+        finally:
+            shutil.rmtree(raw_root, ignore_errors=True)
+
         # 旧版三字段快照（b2af7c9 那代引擎建的库）：没有源指纹，只能整体判漂移。
         # 用独立工作区，避免动到上面 fixture 的任务状态。
         legacy_root = Path(tempfile.mkdtemp(prefix="llm-wiki-legacy-"))
@@ -1227,6 +1257,103 @@ def main(argv=None):
         finally:
             shutil.rmtree(legacy_root, ignore_errors=True)
 
+        # 任务目录只是任务的素材：next 物化，submit 默认读它，关闭即删。
+        task_root = Path(tempfile.mkdtemp(prefix="llm-wiki-taskdir-"))
+        try:
+            (task_root / "a.md").write_text("# 任务目录\n\n正文一句话。\n", encoding="utf-8")
+            run(task_root, "ingest")
+            handed = run(task_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            folder = task_root / ".wiki" / "tasks" / handed["id"]
+            names = sorted(path.name for path in folder.iterdir())
+            check(results, "next materializes the task folder",
+                  names == ["brief.md", "payload.json", "work.json"], names)
+            (folder / "payload.json").write_text(json.dumps({"decisions": [
+                {"source": handed["work"]["sources"][0]["key"], "action": "skip",
+                 "reason": "与主题无关"}]}, ensure_ascii=False), encoding="utf-8")
+            accepted = run(task_root, "submit", handed["id"])
+            check(results, "submit reads the task payload by default", accepted["ok"], accepted)
+            check(results, "a closed task drops its folder", not folder.exists(), folder)
+
+            (task_root / "b.md").write_text("# 第二个来源\n\n正文两句话。\n", encoding="utf-8")
+            run(task_root, "ingest")
+            route = run(task_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            route_folder = task_root / ".wiki" / "tasks" / route["id"]
+            (route_folder / "payload.json").write_text(json.dumps({"decisions": [
+                {"source": route["work"]["sources"][0]["key"], "action": "new",
+                 "page": "task-dir-page", "title": "任务目录页", "type": "concept",
+                 "reason": "唯一来源"}]}, ensure_ascii=False), encoding="utf-8")
+            run(task_root, "submit", route["id"])
+            page_task = run(task_root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"][0]
+            page_folder = task_root / ".wiki" / "tasks" / page_task["id"]
+            filled = page_folder / "payload.json"
+            original = filled.read_text(encoding="utf-8")
+            run(task_root, "release", page_task["id"])
+            check(results, "release keeps the filled payload",
+                  filled.read_text(encoding="utf-8") == original, filled)
+            reclaimed = run(task_root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"][0]
+            check(results, "a re-claimed task keeps the agent's payload",
+                  reclaimed["id"] == page_task["id"]
+                  and filled.read_text(encoding="utf-8") == original, reclaimed["id"])
+
+            # 领取后不提交、租约未过期时再 next：恢复同一任务，不能报空让人停摆。
+            resumed = run(task_root, "next", "--kind", "page", "--batch", "1")
+            check(results, "next resumes a leased task instead of reporting no work",
+                  resumed["data"]["count"] == 1
+                  and resumed["data"]["tasks"][0]["id"] == page_task["id"]
+                  and "unfinished" in resumed["summary"]
+                  and filled.read_text(encoding="utf-8") == original, resumed)
+
+            # 同一页面只允许一个未关闭的 page 任务：第二个来源挂上去，不新增第二条。
+            run(task_root, "release", page_task["id"])
+            (task_root / "c.md").write_text("# 第三个来源\n\n正文三句话。\n", encoding="utf-8")
+            run(task_root, "ingest")
+            second = run(task_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            second_folder = task_root / ".wiki" / "tasks" / second["id"]
+            (second_folder / "payload.json").write_text(json.dumps({"decisions": [
+                {"source": second["work"]["sources"][0]["key"], "action": "new",
+                 "page": "task-dir-page", "title": "任务目录页", "type": "concept",
+                 "reason": "同一页补来源"}]}, ensure_ascii=False), encoding="utf-8")
+            attached = run(task_root, "submit", second["id"])
+            conn = sqlite3.connect(task_root / ".wiki" / "wiki.db")
+            open_pages = conn.execute(
+                "SELECT id FROM tasks WHERE kind = 'page' AND state IN ('queued', 'leased')"
+            ).fetchall()
+            mounted = conn.execute(
+                "SELECT COUNT(*) FROM task_sources WHERE task_id = ?", (page_task["id"],)
+            ).fetchone()[0]
+            conn.close()
+            check(results, "a second route attaches to the open page task",
+                  attached["ok"] and len(open_pages) == 1 and mounted == 2,
+                  (attached, open_pages, mounted))
+
+            stale = task_root / ".wiki" / "tasks" / "t_deadbeef"
+            stale.mkdir()
+            run(task_root, "ingest")
+            check(results, "next reaps folders of closed tasks", not stale.exists(), stale)
+
+            # 写命令排队：另一进程占着 `lock` 时等 5 秒后报 E_BUSY；陈旧的锁被接管。
+            lock = task_root / ".wiki" / "lock"
+            holder = subprocess.Popen(
+                [sys.executable, "-c",
+                 "import os,sys,time; p=sys.argv[1];"
+                 " fd=os.open(p, os.O_CREAT|os.O_EXCL|os.O_WRONLY, 0o644);"
+                 " os.write(fd, str(os.getpid()).encode()); os.close(fd); time.sleep(9)",
+                 str(lock)]
+            )
+            try:
+                time.sleep(1.0)
+                busy = run(task_root, "status", expect=4)
+            finally:
+                holder.wait()
+            check(results, "a held lock returns E_BUSY",
+                  busy.get("error", {}).get("code") == "E_BUSY", busy)
+            lock.write_text("999999", encoding="utf-8")
+            taken = run(task_root, "status")
+            check(results, "a stale lock is taken over",
+                  taken["ok"] and not lock.exists(), (taken, lock))
+        finally:
+            shutil.rmtree(task_root, ignore_errors=True)
+
         dry = root / "dry"
         dry.mkdir()
         (dry / "note.md").write_text("# 标题\n\n正文。\n", encoding="utf-8")
@@ -1235,6 +1362,25 @@ def main(argv=None):
             cwd=dry, capture_output=True, text=True,
         )
         check(results, "dry run leaves no .wiki", dry_run.returncode == 0 and not (dry / ".wiki").exists(), dry_run.stderr)
+
+        # 队列清空后再摄入：queue 快照应显示没有未完成的工作，不再给出"去跑 next"的暗示。
+        drained_root = root / "drained"
+        drained_root.mkdir()
+        (drained_root / "note.md").write_text("# 唯一来源\n\n正文。\n", encoding="utf-8")
+        run(drained_root, "init")
+        run(drained_root, "ingest")
+        claimed = run(drained_root, "next", "--batch", "10")["data"]["tasks"]
+        check(results, "drained fixture claims one route task", len(claimed) == 1, claimed)
+        run(drained_root, "submit", claimed[0]["id"], "--payload", payload_file(
+            drained_root, "skip.json",
+            {"decisions": [{"source": "note.md", "action": "skip", "reason": "无进展，且无可沉淀的知识"}]}))
+        drained = run(drained_root, "ingest")["data"]
+        check(results, "a drained queue reports no open work",
+              drained["queue"]["open"] == 0 and drained["queue"]["queued"] == 0
+              and drained["queued_tasks"] == [], drained.get("queue"))
+        empty = run(drained_root, "next", "--batch", "10")
+        check(results, "next keeps reporting no work when nothing is open",
+              empty["data"]["count"] == 0 and empty["summary"] == "no queued tasks", empty)
 
         override = root / "scenario" / "topic-exploration"
         override.mkdir()

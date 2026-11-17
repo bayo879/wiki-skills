@@ -35,7 +35,7 @@
 | --- | --- |
 | `E_EVIDENCE_NOT_FOUND` | 重读 raw，逐字复制引文（比较时忽略空白） |
 | `E_SOURCE_DRIFT` | 来源在领取后被改；重新 `next` 取新任务 |
-| `E_TASK_STALE` | 任务已关闭或租约过期；重新 `next`，丢弃旧载荷。来源变化导致的过期是 `E_SOURCE_DRIFT` |
+| `E_TASK_STALE` | 任务已关闭，或提交时租约已过期；重新 `next`。被重新发放的是同一个任务时保留已填的 `payload.json`，任务已关闭则按新任务重做。来源变化导致的过期是 `E_SOURCE_DRIFT` |
 | `E_TASK_SCOPE` | 只提交任务 `work.sources` 里的来源 |
 | `E_PAGE_CONFLICT` | 页面已被别的任务改过；重新 `next`，基于新 rev 重写 |
 | `E_LINK_UNRESOLVED` | 先建链接目标页，或去掉该链接 |

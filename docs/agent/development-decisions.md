@@ -192,3 +192,39 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1`，参数原样追加，
   退出码由 PowerShell 透传；双击启动不再作为交付要求。
 - `tests/selftest.py` 增加守卫：`skills/` 下出现 `.cmd`/`.bat` 即失败。
+
+## 2026-11-17：任务目录化、单页单任务与工作区文件锁
+
+用户原话："我认为看不到是技能面不暴露，最好放在db不借助工具读不了的程度就好了，不要
+脱离工作区"、"1. 按后者走吧"、"1.、3感觉是一个问题，按目录改造看看难度大不大，大的话，
+这次先不做；2. 转换任务不算的话，不允许，而且得用文件做一个进程锁，防止多进程同时
+竞争资源"。
+
+- 真实源仍是 `.wiki/wiki.db`：任务状态、租约、epoch 全在账本里，技能与 brief 不出现
+  表名、租约、epoch。载荷文件只是中转，不是任务的唯一事实源。
+- 目录只是任务素材，不是队列：`next` 领取后物化 `.wiki/tasks/<id>/`
+  （`brief.md`、`work.json`、`payload.json`），`submit` 默认读该 `payload.json`；
+  提交成功或过期删目录，释放后重领只刷新 brief/work，不覆盖 agent 已填的 payload。
+  `.wiki/payloads/` 不再创建。
+- 不改 2026-11-15「任务一次一个、agent 不参与任务选择」；同一页面同时只允许一个未关闭
+  的 page 任务（route 与来源自己的转换任务不计），账本用部分唯一索引兜底，`enqueue_task`
+  撞约束时复用已有任务；已领走的页面仍报 `E_STATE` 让 route 等待。
+- 多进程竞争用文件锁解决：写账本/观看区的命令在 `main()` 里抢 `.wiki/lock`，等 5 秒仍
+  拿不到返回 `E_BUSY`（退出码 4）；posix 按 pid 判活，非 posix 只按 30 分钟陈旧阈值接管。
+  `--dry-run` 且没有 `.wiki/` 时不加锁，保持「试运行不建 `.wiki/`」。
+- 与本次无关的共享 raw 人工改写用例（`tests/selftest.py` 的 hand-edited raw 三条）按用户
+  要求先删除，不在这轮裁决共享 raw 语义；`selftest.py` 自测 201 项。
+
+## 2026-11-17：`next` 重新发放未提交的任务
+
+修 `docs/issues/2026-11-16-P2-next-empty-with-leased-tasks.md`：领取后中断再跑 `next`，
+旧实现返回空，agent 按技能说明停摆到租约过期。
+
+- 队列不足一批时，`next` 按同样顺序（route 优先、`created_at`、`id`）重新发放仍在租约里的
+  任务，`summary` 以 `resuming` 开头；任务目录与已填 `payload.json` 保持不变。重新发放前
+  照旧查漂移，失效任务置 `expired` 不发出；队列与租约都空时才返回 `no queued tasks`。
+- 单写者前提下不再区分「谁的租约」，同一工作区允许恢复任何未提交任务；并发重复领取由
+  `submit` 的 `state='leased'` 与可选 `epoch` 兜底，后到的提交拿 `E_TASK_STALE`，账本不会
+  出现重复记录。
+- `release` 不进技能流程，只作为运维口子保留；`SKILL.md` 仍不出现租约、epoch 字样，
+  只说「同一个任务会再发回来，`payload.json` 保留」。

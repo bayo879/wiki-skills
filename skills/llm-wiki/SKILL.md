@@ -18,8 +18,8 @@ description: 把工作区里的本地文档整理成可检索、可追溯的 Mar
   子目录，指向区外会被拒绝。
 - 资料在工作区外时，停下来让用户把那个目录作为工作区打开，或复制进来；不要跨区扫描、
   读取或写入。
-- 草稿、载荷、导出与临时文件都放 `<root>/.wiki/` 下：`.wiki/drafts/`、
-  `.wiki/payloads/`、`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源；
+- 草稿、任务目录、导出与临时文件都放 `<root>/.wiki/` 下：`.wiki/drafts/`、
+  `.wiki/tasks/<id>/`、`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源；
   场景/话题目录与观看区（默认 `wiki/`）整目录跳过，即使关了发布，观看区目录名也不能
   当来源。
 
@@ -51,7 +51,8 @@ python3 <skill>/scripts/wiki.py ingest --json
 ```
 
 `ingest` 扫描当前工作区，把新增或变化的文件排成任务。已有 wiki 重复执行即可；不要为了
-“刷新”而删 `.wiki/`。
+“刷新”而删 `.wiki/`。返回的 `queue.open` 是摄入后的未完成任务数：大于 0 就继续 `next`，
+为 0 就不用再取。
 
 ## 取任务
 
@@ -59,21 +60,29 @@ python3 <skill>/scripts/wiki.py ingest --json
 python3 <skill>/scripts/wiki.py next --json
 ```
 
-每次只领一个任务。每个任务只有四项：
+每次只领一个任务。任务落在 `.wiki/tasks/<id>/`：`brief.md` 是玩法，`work.json` 是参考数据，
+`payload.json` 是要填的骨架。`next` 的返回值同样有四项：
 
 - `id`：提交时用；
 - `brief`：这个任务要做什么、怎么做、提交后会发生什么；
-- `template`：已经固定好的载荷骨架，只填空；
+- `template`：已经固定好的载荷骨架，和 `payload.json` 内容一致，只填空；
 - `work`：原文位置、已有页面索引、已排队但尚未写入的页面（`pending_pages`）、当前页内容。
 
-按 `brief` 做，把 `template` 填好存到 `.wiki/payloads/<id>.json`，然后：
+按 `brief.md` 做，把 `.wiki/tasks/<id>/payload.json` 填好（只填空，不要改字段名），然后：
 
 ```bash
-python3 <skill>/scripts/wiki.py submit <id> --payload .wiki/payloads/<id>.json --json
+python3 <skill>/scripts/wiki.py submit <id> --json
 ```
 
-提交成功后重新 `next`。`next` 返回没有任务时就停止，不要自己造任务，也不要为了“推进”
-去跑别的命令。
+`submit` 默认读这个任务目录里的 `payload.json`，不用再传路径；`--payload` 只在你确实要
+从别处提交时用（`-` 表示从 stdin 读）。提交成功或任务过期后目录会被清掉；任务被释放后
+重新 `next` 会刷新 `brief.md`、`work.json`，但不会覆盖你已经填好的 `payload.json`。
+
+提交成功后重新 `next`。如果上次领了任务但没提交（中断、上下文压缩、误重跑），`next` 会把
+同一个任务发回来，`payload.json` 保留，接着填完提交即可。只有 `next` 说没有任务时才停止，
+不要自己造任务，也不要为了“推进”去跑别的命令。同一页面同时只会有一个未关闭的页面任务：
+给同一页面排第二个来源时，如果该页面已被领走，`submit` 返回 `E_STATE`，等那个任务提交后
+再试。
 
 ## 填写内容
 
@@ -170,8 +179,11 @@ python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
 ## 提交失败
 
 - 提交失败会先把任务退回队列。读返回的 `error.message` 与 `error.next`，重新 `next`
-  领取任务（通常还是同一个 id），再改 `template` 里对应的内容重交；不要拿旧 id 直接重交。
+  领取任务（通常还是同一个 id），再改 `.wiki/tasks/<id>/payload.json` 里对应的内容重交；
+  不要拿旧 id 直接重交。
 - 返回 `E_TASK_STALE` 表示任务已被领取、关闭或页面已更新；重新 `next`，不要复用旧 payload。
+- 返回 `E_BUSY` 表示另一个 wiki 进程正在这个工作区写账本：等它结束再重试，不要删
+  `.wiki/lock` 抢跑（只有确认它已崩溃时才删）。
 - 不要绕过校验，也不要直接改 `.wiki/` 下的文件来“修好”它。
 
 ## 不做

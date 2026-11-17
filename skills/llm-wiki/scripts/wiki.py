@@ -35,18 +35,18 @@ from runtime import require_python
 require_python()
 
 import health
+import ledger
 import scenarios
 import search
 import topics
 from errors import WikiError
 from frontmatter import split_frontmatter, yaml_scalar
-from tasks import task_packet
+from tasks import TASK_DIR, render_brief, task_dir_relative, task_packet
 from validation import validate_page_payload
-from workspace import WIKI_DIR, dry_store, inside_root, window_safe
+from workspace import WIKI_DIR, dry_store, inside_root, window_safe, workspace_lock
 
 VERSION = "0.4.1"
 RAW_SUBDIR = "raw"
-PAYLOAD_SUBDIR = "payloads"
 DRAFT_SUBDIR = "drafts"
 DB_NAME = "wiki.db"
 CONFIG_NAME = "wiki.json"
@@ -478,14 +478,6 @@ def dump_meta(meta):
     return clean
 
 
-def key2file(key):
-    """Readable, filesystem-safe raw filename for an arbitrary source key."""
-    base = key.rsplit("/", 1)[-1]
-    base = re.sub(r"\.[A-Za-z0-9]+$", "", base)
-    safe = re.sub(r"[^\w.-]+", "-", base, flags=re.UNICODE).strip("-._")
-    return f"{safe[:80] or 'source'}-{digest_text(key)[:8]}"
-
-
 def load_config(path):
     if not path.exists():
         return json.loads(json.dumps(DEFAULT_CONFIG))
@@ -564,7 +556,7 @@ class Wiki:
         # Placeholder until ensure() reads the config, which then repoints it at
         # the publish tree: raw text never lives in `.wiki/` any more.
         self.raw_dir = self.wiki_dir / RAW_SUBDIR
-        self.payload_dir = self.wiki_dir / PAYLOAD_SUBDIR
+        self.tasks_dir = self.wiki_dir / TASK_DIR
         self.draft_dir = self.wiki_dir / DRAFT_SUBDIR
         self.db_path = self.wiki_dir / DB_NAME
         self.config_path = self.wiki_dir / CONFIG_NAME
@@ -583,7 +575,7 @@ class Wiki:
 
     def ensure(self, push=True):
         created = []
-        for directory in (self.wiki_dir, self.payload_dir, self.draft_dir):
+        for directory in (self.wiki_dir, self.tasks_dir, self.draft_dir):
             if not directory.exists():
                 directory.mkdir(parents=True)
                 created.append(norm_key(directory.relative_to(self.root)))
@@ -602,8 +594,9 @@ class Wiki:
             self.conn = sqlite3.connect(self.db_path)
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA busy_timeout = 5000")
-            self._create_schema()
-            self.ensure_columns()
+            ledger.create_schema(self.conn)
+            ledger.ensure_columns(self.conn)
+            ledger.ensure_open_page_index(self.conn)
         # R11：sync 要先看磁盘再让推送动手，否则挪走的文件会被重建出第二个副本。
         if push:
             self.view_events = self.sync_view()
@@ -640,86 +633,6 @@ class Wiki:
         # 归 sync_view，开关为假时它直接返回。
         if not self.config["publish"]["enabled"]:
             return
-
-    def _create_schema(self):
-        with self.conn:
-            self.conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS sources (
-                    key TEXT PRIMARY KEY,
-                    path TEXT NOT NULL,
-                    digest TEXT NOT NULL,
-                    size INTEGER NOT NULL,
-                    mtime REAL NOT NULL,
-                    raw_digest TEXT NOT NULL,
-                    raw_size INTEGER NOT NULL,
-                    raw_mtime REAL NOT NULL,
-                    raw TEXT NOT NULL,
-                    parser TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS links (
-                    src TEXT NOT NULL,
-                    dst TEXT NOT NULL,
-                    UNIQUE(src, dst)
-                );
-                CREATE INDEX IF NOT EXISTS links_dst ON links(dst);
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id TEXT PRIMARY KEY,
-                    kind TEXT NOT NULL,
-                    subject TEXT NOT NULL,
-                    -- queued | leased | expired | accepted; rows are never deleted
-                    state TEXT NOT NULL,
-                    epoch INTEGER NOT NULL DEFAULT 0,
-                    inputs TEXT NOT NULL,
-                    payload TEXT,
-                    last_error TEXT,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    lease_until TEXT,
-                    created_at TEXT NOT NULL,
-                    closed_at TEXT
-                );
-                CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, kind);
-                CREATE TABLE IF NOT EXISTS task_sources (
-                    task_id TEXT NOT NULL,
-                    source_key TEXT NOT NULL,
-                    PRIMARY KEY (task_id, source_key)
-                );
-                CREATE INDEX IF NOT EXISTS task_sources_key ON task_sources(source_key);
-                CREATE TABLE IF NOT EXISTS page_revs (
-                    page TEXT NOT NULL,
-                    rev INTEGER NOT NULL,
-                    meta TEXT NOT NULL,
-                    body TEXT NOT NULL,
-                    digest TEXT NOT NULL,
-                    render_digest TEXT NOT NULL,
-                    view_digest TEXT NOT NULL,
-                    view_path TEXT NOT NULL,
-                    origin TEXT NOT NULL,
-                    accepted_at TEXT NOT NULL,
-                    PRIMARY KEY (page, rev)
-                );
-                """
-            )
-
-    def ensure_columns(self):
-        """Refuse a ledger from an older skill; there is no migration on purpose."""
-        required = (
-            ("sources", ("raw_digest", "raw_size", "raw_mtime")),
-            ("page_revs", ("view_digest", "view_path")),
-        )
-        for table, columns in required:
-            present = {
-                row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")
-            }
-            if not set(columns) <= present:
-                raise WikiError(
-                    "E_STATE",
-                    "ledger schema is older than this skill",
-                    "delete .wiki/ then run `init` and `ingest`",
-                    3,
-                )
 
     def close(self):
         if self.conn is not None:
@@ -788,22 +701,179 @@ class Wiki:
             "raw_digest": raw_digest,
         }
 
-    def write_raw(self, key, text, meta):
-        target = self.publish_raw_dir / f"{key2file(key)}.md"
+    def _raw_name_taken(self, name, raw_id):
+        row = self.conn.execute(
+            "SELECT id FROM raws WHERE name = ?", (name,)
+        ).fetchone()
+        return row is not None and row["id"] != raw_id
+
+    def _raw_name(self, key, raw_id):
+        """First-seen basename of the source key, unique among raw rows."""
+        base = key.rsplit("/", 1)[-1]
+        base = re.sub(r"\.[A-Za-z0-9]+$", "", base)
+        base = re.sub(r"[^\w.-]+", "-", base, flags=re.UNICODE).strip("-._") or "source"
+        base = base[:80]
+        candidate, ordinal = base, 2
+        while self._raw_name_taken(candidate, raw_id):
+            candidate = f"{base}-{ordinal}"
+            ordinal += 1
+        return candidate
+
+    def raw_mounts(self, raw_id):
+        return [
+            row["key"] for row in self.conn.execute(
+                "SELECT key FROM sources WHERE raw_id = ? ORDER BY key", (raw_id,)
+            )
+        ]
+
+    def attach_raw(self, key, text, parser, title):
+        """Store one parsed body as a raw copy; return (path, id).
+
+        The body digest is the identity: the same text always lands on one row
+        and one file, so a hundred copies of a document leave one raw copy
+        mounted by many sources. When the previous raw of this key had no other
+        mount, the row is replaced in place and keeps its filename.
+        """
+        raw_id = digest_text(text)
+        today = date.today().isoformat()
+        row = self.conn.execute("SELECT * FROM raws WHERE id = ?", (raw_id,)).fetchone()
+        if row is not None:
+            name, rel = row["name"], row["path"]
+        else:
+            current = self.source_row(key)
+            previous = None
+            if current is not None and current["raw_id"]:
+                previous = self.conn.execute(
+                    "SELECT * FROM raws WHERE id = ?", (current["raw_id"],)
+                ).fetchone()
+            if previous is not None and self.raw_mounts(previous["id"]) == [key]:
+                # 只有这一个源，换内容就是原地换行：文件名跟着这份内容继续用。
+                name, rel = previous["name"], previous["path"]
+                with self.conn:
+                    self.conn.execute("DELETE FROM raws WHERE id = ?", (previous["id"],))
+            else:
+                name = self._raw_name(key, raw_id)
+                rel = norm_key(
+                    (self.publish_raw_dir / f"{name}.md").relative_to(self.root)
+                )
+        mounts = self.raw_mounts(raw_id)
+        if key not in mounts:
+            mounts = sorted(mounts + [key])
+        meta = {
+            "id": raw_id,
+            "title": title,
+            "type": "raw",
+            "summary": f"parsed from {', '.join(mounts)} by {parser}",
+            "sources": mounts,
+            "status": "raw",
+            "updated": today,
+        }
+        target = self.root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         write_atomic(target, render_page(meta, text))
-        return norm_key(target.relative_to(self.root))
+        size, mtime = target.stat().st_size, target.stat().st_mtime
+        with self.conn:
+            if row is None:
+                self.conn.execute(
+                    """
+                    INSERT INTO raws (id, name, path, parser, size, mtime, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (raw_id, name, rel, parser, size, mtime, today),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE raws SET size = ?, mtime = ?, updated_at = ? WHERE id = ?",
+                    (size, mtime, today, raw_id),
+                )
+            # 一份 raw 可能被多个源挂着：文件的 size/mtime 变了，每个挂载源
+            # 记的原文事实都要一起对齐，否则下轮 ingest 会把共享者误判成「人工改过」。
+            self.conn.execute(
+                "UPDATE sources SET raw_digest = ?, raw_size = ?, raw_mtime = ? "
+                "WHERE raw_id = ?",
+                (digest_bytes(target.read_bytes()), size, mtime, raw_id),
+            )
+        return rel, raw_id
+
+    def adopt_raw_edit(self, key, parser):
+        """Re-key a hand-edited raw in place; the file itself is left untouched.
+
+        The body digest is the ledger identity, so a reformatted copy becomes a
+        new row. The user's own bytes stay exactly as written — the ledger is
+        the fact source, the frontmatter inside a hand-edited raw is whatever
+        the parse wrote back then.
+        """
+        row = self.source_row(key)
+        if row is None or not row["raw"]:
+            return "", ""
+        target = self.root / row["raw"]
+        try:
+            _, body = split_frontmatter(target.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return row["raw"], row["raw_id"]
+        raw_id = digest_text(body)
+        if raw_id == row["raw_id"]:
+            return row["raw"], raw_id
+        known = self.conn.execute(
+            "SELECT * FROM raws WHERE id = ?", (raw_id,)
+        ).fetchone()
+        if known is not None:
+            # 同样的正文已经在别处落过一份：直接挂过去，不再造第二份。
+            return known["path"], raw_id
+        if self.raw_mounts(row["raw_id"]) != [key]:
+            # 这份原文还被别的源共享：不能就地改行，另存一份给这个源。
+            return self.attach_raw(key, body, parser, target.name)
+        previous = self.conn.execute(
+            "SELECT * FROM raws WHERE id = ?", (row["raw_id"],)
+        ).fetchone()
+        stat = target.stat()
+        with self.conn:
+            if previous is not None:
+                self.conn.execute("DELETE FROM raws WHERE id = ?", (row["raw_id"],))
+                name, rel, updated = previous["name"], previous["path"], date.today().isoformat()
+            else:
+                name = self._raw_name(key, raw_id)
+                rel = norm_key((self.publish_raw_dir / f"{name}.md").relative_to(self.root))
+                updated = date.today().isoformat()
+            self.conn.execute(
+                """
+                INSERT INTO raws (id, name, path, parser, size, mtime, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (raw_id, name, rel, parser, stat.st_size, stat.st_mtime, updated),
+            )
+        return rel, raw_id
+
+    def collect_raws(self):
+        """Drop raw rows no source points at, and their files."""
+        dropped = [
+            row for row in self.conn.execute(
+                """
+                SELECT * FROM raws
+                WHERE id NOT IN (SELECT raw_id FROM sources WHERE raw_id <> '')
+                """
+            )
+        ]
+        for row in dropped:
+            with self.conn:
+                self.conn.execute("DELETE FROM raws WHERE id = ?", (row["id"],))
+            target = self.root / row["path"]
+            if target.exists():
+                target.unlink()
+        return [row["path"] for row in dropped]
 
     def upsert_source(self, path, digest, size, mtime, raw, parser, status,
-                      raw_digest, raw_size, raw_mtime):
+                      raw_digest, raw_size, raw_mtime, raw_id="",
+                      last_parsed_digest=""):
         key = norm_key(path)
         now = date.today().isoformat()
         with self.conn:
             self.conn.execute(
                 """
                 INSERT INTO sources (key, path, digest, size, mtime, raw_digest, raw_size,
-                                     raw_mtime, raw, parser, status, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     raw_mtime, raw, parser, status, updated_at, raw_id,
+                                     last_parsed_digest)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET
                     digest = excluded.digest,
                     size = excluded.size,
@@ -814,10 +884,12 @@ class Wiki:
                     raw = excluded.raw,
                     parser = excluded.parser,
                     status = excluded.status,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    raw_id = excluded.raw_id,
+                    last_parsed_digest = excluded.last_parsed_digest
                 """,
                 (key, str(path), digest, size, mtime, raw_digest, raw_size, raw_mtime,
-                 raw, parser, status, now),
+                 raw, parser, status, now, raw_id, last_parsed_digest),
             )
 
     def set_source_status(self, key, status):
@@ -1139,6 +1211,51 @@ class Wiki:
     def task_row(self, task_id):
         return self.conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
 
+    def task_dir(self, task_id):
+        return self.tasks_dir / task_id
+
+    def clear_task_dir(self, task_id):
+        shutil.rmtree(self.task_dir(task_id), ignore_errors=True)
+
+    def cleanup_task_dirs(self):
+        """Drop task folders that no longer belong to an open task."""
+        if not self.tasks_dir.is_dir():
+            return []
+        dropped = []
+        for entry in sorted(self.tasks_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            row = self.task_row(entry.name)
+            if row and row["state"] in TASK_OPEN_STATES:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            dropped.append(entry.name)
+        return dropped
+
+    def materialize_task(self, row):
+        """Write the task folder: the brief, its payload skeleton, and work data.
+
+        Re-claiming a task refreshes the brief and the work view but never
+        overwrites a payload.json the agent already filled.
+        """
+        work = self.task_work(row)
+        packet = task_packet(row["id"], row["kind"], json.loads(row["inputs"]), work)
+        directory = self.task_dir(row["id"])
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "brief.md").write_text(
+            render_brief(row["id"], packet["brief"]), encoding="utf-8"
+        )
+        (directory / "work.json").write_text(
+            json.dumps(work, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        skeleton = directory / "payload.json"
+        if not skeleton.exists():
+            skeleton.write_text(
+                json.dumps(packet["template"], ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        return packet
+
     def open_task_for_page(self, page_id):
         return self.conn.execute(
             "SELECT * FROM tasks WHERE kind = 'page' AND subject = ? AND state IN ('queued', 'leased')",
@@ -1149,6 +1266,22 @@ class Wiki:
         return self.conn.execute(
             "SELECT * FROM tasks WHERE state IN ('queued', 'leased') ORDER BY id"
         ).fetchall()
+
+    def task_counts(self):
+        # 队列口径只在这一处定义：open 是 queued 与 leased 之和，expired/accepted 是
+        # 终态历史，算在返回里供 status 使用，但不属于未完成的工作。
+        rows = self.conn.execute(
+            "SELECT kind, state, COUNT(*) AS n FROM tasks "
+            "WHERE state IN ('queued', 'leased', 'expired', 'accepted') GROUP BY kind, state"
+        ).fetchall()
+        counts = {"open": 0, "queued": 0, "leased": 0, "route": 0, "page": 0,
+                  "expired": 0, "accepted": 0}
+        for row in rows:
+            counts[row["state"]] += row["n"]
+            if row["state"] in ("queued", "leased"):
+                counts["open"] += row["n"]
+                counts[row["kind"]] = counts.get(row["kind"], 0) + row["n"]
+        return counts
 
     def source_in_open_task(self, source_key):
         return self.conn.execute(
@@ -1192,19 +1325,30 @@ class Wiki:
                 3,
             )
         task_id = "t_" + os.urandom(4).hex()
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO tasks (id, kind, subject, state, epoch, inputs, created_at)
-                VALUES (?, ?, ?, 'queued', 0, ?, ?)
-                """,
-                (task_id, kind, subject, json.dumps(inputs, ensure_ascii=False, sort_keys=True), now_iso()),
-            )
-            for item in inputs.get("sources", []):
+        encoded = json.dumps(inputs, ensure_ascii=False, sort_keys=True)
+        try:
+            with self.conn:
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO task_sources (task_id, source_key) VALUES (?, ?)",
-                    (task_id, item["key"]),
+                    """
+                    INSERT INTO tasks (id, kind, subject, state, epoch, inputs, created_at)
+                    VALUES (?, ?, ?, 'queued', 0, ?, ?)
+                    """,
+                    (task_id, kind, subject, encoded, now_iso()),
                 )
+                for item in inputs.get("sources", []):
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO task_sources (task_id, source_key) VALUES (?, ?)",
+                        (task_id, item["key"]),
+                    )
+        except sqlite3.IntegrityError:
+            # 另一个进程在检查与插入之间抢到同一页；账本的唯一索引兜底，复用那条任务。
+            existing = self.conn.execute(
+                "SELECT id FROM tasks WHERE kind = ? AND subject = ? AND state IN ('queued', 'leased')",
+                (kind, subject),
+            ).fetchone()
+            if existing:
+                return existing["id"]
+            raise
         return task_id
 
     def attach_page_source(self, task_id, source_key):
@@ -1297,33 +1441,76 @@ class Wiki:
                     )
 
     def claim_tasks(self, kind=None, batch=None):
+        """Claim queued tasks, then reissue still-leased ones to fill the batch.
+
+        A reissued task keeps its task folder, so an agent that lost its turn
+        continues the payload it already filled instead of stopping until the
+        lease expires. Returns `(claimed, resumed)`.
+        """
         now = now_iso()
         with self.conn:
             self.conn.execute(
                 "UPDATE tasks SET state = 'queued', lease_until = NULL WHERE state = 'leased' AND lease_until < ?",
                 (now,),
             )
-            sql = "SELECT * FROM tasks WHERE state = 'queued'"
-            params = []
-            if kind:
-                sql += " AND kind = ?"
-                params.append(kind)
-            sql += " ORDER BY CASE kind WHEN 'route' THEN 0 ELSE 1 END, created_at, id LIMIT ?"
-            params.append(batch)
-            rows = self.conn.execute(sql, params).fetchall()
-            claimed = []
-            for row in rows:
-                reason = self.task_drift(row)
-                if reason:
-                    # 失效任务留在账本里作为历史，但不发出去。
-                    self.expire_task(row["id"], reason)
-                    continue
-                self.conn.execute(
-                    "UPDATE tasks SET state = 'leased', epoch = epoch + 1, lease_until = ?, attempts = attempts + 1 WHERE id = ?",
-                    (self._lease_deadline(), row["id"]),
-                )
-                claimed.append(self.task_row(row["id"]))
+            claimed = self._claim_queued(kind, batch)
+            resumed = self._resume_leased(
+                kind, max(0, batch - len(claimed)), {row["id"] for row in claimed}
+            )
+        return claimed, resumed
+
+    def _claim_queued(self, kind, batch):
+        sql = "SELECT * FROM tasks WHERE state = 'queued'"
+        params = []
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY CASE kind WHEN 'route' THEN 0 ELSE 1 END, created_at, id LIMIT ?"
+        params.append(batch)
+        claimed = []
+        for row in self.conn.execute(sql, params).fetchall():
+            reason = self.task_drift(row)
+            if reason:
+                # 失效任务留在账本里作为历史，但不发出去。
+                self.expire_task(row["id"], reason)
+                continue
+            self.conn.execute(
+                "UPDATE tasks SET state = 'leased', epoch = epoch + 1, lease_until = ?, attempts = attempts + 1 WHERE id = ?",
+                (self._lease_deadline(), row["id"]),
+            )
+            claimed.append(self.task_row(row["id"]))
         return claimed
+
+    def _resume_leased(self, kind, limit, skip):
+        """Reissue open leases in claim order, expiring drifted tasks.
+
+        `skip` holds the ids claimed a moment ago in this same call; they are
+        leased again already and must not come back twice.
+        """
+        if limit <= 0:
+            return []
+        sql = "SELECT * FROM tasks WHERE state = 'leased'"
+        params = []
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY CASE kind WHEN 'route' THEN 0 ELSE 1 END, created_at, id"
+        resumed = []
+        for row in self.conn.execute(sql, params).fetchall():
+            if len(resumed) >= limit:
+                break
+            if row["id"] in skip:
+                continue
+            reason = self.task_drift(row)
+            if reason:
+                self.expire_task(row["id"], reason)
+                continue
+            self.conn.execute(
+                "UPDATE tasks SET state = 'leased', epoch = epoch + 1, lease_until = ?, attempts = attempts + 1 WHERE id = ?",
+                (self._lease_deadline(), row["id"]),
+            )
+            resumed.append(self.task_row(row["id"]))
+        return resumed
 
     def _lease_deadline(self):
         return datetime.fromtimestamp(
@@ -1354,6 +1541,8 @@ class Wiki:
                 "WHERE id = ? AND state IN ('queued', 'leased')",
                 (reason, now_iso(), task_id),
             )
+        if cursor.rowcount > 0:
+            self.clear_task_dir(task_id)
         return cursor.rowcount > 0
 
     def close_task(self, task_id, payload, epoch=None):
@@ -1367,6 +1556,8 @@ class Wiki:
         if epoch is not None and cursor.rowcount == 0:
             raise WikiError("E_TASK_STALE", f"task {task_id} changed before it could be closed",
                             "run `next` again and submit the fresh task", 3)
+        if cursor.rowcount > 0:
+            self.clear_task_dir(task_id)
 
     def page_index(self):
         return [
@@ -1538,6 +1729,7 @@ def command_init():
 def command_ingest():
     require_health()
     wiki, _ = open_wiki(dry_run=ARGS.dry_run)
+    wiki.cleanup_task_dirs()
     limit = int(wiki.config["ingest"].get("max_source_bytes", 50_000_000))
     force = ARGS.force
     selected = {norm_key(Path(value)) for value in ARGS.only} if ARGS.only else None
@@ -1602,11 +1794,18 @@ def command_ingest():
                 continue
             if not ARGS.dry_run:
                 raw_rel = row["raw"]
+                raw_id = row["raw_id"]
+                if action == "bookkeep_raw" and raw_rel:
+                    # 人工排版过的原文：正文变了就换一行，last_parsed_digest 留旧值，
+                    # 下一轮 ingest 据此认出「源没变、原文是人改的」，不回源覆盖。
+                    raw_rel, raw_id = wiki.adopt_raw_edit(key, row["parser"])
                 disk_digest, disk_size, disk_mtime = file_facts(wiki.root / raw_rel)
                 wiki.upsert_source(
                     path.relative_to(wiki.scan_root), digest, stat.st_size, stat.st_mtime,
                     raw_rel, row["parser"], row["status"],
                     disk_digest, disk_size, disk_mtime,
+                    raw_id=raw_id,
+                    last_parsed_digest=row["last_parsed_digest"],
                 )
                 # 采纳用户改动后的原文即账本事实：仍在排队或租用的快照要对齐，
                 # 否则同一份原文会被自己的任务判成漂移。
@@ -1645,23 +1844,18 @@ def command_ingest():
                 }
             )
             continue
-        meta = {
-            "id": key2file(key),
-            "title": path.name,
-            "type": "raw",
-            "summary": f"parsed from {key} by {parser}",
-            "sources": [key],
-            "status": "raw",
-            "updated": date.today().isoformat(),
-        }
         if action == "rewrite":
-            raw_rel = wiki.write_raw(key, text, meta)
+            raw_rel, raw_id = wiki.attach_raw(key, text, parser, path.name)
+            last_parsed = raw_id
         else:
             # parse_keep_raw：保留用户那份原文，只刷新账本里的原文事实。
             raw_rel = row["raw"]
+            raw_id = row["raw_id"]
+            last_parsed = row["last_parsed_digest"]
         raw_digest, raw_size, raw_mtime = file_facts(wiki.root / raw_rel)
         wiki.upsert_source(path.relative_to(wiki.scan_root), digest, len(data), stat.st_mtime,
-                           raw_rel, parser, "pending", raw_digest, raw_size, raw_mtime)
+                           raw_rel, parser, "pending", raw_digest, raw_size, raw_mtime,
+                           raw_id=raw_id, last_parsed_digest=last_parsed)
         fresh.append(
             {
                 "key": key,
@@ -1721,7 +1915,10 @@ def command_ingest():
         queued.append(
             wiki.enqueue_task("route", row["key"], {"sources": [wiki.source_snapshot(row["key"])]})
         )
+    # 最后一件事：没有任何来源指向的旧 raw 行连同文件一起回收，观看区不留孤儿副本。
+    reclaimed = wiki.collect_raws()
     remaining = [row["key"] for row in wiki.all_sources() if row["status"] == "pending"]
+    counts = wiki.task_counts()
     data = {
         "ingested": fresh,
         "unchanged": unchanged,
@@ -1731,13 +1928,18 @@ def command_ingest():
         "vanished": vanished,
         "restored": restored,
         "queued_tasks": queued,
+        "reclaimed": reclaimed,
         "pending_total": len(remaining),
         "pending": remaining,
-        "next": "run `next` to claim route tasks",
+        "queue": {
+            "open": counts["open"], "queued": counts["queued"], "leased": counts["leased"],
+            "route": counts["route"], "page": counts["page"],
+        },
     }
     emit(
         "ingest", wiki.root,
-        f"ingested {len(fresh)} sources, queued {len(queued)} route tasks; {len(remaining)} pending",
+        f"ingested {len(fresh)} sources, queued {len(queued)} route tasks; "
+        f"{len(remaining)} pending, open queue {counts['open']}",
         data,
         [f"queued: {item}" for item in queued],
         ok=not (failed or oversize),
@@ -1757,19 +1959,7 @@ def command_status():
     for row in rows:
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
     pages = wiki.all_pages()
-    open_rows = wiki.conn.execute(
-        "SELECT kind, state, COUNT(*) AS n FROM tasks WHERE state IN ('queued', 'leased') GROUP BY kind, state"
-    ).fetchall()
-    tasks = {"queued": 0, "leased": 0, "route": 0, "page": 0}
-    for row in open_rows:
-        tasks[row["state"]] = tasks.get(row["state"], 0) + row["n"]
-        tasks[row["kind"]] = tasks.get(row["kind"], 0) + row["n"]
-    # 终态单独计数：expired 是失效历史，accepted 是已完成，都不属于未完成的工作。
-    closed_rows = wiki.conn.execute(
-        "SELECT state, COUNT(*) AS n FROM tasks WHERE state IN ('expired', 'accepted') GROUP BY state"
-    ).fetchall()
-    for row in closed_rows:
-        tasks[row["state"]] = row["n"]
+    tasks = wiki.task_counts()
     stale = sorted(
         record["id"] for record in pages if record["meta"].get("status") == "stale"
     )
@@ -1790,9 +1980,9 @@ def command_status():
         "pages": len(pages),
         "stale_pages": stale,
         "pending": pending,
-        "tasks": {"open": tasks["queued"] + tasks["leased"], "queued": tasks["queued"],
+        "tasks": {"open": tasks["open"], "queued": tasks["queued"],
                   "leased": tasks["leased"], "route": tasks["route"], "page": tasks["page"],
-                  "expired": tasks.get("expired", 0), "accepted": tasks.get("accepted", 0)},
+                  "expired": tasks["expired"], "accepted": tasks["accepted"]},
         "next": "run `next`" if tasks["queued"] else ("wait for leased tasks to expire" if tasks["leased"] else "run `ingest`"),
     }
     emit(
@@ -1809,13 +1999,13 @@ def command_status():
 def command_next():
     require_health()
     wiki, _ = open_wiki()
+    wiki.cleanup_task_dirs()
     batch = ARGS.batch or 1
-    rows = wiki.claim_tasks(kind=ARGS.kind, batch=max(1, batch))
+    claimed, resumed = wiki.claim_tasks(kind=ARGS.kind, batch=max(1, batch))
     tasks = []
     lines = []
-    for row in rows:
-        inputs = json.loads(row["inputs"])
-        item = task_packet(row["id"], row["kind"], inputs, wiki.task_work(row))
+    for row in claimed + resumed:
+        item = wiki.materialize_task(row)
         tasks.append(item)
         lines.append(f"{row['id']}  {item['brief']['goal']}")
     data = {"tasks": tasks, "count": len(tasks)}
@@ -1823,34 +2013,53 @@ def command_next():
         emit("next", wiki.root, "no queued tasks", data, [])
         wiki.close()
         return 0
-    emit(
-        "next", wiki.root,
-        f"{len(tasks)} task(s) ready; read each brief, fill its template, then submit",
-        data,
-        lines,
-    )
+    if len(resumed) == len(tasks):
+        summary = (
+            f"resuming {len(resumed)} unfinished task(s); keep the payload you already "
+            "have and submit"
+        )
+    elif resumed:
+        summary = (
+            f"{len(tasks)} task(s) ready ({len(resumed)} unfinished resumed); read each "
+            "brief, fill its payload.json, then submit"
+        )
+    else:
+        summary = (
+            f"{len(tasks)} task(s) ready; read each brief, fill its payload.json, then submit"
+        )
+    emit("next", wiki.root, summary, data, lines)
     wiki.close()
     return 0
 
 
-def read_payload(wiki):
+def read_payload(wiki, row):
+    """Read the submit payload: the task folder by default, an explicit path, or stdin."""
     if ARGS.payload == "-":
         raw = sys.stdin.read()
     else:
-        candidate = inside_root(
-            wiki.root, ARGS.payload, "payload",
-            "put payloads under .wiki/payloads/, or pass - for stdin",
-        )
+        if ARGS.payload:
+            candidate = inside_root(
+                wiki.root, ARGS.payload, "payload",
+                "put payloads inside the workspace, or pass - for stdin",
+            )
+        else:
+            candidate = wiki.task_dir(row["id"]) / "payload.json"
+            if not candidate.exists():
+                # 目录丢失（旧任务或被手工删除）时按当前任务重建，再读回骨架。
+                wiki.materialize_task(row)
         try:
             raw = candidate.read_text(encoding="utf-8")
         except OSError as error:
-            raise WikiError("E_PAYLOAD", f"cannot read payload: {error}", "pass a readable JSON file or -", 2)
+            raise WikiError(
+                "E_PAYLOAD", f"cannot read payload: {error}",
+                f"fill {task_dir_relative(row['id'])}/payload.json, or pass --payload", 2,
+            )
     try:
         return json.loads(raw)
     except json.JSONDecodeError as error:
         raise WikiError(
             "E_PAYLOAD", f"payload is not valid JSON: {error}",
-            "emit one JSON object; `next --json` includes a template for each task", 2,
+            f"edit {task_dir_relative(row['id'])}/payload.json; `next --json` also returns the template", 2,
         )
 
 
@@ -1884,7 +2093,7 @@ def command_submit():
         wiki.requeue_task(task_id, "lease expired")
         raise WikiError("E_TASK_STALE", f"task {task_id} expired before submit",
                         "run `next` again to get fresh work", 3)
-    payload = read_payload(wiki)
+    payload = read_payload(wiki, row)
     try:
         if row["kind"] == "route":
             result = submit_route(wiki, row, payload)
@@ -2059,7 +2268,10 @@ def submit_route(wiki, row, payload):
         else:
             inputs["mode"] = "update"
             inputs["route_task"] = row["id"]
-        page_tasks.append(wiki.enqueue_task("page", item["page"], inputs))
+        task_id = wiki.enqueue_task("page", item["page"], inputs)
+        # 唯一索引可能把并发插入收敛到同一条任务，补挂本次来源（幂等）。
+        wiki.attach_page_source(task_id, key)
+        page_tasks.append(task_id)
     wiki.close_task(row["id"], payload, row["epoch"])
     return {
         "kind": "route",
@@ -2556,7 +2768,7 @@ def build_parser():
     submit = sub.add_parser("submit", parents=[common], help="submit a task payload")
     submit.add_argument("id")
     submit.add_argument("--epoch", type=int, help=argparse.SUPPRESS)
-    submit.add_argument("--payload", required=True, help="JSON file, or - for stdin")
+    submit.add_argument("--payload", help="JSON file or - for stdin; defaults to the task folder")
     release = sub.add_parser("release", parents=[common], help="return a task to the queue")
     release.add_argument("id")
     read = sub.add_parser("read", parents=[common], help="read raw text or a page by ref")
@@ -2613,6 +2825,12 @@ COMMANDS = {
     "version": command_version,
 }
 
+# 会打开账本或改观看区的命令都排队执行；check/version/scenario 只读包与场景目录。
+LOCKED_COMMANDS = frozenset({
+    "init", "ingest", "next", "submit", "release", "read", "query",
+    "export", "status", "sync", "doctor", "page import", "page restore",
+})
+
 
 def main(argv=None):
     global ARGS
@@ -2634,6 +2852,11 @@ def main(argv=None):
     else:
         handler = COMMANDS[command]
     try:
+        # 试运行不得创建 `.wiki/`，此时也没有可争用的写入目标，直接跳过排队。
+        dry_only = command == "ingest" and ARGS.dry_run and not (root / WIKI_DIR).exists()
+        if command in LOCKED_COMMANDS and not dry_only:
+            with workspace_lock(root):
+                return handler()
         return handler()
     except WikiError as error:
         return fail(command, root, error)

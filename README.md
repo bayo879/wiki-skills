@@ -25,9 +25,9 @@ python3 <skill>/scripts/wiki.py check --json
 python3 <skill>/scripts/wiki.py init --json
 python3 <skill>/scripts/wiki.py ingest --json
 
-# 任务循环：next 返回 brief 与 template，填好 template 后 submit
+# 任务循环：next 把任务写进 .wiki/tasks/<id>/，填好其中的 payload.json 后 submit
 python3 <skill>/scripts/wiki.py next --json
-python3 <skill>/scripts/wiki.py submit <t_id> --payload .wiki/payloads/<t_id>.json --json
+python3 <skill>/scripts/wiki.py submit <t_id> --json
 
 # 场景：显式检索并加载流程，按步骤执行（不摄入、不建库）
 python3 <skill>/scripts/wiki.py scenario search "开户" --json
@@ -147,7 +147,7 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 tests/selftest.py
 ```
 
-`tests/selftest.py` 在临时目录跑 179 项端到端检查，不接触真实数据；它和 `tests/` 留在
+`tests/selftest.py` 在临时目录跑 190 项端到端检查，不接触真实数据；它和 `tests/` 留在
 仓库、由开发/CI 执行，不复制进安装后的技能目录。验证记录（含真实 PDF 语料结果）见
 [docs/agent/verification.md](docs/agent/verification.md)。场景目录结构与写法见
 [docs/readme/scenarios.md](docs/readme/scenarios.md)，话题沉淀格式见

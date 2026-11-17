@@ -49,9 +49,33 @@ def missing_sections(body, page_type):
     return missing
 
 
+TASK_DIR = "tasks"
+
+
+def task_dir_relative(task_id):
+    """Where a leased task keeps its brief, payload skeleton, and work data."""
+    return f".wiki/{TASK_DIR}/{task_id}"
+
+
 def submit_step(task_id):
-    path = f".wiki/payloads/{task_id}.json"
-    return f"把填好的 template 存到 {path}，运行 `submit {task_id} --payload {path}`"
+    return f"把填好的 payload.json 留在本目录，运行 `submit {task_id}`"
+
+
+def render_brief(task_id, brief):
+    """The agent-facing brief as Markdown, next to the payload it fills."""
+    lines = [
+        f"# {brief['goal']}",
+        "",
+        f"本目录 `{task_dir_relative(task_id)}/`：`payload.json` 是本次提交内容，"
+        "`work.json` 是来源与页面索引。",
+        "",
+        "## 步骤",
+        "",
+    ]
+    for index, step in enumerate(brief["steps"], 1):
+        lines.append(f"{index}. {step}")
+    lines += ["", "## 提交", "", brief["submit"], "", "## 提交后", "", brief["effect"], ""]
+    return "\n".join(lines)
 
 
 def route_template(sources):
@@ -77,9 +101,9 @@ def route_brief(task_id, sources):
         "goal": f"判断来源 {keys} 应归入哪些页面，或跳过；一份来源可拆到多页。",
         "steps": [
             f"读原文：运行 `read \"raw:{first}\" --offset 1 --limit 120 --json`。",
-            "在 work.page_index 里找同主题的已有页面；已有页面能覆盖时优先 merge。"
-            "work.pending_pages 是已排队、尚未写入的页面，同主题也可以 merge 到它的 id。",
-            "填 template.decisions[]：每个来源至少一条 decision，action 选 new/merge/skip；"
+            "在 `work.json` 的 `page_index` 里找同主题的已有页面；已有页面能覆盖时优先"
+            " merge。`pending_pages` 是已排队、尚未写入的页面，同主题也可以 merge 到它的 id。",
+            "填 `payload.json` 的 `decisions[]`：每个来源至少一条 decision，action 选 new/merge/skip；"
             "一份文件含多个可独立检索的主题时拆成多条 decision、指向不同 page；"
             "每条 decision 都必须写 reason；new 还要给 page、title、type，merge 要给 page。",
         ],
@@ -128,14 +152,14 @@ def page_brief(task_id, inputs, record):
     return {
         "goal": f"{action}页面 {page_id} 的正文。",
         "steps": [
-            "先读 work.sources 里每份 raw 原文；只写原文支持的事实。",
-            "按 template.body 已有的章节填写，不要改章节名，也不要删章节。",
-            "summary 写 1-200 字的一句话；更新已有页面时，template.evidence 里"
-            "旧来源的证据要保留，不要删。",
-            "给 template.evidence 的每条来源填一到两句逐字 quote；"
+            "先读 `work.json` 的 `sources` 里每份 raw 原文；只写原文支持的事实。",
+            "按 `payload.json` 的 `body` 已有章节填写，不要改章节名，也不要删章节。",
+            "`summary` 写 1-200 字的一句话；更新已有页面时，`evidence` 里旧来源的"
+            "证据要保留，不要删。",
+            "给 `evidence` 的每条来源填一到两句逐字 `quote`；"
             "数字、日期、文号、责任主体都要能回到原文。",
-            "links 只填 work.page_index 里已有的页面 id；"
-            "boundaries 写清这一页覆盖什么、不覆盖什么。",
+            "`links` 只填 `work.json` 里 `page_index` 已有的页面 id；"
+            "`boundaries` 写清这一页覆盖什么、不覆盖什么。",
         ],
         "submit": submit_step(task_id),
         "effect": "提交后引擎写入新修订并按账本推送到观看区；"

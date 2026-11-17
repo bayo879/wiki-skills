@@ -13,7 +13,7 @@
 
 ```json
 {"ok": true, "cmd": "next", "version": "0.4.1", "root": "/abs/root",
- "summary": "1 task(s) ready; read each brief, fill its template, then submit",
+ "summary": "1 task(s) ready; read each brief, fill its payload.json, then submit",
  "data": {…}}
 ```
 
@@ -47,8 +47,13 @@
 - 根目录默认是当前工作目录；`--root` 只允许当前目录或它的子目录，不能指到区外。
 - 下列参数解析后必须落在根目录内，否则返回 `E_PATH`：`read` 的路径、`--payload`、
   `body_file`、`page import --from`、`export <dir>`。
-- 草稿、载荷、导出与临时文件放 `<root>/.wiki/` 下（`.wiki/drafts/`、`.wiki/payloads/`、
-  `.wiki/export`、`.wiki/tmp/`）。`--dry-run` 的临时库在 `.wiki/tmp/`，退出时清理。
+- 草稿、任务目录、导出与临时文件放 `<root>/.wiki/` 下（`.wiki/drafts/`、
+  `.wiki/tasks/<id>/`、`.wiki/export`、`.wiki/tmp/`）。`--dry-run` 的临时库在 `.wiki/tmp/`，
+  退出时清理。
+- 会写账本或观看区的命令（`init`、`ingest`、`next`、`submit`、`release`、`read`、`query`、
+  `export`、`status`、`sync`、`doctor`、`page import`、`page restore`）持有一把工作区文件锁
+  `.wiki/lock`；锁被另一个存活进程占着时排队等待 5 秒，仍拿不到返回 `E_BUSY`（退出码 4）。
+  进程崩溃留下的锁（记录 pid 已不存在，或超过 30 分钟）会被下一个命令接管。
 
 ## 命令
 
@@ -62,7 +67,7 @@
 
 ### init
 
-创建 `.wiki/`（`wiki.db`、`wiki.json`、`payloads/`、`drafts/`），并准备
+创建 `.wiki/`（`wiki.db`、`wiki.json`、`tasks/`、`drafts/`），并准备
 观看区 `<view>/` 与 `<view>/raw/`。`data`: `{created, config, pages, sources, open_tasks}`。
 
 ### ingest
@@ -79,7 +84,10 @@
 也不会摄入任何文件。
 
 `data`: `{ingested[{key,raw,parser,digest,size,chars}], unchanged, unsupported[{key,suffix,reason,hint}],
-oversize[{key,message}], failed[{key,message}], vanished, restored, queued_tasks, pending_total, pending}`。
+oversize[{key,message}], failed[{key,message}], vanished, restored, queued_tasks,
+pending_total, pending, queue{open,queued,leased,route,page}}`。`queued_tasks` 只列本次
+新入队的任务 id；`queue` 是提交后的未完成任务快照，`open` 为 `queued` 与 `leased` 之和。
+没有新来源时 `queue.open` 可以为 0，此时再跑 `next` 只会得到空任务列表。
 
 超过 `ingest.max_source_bytes` 的文件进 `oversize`，不解析；无文本层的进
 `unsupported`。两者都不会中止整批摄入。
@@ -91,6 +99,10 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 
 `data.tasks[]`: `{id, brief, template, work}`。
 
+同时把任务物化到 `.wiki/tasks/<id>/`：`brief.md`（同 `brief` 的可读版）、`work.json`（同
+`work`）、`payload.json`（同 `template`，agent 在这里填空）。目录是任务的素材，不是队列：
+只有 `next` 发放任务，任务结束就删目录，残留目录在下一次 `next` 或 `ingest` 时清掉。
+
 - `brief`: `{goal, steps[], submit, effect}`，说明做什么、怎么做、提交后发生什么。
 - `template`: 已固定结构的载荷；route 为 `decisions[]`，page 为 `page/title/type/
   summary/body/links/evidence/boundaries`。
@@ -100,13 +112,20 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 
 不再返回 `epoch`、`lease_until`、`attempts`、`last_error` 或原始 `inputs`。
 
+队列里没有 `queued`、但有已领取（`leased`）而未提交的任务时，`next` 按同样顺序把这些任务
+重新发放，`summary` 以 `resuming` 开头；任务目录与已填的 `payload.json` 保持不变，接着做
+同一个任务即可。重新发放前同样查一次漂移，失效任务置 `expired` 不发出。队列与已领取任务
+都为空时才返回 `no queued tasks`，此时才该停。
+
 ### submit
 
-`submit <id> --payload <file|->`。`--payload` 文件须在根目录内，或传 `-` 从 stdin 读。
-校验通过才写入并关闭任务；否则返回 `E_*` 并把任务退回队列，可重新 `next` 后按新任务
-再交。`--epoch` 仅保留给旧脚本，日常提交不需要。
+`submit <id>`。默认读 `.wiki/tasks/<id>/payload.json`；`--payload <file|->` 可改读别的
+文件（须在根目录内）或从 stdin 读。校验通过才写入并关闭任务；否则返回 `E_*` 并把任务
+退回队列，可重新 `next` 后按新任务再交。`--epoch` 仅保留给旧脚本，日常提交不需要。
 
-载荷应从 `next` 返回的 `template` 直接填写，不要另造字段。
+载荷应从 `next` 落到任务目录的 `payload.json` 直接填写，不要另造字段。任务结束（提交成功
+或过期）后目录被删除；任务被释放后重新 `next` 会刷新 `brief.md` 与 `work.json`，不覆盖
+已填的 `payload.json`。
 
 **route 载荷**：
 
@@ -299,6 +318,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_SOURCE_TOO_LARGE` | 单文件超过 `max_source_bytes` | 调高阈值或拆分来源 |
 | `E_DB` | 数据库不可读 | 从备份恢复，不要手改 |
 | `E_HEALTH` | 安装自检未通过 | 运行 `check --json`；缺文件时重装技能 |
+| `E_BUSY` | 另一个 wiki 进程正占着工作区文件锁 `.wiki/lock` | 等它结束再重试；确认它已崩溃才删锁 |
 
 ## 配置
 

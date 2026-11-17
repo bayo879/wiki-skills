@@ -110,7 +110,18 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。PowerShell 引导仍未实
 `scenario/ppt_creator` 的 `resources` 识别到 `references/outline-template.md`；
 `scenario search "PPT"` 命中 1 条。
 
-## 一、自测：26/26 通过
+## 2026-11-17 `next` 恢复未提交任务后复跑
+
+队列不足一批时 `next` 重新发放仍在租约里的任务（`Wiki._resume_leased`），`summary` 以
+`resuming` 开头，任务目录与已填 `payload.json` 保持不变；重新发放前照旧查漂移。
+`python3 tests/selftest.py`：203/203 通过，退出码 0。新增两条检查：
+
+- `next resumes a leased task instead of reporting no work`：领取后不提交再 `next` 返回同一
+  任务，`payload.json` 不变；
+- `next keeps reporting no work when nothing is open`：队列与租约都空时仍返回
+  `no queued tasks`，agent 才停止。
+
+## 一、自测：203/203 通过
 
 ```bash
 python3 tests/selftest.py
@@ -125,6 +136,11 @@ python3 tests/selftest.py
 | 图片分类 | `.png` 进 `unsupported`，不影响其他文件 |
 | route 领取 | 一个来源一条任务，`work.sources` 带 raw 路径 |
 | payload 区外 | 载荷文件在工作区外返回 `E_PATH` |
+| 任务目录 | `next` 生成 `.wiki/tasks/<id>/{brief.md,payload.json,work.json}` |
+| 任务目录生命周期 | 提交后删目录；释放后重领只刷新 brief/work，已填 `payload.json` 不变；关闭任务的残留目录被 `ingest` 清掉 |
+| 任务恢复 | 领取后不提交再 `next` 返回同一任务且 `payload.json` 不变；队列与租约都空时才返回 `no queued tasks` |
+| 单页单任务 | 第二个来源路由到已排队的页面时挂到该任务上，账本只有一条未关闭 page 任务；被领走时返回 `E_STATE` |
+| 工作区文件锁 | 另一进程持锁时写命令等 5 秒后 `E_BUSY`（退出码 4）；陈旧锁被接管 |
 | `read` raw | 返回解析文本，`content` 为正文 |
 | `skip` 决定 | 被拒决定返回可读错误，接受后来源变 `skipped` |
 | route `new` | 入队 page 任务，任务带来源与 raw |
@@ -145,7 +161,7 @@ python3 tests/selftest.py
 | `--dry-run` | 未初始化目录不创建 `.wiki/` |
 | `doctor` | 跑完并返回结构化 issues |
 
-输出以 `26/26 checks passed` 结尾，退出码 0。`--json` 输出可供 CI 解析。
+输出以 `201/201 checks passed` 结尾，退出码 0。`--json` 输出可供 CI 解析。
 
 ## 二、真实语料：4 份中国电信 PDF
 
@@ -183,6 +199,7 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
 | 放入 `.png` | `unsupported`（no text backend produced content），不中断其他文件 |
 | `max_source_bytes=10` 摄入 100 字节文件 | `oversize`，退出码 1，不写 raw |
 | 已关闭任务重交 | `E_TASK_STALE`，退出码 3 |
+| 另一个进程持锁 | `E_BUSY`，退出码 4 |
 | 载荷引用任务范围外来源 | `E_TASK_SCOPE`，退出码 3 |
 | 引文不在 raw 里 | `E_EVIDENCE_NOT_FOUND`，退出码 2 |
 | 缺 `boundaries` | `E_PAYLOAD`，退出码 2 |

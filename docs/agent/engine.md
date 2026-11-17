@@ -1,10 +1,10 @@
 # 引擎内部
 
-对象：`skills/llm-wiki/scripts/wiki.py`（2601 行，已超过单文件 2000 行上限；拆分方案见
+对象：`skills/llm-wiki/scripts/wiki.py`（2575 行，仍超过单文件 2000 行上限；拆分方案见
 `docs/issues/2026-11-16-P2-split-wiki-engine.md`）。公共错误在 `errors.py`，frontmatter
-解析在 `frontmatter.py`，页面检索在 `search.py`，场景能力在 `scenarios.py`，话题沉淀在
-`topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，工作区边界在
-`workspace.py`，任务信息面在 `tasks.py`，页面载荷校验在 `validation.py`。
+解析在 `frontmatter.py`，账本表结构在 `ledger.py`，页面检索在 `search.py`，场景能力在
+`scenarios.py`，话题沉淀在 `topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，
+工作区边界在 `workspace.py`，任务信息面在 `tasks.py`，页面载荷校验在 `validation.py`。
 本文件只记录改代码时容易踩的内部约定，命令与字段以 `docs/readme/cli.md` 为准。
 
 ## 布局
@@ -24,13 +24,15 @@
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 深检，门禁用轻检 |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留；纯函数，只读 `Wiki` |
+| 账本结构 | `ledger.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用 |
 | 账本 | `class Wiki` | 表、来源、修订、观看区推送、任务全在这里 |
 | 命令层 | `command_*`、`submit_route`、`submit_page` | 只做参数解析、调用 `Wiki`、组装输出 |
 
 ## 表
 
+- `raws(id, name, path, parser, size, mtime, updated_at)`：`id` 是正文 sha256，一份正文一行
 - `sources(key, path, digest, size, mtime, raw_digest, raw_size, raw_mtime, raw, parser,
-  status, updated_at)`
+  status, updated_at, raw_id, last_parsed_digest)`
 - `links(src, dst)`
 - `tasks(id, kind, subject, state, epoch, inputs, payload, last_error, attempts,
   lease_until, created_at, closed_at)`
@@ -38,7 +40,7 @@
 - `page_revs(page, rev, meta, body, digest, render_digest, view_digest, view_path, origin,
   accepted_at)`
 
-表结构每版固定；缺列的旧库由 `ensure_columns` 拒绝（`E_STATE`），不写迁移。
+表结构每版固定；缺列的旧库由 `ledger.ensure_columns` 拒绝（`E_STATE`），不写迁移。
 
 ## 不变量
 
@@ -48,11 +50,13 @@
    或来源 `missing/unsupported/oversize`，页面即 `stale`；不把 status 存成可漂移的字段。
 3. **修订只增不改。** `write_rev` 取 `MAX(rev)+1`，写 `digest`（元数据+正文的规范化哈希）
    与 `render_digest`（渲染文本哈希），再重建链接；页面文件只由观看区推送写出。
-4. **账本不写页面副本。** `.wiki/` 只放账本、载荷与草稿（原文在 `<view>/raw/`）；页面正文的唯一
+4. **账本不写页面副本。** `.wiki/` 只放账本、任务目录与草稿（原文在 `<view>/raw/`）；页面正文的唯一
    落盘副本在 `<view>/pages/`，由 `sync_view` 按账本推送，`render_digest` 只是渲染文本的
    历史哈希，不再用于比对文件。
 5. **任务 epoch 单调。** `claim_tasks` 先回收过期 lease，领取时 `epoch = epoch + 1`；
-   `close_task` 用 `WHERE id=? AND epoch=? AND state='leased'` 的 CAS，rowcount=0 抛
+   队列不足一批时按同样顺序重新发放仍在租约里的任务（`_resume_leased`，同样 `epoch = epoch + 1`、
+   同样先查漂移），让中断后重跑的 agent 接着做同一个任务；`close_task` 用
+   `WHERE id=? AND epoch=? AND state='leased'` 的 CAS，rowcount=0 抛
    `E_TASK_STALE`。不要用先查后写替代 CAS。漂移任务不发出，`expire_task` 置终态
    `expired` 并写 `last_error`、`closed_at`；任务行只增不删，供审计。`enqueue_task` 做树
    唯一性：一个来源不能同时属于两棵未关闭的 page 任务树，冲突抛 `E_TASK_CONFLICT`；
@@ -98,6 +102,24 @@
     发布也不能拿它当来源；换掉名字后旧目录恢复为普通来源。`sync_view` 对 `pages/` 的手改
     只告警不覆盖，`topics/`、`scenarios/` 只在目标不存在时投放，`README.md` 每次推送重写，
     其他文件（含 `.obsidian/`）不删不改。
+15. **任务目录只是素材，不是队列。** `next` 领取后把任务物化到
+    `.wiki/tasks/<id>/`（`brief.md`、`work.json`、`payload.json`）；发放仍只由 `next` 决定。
+    `payload.json` 只在不存在时写入，重领只刷新 `brief.md` 与 `work.json`，不覆盖 agent 已填
+    的内容；未提交的租约任务由 `next` 以同一 id 重新发放，不置 `expired`。
+    `close_task`/`expire_task` 成功后删目录，残留目录由 `next`、`ingest` 的
+    `cleanup_task_dirs` 清掉。`submit` 默认读该目录的 `payload.json`，`--payload` 只是后备。
+16. **同一页面同时只有一个未关闭的 page 任务。** 账本里用部分唯一索引
+    `tasks_open_page ON tasks(subject) WHERE kind='page' AND state IN ('queued','leased')`
+    兜底（`ledger.ensure_open_page_index` 建索引前把重复行置 `expired` 并迁移
+    `task_sources`）。`enqueue_task` 撞 `IntegrityError` 时回查已有任务并复用；`submit_route`
+    命中已领走的 page 任务仍报 `E_STATE`，不另开第二条。route 任务与来源自己的转换任务
+    不计入这条约束。
+17. **写命令按工作区排队。** 会写账本或观看区的命令在 `main()` 里用
+    `workspace.workspace_lock` 抢 `<root>/.wiki/lock`（`O_CREAT|O_EXCL` 写入 pid），等待
+    5 秒仍拿不到抛 `E_BUSY`（exit 4）；非 posix 平台不按 pid 判活，只按 30 分钟陈旧阈值
+    接管，posix 用 `os.kill(pid, 0)` 判断持有者是否还在。`--dry-run` 且没有 `.wiki/` 时不
+    加锁，避免试运行留下目录。
+
 
 ## 数据方向
 
@@ -137,7 +159,8 @@ scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不�
 - 改观看区或发布：同步 `docs/readme/cli.md`、`README.md`、
   `docs/readme/design-principles.md`、`SKILL.md`、`tests/selftest.py`；保持 `sync` 只回收、
   推送只发生在命令入口，且观看区目录名始终跳过扫描。
-- 改表结构：同步 `ensure_columns` 的必需列检查；旧库直接 `E_STATE` 拒绝，不写迁移。
+- 改表结构：同步 `ledger.REQUIRED_COLUMNS` 与本文件的表清单；旧库由 `ledger.ensure_columns`
+  直接 `E_STATE` 拒绝，不写迁移。
 - 改渲染：`render_page` 与 `split_frontmatter` 必须能往返；跑 `tests/selftest.py` 的
   import/restore 用例。
 - 改任务：并发前提是单写者；不要为了"更快"去掉提交前的状态与租约检查。

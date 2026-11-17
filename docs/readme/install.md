@@ -89,13 +89,13 @@ python3 <安装路径>/scripts/wiki.py check --json
 python3 <安装路径>/scripts/wiki.py ingest --json
 ```
 
-首次运行会在**当前工作区**创建 `.wiki/`（`wiki.json`、`wiki.db`、`payloads/`、
+首次运行会在**当前工作区**创建 `.wiki/`（`wiki.json`、`wiki.db`、`tasks/`、
 `drafts/`），以及观看区 `<view>/` 与 `<view>/raw/`（`publish.dir`，默认 `wiki/`）；
 原文副本与页面副本都在观看区，不在 `.wiki/` 下。`--root` 只接受当前目录或它下面的子目录，不能指向工作区外；资料在区外时，
 请用户把那个目录作为工作区打开，或复制进来。
 
-草稿、载荷、导出与临时文件都放 `.wiki/` 下：`.wiki/drafts/`、`.wiki/payloads/`、
-`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源，缓存不要散落在根目录。
+草稿、任务目录、导出与临时文件都放 `.wiki/` 下：`.wiki/drafts/`、
+`.wiki/tasks/<id>/`、`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源，缓存不要散落在根目录。
 
 摄入只负责把文件变成来源并排队 route 任务；建页由后续任务循环完成，见 `SKILL.md`
 的主循环。不要手工编辑 `.wiki/` 下的文件，页面只能通过 `submit`、`page import` 修改。

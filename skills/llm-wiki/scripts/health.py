@@ -20,6 +20,7 @@ SCRIPT_FILES = (
     "wiki.py",
     "errors.py",
     "frontmatter.py",
+    "ledger.py",
     "search.py",
     "scenarios.py",
     "topics.py",
@@ -31,7 +32,7 @@ SCRIPT_FILES = (
 )
 TEMPLATES = ("concept.md", "entity.md", "process.md", "note.md")
 BUILTIN_SCENARIOS = ("topic-exploration",)
-TABLES = ("sources", "page_revs", "tasks", "task_sources", "links")
+TABLES = ("sources", "raws", "page_revs", "tasks", "task_sources", "links")
 
 
 def _check(name, fn):
@@ -73,6 +74,10 @@ def _ledger_probe(workspace, deep, allow_missing):
     if not wiki_dir.exists():
         return True, "no wiki yet"
     if not db.is_file():
+        if not config.is_file():
+            # 只有锁文件、任务目录这类工作区脚手架，没有账本也没有配置：
+            # 等同于未初始化，init/ingest 会建库。
+            return True, "no ledger yet"
         if allow_missing:
             return True, "ledger missing; init will create it"
         return False, f"{wiki_dir} exists but wiki.db is missing"
