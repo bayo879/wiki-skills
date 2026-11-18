@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识，原文直接读观看区文件。回答知识问题时默认按内置「话题探索」场景办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。场景能力必须显式 `scenario search` 后再 `scenario load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
+description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识，原文直接读观看区文件。回答知识问题时默认按内置「话题探索」工作流办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。可执行工作流必须显式 `workflow search` 后再 `workflow load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
 ---
 
 # llm-wiki：按任务填内容
@@ -20,7 +20,7 @@ description: 把工作区里的本地文档整理成可检索、可追溯的 Mar
   读取或写入。
 - 草稿、任务目录、导出与临时文件都放 `<root>/.wiki/` 下：`.wiki/drafts/`、
   `.wiki/tasks/<id>/`、`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源；
-  场景/话题目录与观看区（默认 `wiki/`）整目录跳过，即使关了发布，观看区目录名也不能
+  工作流/话题目录与观看区（默认 `wiki/`）整目录跳过，即使关了发布，观看区目录名也不能
   当来源。
 
 ## 运行时
@@ -123,15 +123,15 @@ python3 <skill>/scripts/wiki.py submit <id> --json
 ## 查知识
 
 回答「是什么 / 怎么做 / 有哪些 / 有什么区别 / 帮我梳理」这类问题时，默认按内置
-「话题探索」场景办事：定主题、多轮检索、总结，最后问用户是否沉淀。
+「话题探索」工作流办事：定主题、多轮检索、总结，最后问用户是否沉淀。
 
 ```bash
-python3 <skill>/scripts/wiki.py scenario load "topic-exploration" --json
+python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 python3 <skill>/scripts/wiki.py query "关键词" --json
 python3 <skill>/scripts/wiki.py query --page <page-id> --json
 ```
 
-`query` **不检索场景**；话题探索是先显式 `scenario load "topic-exploration"` 再照着走的流程，
+`query` **不检索工作流**；话题探索是先显式 `workflow load "topic-exploration"` 再照着走的流程，
 不是查询时自动注入的分支。`topics` 是已沉淀话题，相关的先读再探索，不重复劳动。单点查
 页面、查字段或确认某个已知事实，直接用 `query`，不必走完整流程；要读原文就打开
 `work.json` 里 `sources[].raw` 指向的观看区文件。
@@ -141,13 +141,14 @@ python3 <skill>/scripts/wiki.py query --page <page-id> --json
 ## 观看区
 
 命令会在根目录维护一份给人看的产出 `<view>/`（默认 `wiki/`，由 `.wiki/wiki.json` 的
-`publish.dir` 指定；`publish` 段另有 `enabled`、`topics`、`scenarios`，默认都为 `true`，
+`publish.dir` 指定；`publish` 段另有 `enabled`、`topics`、`workflows`，默认都为 `true`，
 一般不需要动）：
 
 - `pages/`：按账本推送的知识页，按 `<type>/<标题>.md` 命名；手改不会覆盖，只会告警。
 - `raw/`：摄入时写入的原文副本，用于核对引文；不要手改。
 - `README.md`：目录说明与统计，每次推送重写。
-- `topics/`、`scenarios/`：首次推送时从 `话题/`、`scenario/` 各投放一份；之后归用户。
+- `topics/`、`workflows/`：首次推送时从 `话题/`、`workflow/` 各投放一份；之后归用户。
+  旧的 `scenarios/` 不再同步，可删除或手动并入 `workflows/`。
 
 不需要为了交付结果去动观看区；`next`/`submit` 正常跑完，下一次命令会自动推送。只有用户
 要求把观看区里的手改收回时，才运行 `sync`（先确认再跑；它只回收、不推送）：
@@ -157,32 +158,48 @@ python3 <skill>/scripts/wiki.py sync --json
 python3 <skill>/scripts/wiki.py sync --body-only --json
 ```
 
-## 按场景执行
+## 按工作流执行
 
-项目可以把一类任务的流程写成场景，放在 `<root>/scenario/<场景>/`（旧名 `场景能力/`，二者同 id 时以
-`scenario/` 为准）：`SCENARIO.md` 是主流程，
-`scripts/` 和 `references/` 是配套脚本与说明。技能自带 `topic-exploration` 内置场景；项目放同名
-场景即可覆盖它。场景是能力，不是知识页：它不会被 `ingest` 写进账本；`query` 也不检索
-它，必须显式 `scenario search`，避免场景自动介入普通知识问答。改完流程不用重新摄入。
-内置场景的 `path` 只是展示标签（`builtin/<id>/SCENARIO.md`），不是磁盘路径。
-场景 frontmatter 的 `name` 写英文机器名，中文展示名放 `alias_name`；`scenario list` 会
-以 `id（alias_name）` 显示。
+项目可以把一类可执行任务的流程写成工作流，放在 `<root>/workflow/<工作流>/`：`WORKFLOW.md`
+是主流程，`scripts/` 和 `references/` 是配套脚本与说明。旧目录 `scenario/`、`场景能力/`
+仍然能读，同 id 时优先级 `workflow/` > `scenario/` > `场景能力/`；目录里没有 `WORKFLOW.md`
+时回退读 `SCENARIO.md`。技能自带 `topic-exploration` 内置工作流；项目放同名工作流即可覆盖它，
+内置项的 `path` 只是展示标签（`builtin/<id>/WORKFLOW.md`）。工作流 frontmatter 的 `name` 写
+英文机器名，中文展示名放 `alias_name`；`workflow list` 以 `id（alias_name）` 显示。
 
-需要场景能力时，先显式检索，再加载照做：
+工作流是可执行流程，不是知识页：它不会被 `ingest` 写进账本；`query` 也不检索它，必须显式
+`workflow search`，避免工作流自动介入普通知识问答。改完流程不用重新摄入。
+
+`## 步骤` 一节里的每一步都要标类型：
+
+- `tool:` 调命令、脚本或另一个技能；正文写清命令与参数。
+- `human:` 需要人做或人确认；停下来问用户，不要替用户决定。
+- `agent:` 由你判断或写作，不需要外部动作。
+- `verify:` 验证前一步结果；可省略。
+
+至少要有一步 `tool:`。只有 `human:`/`agent:`、没有可调用工具时，它是纯人工流程，应写成
+`process` 页面，`workflow load` 会判它无效并指向 `process`。没有类型标记的旧文件 0.5.0
+仍能加载，但会给出 warning；`0.6.0` 起没有标记将判无效。
+
+需要工作流时，先显式检索，再加载照做：
 
 ```bash
-python3 <skill>/scripts/wiki.py scenario search "开户" --json
-python3 <skill>/scripts/wiki.py scenario list --json
-python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
+python3 <skill>/scripts/wiki.py workflow search "开户" --json
+python3 <skill>/scripts/wiki.py workflow list --json
+python3 <skill>/scripts/wiki.py workflow load "<工作流>" --json
 ```
 
-- 只有确认要按场景办事时才检索场景；普通提问不要先搜场景，也不要让场景替用户决定范围。
-- 用 `content` 里的步骤执行任务，用 `resources` 找配套文件；需要细节时再读
+`load` 返回 `workflow`（元数据）、`content`（全文）、`resources`（配套文件），以及按类型分好
+的 `tools`、`human_steps`、`agent_steps`、`verify_steps`（每项 `{line, text}`）和 `warnings`；
+`list` 的每一项也带 `tools`/`human_steps` 计数与 `warnings`。
+
+- 只有确认要按工作流办事时才检索；普通提问不要先搜工作流，也不要让工作流替用户决定范围。
+- 按 `tools` 调工具、按 `human_steps` 停下来问人；用 `resources` 找配套文件，需要细节时再读
   `references/`，不要一次把所有脚本和说明都倒进上下文。
 - 运行 `scripts/` 前先看清用途与参数；没有把握时先向用户确认，不要盲跑。
-- 场景步骤与知识页冲突时，流程以 `SCENARIO.md` 为准；事实依据仍以 raw 和页面为准，
+- 工作流步骤与知识页冲突时，流程以 `WORKFLOW.md` 为准；事实依据仍以 raw 和页面为准，
   缺依据就说明，不要补编步骤。
-- 没有命中场景时按普通知识检索回答；不要凭目录名猜流程，也不要声称执行了不存在的场景。
+- 没有命中工作流时按普通知识检索回答；不要凭目录名猜流程，也不要声称执行了不存在的工作流。
 
 ## 沉淀话题
 
@@ -191,9 +208,9 @@ python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
 `ingest`，不写 `.wiki/`，不建页面、不排任务；写入后报告“未执行摄入”。观看区的 `topics/`
 只是首次推送时的副本，之后归用户；改话题仍以根目录 `话题/` 为准。
 
-- 话题文件的 frontmatter、固定六节、归属判断、授权与完成标准，见内置场景
-  `scenario load "topic-exploration"` 的“话题文件”与“沉淀前的归属判断”两节。
-- 流程稳定、可重复执行时，同时给出 `场景能力/<id>/SCENARIO.md` 的能力候选草稿，用户确认
+- 话题文件的 frontmatter、固定六节、归属判断、授权与完成标准，见内置工作流
+  `workflow load "topic-exploration"` 的“话题文件”与“沉淀前的归属判断”两节。
+- 流程稳定、可重复执行时，同时给出 `workflow/<id>/WORKFLOW.md` 的工作流候选草稿，用户确认
   后再建；资料不足时列出待摄入来源与下一轮要查的关键词。
 - 项目事实归产品文档，强制规则归指导文档，未决问题归 issues；只有可复用的方法、经验、
   踩坑、方案取舍和探索结论写话题。凭据不落盘。

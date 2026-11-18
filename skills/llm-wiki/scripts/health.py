@@ -33,7 +33,7 @@ SCRIPT_FILES = (
     "errors.py",
     "frontmatter.py",
     "search.py",
-    "scenarios.py",
+    "workflows.py",
     "topics.py",
     "tasks.py",
     "validation.py",
@@ -43,7 +43,7 @@ SCRIPT_FILES = (
 )
 TEMPLATES = ("concept.md", "entity.md", "process.md")
 REFERENCES = ("curation.md", "recovery.md")
-BUILTIN_SCENARIOS = ("topic-exploration",)
+BUILTIN_WORKFLOWS = ("topic-exploration",)
 
 LEDGER_OK = "ok"
 LEDGER_REPAIRABLE = "repairable"
@@ -210,13 +210,13 @@ def check_installation(skill_dir, workspace, deep=True, include_ledger=True):
                 ),
             )
         )
-    for name in BUILTIN_SCENARIOS:
+    for name in BUILTIN_WORKFLOWS:
         checks.append(
             _check(
-                f"scenario:{name}",
+                f"workflow:{name}",
                 lambda name=name: (
-                    (skill_dir.parent / "scenarios" / name / "SCENARIO.md").is_file(),
-                    str(skill_dir.parent / "scenarios" / name / "SCENARIO.md"),
+                    (skill_dir.parent / "workflows" / name / "WORKFLOW.md").is_file(),
+                    str(skill_dir.parent / "workflows" / name / "WORKFLOW.md"),
                 ),
             )
         )
@@ -233,7 +233,7 @@ def check_installation(skill_dir, workspace, deep=True, include_ledger=True):
 def _next_for(name):
     if name in INSTALL_NEXT:
         return INSTALL_NEXT[name]
-    if name.startswith(("file:", "template:", "scenario:", "reference:")):
+    if name.startswith(("file:", "template:", "workflow:", "reference:")):
         return "reinstall the skill so its files are complete, then rerun"
     return "fix the reported item, then rerun"
 

@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-import scenarios
+import workflows
 import topics
 from errors import WikiError
 from pages import EVIDENCE_HEADING, meta_mismatch, split_evidence, view_name
@@ -25,15 +25,20 @@ def render_view_readme(wiki, records=None):
         by_type[kind] = by_type.get(kind, 0) + 1
     raw_count = sum(1 for path in wiki.publish_raw_dir.rglob("*") if path.is_file())
     topic_count = sum(1 for path in (publish / "topics").rglob("*.md") if path.is_file())
-    scenario_count = sum(
+    workflow_count = sum(
+        1 for path in (publish / "workflows").glob("*")
+        if (path / workflows.WORKFLOW_FILE).is_file()
+        or (path / workflows.LEGACY_FILE).is_file()
+    )
+    legacy_count = sum(
         1 for path in (publish / "scenarios").glob("*")
-        if (path / scenarios.SCENARIO_FILE).is_file()
+        if (path / workflows.LEGACY_FILE).is_file()
     )
     lines = [
         "# Wiki 视图",
         "",
         "pages/ 由引擎维护：按账本推送。raw/ 是原文副本，手改会被 ingest 采纳为账本事实。",
-        "topics/ 与 scenarios/ 首次投放后归你：引擎不再覆盖、不会删除。",
+        "topics/ 与 workflows/ 首次投放后归你：引擎不再覆盖、不会删除。",
         "pages/ 里手改过的文件不会被覆盖，只给告警；运行 sync 把它收进账本。",
         "其他文件（包括 .obsidian/）不会被删除。",
         "",
@@ -46,12 +51,19 @@ def render_view_readme(wiki, records=None):
     lines.extend([
         f"- `raw/`：原文视图，共 {raw_count} 个文件。",
         f"- `topics/`：话题副本，共 {topic_count} 篇。",
-        f"- `scenarios/`：场景副本，共 {scenario_count} 个。",
+        f"- `workflows/`：工作流副本，共 {workflow_count} 个。",
+    ])
+    if legacy_count:
+        lines.append(
+            f"- `scenarios/`：旧版场景副本，已停止同步，共 {legacy_count} 个；"
+            "可删除或手动并入 `workflows/`。"
+        )
+    lines.extend([
         "",
         "## 说明",
         "",
         "- 原文只留一份：删掉 `raw/` 里的文件后 `ingest` 会用源文件重建；改坏后删掉再 `ingest`。源文件内容改变且比 raw 新时 `ingest` 会主动重写；只改 mtime 不会触发。",
-        "- `topics/`、`scenarios/` 是你自己的成果，改动与新增都不会被引擎同步或删除。",
+        "- `topics/`、`workflows/` 是你自己的成果，改动与新增都不会被引擎同步或删除。",
     ])
     return "\n".join(lines) + "\n"
 
@@ -135,8 +147,8 @@ class ViewMixin:
         publish = self.config["publish"]
         if publish.get("topics", True):
             self._seed_view_topics(events)
-        if publish.get("scenarios", True):
-            self._seed_view_scenarios(events)
+        if publish.get("workflows", publish.get("scenarios", True)):
+            self._seed_view_workflows(events)
         write_atomic(self.publish_dir / "README.md", render_view_readme(self, records))
         events.append("README.md rewritten")
         return events
@@ -233,16 +245,16 @@ class ViewMixin:
             shutil.copy2(source, target)
             events.append(f"{norm_key(target.relative_to(self.root))} seeded")
 
-    def _seed_view_scenarios(self, events):
-        """Copy each project scenario once; built-in scenarios never enter the view."""
-        destination = self.publish_dir / "scenarios"
-        for entry in scenarios.scan(self.root, builtin=False):
+    def _seed_view_workflows(self, events):
+        """Copy each project workflow once; built-in workflows never enter the view."""
+        destination = self.publish_dir / "workflows"
+        for entry in workflows.scan(self.root, builtin=False):
             source = self.root / entry["path"]
             target = destination / entry["id"]
             if target.exists() or not source.is_dir():
                 continue
             if not window_safe(self.root, source.resolve()):
-                events.append(f"warning: skip scenario {entry['id']}: source escapes the workspace")
+                events.append(f"warning: skip workflow {entry['id']}: source escapes the workspace")
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(source, target)

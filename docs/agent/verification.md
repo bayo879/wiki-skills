@@ -166,6 +166,27 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。Windows 侧没有跑过 Po
 | `wiki.db` 写成文本 | `E_DB`，`message` 为 `ledger cannot be opened: file is not a database`，退出码 3 |
 | 半初始化目录 `check` | `ok:true`，ledger 项 `detail` 以 `repairable:` 开头 |
 
+## 2026-11-18 场景改名为可执行工作流后复跑
+
+`scenario` 改为 `workflow`：命令硬切为 `workflow list/search/load`，目录仍三向读取
+（`workflow/` > `scenario/` > `场景能力/`），主文件 `WORKFLOW.md` 优先、缺失回退
+`SCENARIO.md`；步骤要求每步标 `tool:`/`human:`/`agent:`/`verify:`，整份至少一个 `tool:`。
+
+`python3 tests/selftest.py`：258/258 通过，退出码 0。新增与改写的检查：
+
+- 三目录优先级与同名 id 去重；`WORKFLOW.md` 缺失时回退 `SCENARIO.md`；
+- `workflow list` 的 `roots`/`warned` 与每项的步骤计数；`workflow load` 返回
+  `tools`/`human_steps`/`agent_steps`/`verify_steps`/`warnings`；
+- 全角冒号与大小写归一；3 空格缩进的子项、代码块与其他节的列表不算步骤；
+- 零标记给 `W_STEPS_UNTYPED`（0.5.0 合法，0.6.0 起判无效），部分未标给
+  `W_STEP_UNTYPED`，纯人工流程 `E_WORKFLOW_INVALID` 且 `next` 指向 `process` 页；
+- 内置 `topic-exploration` 从 `workflows/` 加载，`check` 列出 `workflow:topic-exploration`；
+- 观看区投放 `workflows/`、旧 `scenarios/` 不被删除、`publish.workflows=false` 停止投放；
+- `ingest` 跳过三目录，`query` 不混入工作流结果；
+- `publish.scenarios` 按值迁移为 `publish.workflows`。
+
+`wiki.py check` 的 `workflow:topic-exploration` 一项通过，账本完整性报 `ok`。
+
 ## 一、自测：203/203 通过
 
 ```bash

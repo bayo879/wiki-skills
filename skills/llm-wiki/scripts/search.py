@@ -2,7 +2,7 @@
 
 The scoring is intentionally simple: count query-term hits in title, summary and
 body, then weight title hits 5x and summary hits 3x. `query` combines these page
-results with scenario matches, so the page half lives here and stays free of
+results with workflow matches, so the page half lives here and stays free of
 command-line state.
 """
 

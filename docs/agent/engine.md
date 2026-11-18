@@ -3,8 +3,8 @@
 对象：`skills/llm-wiki/scripts/`。`wiki.py` 只是入口（命令行转发与兼容再导出），命令层在
 `cli.py`，账本表结构与 `Wiki` 组合根在 `ledger.py`，其余按职责分在 `pages.py`、`view.py`、
 `task_store.py`、`ingest.py`、`util.py`；单文件都不超过 2000 行。公共错误在 `errors.py`，
-frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能力在
-`scenarios.py`，话题沉淀在 `topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，
+frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行工作流在
+`workflows.py`，话题沉淀在 `topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，
 工作区边界在 `workspace.py`，任务信息面在 `tasks.py`，页面载荷校验在 `validation.py`。
 本文件只记录改代码时容易踩的内部约定，命令与字段以 `docs/readme/cli.md` 为准。
 
@@ -19,14 +19,14 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
 | 工具 | `util.py` | `norm_key`、`digest_bytes`/`digest_text`、`same_stamp`、`now_iso`/`parse_iso`、`dump_meta`、`write_atomic` |
 | 工作区边界 | `workspace.py` | `WIKI_DIR`、`window_safe`、`inside_root`、`dry_store`；文件参数一律先过 `inside_root` |
 | 摄入与解析 | `ingest.py` | `extract_text`/`pdf_to_text`/`docx_to_text`/`html_to_text`、`decode_bytes`、`raw_facts`、`raw_body_digest`、`ingest_decision`；纯函数，不碰数据库；超限在 `read_bytes` 抛 |
-| frontmatter | `frontmatter.py` | `split_frontmatter`、`unquote_scalar`、`yaml_scalar`；页面渲染与场景加载共用一套语法 |
+| frontmatter | `frontmatter.py` | `split_frontmatter`、`unquote_scalar`、`yaml_scalar`；页面渲染与工作流加载共用一套语法 |
 | 页面层 | `pages.py` 的 `PagesMixin` | `page_record`、`write_rev`、`rebuild_links`、`links_for`、`view_text`、`page_ids` |
 | 页面渲染 | `pages.py` 的 `render_page` | 依赖 `frontmatter.yaml_scalar`；改动一侧要同步另一侧 |
 | 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
-| 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`topics/`、`scenarios/` 只首次投放；手改只告警，`sync` 回收 |
+| 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`topics/`、`workflows/` 只首次投放；手改只告警，`sync` 回收 |
 | 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；并发走同一条 CAS 约定 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
-| 场景能力 | `scenarios.py` | `scan`/`inventory`/`match`/`load`/`default`；`scenario/` 与旧 `场景能力/` 都扫描（同 id 前者优先），再与 `scenarios/` 内置场景合并，只读文件，不写 `.wiki/`，不生成任务 |
+| 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；`workflow/`、`scenario/`、`场景能力/` 都扫描（同 id 按序优先，`WORKFLOW.md` 回退 `SCENARIO.md`），再与 `workflows/` 内置工作流合并；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
 | 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `话题/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留；纯函数，只读 `Wiki` |
 | 账本结构 | `ledger.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用 |
@@ -98,25 +98,33 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
     `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
     解析后落在扫描根外的符号链接。导入 `errors.py` / `workspace.py` 前设
     `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。
-12. **场景只读、不进账本、不随查询注入。** `scan_files` 在扫描根一级跳过 `scenario/` 与
-    旧 `场景能力/`（`scenarios.SCENARIO_DIRS`），不因旧 `scan.ignore` 是否包含它们而改变；
-    `scenarios.py` 不打开数据库、不写 `.wiki/`、不排任务。`scenario_roots` 按
-    `(scenario, 场景能力)` 顺序返回实际存在的目录，`scan` 逐目录收一级子目录并跳过重复 id，
-    因此同名时英文目录生效。`query` 不读场景文件，场景只通过显式 `scenario search` 检索，
-    项目场景与内置场景一起参与，只返回 `valid` 项。`scenario list` 仍列出非法项并带 `error`，
-    并在 `roots` 里报告实际扫描到的目录。`scenario load` 的 id 必须是这两个目录之一的一级
-    目录名或内置场景 id，拒绝 `.`、`..`、路径分隔符和区外符号链接。场景文件是活文件，
-    不做缓存或 digest。
+12. **工作流只读、不进账本、不随查询注入。** `scan_files` 在扫描根一级跳过 `workflow/`、
+    `scenario/` 与旧 `场景能力/`（`workflows.WORKFLOW_DIRS`），不因旧 `scan.ignore` 是否包含
+    它们而改变；`workflows.py` 不打开数据库、不写 `.wiki/`、不排任务。`workflow_roots` 按
+    `(workflow, scenario, 场景能力)` 顺序返回实际存在的目录，`scan` 逐目录收一级子目录并跳过
+    重复 id，因此同名时 `workflow/` 生效；目录里没有 `WORKFLOW.md` 时回退 `SCENARIO.md`。
+    `query` 不读工作流文件，工作流只通过显式 `workflow search` 检索，项目工作流与内置工作流
+    一起参与，只返回 `valid` 项。`workflow list` 仍列出非法项并带 `error`，在 `roots` 里报告
+    实际扫描到的目录，并汇总带 warning 的项数。`workflow load` 的 id 必须是这些目录之一的
+    一级目录名或内置工作流 id，拒绝 `.`、`..`、路径分隔符和区外符号链接。工作流文件是活
+    文件，不做缓存或 digest。
+    步骤契约在 `parse_steps` / `_contract`：只取第一个 `## 步骤` 到下一个二级标题之间的顶层
+    列表项（缩进最浅一层），代码块、缩进子项和其他节不算；`tool:`/`human:`/`agent:`/`verify:`
+    接受全角冒号与大小写变体，输出统一小写。部分步骤未标给 `W_STEP_UNTYPED`、标记后无内容给
+    `W_STEP_EMPTY`；整份零标记、无 `## 步骤` 或该节无列表项在 `UNTYPED_ALLOWED` 为真
+    （0.5.0）时只给 warning，翻转后（0.6.0）改判 error。有标记但没有 `tool:` 一律 invalid，
+    hint 指向 `process` 页（纯人工流程不属于工作流）。
 13. **话题只读且不进账本。** `scan_files` 同时跳过 `话题/`，话题不会被当成来源。`topics.py`
     只读 `话题/*.md`，取 frontmatter 的 `name/description/status/updated`；正文为空或文件超过
     200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的 `topic_matches` 与页面
     `matches` 分开计数；话题文件由 agent 直接写，不经账本。
 14. **观看区目录由 `publish` 配置决定。** `publish_dir_name` 要求 `dir` 是单个目录名，拒绝
-    `.wiki`、`话题`、`scenario`、`场景能力`；`ensure()` 在开关判断之前调用它，非法值即使
-    `enabled:false` 也报 `E_CONFIG`。`ensure_publish` 始终创建 `<view>/` 与 `<view>/raw/`，
+    `.wiki`、`话题`、`workflow`、`scenario`、`场景能力`；`ensure()` 在开关判断之前调用它，
+    非法值即使 `enabled:false` 也报 `E_CONFIG`。`publish.workflows` 控制是否投放工作流，旧库
+    的 `publish.scenarios` 在没有 `workflows` 键时按值迁移。`ensure_publish` 始终创建 `<view>/` 与 `<view>/raw/`，
     `enabled:false` 只跳过 `sync_view`。`scan_files` 在扫描根无条件跳过该目录名，所以关了
     发布也不能拿它当来源；换掉名字后旧目录恢复为普通来源。`sync_view` 对 `pages/` 的手改
-    只告警不覆盖，`topics/`、`scenarios/` 只在目标不存在时投放，`README.md` 每次推送重写，
+    只告警不覆盖，`topics/`、`workflows/` 只在目标不存在时投放，`README.md` 每次推送重写，
     其他文件（含 `.obsidian/`）不删不改。
 15. **route 任务必须登记检索。** `query --task <id> 词...` 每个词独立检索各返 5 条、按词分组，
     追加一行 `{ts,words,hits}` 到 `<task_dir>/queries.jsonl`；重复词不重复计配额，配额是
@@ -152,8 +160,8 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
 route 载荷 → 校验 → 页面任务（new/merge）或来源结算（skip）
 page 载荷 → 校验 → page_revs + links → 推送 → <view>/pages 副本
 
-scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不落盘）
-                              └─scenario load→ 全文 + resources
+workflow/<id>/WORKFLOW.md ──query/scan──→ 工作流命中（只读，不落盘）
+                              └─workflow load→ 全文 + 分类型步骤 + resources
 
 话题/*.md ──query/scan──→ topics 命中（只读，不落盘）
 ```
@@ -179,11 +187,12 @@ scenario/<id>/SCENARIO.md ──query/scan──→ 场景命中（只读，不�
 - 改字段或校验：同步 `docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
   `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
   `tests/selftest.py`。
-- 改场景：同步 `docs/readme/cli.md`、`docs/readme/scenarios.md`、`SKILL.md`、
-  `skills/llm-wiki/scripts/health.py` 的 `SCRIPT_FILES` 与 `BUILTIN_SCENARIOS`、
-  `tests/selftest.py`；保持场景只经显式 `scenario search` 检索、`load` 只读、内置可覆盖。
+- 改工作流：同步 `docs/readme/cli.md`、`docs/readme/workflows.md`、`SKILL.md`、
+  `skills/llm-wiki/scripts/health.py` 的 `SCRIPT_FILES` 与 `BUILTIN_WORKFLOWS`、
+  `tests/selftest.py`；保持工作流只经显式 `workflow search` 检索、`load` 只读、内置可覆盖。
+  改进步骤契约时同时改 `parse_steps`、`_contract`、selftest 与 `workflows.md` 的判定表。
 - 改话题：同步 `docs/readme/cli.md`、`docs/readme/topics.md`、`SKILL.md`、
-  `skills/llm-wiki/scenarios/topic-exploration/SCENARIO.md`、`scripts/health.py` 的
+  `skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md`、`scripts/health.py` 的
   `SCRIPT_FILES`、`tests/selftest.py`；保持 `ingest` 跳过 `话题/`、`query` 只带话题。
 - 改观看区或发布：同步 `docs/readme/cli.md`、`README.md`、
   `docs/readme/design-principles.md`、`SKILL.md`、`tests/selftest.py`；保持 `sync` 只回收、

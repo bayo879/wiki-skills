@@ -2,15 +2,16 @@
 
 把本地文档整理成可检索、可追溯的 Markdown 知识库。交付物是一个 agent 技能目录
 `skills/llm-wiki/`：纯 Python 标准库，没有服务端、没有构建步骤、没有二进制的分发包。
-项目还可以把一类任务的执行流程写成**场景能力**，放在根目录 `scenario/`（旧名 `场景能力/`）下；检索命中后按
-`SCENARIO.md` 的流程执行，不需要摄入成知识页。回答知识问题时默认走内置的「话题探索」场景：
-定主题、多轮检索、总结，收尾时询问是否把主题沉淀成根目录 `话题/<主题>.md`。
+项目还可以把一类任务的执行流程写成**可执行工作流**，放在根目录 `workflow/`（旧目录
+`scenario/`、`场景能力/` 仍兼容）下；`WORKFLOW.md` 的每一步标明是调工具、人做、agent 判断
+还是验证，检索命中后照着执行，不需要摄入成知识页。回答知识问题时默认走内置的「话题探索」
+工作流：定主题、多轮检索、总结，收尾时询问是否把主题沉淀成根目录 `话题/<主题>.md`。
 
 设计前提：**确定性的事交给引擎，语义的事交给 agent。** 扫描、解析、哈希、任务状态、
 引文校验、页面渲染都在 `scripts/` 里（入口 `scripts/wiki.py`）；agent 只领任务、读原文、
 交 JSON 载荷。
 知识库状态只存在 `.wiki/wiki.db` 账本中；引擎按账本把页面推送到 `<view>/` 观看区
-（`publish.dir`，默认 `wiki/`），`.wiki/` 里不再保存第二份页面正文。场景文件是只读能力，
+（`publish.dir`，默认 `wiki/`），`.wiki/` 里不再保存第二份页面正文。工作流文件是只读能力，
 不写账本。
 
 ## 快速开始
@@ -28,12 +29,12 @@ python3 <skill>/scripts/wiki.py ingest --json
 python3 <skill>/scripts/wiki.py next --json
 python3 <skill>/scripts/wiki.py submit <t_id> --json
 
-# 场景：显式检索并加载流程，按步骤执行（不摄入、不建库）
-python3 <skill>/scripts/wiki.py scenario search "开户" --json
-python3 <skill>/scripts/wiki.py scenario load "<场景>" --json
+# 工作流：显式检索并加载流程，按类型步骤执行（不摄入、不建库）
+python3 <skill>/scripts/wiki.py workflow search "开户" --json
+python3 <skill>/scripts/wiki.py workflow load "<工作流>" --json
 
 # 默认话题探索：先加载内置流程，再检索、总结，最后按需沉淀
-python3 <skill>/scripts/wiki.py scenario load "topic-exploration" --json
+python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 ```
 
 Windows 首次使用运行
@@ -45,7 +46,7 @@ Windows 首次使用运行
 
 ## 工作方式
 
-1. `ingest` 扫描根目录（跳过隐藏目录、`scan.ignore`、场景/话题目录与观看区），把新文件或
+1. `ingest` 扫描根目录（跳过隐藏目录、`scan.ignore`、工作流/话题目录与观看区），把新文件或
    内容变化的文件按正文去重后解析到 `<view>/raw/`（默认 `wiki/raw/`），每个 raw 入队一条
    **route** 任务，同一份正文的多个路径合成一条。
 2. agent 对每份正文提交决定：`new`（新建页）、`merge`（并入已有页）或 `skip`（不要），
@@ -55,10 +56,11 @@ Windows 首次使用运行
    必须逐字命中来源文本，否则拒绝写入。
 4. 页面以修订形式写入账本，并由引擎推送到 `<view>/pages/<type>/<标题>.md`（观看区）；
    正文只存在账本与观看区两处。来源变化会让引用页变 `stale`，下次 `ingest` 重新排队。
-5. 场景能力放在 `scenario/<场景>/`（旧名 `场景能力/`），由 `SCENARIO.md`、`scripts/`、`references/` 组成。
-   `ingest` 跳过整个目录；`query` 不检索场景，需要时显式 `scenario search`，命中后按
-   `scenario load` 得到的流程执行。改场景文件立即生效，不用重新摄入。技能自带
-   `topic-exploration` 内置场景，项目放同名场景即可覆盖，显式检索时同样能被检出。
+5. 可执行工作流放在 `workflow/<工作流>/`（旧目录 `scenario/`、`场景能力/` 仍扫描），由
+   `WORKFLOW.md`、`scripts/`、`references/` 组成；旧目录里没有 `WORKFLOW.md` 时回退
+   `SCENARIO.md`。`ingest` 跳过整个目录；`query` 不检索工作流，需要时显式 `workflow search`，
+   命中后按 `workflow load` 返回的分类步骤执行。改工作流文件立即生效，不用重新摄入。技能自带
+   `topic-exploration` 内置工作流，项目放同名工作流即可覆盖，显式检索时同样能被检出。
 6. 话题沉淀放在 `话题/<主题>.md`，一个主题一份，固定六节（主题、结论、依据、未决问题、
    下一步、能力候选）。`ingest` 跳过 `话题/`；`query` 把命中话题放在 `topics`，与页面
    计数分开。话题由 agent 直接写，不进账本、不排任务。
@@ -78,11 +80,12 @@ Windows 首次使用运行
   `sync` 决定是否收进账本。人工修改走 `page import`，回滚走 `page restore --rev N`。
 - **观看区的所有权分开算。** `<view>/pages` 的手改不会被覆盖，只给告警，由人工 `sync`
   收进账本；`<view>/raw` 由摄入维护（手改会在下一次 `ingest` 被采纳为事实），
-  `<view>/README.md` 每次推送重写；`topics/`、`scenarios/` 首次投放后归用户，引擎不覆盖
+  `<view>/README.md` 每次推送重写；`topics/`、`workflows/` 首次投放后归用户，引擎不覆盖
   也不删除。详见[观看区与发布](#观看区与发布)。
-- **场景不是知识页。** `scenario/`（或 `场景能力/`）不摄入、不进账本、不生成任务；流程以
-  `SCENARIO.md` 为准，事实依据仍以页面和 raw 为准。场景命令只读，不要求先 `init`。
-- **话题是 wiki 的探索层，不是知识页。** `话题/` 由 agent 按内置「话题探索」场景的格式
+- **工作流不是知识页。** `workflow/`（或旧的 `scenario/`、`场景能力/`）不摄入、不进账本、
+  不生成任务；流程以 `WORKFLOW.md` 为准，事实依据仍以页面和 raw 为准。工作流命令只读，
+  不要求先 `init`。
+- **话题是 wiki 的探索层，不是知识页。** `话题/` 由 agent 按内置「话题探索」工作流的格式
   直接写入，不运行 page 任务、不写 `.wiki/`、不排任务；写入不代表已摄入，也不参与页面
   证据校验。
 - **超限文件不解析。** 默认单文件 50 MB（`ingest.max_source_bytes`），按 `oversize` 报告，
@@ -99,7 +102,8 @@ Windows 首次使用运行
   删掉该文件再 `ingest`，会用源文件重建（源文件也没了才会丢）。源文件内容改变且比 raw 新时
   `ingest` 会主动重写；只改 mtime（`touch`）不会触发。
 - `README.md`：目录说明与统计，每次推送重写。
-- `topics/`、`scenarios/`：首次推送各投放一次，之后归用户；引擎不覆盖、不删除。
+- `topics/`、`workflows/`：首次推送各投放一次，之后归用户；引擎不覆盖、不删除。旧的
+  `scenarios/` 不再同步，可删除或手动并入 `workflows/`。
 - 其他文件（包括 `.obsidian/`）不删不改。
 
 手改尚未被 `sync` 收割期间，这一页在观看区整体冻结：推送既不覆盖它，也不按新标题改名或
@@ -107,14 +111,14 @@ Windows 首次使用运行
 被占等）只写 stderr，不进 JSON 的 `data`；只有 `sync` 会在 `data.warnings` 里给出同类信息。
 
 配置在 `.wiki/wiki.json` 的 `publish` 段，四个键：`dir`（默认 `wiki`）、`enabled`（默认
-`true`）、`topics`（默认 `true`）、`scenarios`（默认 `true`）。
+`true`）、`topics`（默认 `true`）、`workflows`（默认 `true`；旧库的 `scenarios` 键仍兼容）。
 
 `dir` 必须是单个目录名：不能以点开头、不能含路径分隔符，也不能是 `.wiki`、`话题`、
-`scenario`、`场景能力`；名字非法时即使 `enabled:false` 也报 `E_CONFIG`。这个名字被引擎
+`workflow`、`scenario`、`场景能力`；名字非法时即使 `enabled:false` 也报 `E_CONFIG`。这个名字被引擎
 占用，即使关了发布也仍跳过，所以不能拿它当来源目录。`enabled:false` 只停推送：不写
-`README.md`，不再更新 `pages/`、不投放 `topics/`、`scenarios/`，但 `<view>/` 与
+`README.md`，不再更新 `pages/`、不投放 `topics/`、`workflows/`，但 `<view>/` 与
 `<view>/raw/` 仍会创建。换 `dir` 后旧目录名不再跳过，`ingest` 会把它当普通来源摄入，
-清理旧目录由用户决定。整目录删除会连 `raw/` 里的原文和 `topics/`、`scenarios/` 里的用户
+清理旧目录由用户决定。整目录删除会连 `raw/` 里的原文和 `topics/`、`workflows/` 里的用户
 改动一起丢掉；`raw/` 要重新 `ingest` 才能补回，`pages/` 与 `README.md` 会按账本重建。
 
 ```bash
@@ -129,14 +133,14 @@ python3 <skill>/scripts/wiki.py sync --body-only --json  # 只取正文与证据
 
 ```text
 skills/llm-wiki/          技能：SKILL.md、references/（curation.md）、
-                          scenarios/（内置话题探索）、templates/（concept、entity、
+                          workflows/（内置话题探索）、templates/（concept、entity、
                           process）、scripts/
 tests/                    开发/CI 的端到端自测，不随技能安装
-docs/readme/              产品说明：设计原则、CLI、场景、话题、安装、恢复
+docs/readme/              产品说明：设计原则、CLI、工作流、话题、安装、恢复
 docs/agent/               开发指导：决策、引擎内部、维护守则
 docs/issues/              未决问题，一问题一文件
 wiki/                     观看区：运行时在工作区根目录创建（publish.dir 默认 wiki/），
-                          pages/ raw/ topics/ scenarios/ README.md
+                          pages/ raw/ topics/ workflows/ README.md
 ```
 
 Rust 实现已于 2026-11-13 停止维护，归档在 Git tag `rust-archive-2026-11-13`，不在当前
@@ -149,8 +153,8 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 tests/selftest.py
 ```
 
-`tests/selftest.py` 在临时目录跑 190 项端到端检查，不接触真实数据；它和 `tests/` 留在
+`tests/selftest.py` 在临时目录跑 258 项端到端检查，不接触真实数据；它和 `tests/` 留在
 仓库、由开发/CI 执行，不复制进安装后的技能目录。验证记录（含真实 PDF 语料结果）见
-[docs/agent/verification.md](docs/agent/verification.md)。场景目录结构与写法见
-[docs/readme/scenarios.md](docs/readme/scenarios.md)，话题沉淀格式见
+[docs/agent/verification.md](docs/agent/verification.md)。工作流目录、步骤契约与写法见
+[docs/readme/workflows.md](docs/readme/workflows.md)，话题沉淀格式见
 [docs/readme/topics.md](docs/readme/topics.md)。

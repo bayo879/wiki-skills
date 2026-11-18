@@ -27,7 +27,7 @@ python3 <skill>/scripts/wiki.py ingest --json   # 失败时 stdout 仍是一段 
 自动补齐只有一种：任何打开账本的命令（`init`、`ingest`、`next`、`submit`、`query`、
 `status`、`doctor` 等）在打开时，缺的目录、缺的 `wiki.json`、缺的表会当场建出来，
 补了什么写在返回值的 `repaired` 里（路径列表，和 `created` 同形）。`repaired` 非空不是错误；
-它说明这条命令顺手把库补全了。`check`、`scenario`、`version` 不碰账本，也不会建库。
+它说明这条命令顺手把库补全了。`check`、`workflow`、`version` 不碰账本，也不会建库。
 
 ## 运行时与安装
 

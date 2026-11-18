@@ -4,7 +4,7 @@
 子目录；指到工作区外返回 `E_PATH`。除 `version` 外都接受 `--json`。引擎只依赖 Python
 标准库。
 
-除 `check`、`version`、`scenario` 外，命令启动时会准备 `.wiki/` 与观看区 `<view>/`
+除 `check`、`version`、`workflow` 外，命令启动时会准备 `.wiki/` 与观看区 `<view>/`
 （`publish.dir`，默认 `wiki/`）：缺的目录、缺的 `wiki.json`、缺的账本表当场补齐，补了什么
 列在 `data.repaired`（路径数组，和 `created` 同形），并按账本推送一次；`sync` 例外，它只
 回收、不推送。
@@ -65,7 +65,7 @@
 
 ### check
 
-只读诊断：Python 3.12+、技能必需文件与模板、场景与手册文件、工作区可写、已有账本可读。
+只读诊断：Python 3.12+、技能必需文件与模板、工作流与手册文件、工作区可写、已有账本可读。
 不创建 `.wiki/`，不读写页面内容，也不修任何东西。`data`: `{ok, doc, checks[{name,ok,detail}]}`；
 `doc` 是恢复手册路径，失败时用它找到对应小节；`ok` 与退出码一致（`0` 通过，`1` 有失败项）。
 账本项可以给出 `repairable`（结构能补，例如有 `wiki.json` 却缺 `wiki.db`）：仍算通过，
@@ -84,11 +84,12 @@
 
 ### ingest
 
-扫描根目录（跳过隐藏目录、`scan.ignore`、`scenario/`、`场景能力/`、`话题/` 与观看区
-`<view>/`），解析新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），并为每个
-新来源入队任务，同一份正文的多个路径合成一条 route 任务。`scenario/`（旧名 `场景能力/`）是流程能力、`话题/` 是 wiki 的
-探索层，都不作为摄入来源，摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。场景与
-话题的检索分别由 `scenario search` 和 `query` 直接扫描文件完成。
+扫描根目录（跳过隐藏目录、`scan.ignore`、`workflow/`、`scenario/`、`场景能力/`、`话题/`
+与观看区 `<view>/`），解析新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），
+并为每个新来源入队任务，同一份正文的多个路径合成一条 route 任务。`workflow/`（旧目录
+`scenario/`、`场景能力/`）放可执行工作流，`话题/` 是 wiki 的探索层，都不作为摄入来源，
+摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。工作流与话题的检索分别由
+`workflow search` 和 `query` 直接扫描文件完成。
 
 `--dry-run` 用 `.wiki/tmp/` 下的临时库，退出时清理，不写账本；它只列 `would_ingest`，不预告
 末尾补偿入队会补哪些来源。`--force` 忽略哈希重新解析。`--only` 按根目录相对 key
@@ -206,8 +207,8 @@ decision 可带可选 `links`，声明这页与哪些页面相关。目标只能
 ### query
 
 `query <词...> [--limit N] [--task <id>]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
-`话题/`，命中时在 `topics` 里返回。`query` **不检索场景**，场景必须显式
-`scenario search`。`query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
+`话题/`，命中时在 `topics` 里返回。`query` **不检索工作流**，工作流必须显式
+`workflow search`。`query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
 `path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`sources`（`[{key, raw}]`，`raw`
 是账本渲染的观看区副本路径，源缺失时为 `null`）、`outgoing`、`incoming`、`body`，不查话题。
 
@@ -224,40 +225,49 @@ decision 可带可选 `links`，声明这页与哪些页面相关。目标只能
 
 检索结果是定位工具，不是覆盖证明。
 
-### scenario
+### workflow
 
-`scenario list`：列出 `<root>/scenario/` 与 `<root>/场景能力/` 下的一级场景目录及技能内置场景，
-包括结构不合法的项；同一 id 出现在两个目录时只列 `scenario/` 那份，项目场景与内置场景
-同 id 时只列项目版。
+`workflow list`：列出 `<root>/workflow/`、`<root>/scenario/`、`<root>/场景能力/` 下的一级
+工作流目录及技能内置工作流，包括结构不合法的项；同一 id 出现在多个目录时按
+`workflow/` > `scenario/` > `场景能力/` 只列第一份，项目工作流与内置工作流同 id 时只列
+项目版。
 
-`data`: `{root, roots, count, valid, scenarios[]}`；`root` 是生效的目录名，`roots` 是实际存在的
-场景目录（`scenario/` 在前）；每项为
-`{id, source, name, alias_name, description, tags, path, main, valid, error, resources[]}`，
-其中 `name` 是场景机器名、`alias_name` 是可选的中文展示名（人类可读行优先显示它）；
-`tags` 按 Obsidian 规则规范化（去 `#`、空白切分、保留 `a/b` 层级、丢弃纯数字），
-`source` 取 `project` 或 `builtin`。`resources[]` 为 `{path, kind, size}`，`kind` 取
-`script`（`scripts/` 下）、`reference`（`references/` 下）或 `other`。
+`data`: `{root, roots, count, valid, warned, workflows[]}`；`root` 是优先生效的目录名，
+`roots` 是实际存在的工作流目录（`workflow/` 在前），`warned` 是带 warning 的项数；每项为
+`{id, source, name, alias_name, description, tags, path, main, valid, error, resources,
+tools, human_steps, agent_steps, verify_steps, warnings[]}`。`tools`、`human_steps` 等是
+各类型步骤的数量，`warnings[]` 为 `{code, line, text, message}`；`name` 是工作流机器名、
+`alias_name` 是可选的中文展示名（人类可读行优先显示它）；`tags` 按 Obsidian 规则规范化
+（去 `#`、空白切分、保留 `a/b` 层级、丢弃纯数字），`source` 取 `project` 或 `builtin`。
+`resources[]` 为 `{path, kind, size}`，`kind` 取 `script`（`scripts/` 下）、`reference`
+（`references/` 下）或 `other`。
 
-`scenario search <词...> [--limit N]`：显式检索场景，返回命中的项目场景与内置场景；
-不传词返回 `E_USAGE`。只有显式检索并 `load` 后，才按场景的分支流程执行，避免场景自动
-介入普通知识问答。
+`workflow search <词...> [--limit N]`：显式检索工作流，返回命中的项目工作流与内置工作流；
+不传词返回 `E_USAGE`。只有显式检索并 `load` 后，才按工作流的分支流程执行，避免工作流
+自动介入普通知识问答。
 
-`data`: `{query, matches, scenarios[]}`；`matches` 只数场景，`scenarios[]` 为
-`{id, source, name, alias_name, description, tags, path, main, load, score, resources}`，
-`source` 取 `project` 或 `builtin`；`load` 是建议的加载命令，`resources` 是配套文件数量。
-非法场景不进 `scenario search` 结果。
+`data`: `{query, matches, workflows[]}`；`matches` 只数工作流，`workflows[]` 为
+`{id, source, name, alias_name, description, tags, path, main, load, score, resources,
+tools, human_steps, verify_steps, warnings}`，`load` 是建议的加载命令。非法工作流不进
+`workflow search` 结果。
 
-`scenario load <id>`：加载一个合法场景（项目或内置），返回主文件全文与资源清单。
+`workflow load <id>`：加载一个合法工作流（项目或内置），返回主文件全文、资源清单与按类型
+分好的步骤。
 
-`data`: `{scenario, path, content, meta, resources}`。`content` 是 `SCENARIO.md`
-全文（含 frontmatter），`path` 是主文件的根目录相对路径，`resources` 同上。内置场景的
-`path` 是展示标签 `builtin/<id>/SCENARIO.md`，不是磁盘路径；其 `resources` 恒为空。
+`data`: `{workflow, path, content, meta, resources, tools, human_steps, agent_steps,
+verify_steps, warnings}`。`content` 是 `WORKFLOW.md` 全文（含 frontmatter），`path` 是主
+文件的根目录相对路径；旧目录里没有 `WORKFLOW.md` 时读回退的 `SCENARIO.md`。`tools`、
+`human_steps`、`agent_steps`、`verify_steps` 每项为 `{line, text}`，`warnings[]` 同上。
+内置工作流的 `path` 是展示标签 `builtin/<id>/WORKFLOW.md`，不是磁盘路径；其 `resources`
+恒为空。
 
-三个命令都只读：不创建 `.wiki/`，不写账本，不要求先 `init` 或 `ingest`。场景文件改动后
-下一次 `scenario search` / `scenario load` 立即生效。`id` 必须是 `scenario/` 或 `场景能力/` 下的一级目录名
-（或内置场景 id），包含路径分隔符或试图跳出目录返回 `E_USAGE`；场景不存在返回
-`E_NOT_FOUND`；缺 `SCENARIO.md`、缺 `description`、正文为空、文件过大或场景目录/主文件
-指向区外返回 `E_SCENARIO_INVALID`。`scenario list` 不因个别场景不合法而失败。
+三个命令都只读：不创建 `.wiki/`，不写账本，不要求先 `init` 或 `ingest`。工作流文件改动后
+下一次 `workflow list` / `workflow load` 立即生效。`id` 必须是工作流目录下的一级目录名
+（或内置 id），包含路径分隔符或试图跳出目录返回 `E_USAGE`；工作流不存在返回
+`E_NOT_FOUND`；缺 `WORKFLOW.md`、缺 `description`、正文为空、文件过大、工作流目录或主
+文件指向区外，或步骤里没有 `tool:` 步骤，返回 `E_WORKFLOW_INVALID`。没有 `## 步骤`、
+这一节没有列表项、或整份没有任何类型标记的工作流在 0.5.0 仍可加载但带 `warnings`，
+`0.6.0` 起返回 `E_WORKFLOW_INVALID`。`workflow list` 不因个别工作流不合法而失败。
 
 ### page
 
@@ -341,10 +351,10 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_SOURCE_DRIFT` | 来源在任务领取后被改动或删除 | 重新 `next`，重读来源 |
 | `E_UNKNOWN_SOURCE` | 页面引用未登记的来源 | 先 `ingest` |
 | `E_EMPTY` | 还没有任何来源 | 先 `ingest` |
-| `E_NOT_FOUND` | 页面、版本或场景不存在 | 用 `query`/`scenario list` 定位 |
+| `E_NOT_FOUND` | 页面、版本或工作流不存在 | 用 `query`/`workflow list` 定位 |
 | `E_PATH` | 路径越出工作区根目录 | 用工作区内路径；资料在区外时切换工作区 |
 | `E_CONFIG` | `.wiki/wiki.json` 非法，或 `publish.dir` 不合规 | 修正 JSON，或删掉让它按默认重建；见「配置损坏」 |
-| `E_SCENARIO_INVALID` | 场景缺主文件、`description`、正文，或超过 200000 字符 | 按 `scenario list` 的 `error` 修正场景目录 |
+| `E_WORKFLOW_INVALID` | 工作流缺主文件、`description`、正文，超过 200000 字符，或步骤里没有 `tool:` | 按 `workflow list` 的 `error` 修正工作流目录 |
 | `E_SOURCE_TOO_LARGE` | 单文件超过 `max_source_bytes` | 调高阈值或拆分来源 |
 | `E_DB` | 账本打不开或完整性检查失败 | 停写，从备份恢复整个 `.wiki/`；见「账本损坏」 |
 | `E_HEALTH` | 安装检查未通过：解释器太旧、技能文件缺失、工作区不可写 | 按 `error.next`；见「运行时与安装」 |
@@ -358,7 +368,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 {"schema": {"types": ["concept", "entity", "process"]},
  "scan": {"ignore": [".git", "node_modules", "target", "dist"]},
  "ingest": {"max_source_bytes": 50000000},
- "publish": {"dir": "wiki", "enabled": true, "topics": true, "scenarios": true}}
+ "publish": {"dir": "wiki", "enabled": true, "topics": true, "workflows": true}}
 ```
 
 改 `schema.types` 会立即影响后续校验；已存在的页面不会被自动迁移。老库配置里的 `note`
@@ -367,6 +377,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 `schema.types` 里删掉。
 
 `publish.dir` 是观看区目录名，必须是单个目录名：不能以点开头、不能含路径分隔符，也不能
-是 `.wiki`、`话题`、`scenario`、`场景能力`；非法值即使 `enabled:false` 也返回 `E_CONFIG`。
-`enabled:false` 只停推送，`<view>/` 与 `<view>/raw/` 仍会创建；`topics`、`scenarios`
-控制首次推送时是否投放对应目录。
+是 `.wiki`、`话题`、`workflow`、`scenario`、`场景能力`；非法值即使 `enabled:false` 也返回 `E_CONFIG`。
+`enabled:false` 只停推送，`<view>/` 与 `<view>/raw/` 仍会创建；`topics`、`workflows`
+控制首次推送时是否投放对应目录。旧库的 `publish.scenarios` 仍会读：没有 `workflows` 键时按
+`scenarios` 的值迁移，`scenarios` 为假则不再投放工作流。

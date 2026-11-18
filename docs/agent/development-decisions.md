@@ -366,3 +366,27 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
 - 同步 `docs/readme/cli.md`、`topics.md`、`design-principles.md`、`recovery.md`、
   `docs/agent/engine.md`、`verification.md`、`skills/llm-wiki/SKILL.md` 与
   `references/`、内置场景；`selftest.py` 249 项。
+
+## 2026-11-18：场景能力改名为可执行工作流
+
+复核 issue「scenario 改名 workflow」后逐项定案并落地。`scenario` 这个名字不承载「可执行」，
+和 `process` 页的边界也说不清；改名同时把「可执行」写成契约，而不是只换术语。
+
+- **正式名 `workflow`，中文「可执行工作流」。** 首次出现写定义句，其后简称「工作流」；
+  「适用场景/使用场景」这类普通词不替换。
+- **命令硬切，不设别名。** 只留 `workflow list/search/load`，`scenario` 命令直接移除；
+  目录双读已经保住旧工作区的内容，再留一套旧命令只会让两种说法并存。
+- **目录与主文件双读。** `workflow/` > `scenario/` > `场景能力/`，`WORKFLOW.md` 优先、
+  缺失回退 `SCENARIO.md`；旧工作区零迁移，内容不会在 `workflow list` 里消失。
+- **步骤契约四类、每步必标。** `tool:`/`human:`/`agent:`/`verify:`，只解析第一个 `## 步骤`
+  的顶层列表项；整份至少一个 `tool:`，纯人工流程判 invalid 并指向 `process` 页。issue 原设想
+  的 tool/human 二分装不下「判断收敛」「组论点」这类纯判断步骤，故加 `agent:`。
+- **旧内容 0.6.0 截止。** `UNTYPED_ALLOWED` 控制：0.5.0 零标记仍合法但给 warning，0.6.0
+  翻转后判 invalid；仓库内两份（内置 `topic-exploration`、`workflow/ppt_creator`）当次补标记。
+- **观看区保留旧目录。** 新投放 `workflows/`，旧 `scenarios/` 不搬不删，README 注明「已停止
+  同步」；`publish.workflows` 为新键，旧 `publish.scenarios` 按值迁移。
+- **0.5.0 一次装完，0.6.0 只收紧。** 双读长期保留，不再为旧目录设移除窗口。
+- 代码把 `scenarios.py` 改为 `workflows.py`，`SCENARIO_DIRS`→`WORKFLOW_DIRS`，
+  `E_SCENARIO_INVALID`→`E_WORKFLOW_INVALID`；内置目录改 `skills/llm-wiki/workflows/`；
+  同步 `README.md`、`SKILL.md`、`docs/readme/workflows.md`、`cli.md`、`design-principles.md`、
+  `topics.md`、`docs/agent/` 与 selftest；`VERSION=0.5.0`，`selftest.py` 258 项。

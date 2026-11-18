@@ -9,9 +9,12 @@
   记录 skills-only 转型、账本为唯一事实源、删除页面镜像、不引入 OCR/联网等已定决策。
 - **改引擎（`scripts/wiki.py`）**：读 [引擎内部](docs/agent/engine.md)，查任务状态机、
   epoch/lease、修订与渲染、观看区推送、错误码约定与单文件规模边界。
-- **改话题探索或沉淀流程**：读 [话题沉淀](docs/readme/topics.md) 与内置场景
-  `skills/llm-wiki/scenarios/话题探索/SCENARIO.md`，查 `scenario search` 的显式检索、
+- **改话题探索或沉淀流程**：读 [话题沉淀](docs/readme/topics.md) 与内置工作流
+  `skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md`，查 `workflow search` 的显式检索、
   `query` 的 `topics` 字段与 `ingest` 跳过 `话题/` 的约束。
+- **改工作流目录、步骤契约或命令**：读 [可执行工作流](docs/readme/workflows.md) 与
+  [引擎内部](docs/agent/engine.md)，查三目录优先级、`WORKFLOW.md` 回退、四类步骤标记与
+  `workflow list/search/load` 的输出字段。
 - **改技能文字、命令契约或输出格式**：读 [技能与契约维护](docs/agent/maintenance.md)，
   查 SKILL.md 与 references 的同步范围、`tests/selftest.py` 守卫、文档编辑的核验要求。
 - **改文档或准备提交**：读 [技能与契约维护](docs/agent/maintenance.md)；

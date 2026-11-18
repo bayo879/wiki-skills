@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import health
-import scenarios
+import workflows
 import search
 import topics
 from errors import WikiError
@@ -51,7 +51,7 @@ from workspace import (
 )
 
 
-VERSION = "0.4.3"
+VERSION = "0.5.0"
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 # 当前命令打开账本时补齐的东西；emit 把它作为 repaired 输出。
@@ -1016,49 +1016,73 @@ def command_query():
     wiki.close()
     return 0
 
-def command_scenario():
+def command_workflow():
     workspace = Path.cwd().resolve()
     root = Path(ARGS.root).resolve() if ARGS.root else workspace
     if not window_safe(workspace, root):
         raise WikiError(
-            "E_PATH", "scenario root escapes the workspace",
+            "E_PATH", "workflow root escapes the workspace",
             "run from the workspace, or pass --root inside it", 2,
         )
-    if ARGS.scenario_command == "search":
+    if ARGS.workflow_command == "search":
         terms = [term.strip() for term in ARGS.text if term.strip()]
         if not terms:
             raise WikiError(
-                "E_USAGE", "scenario search needs text",
-                'example: scenario search "开户"', 2,
+                "E_USAGE", "workflow search needs text",
+                'example: workflow search "开户"', 2,
             )
-        hits = scenarios.match(root, terms, ARGS.limit)
-        data = {"query": " ".join(terms), "matches": len(hits), "scenarios": hits}
+        hits = workflows.match(root, terms, ARGS.limit)
+        data = {"query": " ".join(terms), "matches": len(hits), "workflows": hits}
         lines = []
         for item in hits:
             alias = f"（{item['alias_name']}）" if item["alias_name"] else ""
             lines.append(f"{item['id']}{alias}  {item['description']}")
-            lines.append(f"    path: {item['path']}  load: {item['load']}")
-        emit("scenario search", root, f"{len(hits)} matching scenarios", data, lines)
+            lines.append(
+                f"    path: {item['path']}  tools: {item['tools']}"
+                f"  human: {item['human_steps']}  load: {item['load']}"
+            )
+        emit("workflow search", root, f"{len(hits)} matching workflows", data, lines)
         return 0
-    if ARGS.scenario_command == "list":
-        data = scenarios.inventory(root)
-        summary = f"{data['valid']} valid, {data['count'] - data['valid']} invalid scenarios"
+    if ARGS.workflow_command == "list":
+        data = workflows.inventory(root)
+        summary = f"{data['valid']} valid, {data['count'] - data['valid']} invalid workflows"
+        if data["warned"]:
+            summary += f", {data['warned']} with warnings"
         lines = []
-        for item in data["scenarios"]:
+        for item in data["workflows"]:
             state = "ok" if item["valid"] else f"invalid: {item['error']}"
             alias = f"（{item['alias_name']}）" if item["alias_name"] else ""
             lines.append(f"{item['id']}{alias}  [{state}]  {item['description']}")
-            lines.append(f"    path: {item['path']}  resources: {len(item['resources'])}")
-        emit("scenario list", root, summary, data, lines)
+            detail = (
+                f"    path: {item['path']}  resources: {len(item['resources'])}"
+                f"  tools: {item['tools']}  human: {item['human_steps']}"
+            )
+            if item["warnings"]:
+                detail += f"  warnings: {len(item['warnings'])}"
+            lines.append(detail)
+            for warning in item["warnings"]:
+                where = f"line {warning['line']}: " if warning["line"] else ""
+                lines.append(f"    ! {where}{warning['message']}")
+        emit("workflow list", root, summary, data, lines)
         return 0
-    data = scenarios.load(root, ARGS.id)
+    data = workflows.load(root, ARGS.id)
+    record = data["workflow"]
     emit(
-        "scenario load", root,
-        f"scenario {data['scenario']['id']}: {len(data['resources'])} resources",
+        "workflow load", root,
+        f"workflow {record['id']}: {len(data['resources'])} resources, "
+        f"{len(data['tools'])} tool steps, {len(data['human_steps'])} human steps",
         data,
-        [f"path: {data['path']}", f"description: {data['scenario']['description']}", "", data["content"]],
+        [
+            f"path: {data['path']}",
+            f"description: {record['description']}",
+            f"steps: {len(data['tools'])} tool, {len(data['human_steps'])} human, "
+            f"{len(data['agent_steps'])} agent, {len(data['verify_steps'])} verify",
+            "",
+            data["content"],
+        ],
     )
     return 0
+
 
 def command_page_import():
     wiki, _ = open_wiki()
@@ -1317,13 +1341,13 @@ def build_parser():
     query.add_argument("--page")
     query.add_argument("--task", help="register the search on a task; route tasks must query before deciding")
     query.add_argument("--limit", type=int, default=None)
-    scenario = sub.add_parser("scenario", help="inspect scenario capabilities")
-    scenario_sub = scenario.add_subparsers(dest="scenario_command", required=True)
-    scenario_sub.add_parser("list", parents=[common], help="list scenario capabilities and validity")
-    search_p = scenario_sub.add_parser("search", parents=[common], help="explicitly search scenario capabilities")
+    workflow = sub.add_parser("workflow", help="inspect executable workflows")
+    workflow_sub = workflow.add_subparsers(dest="workflow_command", required=True)
+    workflow_sub.add_parser("list", parents=[common], help="list workflows with step counts and validity")
+    search_p = workflow_sub.add_parser("search", parents=[common], help="explicitly search workflows")
     search_p.add_argument("text", nargs="*")
     search_p.add_argument("--limit", type=int, default=5)
-    load_p = scenario_sub.add_parser("load", parents=[common], help="load one scenario flow and its resources")
+    load_p = workflow_sub.add_parser("load", parents=[common], help="load one workflow, its typed steps and resources")
     load_p.add_argument("id")
     page = sub.add_parser("page", help="human edits to an existing page")
     page_sub = page.add_subparsers(dest="page_command", required=True)
@@ -1381,9 +1405,9 @@ def main(argv=None):
         handler = (
             command_page_import if ARGS.page_command == "import" else command_page_restore
         )
-    elif command == "scenario":
-        command = f"scenario {ARGS.scenario_command}"
-        handler = command_scenario
+    elif command == "workflow":
+        command = f"workflow {ARGS.workflow_command}"
+        handler = command_workflow
     else:
         handler = COMMANDS[command]
     try:

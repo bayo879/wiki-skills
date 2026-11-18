@@ -11,10 +11,10 @@
 | 任务 brief 与 template 的形状 | `skills/llm-wiki/scripts/tasks.py` | `cli.md` 给字段说明，`tests/selftest.py` 给断言 |
 | agent 行为约束 | `skills/llm-wiki/SKILL.md` | `README.md` 只讲产品边界 |
 | 页面质量与证据标准 | `skills/llm-wiki/references/curation.md` | — |
-| 话题的文件格式、归属与写入流程 | `docs/readme/topics.md`（流程细节在内置场景 `skills/llm-wiki/scenarios/topic-exploration/SCENARIO.md`） | `SKILL.md` 只给触发、边界与入口 |
+| 话题的文件格式、归属与写入流程 | `docs/readme/topics.md`（流程细节在内置工作流 `skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md`） | `SKILL.md` 只给触发、边界与入口 |
 | 页面固定版式与正文模板 | `skills/llm-wiki/templates/`（按类型分文件） | — |
 | 安装与目录约定 | `docs/readme/install.md` | `README.md` 给一行入口 |
-| 场景目录、frontmatter 与写法 | `docs/readme/scenarios.md` | `SKILL.md` 只给加载与执行约束 |
+| 工作流目录、frontmatter、步骤契约与写法 | `docs/readme/workflows.md` | `SKILL.md` 只给加载与执行约束 |
 | 故障与恢复 | `skills/llm-wiki/references/recovery.md`（随技能安装，按错误码分节） | `docs/readme/recovery.md` 只留原则与入口 |
 | 实测结果与未覆盖项 | `docs/agent/verification.md` | — |
 | 内部实现约定 | `docs/agent/engine.md` | — |
@@ -23,11 +23,13 @@
 改命令、载荷、错误码时，至少同时检查：`docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
 `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
 `skills/llm-wiki/references/recovery.md`、`tests/selftest.py`、`README.md` 中的示例。
-改场景行为时，同时检查 `docs/readme/scenarios.md`、`skills/llm-wiki/scripts/scenarios.py`
-与 `query`/`scenario` 的输出断言。`scenarios.SCENARIO_DIRS` 改动时还要同步 `ingest` 的
-根级跳过、`publish.dir` 的保留名与 `docs/readme/cli.md`。
-改话题流程时，同时检查 `SKILL.md` 的触发描述、`docs/readme/topics.md` 与内置场景
-`skills/llm-wiki/scenarios/topic-exploration/SCENARIO.md` 的归属、授权与格式约束。
+改工作流行为时，同时检查 `docs/readme/workflows.md`、`skills/llm-wiki/scripts/workflows.py`
+与 `query`/`workflow` 的输出断言。`workflows.WORKFLOW_DIRS` 改动时还要同步 `ingest` 的根级
+跳过、`publish.dir` 的保留名、观看区投放目录与 `docs/readme/cli.md`。改步骤契约
+（`parse_steps`、`_contract`、`UNTYPED_ALLOWED`）时，同步 `workflows.md` 的判定表、
+`SKILL.md` 的四类标记段、`health.py` 的 `BUILTIN_WORKFLOWS` 与 selftest 的夹具。
+改话题流程时，同时检查 `SKILL.md` 的触发描述、`docs/readme/topics.md` 与内置工作流
+`skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md` 的归属、授权与格式约束。
 示例里的命令必须能直接跑通。
 改章节骨架（`tasks.py` 的 `PAGE_SECTIONS`）时，同步 `templates/` 下对应类型的正文模板，
 保证模板章节与引擎一致。`PAGE_SECTIONS` 里可以留着不在默认 `schema.types` 中的类型

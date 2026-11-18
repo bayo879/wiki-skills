@@ -1,7 +1,7 @@
-"""Frontmatter parsing shared by ledger pages and scenario flows.
+"""Frontmatter parsing shared by ledger pages and workflow files.
 
 The parser is deliberately small: scalar keys plus `- item` lists, which is all
-the engine and `SCENARIO.md` need. Page rendering and scenario loading must read
+the engine and `WORKFLOW.md` need. Page rendering and workflow loading must read
 the same syntax, so both import this module instead of keeping their own copy.
 """
 

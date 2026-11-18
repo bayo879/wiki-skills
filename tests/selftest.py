@@ -30,7 +30,8 @@ sys.path.insert(0, str(SCRIPT.parent))
 from runtime import require_python
 
 require_python()
-import scenarios  # noqa: E402  (frontmatter normalisation, for tag checks)
+import ledger  # noqa: E402  (config migration)
+import workflows  # noqa: E402  (frontmatter normalisation, for tag checks)
 import wiki  # noqa: E402  (the engine itself, for table-level checks)
 
 WIKI_CACHE = ".wiki"
@@ -81,12 +82,12 @@ def body_file(root):
     return path
 
 
-def scenario_files(root):
-    base = Path(root) / "场景能力"
+def workflow_files(root):
+    base = Path(root) / "workflow"
     good = base / "account-opening"
     (good / "scripts").mkdir(parents=True)
     (good / "references").mkdir(parents=True)
-    main = good / "SCENARIO.md"
+    main = good / "WORKFLOW.md"
     main.write_text(
         "---\n"
         "name: 开户流程\n"
@@ -96,40 +97,60 @@ def scenario_files(root):
         "  - 新客户\n"
         "---\n"
         "# 开户流程\n\n"
-        "1. 核验身份\n"
-        "2. 登记资料\n",
+        "## 步骤\n\n"
+        "1. tool: **核验身份**：运行 `scripts/check.sh`\n"
+        "2. human: **收资料**：请客户签字确认\n"
+        "3. agent: **登记资料**：写入客户档案\n"
+        "4. verify: **核对**：检查资料齐全\n"
+        "   - tool: 缩进子项不是步骤\n",
         encoding="utf-8",
     )
     (good / "scripts/check.sh").write_text("echo check\n", encoding="utf-8")
     (good / "references/notes.md").write_text("开户材料说明\n", encoding="utf-8")
     broken = base / "broken"
     broken.mkdir()
-    (broken / "SCENARIO.md").write_text(
-        "---\nname: 坏场景\n---\n\n缺少 description。\n", encoding="utf-8"
+    (broken / "WORKFLOW.md").write_text(
+        "---\nname: 坏流程\n---\n\n缺少 description。\n", encoding="utf-8"
+    )
+    manual = base / "manual"
+    manual.mkdir()
+    (manual / "WORKFLOW.md").write_text(
+        "---\nname: 手工流程\ndescription: 只有人工步骤\n---\n\n"
+        "## 步骤\n\n1. human: **签字**\n2. agent: **归档**\n",
+        encoding="utf-8",
+    )
+    partial = base / "partial"
+    partial.mkdir()
+    (partial / "WORKFLOW.md").write_text(
+        "---\nname: 混写流程\ndescription: 有一步没标类型\n---\n\n"
+        "## 步骤\n\n1. tool: **取证**\n2. 复核\n",
+        encoding="utf-8",
     )
     english = Path(root) / "scenario" / "deck-flow"
     english.mkdir(parents=True)
     (english / "SCENARIO.md").write_text(
-        "---\n"
-        "name: English flow\n"
-        "description: Flow stored under the English scenario directory\n"
-        "tags:\n"
-        "  - deck\n"
-        "---\n"
-        "# English flow\n\n"
-        "1. draft\n"
-        "2. hand off\n",
+        "---\nname: 旧英文流程\ndescription: 旧目录里的流程\n---\n\n"
+        "## 步骤\n\n1. tool: **旧步骤**\n",
         encoding="utf-8",
     )
-    legacy = base / "deck-flow"
+    deck = base / "deck-flow"
+    deck.mkdir()
+    (deck / "WORKFLOW.md").write_text(
+        "---\nname: Deck flow\ndescription: Flow stored under the canonical workflow directory\n---\n\n"
+        "## 步骤\n\n1. tool: **draft**\n2. human: **hand off**\n",
+        encoding="utf-8",
+    )
+    legacy = base / "legacy-flow"
     legacy.mkdir()
     (legacy / "SCENARIO.md").write_text(
-        "---\n"
-        "name: Legacy deck\n"
-        "description: Shadowed copy left behind in the Chinese directory\n"
-        "---\n"
-        "# Legacy deck\n\n"
-        "1. stale\n",
+        "---\nname: 旧流程\ndescription: 还没有类型标记的旧文件\n---\n\n"
+        "# 旧流程\n\n## 步骤\n\n1. 老步骤\n",
+        encoding="utf-8",
+    )
+    shadow = Path(root) / "场景能力" / "account-opening"
+    shadow.mkdir(parents=True)
+    (shadow / "SCENARIO.md").write_text(
+        "---\nname: 影子流程\ndescription: 中文目录里的旧副本\n---\n\n1. 旧\n",
         encoding="utf-8",
     )
     return main
@@ -558,40 +579,68 @@ def main(argv=None):
         )
         (root / "b.md").write_text("# 无关材料\n\n用来验证 skip 分支。\n", encoding="utf-8")
         (root / "scan.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-        scenario_main = scenario_files(root)
+        workflow_main = workflow_files(root)
 
-        listing = run(root, "scenario", "list")["data"]
-        check(results, "scenario list includes project and builtin entries",
-              listing["count"] == 4 and listing["valid"] == 3, listing)
-        check(results, "scenario list reports both project roots",
-              listing["roots"] == ["scenario", "场景能力"], listing.get("roots"))
-        check(results, "scenario commands leave no .wiki", not (root / ".wiki").exists(), listing)
-        check(results, "scenario tags follow the obsidian rules",
-              scenarios._tags(["#话题", "见证 开户", "2024", "a/b#c", "话题"])
-              == ["话题", "见证", "开户", "a/b", "c"], scenarios._tags(["#话题", "见证 开户"]))
-        builtin = run(root, "scenario", "load", "topic-exploration")["data"]
-        check(results, "builtin scenario is loadable without project files",
-              builtin["scenario"]["source"] == "builtin"
+        listing = run(root, "workflow", "list")["data"]
+        check(results, "workflow list includes project and builtin entries",
+              listing["count"] == 7 and listing["valid"] == 5 and listing["warned"] == 3, listing)
+        check(results, "workflow list reports all project roots",
+              listing["roots"] == ["workflow", "scenario", "场景能力"], listing.get("roots"))
+        check(results, "workflow commands leave no .wiki", not (root / ".wiki").exists(), listing)
+        check(results, "workflow tags follow the obsidian rules",
+              workflows._tags(["#话题", "见证 开户", "2024", "a/b#c", "话题"])
+              == ["话题", "见证", "开户", "a/b", "c"], workflows._tags(["#话题", "见证 开户"]))
+        legacy_config = Path(tempfile.mkdtemp(prefix="llm-wiki-config-"))
+        try:
+            (legacy_config / ".wiki").mkdir()
+            config_file = legacy_config / ".wiki" / "wiki.json"
+            config_file.write_text('{"publish": {"scenarios": false}}', encoding="utf-8")
+            migrated = ledger.load_config(config_file)["publish"]
+            check(results, "publish.scenarios migrates to publish.workflows",
+                  migrated["workflows"] is False and migrated["topics"] is True, migrated)
+        finally:
+            shutil.rmtree(legacy_config, ignore_errors=True)
+        parsed, has_section = workflows.parse_steps(
+            "## 步骤\n\n1. TOOL：**a**\n2. Human: **b**\n   - tool: 子项\n"
+            "3. 没标\n\n## 其他\n\n- tool: 不算\n")
+        check(results, "step markers accept a full-width colon and any case",
+              has_section and [step["type"] for step in parsed] == ["tool", "human", None], parsed)
+        builtin = run(root, "workflow", "load", "topic-exploration")["data"]
+        check(results, "builtin workflow is loadable without project files",
+              builtin["workflow"]["source"] == "builtin"
               and builtin["path"].startswith("builtin/")
               and "话题文件" in builtin["content"]
-              and builtin["scenario"]["name"] == "topic-exploration"
-              and builtin["scenario"]["alias_name"] == "话题探索"
+              and builtin["workflow"]["name"] == "topic-exploration"
+              and builtin["workflow"]["alias_name"] == "话题探索"
+              and len(builtin["tools"]) == 4 and len(builtin["human_steps"]) == 1
               and builtin["resources"] == [], builtin)
-        check(results, "builtin scenario id cannot escape", run(root, "scenario", "load", "../x", expect=2)["error"]["code"] == "E_USAGE")
-        loaded = run(root, "scenario", "load", "account-opening")["data"]
-        check(results, "scenario load returns the whole flow",
-              "核验身份" in loaded["content"] and loaded["path"].endswith("SCENARIO.md")
-              and loaded["scenario"]["alias_name"] == "", loaded)
-        check(results, "scenario load inventories support files",
+        check(results, "builtin workflow id cannot escape",
+              run(root, "workflow", "load", "../x", expect=2)["error"]["code"] == "E_USAGE")
+        loaded = run(root, "workflow", "load", "account-opening")["data"]
+        check(results, "workflow load returns the flow and typed steps",
+              "核验身份" in loaded["content"] and loaded["path"].endswith("WORKFLOW.md")
+              and loaded["workflow"]["alias_name"] == ""
+              and [step["text"] for step in loaded["tools"]] == ["**核验身份**：运行 `scripts/check.sh`"]
+              and len(loaded["human_steps"]) == 1 and len(loaded["agent_steps"]) == 1
+              and len(loaded["verify_steps"]) == 1 and loaded["warnings"] == [], loaded)
+        check(results, "workflow load inventories support files",
               {item["kind"] for item in loaded["resources"]} == {"script", "reference"}, loaded["resources"])
-        english = run(root, "scenario", "load", "deck-flow")["data"]
-        check(results, "scenario under scenario/ is loadable",
-              english["path"].startswith("scenario/deck-flow/")
-              and english["scenario"]["name"] == "English flow"
-              and "hand off" in english["content"], english["path"])
-        escaped = run(root, "scenario", "load", "../x", expect=2)
-        check(results, "scenario id cannot escape the scenario root",
-              escaped["error"]["code"] == "E_USAGE", escaped)
+        deck = run(root, "workflow", "load", "deck-flow")["data"]
+        check(results, "workflow/ wins over scenario/ and 场景能力/",
+              deck["path"] == "workflow/deck-flow/WORKFLOW.md"
+              and deck["workflow"]["name"] == "Deck flow", deck["path"])
+        legacy = run(root, "workflow", "load", "legacy-flow")["data"]
+        check(results, "a legacy SCENARIO.md still loads with a warning",
+              legacy["path"] == "workflow/legacy-flow/SCENARIO.md"
+              and legacy["warnings"][0]["code"] == "W_STEPS_UNTYPED", legacy)
+        partial = run(root, "workflow", "load", "partial")["data"]
+        check(results, "an untyped step only warns",
+              partial["workflow"]["valid"]
+              and [item["code"] for item in partial["warnings"]] == ["W_STEP_UNTYPED"], partial)
+        manual = run(root, "workflow", "load", "manual", expect=2)
+        check(results, "a typed workflow without tool steps is invalid",
+              manual["error"]["code"] == "E_WORKFLOW_INVALID"
+              and "process page" in manual["error"]["next"], manual)
 
         data = run(root, "check")["data"]
         check(results, "check passes in a workspace with no ledger", data["ok"], data)
@@ -709,8 +758,8 @@ def main(argv=None):
         check(results, "ingest reports the open queue",
               data["queue"]["open"] == data["queue"]["queued"] + data["queue"]["leased"]
               and data["queue"]["route"] == 2, data.get("queue"))
-        check(results, "ingest skips the scenario directory",
-              not any(item["key"].startswith(("场景能力", "scenario")) for item in data["ingested"]), data["ingested"])
+        check(results, "ingest skips the workflow directories",
+              not any(item["key"].startswith(("workflow", "scenario", "场景能力")) for item in data["ingested"]), data["ingested"])
         check(results, "ingest skips topic files",
               not any(item["key"].startswith("话题/") for item in data["ingested"]), data["ingested"])
         check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
@@ -815,28 +864,29 @@ def main(argv=None):
               [wiki.ingest_decision(*args) for args, _ in cases] == [want for _, want in cases], cases)
 
         found = run(root, "query", "开户")["data"]
-        check(results, "query does not mix in scenario matches",
-              "scenarios" not in found and "scenario_matches" not in found, found)
-        searched = run(root, "scenario", "search", "开户")["data"]
-        check(results, "scenario search finds a project scenario",
-              searched["matches"] == 1 and searched["scenarios"][0]["id"] == "account-opening", searched)
-        scenario_main.write_text(
-            scenario_main.read_text(encoding="utf-8") + "\n补充：支持见证开户。\n",
+        check(results, "query does not mix in workflow matches",
+              "workflows" not in found and "workflow_matches" not in found, found)
+        searched = run(root, "workflow", "search", "开户")["data"]
+        check(results, "workflow search finds a project workflow",
+              searched["matches"] == 1 and searched["workflows"][0]["id"] == "account-opening"
+              and searched["workflows"][0]["tools"] == 1, searched)
+        workflow_main.write_text(
+            workflow_main.read_text(encoding="utf-8") + "\n补充：支持见证开户。\n",
             encoding="utf-8",
         )
-        live = run(root, "scenario", "search", "见证开户")["data"]
-        check(results, "scenario edits are searchable without ingest",
+        live = run(root, "workflow", "search", "见证开户")["data"]
+        check(results, "workflow edits are searchable without ingest",
               live["matches"] == 1, live)
-        invalid = run(root, "scenario", "search", "坏场景")["data"]
-        check(results, "invalid scenarios stay out of scenario search",
+        invalid = run(root, "workflow", "search", "坏流程")["data"]
+        check(results, "invalid workflows stay out of workflow search",
               invalid["matches"] == 0, invalid)
 
         topics_hit = run(root, "query", "复机")["data"]
-        builtin_hit = run(root, "scenario", "search", "话题")["data"]
-        check(results, "scenario search finds the builtin explicitly",
+        builtin_hit = run(root, "workflow", "search", "话题")["data"]
+        check(results, "workflow search finds the builtin explicitly",
               builtin_hit["matches"] >= 1
-              and builtin_hit["scenarios"][0]["id"] == "topic-exploration"
-              and builtin_hit["scenarios"][0]["source"] == "builtin",
+              and builtin_hit["workflows"][0]["id"] == "topic-exploration"
+              and builtin_hit["workflows"][0]["source"] == "builtin",
               builtin_hit)
         check(results, "query finds the saved topic",
               topics_hit["topic_matches"] == 1
@@ -1020,7 +1070,7 @@ def main(argv=None):
         }
         run(root, "submit", task["id"], "--payload", payload_file(root, "update-page.json", update_payload))
 
-        # Task 6: 推送观看区（pages / raw / topics / scenarios / README）----
+        # Task 6: 推送观看区（pages / raw / topics / workflows / README）----
         page_file = root / "wiki/pages/process/反诈复机.md"
         check(results, "the first revision was published with its own text",
               page_file.exists()
@@ -1085,7 +1135,7 @@ def main(argv=None):
 
         readme = (root / "wiki/README.md").read_text(encoding="utf-8")
         check(results, "view readme lists the directories",
-              all(word in readme for word in ("pages", "raw", "topics", "scenarios")), readme)
+              all(word in readme for word in ("pages", "raw", "topics", "workflows")), readme)
         check(results, "view readme names who owns what",
               "由引擎维护" in readme and "归你" in readme and "sync" in readme, readme)
         (root / "wiki/README.md").unlink()
@@ -1095,14 +1145,31 @@ def main(argv=None):
 
         check(results, "topics are seeded into the view dir",
               (root / "wiki/topics/复机办理.md").exists())
-        check(results, "scenarios are seeded into the view dir",
-              (root / "wiki/scenarios/account-opening/SCENARIO.md").exists()
-              and (root / "wiki/scenarios/account-opening/scripts/check.sh").exists())
-        deck = root / "wiki/scenarios/deck-flow/SCENARIO.md"
-        check(results, "the scenario copy follows the scenario/ precedence",
+        check(results, "workflows are seeded into the view dir",
+              (root / "wiki/workflows/account-opening/WORKFLOW.md").exists()
+              and (root / "wiki/workflows/account-opening/scripts/check.sh").exists())
+        deck = root / "wiki/workflows/deck-flow/WORKFLOW.md"
+        check(results, "the workflow copy follows the workflow/ precedence",
               deck.exists()
-              and "English flow" in deck.read_text(encoding="utf-8")
-              and "Legacy deck" not in deck.read_text(encoding="utf-8"))
+              and "Deck flow" in deck.read_text(encoding="utf-8")
+              and "旧英文流程" not in deck.read_text(encoding="utf-8"))
+        config_path = root / ".wiki/wiki.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["publish"]["workflows"] = False
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        shutil.rmtree(root / "wiki/workflows")
+        run(root, "status")
+        check(results, "publish.workflows=false stops seeding new copies",
+              not (root / "wiki/workflows").exists())
+        config["publish"]["workflows"] = True
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        run(root, "status")
+        old_view = root / "wiki/scenarios/keep.md"
+        old_view.parent.mkdir(parents=True, exist_ok=True)
+        old_view.write_text("旧观看区自己留的文件\n", encoding="utf-8")
+        run(root, "status")
+        check(results, "the old scenarios/ view dir is left alone",
+              old_view.read_text(encoding="utf-8") == "旧观看区自己留的文件\n")
         (root / "wiki/topics/复机办理.md").write_text("我改过的话题\n", encoding="utf-8")
         run(root, "status")
         check(results, "user owned topic copies are never overwritten",
@@ -1196,7 +1263,7 @@ def main(argv=None):
 
         config_path = root / ".wiki/wiki.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        for bad in ("../x", ".wiki", "a/b", "场景能力", "scenario", "", ".", "..", ".hidden", "/abs", "a\\b", "话题"):
+        for bad in ("../x", ".wiki", "a/b", "场景能力", "scenario", "workflow", "", ".", "..", ".hidden", "/abs", "a\\b", "话题"):
             config["publish"]["dir"] = bad
             config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
             escaped = run(root, "status", expect=2)
@@ -1212,13 +1279,13 @@ def main(argv=None):
         config["ingest"]["max_source_bytes"] = 50_000_000
         config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
 
-        config["publish"] = {"dir": "../x", "enabled": False, "topics": True, "scenarios": True}
+        config["publish"] = {"dir": "../x", "enabled": False, "topics": True, "workflows": True}
         config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         disabled = run(root, "status", expect=2)
         check(results, "invalid publish dir is rejected even when disabled",
               disabled["error"]["code"] == "E_CONFIG", disabled)
 
-        config["publish"] = {"dir": "view", "enabled": True, "topics": True, "scenarios": True}
+        config["publish"] = {"dir": "view", "enabled": True, "topics": True, "workflows": True}
         config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         (root / "view").write_text("占位：同名文件不是目录\n", encoding="utf-8")
         blocked = run(root, "status", expect=3)
@@ -2063,16 +2130,17 @@ def main(argv=None):
         check(results, "next keeps reporting no work when nothing is open",
               empty["data"]["count"] == 0 and empty["summary"] == "no queued tasks", empty)
 
-        override = root / "scenario" / "topic-exploration"
+        override = root / "workflow" / "topic-exploration"
         override.mkdir()
-        (override / "SCENARIO.md").write_text(
-            "---\nname: topic-exploration\ndescription: 项目自定义的话题流程\n---\n\n项目版流程。\n",
+        (override / "WORKFLOW.md").write_text(
+            "---\nname: topic-exploration\ndescription: 项目自定义的话题流程\n---\n\n"
+            "## 步骤\n\n1. tool: **检索**：`query`\n",
             encoding="utf-8",
         )
-        overridden = run(root, "scenario", "load", "topic-exploration")["data"]
-        check(results, "project scenario overrides the builtin",
-              overridden["scenario"]["source"] == "project"
-              and "项目版流程" in overridden["content"], overridden)
+        overridden = run(root, "workflow", "load", "topic-exploration")["data"]
+        check(results, "project workflow overrides the builtin",
+              overridden["workflow"]["source"] == "project"
+              and "项目自定义" in overridden["content"], overridden)
 
         retrieval_flow(results)
         batch_flow(results)
@@ -2095,8 +2163,8 @@ def main(argv=None):
             *sorted((ROOT / "docs" / "readme").rglob("*.md")),
             *sorted((ROOT / "docs" / "agent").rglob("*.md")),
             *sorted((ROOT / "skills" / "llm-wiki" / "references").rglob("*.md")),
-            *sorted((ROOT / "skills" / "llm-wiki" / "scenarios").rglob("*.md")),
-            *sorted((ROOT / "scenario").rglob("*.md")),
+            *sorted((ROOT / "skills" / "llm-wiki" / "workflows").rglob("*.md")),
+            *sorted((ROOT / "workflow").rglob("*.md")),
         ]
         stale = [
             f"{path.relative_to(ROOT).as_posix()}:{number}"

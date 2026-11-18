@@ -18,7 +18,7 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-import scenarios
+import workflows
 import topics
 from errors import WikiError
 from frontmatter import split_frontmatter
@@ -219,7 +219,7 @@ DEFAULT_CONFIG = {
         ]
     },
     "ingest": {"max_source_bytes": 50_000_000},
-    "publish": {"dir": "wiki", "enabled": True, "topics": True, "scenarios": True},
+    "publish": {"dir": "wiki", "enabled": True, "topics": True, "workflows": True},
 }
 
 
@@ -239,6 +239,15 @@ def load_config(path):
     for section, values in raw.items():
         if section in config and isinstance(values, dict):
             config[section].update(values)
+    # 0.4.x 用 publish.scenarios 开关；改名后只有显式给了旧键、没给新键时才迁移，
+    # 这样 scripts 里写死 scenarios=false 的旧配置不会因为默认值变回开启。
+    raw_publish = raw.get("publish") if isinstance(raw, dict) else None
+    if (
+        isinstance(raw_publish, dict)
+        and "scenarios" in raw_publish
+        and "workflows" not in raw_publish
+    ):
+        config["publish"]["workflows"] = raw_publish["scenarios"]
     return config
 
 
@@ -257,7 +266,7 @@ def publish_dir_name(config):
         reason = "must not be empty"
     elif name in (".", ".."):
         reason = "must name a directory, not a relative reference"
-    elif name in (WIKI_DIR, topics.TOPIC_DIR) or name in scenarios.SCENARIO_DIRS:
+    elif name in (WIKI_DIR, topics.TOPIC_DIR) or name in workflows.WORKFLOW_DIRS:
         reason = "is reserved for the engine or another wiki layer"
     elif Path(name).is_absolute() or name.startswith("\\"):
         reason = "must be relative to the wiki root"
@@ -386,7 +395,7 @@ class LedgerMixin:
     def scan_files(self):
         ignores = set(self.config["scan"]["ignore"])
         root_skips = {
-            topics.TOPIC_DIR, publish_dir_name(self.config), *scenarios.SCENARIO_DIRS,
+            topics.TOPIC_DIR, publish_dir_name(self.config), *workflows.WORKFLOW_DIRS,
         }
         found = []
         for current, dirnames, filenames in os.walk(self.scan_root):
