@@ -24,7 +24,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 页面渲染 | `pages.py` 的 `render_page` | 依赖 `frontmatter.yaml_scalar`；改动一侧要同步另一侧 |
 | 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
 | 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`topics/`、`workflows/` 只首次投放；手改只告警，`sync` 回收 |
-| 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；并发走同一条 CAS 约定 |
+| 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；租约归属（`task_leases`、`sweep_leases`、`lease_owner`）；并发走同一条 CAS 约定 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；`workflow/`、`scenario/`、`场景能力/` 都扫描（同 id 按序优先，`WORKFLOW.md` 回退 `SCENARIO.md`），再与 `workflows/` 内置工作流合并；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
 | 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `话题/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
@@ -60,8 +60,11 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
    落盘副本在 `<view>/pages/`，由 `sync_view` 按账本推送，`render_digest` 只是渲染文本的
    历史哈希，不再用于比对文件。
 5. **任务 epoch 单调。** `claim_tasks` 先回收过期 lease，领取时 `epoch = epoch + 1`；
-   不重发仍在租约里的任务：有 `leased` 行时 `next` 直接报 `E_TASK_UNSUBMITTED`，agent 先
-   `submit` 或 `release` 才能继续，避免「反复 next 续租」把 `attempts`、`epoch` 变成无效计数；
+   不重发仍在租约里的任务：有 `leased` 行时 `next` 先 `sweep_leases` 收掉过期租约，再把租约
+   按 `owner` 分成自己的和别人的——自己的一律报 `E_TASK_UNSUBMITTED`（先 `submit` 或
+   `release`），别人的报 `E_INGEST_BUSY` 并指出占用会话，让后来者立刻停手而不是重试等待；
+   `ingest` 在入队前也过同一道检查（`--dry-run` 用临时库，不受限），避免两个执行体一起改
+   任务目录与 `.wiki/tmp`；也避免「反复 next 续租」把 `attempts`、`epoch` 变成无效计数；
    `close_task` 用
    `WHERE id=? AND epoch=? AND state='leased'` 的 CAS，rowcount=0 抛
    `E_TASK_STALE`。不要用先查后写替代 CAS。漂移任务不发出，`expire_task` 置终态
@@ -135,8 +138,9 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 16. **任务目录只是素材，不是队列。** `next` 领取后把任务物化到
     `.wiki/tasks/<id>/`（`brief.md`、`work.json`、`payload.json`）；发放仍只由 `next` 决定。
     `payload.json` 只在不存在时写入，重领只刷新 `brief.md` 与 `work.json`，不覆盖 agent 已填
-    的内容；未提交的租约任务不重发：`next` 报 `E_TASK_UNSUBMITTED` 并指向这个目录，
-    租约到期后按现有规则回队，漂移任务置 `expired`。
+    的内容；未提交的租约任务不重发：本会话报 `E_TASK_UNSUBMITTED`、别的会话报
+    `E_INGEST_BUSY`，都指向这个目录并说明归属，租约到期后按现有规则回队，漂移任务置
+    `expired`。
     `close_task`/`expire_task` 成功后删目录，残留目录由 `next`、`ingest` 的
     `cleanup_task_dirs` 清掉。`submit` 默认读该目录的 `payload.json`，`--payload` 只是后备。
 17. **同一页面同时只有一个未关闭的 page 任务。** 账本里用部分唯一索引

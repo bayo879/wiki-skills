@@ -6,7 +6,7 @@
 - `section`：本文件里对应的小节标题。
 
 先按 `error.next` 处理；`next` 说得不够，就翻到 `section` 指定的那一节。只有这两项都没给
-的错误（载荷校验、任务并发这类），按 `SKILL.md`「提交失败」处理，不在这里。
+的错误（载荷校验、队列被别的会话占用这类），按 `SKILL.md`「提交失败」处理，不在这里。
 
 两条通用前提：
 
@@ -116,3 +116,18 @@ workspace root`、`publish dir … resolves outside the workspace root`。
 
 对应 `E_BUSY`：另一个 wiki 进程正在这个工作区写账本。等它结束再重试；只有确认它已经崩溃
 （进程不存在、`.wiki/lock` 超过十分钟没动）才删 `.wiki/lock`，不要为了抢跑直接删锁。
+
+## 队列被别的会话占用
+
+对应 `E_INGEST_BUSY`（`next`、`ingest`）与 `E_TASK_FOREIGN`（`submit`、`query`）：任务记在领取它的会话
+名下，现在由另一个会话持有。`message` 里带着占用的会话 id 和任务 id，`status` 的 `leases`
+也能看到当前归属。
+
+处理：
+
+1. 停手。不要重试、不要 `sleep` 等、不要换一个 `--owner` 假装成自己。
+2. 把会话 id 和任务 id 报给用户，等对方交完，或者由用户决定让你接手。
+3. 确认对方已经停了（会话结束、进程不在）并由用户授权后，才 `release <任务 id>` 把它放回
+   队列，再 `next`。`release` 不校验归属，但会打印原持有方，先看清放的是哪个任务。
+
+同一个会话里的 `E_TASK_UNSUBMITTED` 不是这个问题：那是自己领了还没交，按「提交失败」处理。

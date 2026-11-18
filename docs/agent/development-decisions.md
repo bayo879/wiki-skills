@@ -3,6 +3,24 @@
 本文件记录用户已确认的方向与关键取舍。新决策由用户拍板后追加；未确认的候选方案写进
 `docs/issues/`，不要写在这里。
 
+## 2026-11-18：任务租约按会话归属，别的会话立刻停手
+
+触发：Session `3768c894-2598-4eb4-9d63-00b547a27048` 一批次摄入时，主智能体派 3 个子智能体
+并行领取。`next` 是全局单消费者，三路加起来 100 次 `E_TASK_UNSUBMITTED` 空转，24 分钟只多
+写 10 页（≈0.4 页/分，串行阶段 ≈0.9 页/分），还有一个子智能体停手时仍占着租约未提交。
+
+- 租约记领取会话：新表 `task_leases(task_id, owner, leased_at)`，`tasks` 结构不动（`ensure_columns`
+  不做迁移，加列会让旧库直接报 `E_STATE`）。`--owner` 优先，其次 `$LLM_WIKI_OWNER`、
+  `$DSH_SESSION_ID`；都没有就不记归属。
+- `next` 先 `sweep_leases`，再把租约分成本会话与他会话：本会话仍报 `E_TASK_UNSUBMITTED`，
+  他会话报 `E_INGEST_BUSY` 并指出占用方；`submit`、`query --task` 提交他会话的任务报
+  `E_TASK_FOREIGN`。`release` 仍对任何会话开放，作为运维恢复口子，输出原持有方。
+- 改写 2026-11-17「单写者前提下不再区分「谁的租约」」：不区分归属时，后来者只知道自己领不到，
+  无法判断是"自己没交"还是"别人在摄入"，于是照常重试或派并行子智能体；归属可见才能让后来者
+  立刻停。
+- 文档同步 `SKILL.md`（取任务硬约束、提交失败两条）、`references/recovery.md`（新小节）、
+  `cli.md`、`recovery.md`、`design-principles.md`、`engine.md`。
+
 ## 2026-11-13：转型为 skills-only
 
 用户原话："这个项目要开始转型了，把重心放在skills内的能力开发上，把之前使用rust的设定

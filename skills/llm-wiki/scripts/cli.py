@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -51,8 +52,29 @@ from workspace import (
 )
 
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+# 领取任务的会话身份：显式参数 > 用户导出 > 宿主注入的会话 id。
+OWNER_ENV = ("LLM_WIKI_OWNER", "DSH_SESSION_ID")
+
+
+def session_owner():
+    """Which session a claim belongs to.
+
+    DSH exports `DSH_SESSION_ID` for every session, so a subagent is a
+    different owner without any setup; a plain terminal exports
+    `LLM_WIKI_OWNER` once or passes `--owner` on each command. An empty
+    result means "unattributed": the claim still works, but the queue cannot
+    tell this session from another one, so `next` keeps the old wording
+    instead of guessing.
+    """
+    candidates = [getattr(ARGS, "owner", "")] + [os.environ.get(name) for name in OWNER_ENV]
+    for value in candidates:
+        value = (value or "").strip()
+        if value:
+            return value
+    return ""
 
 # 当前命令打开账本时补齐的东西；emit 把它作为 repaired 输出。
 REPAIRED = []
@@ -163,6 +185,18 @@ def command_init():
 def command_ingest():
     require_install()
     wiki, _ = open_wiki(dry_run=ARGS.dry_run)
+    # 别的会话正在摄入时连排队都停：多个执行体一起改任务目录正是载荷被写串的入口。
+    if not ARGS.dry_run:
+        foreign = wiki.foreign_leases(session_owner())
+        if foreign:
+            task_id, held_by = foreign[0]
+            raise WikiError(
+                "E_INGEST_BUSY",
+                f"session {held_by} is already ingesting task {task_id}; stop, do not retry",
+                "another session is ingesting this workspace: do not ingest, queue or claim "
+                "here, and do not retry — wait for it to submit, or have the user decide who "
+                "takes over", 3,
+            )
     wiki.cleanup_task_dirs()
     limit = int(wiki.config["ingest"].get("max_source_bytes", 50_000_000))
     force = ARGS.force
@@ -408,6 +442,8 @@ def command_status():
     for row in rows:
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
     pages = wiki.all_pages()
+    # 超时租约在 status 里一并收掉：agent 常先看 status 再决定要不要动手。
+    wiki.sweep_leases()
     tasks = wiki.task_counts()
     stale = sorted(
         record["id"] for record in pages if record["meta"].get("status") == "stale"
@@ -422,6 +458,12 @@ def command_status():
         emit("status", wiki.root, line, {"brief": line}, [])
         wiki.close()
         return 0
+    owner = session_owner()
+    leases = [
+        {"task": row["id"], "owner": wiki.lease_owner(row["id"])}
+        for row in wiki.leased_tasks()
+    ]
+    foreign = sorted({item["owner"] for item in leases if item["owner"] and item["owner"] != owner})
     data = {
         "created": created,
         "sources": by_status,
@@ -432,7 +474,9 @@ def command_status():
         "tasks": {"open": tasks["open"], "queued": tasks["queued"],
                   "leased": tasks["leased"], "route": tasks["route"], "page": tasks["page"],
                   "expired": tasks["expired"], "accepted": tasks["accepted"]},
-        "next": ("submit the open task first" if tasks["leased"]
+        "leases": leases,
+        "next": (f"stop: {', '.join(foreign)} is already ingesting" if foreign
+                 else "submit the open task first" if tasks["leased"]
                  else "run `next`" if tasks["queued"] else "run `ingest`"),
     }
     emit(
@@ -449,9 +493,24 @@ def command_next():
     require_install()
     wiki, _ = open_wiki()
     wiki.cleanup_task_dirs()
+    # 先收掉超时的租约：死掉的会话不能靠一条还挂着的 lease 把队列堵死。
+    wiki.sweep_leases()
+    owner = session_owner()
     open_tasks = wiki.leased_tasks()
     if open_tasks:
-        ids = ", ".join(row["id"] for row in open_tasks)
+        holders = [(row["id"], wiki.lease_owner(row["id"])) for row in open_tasks]
+        foreign = wiki.foreign_leases(owner)
+        if foreign:
+            task_id, held_by = foreign[0]
+            raise WikiError(
+                "E_INGEST_BUSY",
+                f"session {held_by} is already ingesting task {task_id}; stop, do not retry",
+                "another session owns the queue: do not claim, do not retry, and do not run "
+                "`next` again until it finishes — only its owner submits or releases it. "
+                "Tell the user another session is ingesting instead of working around it",
+                3,
+            )
+        ids = ", ".join(task_id for task_id, _ in holders)
         first = open_tasks[0]
         raise WikiError(
             "E_TASK_UNSUBMITTED",
@@ -464,11 +523,11 @@ def command_next():
     batch = ARGS.batch or 1
     tasks = []
     lines = []
-    for row in wiki.claim_tasks(kind=ARGS.kind, batch=max(1, batch)):
+    for row in wiki.claim_tasks(kind=ARGS.kind, batch=max(1, batch), owner=owner):
         item = wiki.materialize_task(row)
         tasks.append(item)
         lines.append(f"{row['id']}  {item['brief']['goal']}")
-    data = {"tasks": tasks, "count": len(tasks)}
+    data = {"tasks": tasks, "count": len(tasks), "owner": owner}
     if not tasks:
         emit("next", wiki.root, "no queued tasks", data, [])
         wiki.close()
@@ -530,6 +589,15 @@ def command_submit():
     if row["state"] != "leased":
         raise WikiError("E_TASK_STALE", f"task {task_id} is no longer ready",
                         "run `next` again to get fresh work", 3)
+    held_by = wiki.lease_owner(task_id)
+    if held_by and held_by != session_owner():
+        # 别的会话领走的任务不在这里交：两个会话共用任务目录正是载荷被写串的入口。
+        raise WikiError(
+            "E_TASK_FOREIGN",
+            f"task {task_id} is leased to session {held_by}",
+            "submit only the task this session claimed; ask that session to submit it, or "
+            f"release {task_id} and run `next` here to claim it again", 3,
+        )
     if ARGS.epoch is not None and row["epoch"] != ARGS.epoch:
         raise WikiError(
             "E_TASK_STALE",
@@ -839,8 +907,13 @@ def command_release():
     row = wiki.task_row(ARGS.id)
     if not row:
         raise WikiError("E_TASK_UNKNOWN", f"no task {ARGS.id}", "run `next`", 2)
+    held_by = wiki.lease_owner(ARGS.id)
     wiki.release_task(ARGS.id)
-    emit("release", wiki.root, f"released {ARGS.id}", {"task": ARGS.id}, [])
+    summary = f"released {ARGS.id}"
+    if held_by:
+        # 释放是运维口子，谁的租约都能放回队列，但要说清放掉的是谁的。
+        summary += f" (was leased to {held_by})"
+    emit("release", wiki.root, summary, {"task": ARGS.id, "owner": held_by}, [])
     wiki.close()
     return 0
 
@@ -860,6 +933,13 @@ def query_task(wiki, words):
             "E_TASK_STALE",
             f"task {ARGS.task} is {row['state']}, not leased",
             "run `next` to claim it again, then query", 3,
+        )
+    held_by = wiki.lease_owner(ARGS.task)
+    if held_by and held_by != session_owner():
+        raise WikiError(
+            "E_TASK_FOREIGN",
+            f"task {ARGS.task} is leased to session {held_by}",
+            "only the session that claimed a task can query on it; release it or run `next` here", 3,
         )
     if not words:
         raise WikiError("E_USAGE", "query --task needs topic words",
@@ -1313,6 +1393,10 @@ def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--root", help="wiki root inside the workspace (default: current directory)")
     common.add_argument("--json", action="store_true", help="machine-readable output")
+    common.add_argument(
+        "--owner",
+        help="session id that owns a claim (default: $LLM_WIKI_OWNER, then $DSH_SESSION_ID)",
+    )
     parser = argparse.ArgumentParser(
         prog="wiki.py",
         description="Portable wiki engine: task-driven ingestion, ledger-owned pages.",

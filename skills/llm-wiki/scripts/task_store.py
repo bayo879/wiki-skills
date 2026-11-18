@@ -343,28 +343,72 @@ class TaskStoreMixin:
                         (json.dumps(inputs, ensure_ascii=False, sort_keys=True), row["id"]),
                     )
 
-    def claim_tasks(self, kind=None, batch=None):
+    def claim_tasks(self, kind=None, batch=None, owner=""):
         """Claim queued tasks in tree order.
 
         A task stays `leased` until it is submitted or released, and an agent
         holds at most what it has not finished: `command_next` refuses to hand
         out anything while a lease is open, so a claim never reissues work the
-        agent already has. Returns the claimed rows.
+        agent already has. The claim also records `owner` (the calling
+        session), which is what lets `command_next` tell "my own open task"
+        from "another session is already ingesting" — the second case stops
+        the caller instead of letting sessions take turns on one queue.
+        Returns the claimed rows.
         """
-        now = now_iso()
+        self.sweep_leases()
         with self.conn:
-            self.conn.execute(
-                "UPDATE tasks SET state = 'queued', lease_until = NULL WHERE state = 'leased' AND lease_until < ?",
-                (now,),
-            )
             # 深度优先：先钉住手头那棵树，一批只在它里面发；树里没活可发
             # （例如全被判漂移）才退回常规顺序。
             active = self._active_page_tree() if kind != "route" else None
             for pinned in (active, None):
-                claimed = self._claim_queued(kind, batch, pinned)
+                claimed = self._claim_queued(kind, batch, pinned, owner)
                 if claimed or pinned is None:
                     break
         return claimed
+
+    def sweep_leases(self, now=None):
+        """Return timed-out leases to the queue and drop owners of closed tasks.
+
+        A session that dies mid-task leaves a lease behind. `next` calls this
+        before refusing, so a dead session cannot block the queue past
+        `TASK_LEASE_SECONDS`; the owner row of any task that is no longer
+        `leased` is dropped here too, which keeps `task_leases` from growing
+        historical rows for work that is already finished.
+        """
+        now = now or now_iso()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE tasks SET state = 'queued', lease_until = NULL "
+                "WHERE state = 'leased' AND lease_until < ?",
+                (now,),
+            )
+            self.conn.execute(
+                "DELETE FROM task_leases "
+                "WHERE task_id NOT IN (SELECT id FROM tasks WHERE state = 'leased')"
+            )
+
+    def lease_owner(self, task_id):
+        """Session that holds this task, or '' when it was claimed before
+        owners were recorded or by a session with no id."""
+        row = self.conn.execute(
+            "SELECT owner FROM task_leases WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        return row["owner"] if row else ""
+
+    def foreign_leases(self, owner):
+        """Open leases held by another session, as [(task_id, owner)].
+
+        Leases with no recorded owner are left out on purpose: an old or
+        unattributed claim must stay finishable by anyone rather than block
+        every session behind an owner nobody can name.
+        """
+        return [
+            (task_id, held_by)
+            for task_id, held_by in (
+                (row["id"], self.lease_owner(row["id"])) for row in self.leased_tasks()
+            )
+            if held_by and held_by != owner
+        ]
 
     def leased_tasks(self):
         """Tasks an agent has taken but not submitted or released yet."""
@@ -373,7 +417,7 @@ class TaskStoreMixin:
         ).fetchall()
         return self._task_order(rows)
 
-    def _claim_queued(self, kind, batch, tree=None):
+    def _claim_queued(self, kind, batch, tree=None, owner=""):
         sql = "SELECT rowid, * FROM tasks WHERE state = 'queued'"
         params = []
         if kind:
@@ -397,6 +441,13 @@ class TaskStoreMixin:
                 "UPDATE tasks SET state = 'leased', epoch = epoch + 1, lease_until = ?, attempts = attempts + 1 WHERE id = ?",
                 (self._lease_deadline(), row["id"]),
             )
+            if owner:
+                # 没带会话 id 的调用不写归属：报错时照旧只说“有任务没交”，
+                # 不会把别的会话的租约错认成自己的。
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO task_leases(task_id, owner, leased_at) VALUES (?, ?, ?)",
+                    (row["id"], owner, now_iso()),
+                )
             claimed.append(self.task_row(row["id"]))
         return claimed
 

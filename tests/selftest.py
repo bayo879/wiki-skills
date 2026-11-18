@@ -417,6 +417,42 @@ def retrieval_flow(results):
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
+    # A lease belongs to the session that claimed it: a second session stops,
+    # it does not take turns on the same queue, and a dead session's expired
+    # lease is swept instead of blocking everyone.
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-owner-"))
+    try:
+        (root / "own.md").write_text("# 归属\n\n云网安全主题日。\n", encoding="utf-8")
+        run(root, "ingest")
+        claimed = run(root, "next", "--owner", "sess-a")["data"]
+        check(results, "next records the claiming session", claimed["owner"] == "sess-a", claimed)
+        busy = run(root, "next", "--owner", "sess-b", expect=3)
+        check(results, "another session's lease stops next",
+              busy["error"]["code"] == "E_INGEST_BUSY"
+              and "sess-a" in busy["error"]["message"], busy)
+        foreign = run(root, "submit", claimed["tasks"][0]["id"], "--owner", "sess-b", expect=3)
+        check(results, "another session cannot submit a foreign lease",
+              foreign["error"]["code"] == "E_TASK_FOREIGN", foreign)
+        busy_ingest = run(root, "ingest", "--owner", "sess-b", expect=3)
+        check(results, "a second session cannot ingest while the queue is taken",
+              busy_ingest["error"]["code"] == "E_INGEST_BUSY", busy_ingest)
+
+        conn = sqlite3.connect(root / ".wiki" / "wiki.db")
+        conn.execute("UPDATE tasks SET lease_until = '2000-01-01T00:00:00Z' WHERE state = 'leased'")
+        conn.commit()
+        conn.close()
+        swept = run(root, "next", "--owner", "sess-c")["data"]
+        check(results, "an expired lease is swept, not treated as a live session",
+              swept["owner"] == "sess-c" and swept["tasks"], swept)
+        released = run(root, "release", swept["tasks"][0]["id"], "--owner", "sess-b")["data"]
+        check(results, "release reports the owner it took the task from",
+              released["owner"] == "sess-c", released)
+        again = run(root, "next", "--owner", "sess-b")["data"]
+        check(results, "a released task can be claimed by the next session",
+              again["owner"] == "sess-b" and again["tasks"], again)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
     # Sibling pages keep the order the route listed them in, so a link to an
     # earlier sibling resolves on the first submit instead of by luck.
     root = Path(tempfile.mkdtemp(prefix="llm-wiki-siblings-"))

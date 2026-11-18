@@ -83,6 +83,7 @@ tags:
 
 - `E_SOURCE_DRIFT`：raw 在排队期间被改过，重新读来源后重做这条 decision。
 - `E_TASK_UNSUBMITTED`：手头还有领了没交的任务，填完再 `next`，不要并发领。
+- `E_INGEST_BUSY`：别的会话正在摄入，立刻停手，不要重试、不要派子智能体并行。
 - `failed` 里有解析失败的来源：不猜内容，报给用户等修。
 
 ## 完成标准

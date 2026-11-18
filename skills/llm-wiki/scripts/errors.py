@@ -12,6 +12,8 @@ MANUAL_SECTION = {
     "E_CONFIG": "配置损坏",
     "E_DB": "账本损坏",
     "E_PATH": "工作区边界",
+    "E_INGEST_BUSY": "队列被别的会话占用",
+    "E_TASK_FOREIGN": "队列被别的会话占用",
 }
 
 

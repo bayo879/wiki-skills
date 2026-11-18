@@ -106,6 +106,9 @@ pending_total, pending, queue{open,queued,leased,route,page}}`。`queued_tasks` 
 超过 `ingest.max_source_bytes` 的文件进 `oversize`，不解析；无文本层的进
 `unsupported`。两者都不会中止整批摄入。
 
+别的会话正持有租约时 `ingest` 不动账本，直接报 `E_INGEST_BUSY`：两个执行体一起改任务目录
+和 `.wiki/tmp` 正是载荷被写串的入口。`--dry-run` 用临时库，不受这条限制。
+
 ### next
 
 领取 queued 任务，默认 1 个；`--batch N` 只用于调试或批量运维，`--kind` 可限定类型。
@@ -139,11 +142,19 @@ route 里的书写顺序一致。
 已经领到手的任务继续做，会话重启后按错误里的路径接着填即可。`--kind` 与 `--batch` 同样受
 这条门禁限制——手头没结束，就不发任何新任务。只有队列与租约都空时才返回 `no queued tasks`。
 
+队列只认一个会话：`--owner <id>` 记下领取方，缺省依次取 `$LLM_WIKI_OWNER`、`$DSH_SESSION_ID`
+（宿主给每个会话注入，子智能体各不相同），都没有就不记归属；`data.owner` 回显该值，
+`status` 的 `leases` 列出当前租约。别的会话持有租约时 `next` 与 `ingest` 都失败报
+`E_INGEST_BUSY`，`message` 指出占用方和任务 id，要求停止而不是重试；同一个会话自己持有仍是
+`E_TASK_UNSUBMITTED`。租约过期（`TASK_LEASE_SECONDS`，默认 900 秒）后由下一次 `next`
+收回，死会话的租约不会一直占着队列。
+
 ### submit
 
 `submit <id>`。默认读 `.wiki/tasks/<id>/payload.json`；`--payload <file|->` 可改读别的
 文件（须在根目录内）或从 stdin 读。校验通过才写入并关闭任务；否则返回 `E_*` 并把任务
 退回队列，可重新 `next` 后按新任务再交。`--epoch` 仅保留给旧脚本，日常提交不需要。
+任务记在别的会话名下时不写账本，直接报 `E_TASK_FOREIGN`。
 
 载荷应从 `next` 落到任务目录的 `payload.json` 直接填写，不要另造字段。任务结束（提交成功
 或过期）后目录被删除；任务被释放后重新 `next` 会刷新 `brief.md` 与 `work.json`，不覆盖
@@ -205,7 +216,9 @@ decision 可带可选 `links`，声明这页与哪些页面相关。目标只能
 
 ### release
 
-`release <id>`：把已领取未提交的任务退回队列，不记录错误。
+`release <id>`：把已领取未提交的任务退回队列，不记录错误。任何会话都能释放（给运维留的
+恢复口子），`data.owner` 给出原持有方，`summary` 末尾带 `(was leased to <id>)`；原本没记
+归属时为空串。
 
 ### query
 
@@ -222,7 +235,8 @@ decision 可带可选 `links`，声明这页与哪些页面相关。目标只能
 `query --task <id> 词1 词2 ...`：把这次检索登记到任务上，route 任务提交前必须至少登记一次，
 否则 `submit` 报 `E_NO_QUERY`。每个词单独检索、各返上限 5 条，按词分组返回，不并成一次
 排序；重复的词不重复计配额。配额是 5 个词/1000 字（正文不足 1000 字也给 5 个），超出报
-`E_QUERY_BUDGET`。每次调用追加一行到 `.wiki/tasks/<id>/queries.jsonl`（`{ts,words,hits}`），
+`E_QUERY_BUDGET`。登记要求任务归本会话：别的会话持有的任务报 `E_TASK_FOREIGN`。每次调用
+追加一行到 `.wiki/tasks/<id>/queries.jsonl`（`{ts,words,hits}`），
 任务关闭时随目录一起删除，不保留审计历史。`data`:
 `{task, queries[{word,matches,returned,results}], budget, boundary}`。
 
@@ -288,7 +302,9 @@ verify_steps, warnings}`。`content` 是 `WORKFLOW.md` 全文（含 frontmatter�
 ### status
 
 `status [--brief]`。`data`: `{created, sources{状态:数量}, source_total, pages,
-stale_pages, pending, tasks{open,queued,leased,route,page,expired,accepted}, next}`。
+stale_pages, pending, tasks{open,queued,leased,route,page,expired,accepted}, leases,
+next}`。`leases` 是 `[{task, owner}]`，列出当前租约及其归属会话；`next` 在别人持租约时
+给出 `stop: … is already ingesting`，而不是让你去提交。
 `--brief` 只返回 `brief` 一行摘要，没有 `tasks`；完整数量（含 `expired`、`accepted`）用
 `status --json`，不要加 `--brief`。
 
@@ -339,6 +355,8 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_PAYLOAD` | 载荷字段缺失/类型/长度不合法 | 按 message 修正字段 |
 | `E_TASK_UNKNOWN` | 任务 id 不存在 | `next` 取新任务 |
 | `E_TASK_UNSUBMITTED` | 有已领取但没提交的任务 | 按 `error.next` 先 `submit <id>`（`payload.json` 还在任务目录里）或 `release <id>`，再 `next` |
+| `E_INGEST_BUSY` | 另一个会话持有租约、正占着队列（`next`、`ingest`） | 立刻停止，不重试、不等待；见「队列被别的会话占用」 |
+| `E_TASK_FOREIGN` | 任务的租约记在别的会话名下 | 不要提交或抢做，交给领取它的会话；确认对方停了再由用户授权 `release` |
 | `E_TASK_STALE` | 任务已关闭或租约过期 | 重新 `next`，丢弃旧载荷；来源变化导致的过期是 `E_SOURCE_DRIFT` |
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
 | `E_TASK_CONFLICT` | 来源已属于另一棵未关闭的页面任务树（同一次 route 拆页除外） | 先完成或关闭那个页面任务；拆页请放在同一次 route 提交里 |

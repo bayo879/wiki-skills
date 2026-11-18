@@ -53,6 +53,8 @@
 | `E_EVIDENCE_NOT_FOUND` | 重读 raw，逐字复制引文（比较时忽略空白） |
 | `E_SOURCE_DRIFT` | 来源在领取后被改；重新 `next` 取新任务 |
 | `E_TASK_UNSUBMITTED` | 有领了没交的任务；按 `error.next` 先 `submit <id>`（`payload.json` 与草稿都还在 `.wiki/tasks/<id>/`）或 `release <id>` 再 `next` |
+| `E_INGEST_BUSY` | 租约在别的会话名下；立刻停止，不重试、不等待，等那个会话交完或由用户决定接手 |
+| `E_TASK_FOREIGN` | 任务不是本会话领的；不要提交，交给领取它的会话 |
 | `E_TASK_STALE` | 任务已关闭，或提交时租约已过期；重新 `next`，丢弃旧载荷，按新任务重做。来源变化导致的过期是 `E_SOURCE_DRIFT` |
 | `E_TASK_SCOPE` | 只提交任务 `work.sources` 里的来源 |
 | `E_PAGE_CONFLICT` | 页面已被别的任务改过；重新 `next`，基于新 rev 重写 |
@@ -80,7 +82,10 @@
   没有备份时，页面正文只能从观看区 `<view>/pages/` 或 `export` 产物里人工抢救，且无法
   自动重建任务与修订历史——这是本版最需要避免的故障。
 - 并发：SQLite 有 busy timeout，但不要并行跑两个写命令。多个 agent 同时工作时，用
-  "一个写者 + 其他只读" 的约定；任务 lease 只能防止同一任务被重复领取，不解决库级写冲突。
+  "一个写者 + 其他只读" 的约定。租约记着领取会话（`next` 的 `owner`，默认取宿主注入的
+  会话 id，终端用 `--owner` 或 `$LLM_WIKI_OWNER`），别的会话来领取直接报 `E_INGEST_BUSY`、
+  提交报 `E_TASK_FOREIGN`，不再让多个会话轮流取同一队列；租约只防同一任务被重复领取，
+  不解决库级写冲突。
 - 中断：数据库写入在事务内，观看区文件用临时文件 + 原子替换；中断后重跑同一条命令即可。
   已领取未提交的任务在 15 分钟后可被重新领取。
 

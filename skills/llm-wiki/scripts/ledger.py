@@ -78,6 +78,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     closed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, kind);
+-- 租约归属：只记 state='leased' 的任务，随释放/提交/过期由 sweep_leases 清掉。
+CREATE TABLE IF NOT EXISTS task_leases (
+    task_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    leased_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS task_sources (
     task_id TEXT NOT NULL,
     source_key TEXT NOT NULL,
@@ -105,7 +111,7 @@ REQUIRED_COLUMNS = (
     ("page_revs", ("view_digest", "view_path")),
 )
 
-TABLES = ("sources", "raws", "page_revs", "tasks", "task_sources", "links")
+TABLES = ("sources", "raws", "page_revs", "tasks", "task_leases", "task_sources", "links")
 
 
 def create_schema(conn):

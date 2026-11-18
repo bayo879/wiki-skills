@@ -207,6 +207,8 @@ python3 tests/selftest.py
 | 任务目录 | `next` 生成 `.wiki/tasks/<id>/{brief.md,payload.json,work.json}` |
 | 任务目录生命周期 | 提交后删目录；释放后重领只刷新 brief/work，已填 `payload.json` 不变；关闭任务的残留目录被 `ingest` 清掉 |
 | 任务恢复 | 领取后不提交再 `next` 返回同一任务且 `payload.json` 不变；队列与租约都空时才返回 `no queued tasks` |
+| 租约归属 | `next --owner` 记下领取会话并回显；别的会话领取、`ingest` 报 `E_INGEST_BUSY` 且 `message` 含占用方，提交报 `E_TASK_FOREIGN` |
+| 过期租约回收 | 租约过期后下一次 `next` 直接收回，不当作活会话挡住队列；`release` 输出原持有方，释放后别的会话能领取 |
 | 单页单任务 | 第二个来源路由到已排队的页面时挂到该任务上，账本只有一条未关闭 page 任务；被领走时返回 `E_STATE` |
 | 工作区文件锁 | 另一进程持锁时写命令等 5 秒后 `E_BUSY`（退出码 4）；陈旧锁被接管 |
 | `skip` 决定 | 被拒决定返回可读错误，接受后来源变 `skipped` |
