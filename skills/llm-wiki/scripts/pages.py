@@ -202,6 +202,27 @@ class PagesMixin:
             self.conn.execute("DELETE FROM page_revs WHERE page = ?", (page_id,))
         return True
 
+    def unprovenanced_pages(self):
+        """Pages whose cited sources are all gone or unusable (doctor L7, ingest cleanup)."""
+        found = []
+        for record in self.all_pages():
+            keys = record["meta"].get("sources") or []
+            usable = any(
+                (self.source_row(key) is not None
+                 and self.source_row(key)["status"] not in ("missing", "unsupported", "oversize"))
+                for key in keys
+            )
+            if not usable:
+                found.append(record)
+        return found
+
+    def removable_pages(self):
+        """Unprovenanced pages with no edges; the others stay as stale tombstones."""
+        return [
+            record for record in self.unprovenanced_pages()
+            if not any(self.links_for(record["id"]))
+        ]
+
     def page_ids(self):
         return {
             row["page"]
@@ -220,7 +241,7 @@ class PagesMixin:
         return "stable"
 
     def page_ref(self, record):
-        """Where `read`/`query` point at a ledger page: the view copy, or `page:<id>`."""
+        """Where `query --page` points at a ledger page: the view copy, or `page:<id>`."""
         if not self.config["publish"]["enabled"]:
             return f"page:{record['id']}"
         target = self.publish_dir / self.view_relpath(record)

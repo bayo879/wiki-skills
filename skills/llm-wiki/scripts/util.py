@@ -25,6 +25,16 @@ def digest_text(text):
     return digest_bytes(text.encode("utf-8", "replace"))
 
 
+def body_digest(text):
+    """摘要只取正文：观看区渲染时会去掉前导空行、尾随空白并统一换行。
+
+    原文的身份是正文，不是文件字节。文件前言记的是挂载关系与展示属性，
+    由账本字段决定，重写它（例如多挂一个同正文来源）不能算作原文被改过。
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return digest_text(text.lstrip("\n").rstrip())
+
+
 def same_stamp(size, mtime, known_size, known_mtime):
     """First-stage change filter: same byte size and (nearly) the same mtime.
 

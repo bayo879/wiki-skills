@@ -16,8 +16,8 @@ from runtime import require_python
 require_python()
 
 from errors import WikiError
-from frontmatter import yaml_scalar
-from ingest import file_facts, ingest_decision
+from frontmatter import split_frontmatter, yaml_scalar
+from ingest import ingest_decision, raw_body_digest
 from ledger import DEFAULT_CONFIG, Wiki, load_config, publish_dir_name
 from pages import render_page, split_evidence, view_name
 from util import digest_text
@@ -27,12 +27,13 @@ __all__ = [
     "Wiki",
     "WikiError",
     "digest_text",
-    "file_facts",
     "ingest_decision",
     "load_config",
     "publish_dir_name",
+    "raw_body_digest",
     "render_page",
     "split_evidence",
+    "split_frontmatter",
     "view_name",
     "yaml_scalar",
 ]

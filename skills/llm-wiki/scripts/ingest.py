@@ -15,7 +15,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from errors import WikiError
-from util import digest_bytes, same_stamp
+from frontmatter import split_frontmatter
+from util import body_digest, digest_bytes, same_stamp
 
 
 MAX_RAW_CHARS = 4_000_000
@@ -64,10 +65,11 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
-def file_facts(path):
-    """(digest, size, mtime) of one file, read once; used right after a write."""
-    stat = Path(path).stat()
-    return digest_bytes(Path(path).read_bytes()), stat.st_size, stat.st_mtime
+def raw_body_digest(path):
+    """Digest of one raw copy's body: frontmatter is ledger state, not content."""
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    _, body = split_frontmatter(text)
+    return body_digest(body)
 
 
 def raw_facts(root, row):
@@ -84,7 +86,7 @@ def raw_facts(root, row):
     if same_stamp(stat.st_size, stat.st_mtime, row["raw_size"], row["raw_mtime"]):
         return "ok", stat.st_size, stat.st_mtime
     try:
-        digest = digest_bytes(path.read_bytes())
+        digest = raw_body_digest(path)
     except OSError:
         return "missing", stat.st_size, stat.st_mtime
     if digest == row["raw_digest"]:

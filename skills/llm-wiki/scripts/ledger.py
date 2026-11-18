@@ -26,7 +26,7 @@ from ingest import raw_facts
 from pages import PagesMixin, render_page
 from tasks import TASK_DIR
 from task_store import TaskStoreMixin
-from util import digest_bytes, digest_text, norm_key, write_atomic
+from util import body_digest, norm_key, write_atomic
 from view import ViewMixin
 from workspace import WIKI_DIR, window_safe
 
@@ -434,6 +434,7 @@ class LedgerMixin:
             raw_digest = row["raw_digest"] or ""
         return {
             "key": key,
+            "raw_id": row["raw_id"] or "",
             "source_size": int(row["size"]),
             "source_mtime": float(row["mtime"]),
             "source_digest": row["digest"],
@@ -476,7 +477,7 @@ class LedgerMixin:
         mounted by many sources. When the previous raw of this key had no other
         mount, the row is replaced in place and keeps its filename.
         """
-        raw_id = digest_text(text)
+        raw_id = body_digest(text)
         today = date.today().isoformat()
         row = self.conn.execute("SELECT * FROM raws WHERE id = ?", (raw_id,)).fetchone()
         if row is not None:
@@ -533,7 +534,7 @@ class LedgerMixin:
             self.conn.execute(
                 "UPDATE sources SET raw_digest = ?, raw_size = ?, raw_mtime = ? "
                 "WHERE raw_id = ?",
-                (digest_bytes(target.read_bytes()), size, mtime, raw_id),
+                (raw_id, size, mtime, raw_id),
             )
         return rel, raw_id
 
@@ -553,7 +554,7 @@ class LedgerMixin:
             _, body = split_frontmatter(target.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             return row["raw"], row["raw_id"]
-        raw_id = digest_text(body)
+        raw_id = body_digest(body)
         if raw_id == row["raw_id"]:
             return row["raw"], raw_id
         known = self.conn.execute(

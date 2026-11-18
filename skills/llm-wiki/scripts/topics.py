@@ -64,7 +64,6 @@ def match(root, terms, limit):
                 "status": entry["status"],
                 "updated": entry["updated"],
                 "path": entry["path"],
-                "read": f'read "{entry["path"]}"',
                 "score": score,
                 "snippet": snippet(entry["body"], terms[0]),
             }

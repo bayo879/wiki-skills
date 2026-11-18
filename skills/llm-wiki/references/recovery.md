@@ -25,7 +25,7 @@ python3 <skill>/scripts/wiki.py ingest --json   # 失败时 stdout 仍是一段 
 `3` 状态冲突（账本、任务、来源），`4` 工作区被占用。
 
 自动补齐只有一种：任何打开账本的命令（`init`、`ingest`、`next`、`submit`、`query`、
-`read`、`status`、`doctor` 等）在打开时，缺的目录、缺的 `wiki.json`、缺的表会当场建出来，
+`status`、`doctor` 等）在打开时，缺的目录、缺的 `wiki.json`、缺的表会当场建出来，
 补了什么写在返回值的 `repaired` 里（路径列表，和 `created` 同形）。`repaired` 非空不是错误；
 它说明这条命令顺手把库补全了。`check`、`scenario`、`version` 不碰账本，也不会建库。
 
@@ -108,7 +108,7 @@ workspace root`、`publish dir … resolves outside the workspace root`。
 
 - 命令跑在了工作区外：`cd` 回工作区根目录再执行。`--root` 只接受当前目录或它下面的子目录。
 - 观看区是符号链接、指向工作区外：把 `publish.dir` 改回工作区内的真实目录，或删掉这个链接。
-- `read`/`query` 的 `ref` 用了 `../` 跳出工作区：换成工作区内的路径。
+- `query` 的词或 `--payload` 用了 `../` 跳出工作区：换成工作区内的路径。
 
 边界是有意划的：跨区扫描、读写、软链把数据搬出去，都不会被放行，改路径比绕边界省事。
 

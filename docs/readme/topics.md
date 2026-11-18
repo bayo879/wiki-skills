@@ -85,14 +85,14 @@ updated: 2026-11-16
 
 - `ingest` 整目录跳过 `话题/`，话题不会被当成来源，也不会生成 route/page 任务。
 - `query` 直接扫描 `话题/*.md`，命中时放在 `topics`；话题计数 `topic_matches` 与页面
-  `matches` 分开。每项带 `name`、`description`、`status`、`path`、`read`。场景不进
+  `matches` 分开。每项带 `name`、`description`、`status`、`path`，按 `path` 直接打开话题文件。场景不进
   `query` 结果，需要流程时显式 `scenario search`。
 - 话题由 agent 直接写，不经账本、不排任务；写入后要报告“未执行摄入”，不能说成已建页。
 - 话题改动立即对下一次 `query` 生效，不需要重新 `ingest`。
 
 ## 写入流程
 
-1. 话题探索收尾，总结完成、结论能回溯到页面 id 或 raw key。
+1. 话题探索收尾，总结完成、结论能回溯到页面 id（源文件用 `query --page` 的 `sources[].raw` 定位）。
 2. 默认问用户是否沉淀，并说明位置与要点；用户明确不留时不写。
 3. 归属判断后写 `话题/<主题>.md`：已有同名话题就并入，不新建重复文件。
 4. 收尾报告路径、`status`，以及两项后续：能力候选草稿、待查资料清单（来源、页面、

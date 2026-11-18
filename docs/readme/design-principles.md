@@ -18,7 +18,7 @@
 | 引擎 | 扫描、解析、哈希、任务状态、载荷校验、引文核对、修订与渲染、观看区推送 | 判断哪份材料值得建页、写正文、选标题与边界 |
 | agent | 读 raw 与已有页、决定来源归属、写正文与证据、提交载荷 | 直接改页面文件、手改数据库、跳过任务直接落盘 |
 
-分工的边界由命令面固定：agent 日常只用 `ingest/next/submit/query/read/scenario`；
+分工的边界由命令面固定：agent 日常只用 `ingest/next/submit/query/scenario`；
 `check/doctor` 是诊断入口，`init/release/page/export/status/sync` 是人工或维护入口，不写进
 技能流程。`sync` 只把观看区的手工修改回收进账本，不负责推送。**账本不是前置条件**：打开
 账本的命令会补齐缺的目录、配置与表，补了什么列在 `repaired`，agent 不需要先自检再干活；
@@ -81,7 +81,7 @@
 
 来源被摄入后不是"agent 自己决定从哪开始"，而是引擎给出 route/page 任务：
 
-- 一个来源一条 route 任务；route 通过后，每个目标页一条 page 任务。
+- 一份正文（一个 raw）一条 route 任务，同一份正文的多个路径合在一条里；route 通过后，每个目标页一条 page 任务。
 - 任务有 `queued → leased → accepted`，另有终态 `expired`：来源或 raw 副本变化时任务被
   关闭，行保留供审计；领取带 15 分钟租约与递增 epoch。
 - 提交按任务 id 关闭，不需要 epoch；租约过期或已关闭的任务返回 `E_TASK_STALE`，因来源或

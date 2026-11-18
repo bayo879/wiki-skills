@@ -37,7 +37,7 @@
   `doctor` 不再修复镜像。
 - 页面正文只剩两处：账本 `page_revs` 与观看区 `<view>/pages/`；观看区由 `sync_view` 按
   账本推送，手改仍只告警、由人工 `sync` 回收。
-- `read page:` / `query --page` 的 `path` 改为观看区路径；发布关闭时退回 `page:<id>`。
+- `query --page` 的 `path` 改为观看区路径；发布关闭时退回 `page:<id>`。
 - 旧版残留的 `.wiki/pages/` 与 `.wiki/drift/` 不自动接管也不自动删除，由用户手动清理。
 - 理由：镜像除 drift 留证、旧库接管、稳定 id 路径外没有查询/读取/导出/回收消费者，
   与观看区重复维护，反而让"账本是唯一事实源"的表述含混。
@@ -45,7 +45,8 @@
 ## 2026-11-13：任务协议
 
 - 对外只暴露"任务 + 语义载荷 + 证据"，内部表结构、租约、epoch、哈希不写进技能文档。
-- 任务只有 `route` 与 `page` 两种；一个来源一条 route 任务，一页一条 page 任务。
+- 任务只有 `route` 与 `page` 两种；一份正文（一个 raw）一条 route 任务（同正文的多个路径
+  合在一条里），一页一条 page 任务。
 - todo 只作为显示层投影，账本是唯一进度权威；没有 todo 工具的运行时不受影响。
 - 默认每批 20 条；租约 15 分钟；提交失败零写入并保留 `last_error`。
 - 已取消 `reconcile` 任务类型：页面回滚用 `page restore`（当时的镜像漂移自动还原机制已于
@@ -56,10 +57,10 @@
 用户确认按“引擎 + 示例 + 文档”一起改，触发是一篇讲话同时讲“主题日活动”与“双零”行动，
 旧协议只能合并成一页。
 
-- route 决定从“每个来源恰好一条”改为“每个来源至少一条”：一份来源含多个可独立检索的
-  主题时，提交多条 decision 指向不同 page；同一来源不得重复指向同一 page，skip 不能与
+- route 决定从“每份正文恰好一条”改为“每份正文至少一条”：一份正文含多个可独立检索的
+  主题时，提交多条 decision 指向不同 page；同一目标页不得重复，skip 不能与
   new/merge 并用。
-- 同一次 route 提交拆出的 page 任务共享 `route_task`，是“一个来源只挂一棵 page 树”的
+- 同一次 route 提交拆出的 page 任务共享 `route_task`，是“一份正文只挂一棵 page 树”的
   唯一例外；来源在最后一个相关 page 任务关闭后才转为 `done`。
 - `curation.md` 的示例同步拆成两页并互链，避免示例继续示范“一份文件一页”。
 
@@ -106,7 +107,7 @@
 
 - 技能安装位置（项目级/全局）只决定从哪里加载，不改变知识库位置：知识库根 = 会话
   工作区根。
-- 引擎强制：`--root` 只能是当前目录或其子目录；`read` 路径、`--payload`、`body_file`、
+- 引擎强制：`--root` 只能是当前目录或其子目录；`--payload`、`body_file`、
   `page import --from`、`export` 目标越出根目录返回 `E_PATH`。
 - 草稿、载荷、导出、临时文件统一放 `.wiki/`；`--dry-run` 临时库从系统 temp 改到
   `.wiki/tmp/`，退出时清理。
@@ -119,7 +120,7 @@
 不信任agent的流程决策。"
 
 - 技能只展示 agent 真正要做的流程：`init/ingest`、`next`、按 `brief` 填 `template`、
-  `submit`、`query/read`、工作区边界。epoch、租约、重试、任务状态、错误码表、doctor、
+  `submit`、`query`、工作区边界。epoch、租约、重试、任务状态、错误码表、doctor、
   drift 细节不写进 `SKILL.md`。
 - `next` 只返回 `{id, brief, template, work}`。`brief` 说明做什么、怎么做、提交后发生
   什么；`template` 是引擎固定好的载荷骨架。`submit` 不再要求 epoch。
@@ -347,3 +348,21 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   出现「这一节该能独立检索」的实证再加，不因为「类型表少一个形态」而加。
 - 自检不再用 `note` 建页，另加老库回归（`tests/selftest.py` 的 `legacy_note_flow`）；
   `VERSION=0.4.3`，`selftest.py` 242 项。
+
+## 2026-11-18：raw 升为一等对象，删除 `read`
+
+复核 issue「read 命令在观看区里的定位」后定案并落地：
+
+- **raw 身份取正文，不取文件字节。** `raws.id` 与 `sources.raw_digest` 都用去前言后的正文
+  摘要（`util.body_digest`：CRLF 归一、去首尾空行）；同一份正文的多个路径挂同一个 raw，
+  前言里的挂载列表变化不再让引用页误报 `E_SOURCE_DRIFT` 或假 `stale`。
+- **一份正文一条 route 任务。** 任务 `subject` 是 raw id，`work.sources` 带该 raw 的全部挂载
+  路径；一条 decision 覆盖整个 raw，页面 `sources` 收录全部路径；skip 只把仍 `pending` 的
+  路径置 `skipped`。已打开任务持有同一 raw 时，新路径直接挂进该任务，不再排第二条。
+- **`ingest` 末尾清理孤儿页。** 被引来源全部缺失、且没有出入链的页面连同观看区文件一起
+  删除；有链的只由 `computed_status` 标 `stale`，等链断了再清。
+- **删除 `read`。** 原文已在观看区，agent 直接打开 `work.json` 的 `sources[].raw`；页面正文用
+  `query --page`；话题与场景结果只给 `path`。日常命令面去掉 `read`。
+- 同步 `docs/readme/cli.md`、`topics.md`、`design-principles.md`、`recovery.md`、
+  `docs/agent/engine.md`、`verification.md`、`skills/llm-wiki/SKILL.md` 与
+  `references/`、内置场景；`selftest.py` 249 项。

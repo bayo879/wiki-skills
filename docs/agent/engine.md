@@ -18,7 +18,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
 | 错误与输出 | `errors.py` 的 `WikiError`；`emit`、`fail` 在 `cli.py` | 错误码 + `next` + 退出码；所有命令走同一信封 |
 | 工具 | `util.py` | `norm_key`、`digest_bytes`/`digest_text`、`same_stamp`、`now_iso`/`parse_iso`、`dump_meta`、`write_atomic` |
 | 工作区边界 | `workspace.py` | `WIKI_DIR`、`window_safe`、`inside_root`、`dry_store`；文件参数一律先过 `inside_root` |
-| 摄入与解析 | `ingest.py` | `extract_text`/`pdf_to_text`/`docx_to_text`/`html_to_text`、`decode_bytes`、`file_facts`、`raw_facts`、`ingest_decision`；纯函数，不碰数据库；超限在 `read_bytes` 抛 |
+| 摄入与解析 | `ingest.py` | `extract_text`/`pdf_to_text`/`docx_to_text`/`html_to_text`、`decode_bytes`、`raw_facts`、`raw_body_digest`、`ingest_decision`；纯函数，不碰数据库；超限在 `read_bytes` 抛 |
 | frontmatter | `frontmatter.py` | `split_frontmatter`、`unquote_scalar`、`yaml_scalar`；页面渲染与场景加载共用一套语法 |
 | 页面层 | `pages.py` 的 `PagesMixin` | `page_record`、`write_rev`、`rebuild_links`、`links_for`、`view_text`、`page_ids` |
 | 页面渲染 | `pages.py` 的 `render_page` | 依赖 `frontmatter.yaml_scalar`；改动一侧要同步另一侧 |
@@ -66,20 +66,21 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
    `WHERE id=? AND epoch=? AND state='leased'` 的 CAS，rowcount=0 抛
    `E_TASK_STALE`。不要用先查后写替代 CAS。漂移任务不发出，`expire_task` 置终态
    `expired` 并写 `last_error`、`closed_at`；任务行只增不删，供审计。`enqueue_task` 做树
-   唯一性：一个来源不能同时属于两棵未关闭的 page 任务树，冲突抛 `E_TASK_CONFLICT`；
+   唯一性：一份正文不能同时属于两棵未关闭的 page 任务树，冲突抛 `E_TASK_CONFLICT`；
    route 任务只是临时持有者，不挡新树。同一次 route 提交拆出的 page 任务共享
    `route_task`，允许同一来源按主题进入多页，是这条不变量的唯一例外。
    领取顺序按任务树深度优先：`_task_order` 以 `inputs.route_task` 判是否属于某棵树，
    页面任务（有 parent）排在来源任务之前，同层按 `created_at`、`rowid`；`rowid` 让同秒入队的
    兄弟页保持 route 里的书写顺序，链接不再靠运气。`_claim_queued` 在未指定 `--kind` 时，只要
-   还有未关闭的 page 任务，就先不发新的 route 任务——一棵树没写完不换来源。
+   还有未关闭的 page 任务，就先不发新的 route 任务——一棵树没写完不换正文。
    `claim_tasks` 先用 `_active_page_tree` 钉住最老那棵未关闭的页面树，`--batch` 只在这棵树里
    发：`_batch_rows` 过滤成同一棵树，树里凑不满一批就少发，不拿别的树补位；`--kind route`
    不钉树，route 任务各自成树。树里连漂移都没有可发的任务时才退回常规顺序，避免一棵坏树
    饿死整条队列。
-6. **任务快照有 8 个来源指纹。** 入队时快照 `key`、`source_size`、`source_mtime`、
-   `source_digest`、`raw`、`raw_size`、`raw_mtime`、`raw_digest`；`task_drift` 先比 stat，
-   不一致再读字节比 digest（只是 touch 不算漂移），raw 副本同理，报错分别为
+6. **任务快照有 9 个来源指纹。** 入队时快照 `key`、`raw_id`、`source_size`、
+   `source_mtime`、`source_digest`、`raw`、`raw_size`、`raw_mtime`、`raw_digest`；
+   `task_drift` 先比 stat，不一致再读字节比 digest（只是 touch 不算漂移），raw 副本则读文件、
+   剥前言后按正文比 `raw_digest`——前言里的挂载路径列表变了不算漂移。报错分别为
    `source <key> changed`、`raw copy <raw> was edited`。缺指纹的旧快照直接判漂移；update
    任务还比 `base_rev`。`claim_tasks` 不发出漂移任务，直接过期；提交已过期任务返回
    `E_SOURCE_DRIFT`。
@@ -93,7 +94,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
 10. **没有旧页面接管。** `page_revs` 为空时也不扫描 `.wiki/pages/`：该目录不再被读取，
    账本里没有的页面不会被文件内容凭空生成；升级后残留的 `.wiki/pages/` 由用户手动删除。
 11. **工作区边界。** `open_wiki` 以 cwd 为 workspace，`--root` 必须是 workspace 或其子目录；
-    `read` 路径、`--payload`、`body_file`、`page import --from`、`export` 统一走
+    `--payload`、`body_file`、`page import --from`、`export` 统一走
     `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
     解析后落在扫描根外的符号链接。导入 `errors.py` / `workspace.py` 前设
     `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。

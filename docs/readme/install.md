@@ -100,7 +100,7 @@ python3 <安装路径>/scripts/wiki.py ingest --json
 草稿、任务目录、导出与临时文件都放 `.wiki/` 下：`.wiki/drafts/`、
 `.wiki/tasks/<id>/`、`.wiki/export`、`.wiki/tmp/`。根目录下非隐藏文件会被当成来源，缓存不要散落在根目录。
 
-摄入只负责把文件变成来源并排队 route 任务；建页由后续任务循环完成，见 `SKILL.md`
+摄入只负责把文件变成来源、按正文去重并排队 route 任务；建页由后续任务循环完成，见 `SKILL.md`
 的主循环。不要手工编辑 `.wiki/` 下的文件，页面只能通过 `submit`、`page import` 修改。
 
 ## 5. 搬迁与卸载

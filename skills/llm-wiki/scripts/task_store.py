@@ -14,6 +14,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from errors import WikiError
+from ingest import raw_body_digest
 from tasks import render_brief, task_packet
 from util import digest_bytes, dump_meta, now_iso, same_stamp
 
@@ -168,6 +169,20 @@ class TaskStoreMixin:
             (source_key,),
         ).fetchone()
 
+    def open_task_for_raw(self, raw_id):
+        """Any open task holding one of the raw's mounts; identity is the body."""
+        return self.conn.execute(
+            """
+            SELECT t.id, t.kind, t.subject FROM task_sources ts
+            JOIN tasks t ON t.id = ts.task_id
+            WHERE t.state IN ('queued', 'leased')
+              AND ts.source_key IN (SELECT key FROM sources WHERE raw_id = ?)
+            ORDER BY t.created_at, t.id
+            LIMIT 1
+            """,
+            (raw_id,),
+        ).fetchone()
+
     def enqueue_task(self, kind, subject, inputs):
         existing = self.conn.execute(
             "SELECT id FROM tasks WHERE kind = ? AND subject = ? AND state IN ('queued', 'leased')",
@@ -226,8 +241,8 @@ class TaskStoreMixin:
             raise
         return task_id
 
-    def attach_page_source(self, task_id, source_key):
-        """Add a source, with its full snapshot, to an open page task."""
+    def attach_task_source(self, task_id, source_key):
+        """Add a source, with its full snapshot, to an open task (route or page)."""
         row = self.task_row(task_id)
         inputs = json.loads(row["inputs"])
         if any(item["key"] == source_key for item in inputs.get("sources", [])):
@@ -290,7 +305,7 @@ class TaskStoreMixin:
                 return f"raw copy {raw} is missing"
             if not same_stamp(raw_stat.st_size, raw_stat.st_mtime,
                               item["raw_size"], item["raw_mtime"]):
-                if digest_bytes(raw_path.read_bytes()) != item["raw_digest"]:
+                if raw_body_digest(raw_path) != item["raw_digest"]:
                     return f"raw copy {raw} was edited"
         # 页面在任务排队后又前进了一版，任务基于的修订已经过期。
         if inputs.get("mode") == "update" and inputs.get("base_rev") is not None:
@@ -529,6 +544,7 @@ class TaskStoreMixin:
         row = self.source_row(item["key"])
         return {
             "key": item["key"],
+            "raw_id": row["raw_id"] if row else None,
             "digest": row["digest"] if row else None,
             "raw": row["raw"] if row else None,
             "status": row["status"] if row else "unknown",
@@ -541,6 +557,7 @@ class TaskStoreMixin:
             "sources": [
                 {
                     "key": view["key"],
+                    "raw_id": view["raw_id"],
                     "raw": view["raw"],
                     "chars": view["chars"],
                 }

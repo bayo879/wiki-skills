@@ -40,7 +40,7 @@
 
 - 来源（source）：扫描到的文件，键是相对根目录的路径。状态 `pending`、`done`、
   `skipped`、`unsupported`、`oversize`、`missing`。
-- 任务（task）：`route`（每个来源一条）与 `page`（每页一条）。状态
+- 任务（task）：`route`（每个 raw 一条，同一份正文的多个路径合成一条）与 `page`（每页一条）。状态
   `queued → leased → accepted`；另有过期终态 `expired`，保留行供审计，不再领取。
   提交被拒时回到 `queued` 并记录 `last_error`。
 - 页面（page）：多版修订，每版有 `rev`、`meta`、`body`、`digest`。当前状态
@@ -51,12 +51,12 @@
 ## 工作区边界
 
 - 根目录默认是当前工作目录；`--root` 只允许当前目录或它的子目录，不能指到区外。
-- 下列参数解析后必须落在根目录内，否则返回 `E_PATH`：`read` 的路径、`--payload`、
+- 下列参数解析后必须落在根目录内，否则返回 `E_PATH`：`--payload`、
   `body_file`、`page import --from`、`export <dir>`。
 - 草稿、任务目录、导出与临时文件放 `<root>/.wiki/` 下（`.wiki/drafts/`、
   `.wiki/tasks/<id>/`、`.wiki/export`、`.wiki/tmp/`）。`--dry-run` 的临时库在 `.wiki/tmp/`，
   退出时清理。
-- 会写账本或观看区的命令（`init`、`ingest`、`next`、`submit`、`release`、`read`、`query`、
+- 会写账本或观看区的命令（`init`、`ingest`、`next`、`submit`、`release`、`query`、
   `export`、`status`、`sync`、`doctor`、`page import`、`page restore`）持有一把工作区文件锁
   `.wiki/lock`；锁被另一个存活进程占着时排队等待 5 秒，仍拿不到返回 `E_BUSY`（退出码 4）。
   进程崩溃留下的锁（记录 pid 已不存在，或超过 30 分钟）会被下一个命令接管。
@@ -86,7 +86,7 @@
 
 扫描根目录（跳过隐藏目录、`scan.ignore`、`scenario/`、`场景能力/`、`话题/` 与观看区
 `<view>/`），解析新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），并为每个
-新来源入队一条 route 任务。`scenario/`（旧名 `场景能力/`）是流程能力、`话题/` 是 wiki 的
+新来源入队任务，同一份正文的多个路径合成一条 route 任务。`scenario/`（旧名 `场景能力/`）是流程能力、`话题/` 是 wiki 的
 探索层，都不作为摄入来源，摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。场景与
 话题的检索分别由 `scenario search` 和 `query` 直接扫描文件完成。
 
@@ -110,7 +110,7 @@ pending_total, pending, queue{open,queued,leased,route,page}}`。`queued_tasks` 
 按任务树深度优先，一批只发一棵树：一棵来源树拆出的页面任务没做完，就不发新来源；一批里
 不会同时出现 route 任务和页面任务，页面任务只从当前这棵树取，树没做完时别的来源排在后面。
 批次没填满时用同一棵树里已领但未提交的任务补位，不拿别的树凑数——所以 `--batch 2` 在只剩
-1 个待写页面时返回 1 个，而不是混进下一个来源。同一秒入队的兄弟页按入队顺序发放，和
+1 个待写页面时返回 1 个，而不是混进下一份正文。同一秒入队的兄弟页按入队顺序发放，和
 route 里的书写顺序一致。
 `next` 是 agent 的唯一取任务入口，返回任务包而不是内部状态：
 
@@ -158,15 +158,16 @@ route 里的书写顺序一致。
    "links": ["refund-policy"]}]}
 ```
 
-每个输入来源至少一条决定，`reason` 每条都必须非空，`action` 三选一。一份来源含多个
-可独立检索的主题时，提交多条决定指向不同页面；同一来源不得重复指向同一页面，
+每份正文至少一条决定，`source` 填它的任一挂载路径（同一份正文可能挂在多个路径上），
+这条决定覆盖它的全部路径；`reason` 每条都必须非空，`action` 三选一。一份正文含多个
+可独立检索的主题时，提交多条决定指向不同页面；同一页面不得重复指向，
 `skip` 不能与 `new`/`merge` 并用：
 
 - `new`：`page`、`title`、`type` 必填；页面不能已存在，同一载荷里同一个页面只能
   `new` 一次。
 - `merge`：`page` 必填；页面可以已存在，也可以已在 `pending_pages` 里排队
   （包括同一 route 载荷里的 `new`，顺序不限）。若该页已有未完成任务，来源并入该任务。
-- `skip`：标记 `skipped`。
+- `skip`：把这份正文仍 `pending` 的挂载路径标记 `skipped`。
 
 decision 可带可选 `links`，声明这页与哪些页面相关。目标只能是提交时已存在的页，或同一
 载荷里 `new` 的兄弟页；兄弟页要等被链页面先提交，顺序错会报 `E_LINK_UNRESOLVED`，重新
@@ -202,28 +203,17 @@ decision 可带可选 `links`，声明这页与哪些页面相关。目标只能
 
 `release <id>`：把已领取未提交的任务退回队列，不记录错误。
 
-### read
-
-`read "raw:<key>" [--offset N] [--limit N]` 读解析后的来源文本；
-`read "page:<id>"` 读页面正文；也可传根目录内的相对路径。
-`data`: `{path, offset, limit, total_lines, next_offset, meta, content}`；`page:` 的 `path`
-是观看区里的对应文件，发布关闭时为 `page:<id>`。
-
-对 `.md`，`read` 先看正文首行：以 `---` 开头就按 frontmatter 解析，`meta` 给出结果，
-`content` 只留正文。按路径读取的 `.md`（例如 `SCENARIO.md`）同样如此，开头那段
-frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 raw 副本，返回的同样是
-去掉引擎前言后的正文。`page:` 直接返回账本里的元数据与正文，不做切分。
-
 ### query
 
 `query <词...> [--limit N] [--task <id>]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
 `话题/`，命中时在 `topics` 里返回。`query` **不检索场景**，场景必须显式
 `scenario search`。`query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
-`path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`outgoing`、`incoming`、`body`，不查话题。
+`path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`sources`（`[{key, raw}]`，`raw`
+是账本渲染的观看区副本路径，源缺失时为 `null`）、`outgoing`、`incoming`、`body`，不查话题。
 
 `data`: `{query, matches, returned, results, topic_matches, topics, boundary}`。
 `matches` 只数页面，`topic_matches` 只数话题；`topics[]` 为
-`{name, title, description, status, updated, path, read, score, snippet}`。
+`{name, title, description, status, updated, path, score, snippet}`；按 `path` 直接打开文件。
 
 `query --task <id> 词1 词2 ...`：把这次检索登记到任务上，route 任务提交前必须至少登记一次，
 否则 `submit` 报 `E_NO_QUERY`。每个词单独检索、各返上限 5 条，按词分组返回，不并成一次
@@ -351,7 +341,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_SOURCE_DRIFT` | 来源在任务领取后被改动或删除 | 重新 `next`，重读来源 |
 | `E_UNKNOWN_SOURCE` | 页面引用未登记的来源 | 先 `ingest` |
 | `E_EMPTY` | 还没有任何来源 | 先 `ingest` |
-| `E_NOT_FOUND` | 页面、版本、场景或文件不存在 | 用 `query`/`read`/`scenario list` 定位 |
+| `E_NOT_FOUND` | 页面、版本或场景不存在 | 用 `query`/`scenario list` 定位 |
 | `E_PATH` | 路径越出工作区根目录 | 用工作区内路径；资料在区外时切换工作区 |
 | `E_CONFIG` | `.wiki/wiki.json` 非法，或 `publish.dir` 不合规 | 修正 JSON，或删掉让它按默认重建；见「配置损坏」 |
 | `E_SCENARIO_INVALID` | 场景缺主文件、`description`、正文，或超过 200000 字符 | 按 `scenario list` 的 `error` 修正场景目录 |

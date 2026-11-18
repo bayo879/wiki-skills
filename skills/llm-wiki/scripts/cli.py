@@ -23,7 +23,6 @@ from frontmatter import split_frontmatter
 from ingest import (
     MAX_RAW_CHARS,
     extract_text,
-    file_facts,
     ingest_decision,
     raw_facts,
     read_bytes,
@@ -234,7 +233,9 @@ def command_ingest():
                     # 人工排版过的原文：正文变了就换一行，last_parsed_digest 留旧值，
                     # 下一轮 ingest 据此认出「源没变、原文是人改的」，不回源覆盖。
                     raw_rel, raw_id = wiki.adopt_raw_edit(key, row["parser"])
-                disk_digest, disk_size, disk_mtime = file_facts(wiki.root / raw_rel)
+                raw_stat = (wiki.root / raw_rel).stat()
+                disk_digest = raw_id
+                disk_size, disk_mtime = raw_stat.st_size, raw_stat.st_mtime
                 wiki.upsert_source(
                     path.relative_to(wiki.scan_root), digest, stat.st_size, stat.st_mtime,
                     raw_rel, row["parser"], row["status"],
@@ -287,7 +288,9 @@ def command_ingest():
             raw_rel = row["raw"]
             raw_id = row["raw_id"]
             last_parsed = row["last_parsed_digest"]
-        raw_digest, raw_size, raw_mtime = file_facts(wiki.root / raw_rel)
+        raw_stat = (wiki.root / raw_rel).stat()
+        raw_digest = raw_id
+        raw_size, raw_mtime = raw_stat.st_size, raw_stat.st_mtime
         wiki.upsert_source(path.relative_to(wiki.scan_root), digest, len(data), stat.st_mtime,
                            raw_rel, parser, "pending", raw_digest, raw_size, raw_mtime,
                            raw_id=raw_id, last_parsed_digest=last_parsed)
@@ -301,10 +304,6 @@ def command_ingest():
                 "chars": len(text),
             }
         )
-        if wiki.source_in_open_task(key) is None:
-            queued.append(
-                wiki.enqueue_task("route", key, {"sources": [wiki.source_snapshot(key)]})
-            )
     vanished = []
     for row in wiki.all_sources():
         if row["key"] in seen or row["status"] == "missing":
@@ -337,21 +336,36 @@ def command_ingest():
         wiki.close()
         return 0
     # 失效不是放弃：任务因来源漂移被判 expired 后，来源仍是 pending，但旧任务已经不
-    # 存在，下一轮 ingest 只会走「未变化」分支，不再入队——库会永远空转。这里补一次
-    # 对账：pending 且没有未关闭任务的来源重新入队。没有 raw 的来源（超大、解析失败）
-    # 不排队，它们本来就没有可提交的内容。
+    # 存在，下一轮 ingest 只会走「未变化」分支，不再入队——库会永远空转。这里统一入队：
+    # 先按 raw 归并（同一份正文只排一个 route 任务，任务带它的全部挂载路径），再给
+    # 每个 raw 入队。没有 raw 的来源（超大、解析失败）不排队，它们本来就没有可提交的内容。
+    by_raw = {}
     for row in wiki.all_sources():
         if row["status"] != "pending" or not row["raw"]:
             continue
         if selected is not None and row["key"] not in selected:
             continue
-        if wiki.source_in_open_task(row["key"]) is not None:
+        holder = wiki.open_task_for_raw(row["raw_id"])
+        if holder is not None:
+            # 这份正文已经在别人的树上：新路径挂上去即可，不另排一棵树。
+            wiki.attach_task_source(holder["id"], row["key"])
             continue
+        by_raw.setdefault(row["raw_id"], []).append(row["key"])
+    for raw_id, keys in by_raw.items():
         queued.append(
-            wiki.enqueue_task("route", row["key"], {"sources": [wiki.source_snapshot(row["key"])]})
+            wiki.enqueue_task(
+                "route", raw_id,
+                {"sources": [wiki.source_snapshot(key) for key in sorted(keys)]},
+            )
         )
-    # 最后一件事：没有任何来源指向的旧 raw 行连同文件一起回收，观看区不留孤儿副本。
+    # 没有任何来源指向的旧 raw 行连同文件一起回收，观看区不留孤儿副本。
     reclaimed = wiki.collect_raws()
+    # 孤儿页：来源全没了、也没有出入链的页面没有保留价值，连同观看区副本一起删除；
+    # 还有链的页面只由 computed_status 标 stale，等链断了再清。
+    orphaned = []
+    for record in wiki.removable_pages():
+        if wiki.delete_page(record["id"]):
+            orphaned.append(record["id"])
     remaining = [row["key"] for row in wiki.all_sources() if row["status"] == "pending"]
     counts = wiki.task_counts()
     data = {
@@ -364,6 +378,7 @@ def command_ingest():
         "restored": restored,
         "queued_tasks": queued,
         "reclaimed": reclaimed,
+        "orphaned": orphaned,
         "pending_total": len(remaining),
         "pending": remaining,
         "queue": {
@@ -374,7 +389,8 @@ def command_ingest():
     emit(
         "ingest", wiki.root,
         f"ingested {len(fresh)} sources, queued {len(queued)} route tasks; "
-        f"{len(remaining)} pending, open queue {counts['open']}",
+        f"{len(remaining)} pending, {len(orphaned)} orphan page(s) removed, "
+        f"open queue {counts['open']}",
         data,
         [f"queued: {item}" for item in queued],
         ok=not (failed or oversize),
@@ -551,9 +567,21 @@ def command_submit():
     wiki.close()
     return 0
 
+def _raw_mounts(sources):
+    """Group task sources by raw: one decision covers every path of the same body."""
+    raw_of = {}
+    mounts = {}
+    for item in sources:
+        raw_id = item.get("raw_id") or item["key"]
+        raw_of[item["key"]] = raw_id
+        mounts.setdefault(raw_id, []).append(item["key"])
+    return raw_of, mounts
+
+
 def submit_route(wiki, row, payload):
     inputs = json.loads(row["inputs"])
     available = [item["key"] for item in inputs["sources"]]
+    raw_of, mounts = _raw_mounts(inputs["sources"])
     decisions = payload.get("decisions") if isinstance(payload, dict) else None
     if not isinstance(decisions, list) or not decisions:
         raise WikiError(
@@ -570,9 +598,10 @@ def submit_route(wiki, row, payload):
         if not isinstance(decision, dict):
             raise WikiError("E_PAYLOAD", "each decision must be an object", "", 2)
         key = decision.get("source")
-        if key not in available:
+        if key not in raw_of:
             raise WikiError("E_TASK_SCOPE", f"source {key!r} is not in this task",
                             f"task sources: {', '.join(available)}", 3)
+        raw_id = raw_of[key]
         action = decision.get("action")
         if action not in ("new", "merge", "skip"):
             raise WikiError("E_PAYLOAD", f"action {action!r} must be new, merge or skip",
@@ -580,22 +609,22 @@ def submit_route(wiki, row, payload):
         if not str(decision.get("reason") or "").strip():
             raise WikiError("E_PAYLOAD", f"{key}: reason must not be empty",
                             "one sentence explaining the choice", 2)
-        seen.add(key)
+        seen.add(raw_id)
         if action == "skip":
-            skipped.add(key)
+            skipped.add(raw_id)
             continue
         page_id = str(decision.get("page") or "").strip().lower()
         if not ID_RE.match(page_id):
             raise WikiError("E_BAD_ID", f"{key}: page id {page_id!r} is not a lowercase slug",
                             "use e.g. `filing-process`", 2)
-        if (key, page_id) in targets:
+        if (raw_id, page_id) in targets:
             raise WikiError(
                 "E_PAYLOAD",
-                f"{key}: page {page_id} is decided twice in one payload",
-                "one decision per source and page; split a source across different pages",
+                f"{key}: page {page_id} is decided twice for one raw",
+                "one decision per raw and page; split a raw across different pages",
                 2,
             )
-        targets.add((key, page_id))
+        targets.add((raw_id, page_id))
         if action == "new":
             if page_id in new_ids:
                 raise WikiError(
@@ -604,18 +633,21 @@ def submit_route(wiki, row, payload):
                     "create a page once, then merge the other sources into it", 2,
                 )
             new_ids.add(page_id)
-    missing = [item for item in available if item not in seen]
+    missing = [
+        key for key in available if raw_of[key] not in seen
+    ]
     if missing:
         raise WikiError(
             "E_PAYLOAD",
-            f"decisions must cover every input source; missing {sorted(missing)}",
-            "submit at least one decision per source", 2,
+            f"decisions must cover every input raw; missing {sorted(missing)}",
+            "submit at least one decision per raw (any one of its paths)",
+            2,
         )
-    conflicting = sorted(skipped & {key for key, _ in targets})
+    conflicting = sorted(skipped & {raw_id for raw_id, _ in targets})
     if conflicting:
         raise WikiError(
             "E_PAYLOAD",
-            f"source {conflicting[0]}: skip cannot be combined with new or merge",
+            f"source {mounts[conflicting[0]][0]}: skip cannot be combined with new or merge",
             "skip a source on its own, or decide its pages without skip", 2,
         )
     words = wiki.query_words(row["id"])
@@ -642,6 +674,7 @@ def submit_route(wiki, row, payload):
     }
     for decision in decisions:
         key = decision["source"]
+        raw_id = raw_of[key]
         action = decision["action"]
         if action == "skip":
             if decision.get("links"):
@@ -649,7 +682,7 @@ def submit_route(wiki, row, payload):
                     "E_PAYLOAD", f"{key}: skip decision cannot carry links",
                     "drop links, or decide the page without skip", 2,
                 )
-            plan.append({"action": "skip", "key": key})
+            plan.append({"action": "skip", "key": key, "raw": raw_id})
             continue
         page_id = str(decision.get("page") or "").strip().lower()
         if not ID_RE.match(page_id):
@@ -685,7 +718,7 @@ def submit_route(wiki, row, payload):
                     "E_PAYLOAD", f"{key}: type {page_type!r} not in schema.types",
                     f"choose one of: {', '.join(wiki.config['schema']['types'])}", 2,
                 )
-            plan.append({"action": "new", "key": key, "page": page_id,
+            plan.append({"action": "new", "key": key, "raw": raw_id, "page": page_id,
                          "title": title, "type": page_type, "links": links})
         else:
             pending_create = bool(
@@ -697,21 +730,26 @@ def submit_route(wiki, row, payload):
                     f"{key}: page {page_id} does not exist",
                     "use action new, or check `next --json` page_index and pending_pages", 3,
                 )
-            plan.append({"action": "merge", "key": key, "page": page_id,
+            plan.append({"action": "merge", "key": key, "raw": raw_id, "page": page_id,
                          "rev": record["rev"] if record else None, "links": links})
     # A page created in this same payload must be queued before sources merge
     # into it; otherwise the merge would create an update task for a missing page.
     plan.sort(key=lambda item: 0 if item["action"] == "new" else 1)
     page_tasks = []
     for item in plan:
-        key = item["key"]
+        # 一条 decision 覆盖这份正文的全部挂载路径：页面来源、skip 状态都按 raw 落。
+        keys = mounts[item["raw"]]
         if item["action"] == "skip":
-            wiki.set_source_status(key, "skipped")
+            for key in keys:
+                mount = wiki.source_row(key)
+                if mount is not None and mount["status"] == "pending":
+                    wiki.set_source_status(key, "skipped")
             continue
-        entry = wiki.source_snapshot(key)
+        entries = [wiki.source_snapshot(key) for key in keys]
         existing = wiki.open_task_for_page(item["page"])
         if existing:
-            wiki.attach_page_source(existing["id"], key)
+            for entry in entries:
+                wiki.attach_task_source(existing["id"], entry["key"])
             if item["links"]:
                 wiki.attach_page_links(existing["id"], item["links"])
             page_tasks.append(existing["id"])
@@ -719,7 +757,7 @@ def submit_route(wiki, row, payload):
         inputs = {
             "page": item["page"],
             "base_rev": None if item["action"] == "new" else item["rev"],
-            "sources": [entry],
+            "sources": entries,
             "links": item["links"],
         }
         if item["action"] == "new":
@@ -730,7 +768,8 @@ def submit_route(wiki, row, payload):
             inputs["route_task"] = row["id"]
         task_id = wiki.enqueue_task("page", item["page"], inputs)
         # 唯一索引可能把并发插入收敛到同一条任务，补挂本次来源（幂等）。
-        wiki.attach_page_source(task_id, key)
+        for entry in entries:
+            wiki.attach_task_source(task_id, entry["key"])
         page_tasks.append(task_id)
     wiki.close_task(row["id"], payload, row["epoch"])
     return {
@@ -804,68 +843,6 @@ def command_release():
     emit("release", wiki.root, f"released {ARGS.id}", {"task": ARGS.id}, [])
     wiki.close()
     return 0
-
-def command_read():
-    wiki, _ = open_wiki()
-    ref = ARGS.ref
-    meta = {}
-    if ref.startswith("page:"):
-        page_id = ref[5:]
-        record = wiki.page_record(page_id)
-        if not record:
-            raise WikiError("E_NOT_FOUND", f"no page {page_id}", "run `query` to find the page id", 3)
-        meta = record["meta"]
-        body = record["body"]
-        location = wiki.page_ref(record)
-    else:
-        path = resolve_ref(wiki, ref)
-        text = path.read_text(encoding="utf-8", errors="replace")
-        body = text
-        # frontmatter 是文本属性，不是路径属性：原文搬到观看区 raw/ 后，不能再靠 .wiki 判定。
-        if path.suffix == ".md" and text.startswith("---"):
-            meta, body = split_frontmatter(text)
-        location = norm_key(path.relative_to(wiki.root)) if window_safe(wiki.root, path) else str(path)
-    lines = body.splitlines()
-    offset = max(1, ARGS.offset)
-    limit = max(1, min(ARGS.limit, 2000))
-    window = lines[offset - 1: offset - 1 + limit]
-    next_offset = offset + len(window) if offset - 1 + len(window) < len(lines) else None
-    data = {
-        "path": location,
-        "offset": offset,
-        "limit": limit,
-        "total_lines": len(lines),
-        "next_offset": next_offset,
-        "meta": dump_meta(meta),
-        "content": "\n".join(window),
-    }
-    emit(
-        "read", wiki.root,
-        f"{data['path']} lines {offset}-{offset + len(window) - 1} of {len(lines)}",
-        data,
-        [line for line in window],
-    )
-    wiki.close()
-    return 0
-
-def resolve_ref(wiki, ref):
-    if ref.startswith("raw:"):
-        key = ref[4:]
-        row = wiki.source_row(key)
-        if not row or not row["raw"]:
-            raise WikiError(
-                "E_NOT_FOUND", f"no raw text for {key}",
-                "unsupported or oversize sources keep no raw text; run `status`", 3,
-            )
-        return wiki.root / row["raw"]
-    candidate = (wiki.root / ref).resolve()
-    if not window_safe(wiki.root, candidate):
-        raise WikiError("E_PATH", "ref escapes the workspace root",
-                        "use a path inside the workspace", 2)
-    if not candidate.exists():
-        raise WikiError("E_NOT_FOUND", f"no file {ref}", "check the path, or use `query` first", 3)
-    return candidate
-
 
 def query_task(wiki, words):
     """Register one search per topic word on a task, then show the hits.
@@ -961,10 +938,18 @@ def command_query():
         if not record:
             raise WikiError("E_NOT_FOUND", f"no page {ARGS.page}", "search with `query <text>` first", 3)
         outgoing, incoming = wiki.links_for(ARGS.page)
+        # 源文件路径是账本事实：来源只存 key，副本路径按 raw_id 查 raws 表渲染出来，
+        # 调用方（agent）不用再按来源名猜文件名。
+        sources = []
+        for key in record["meta"]["sources"]:
+            row = wiki.source_row(key)
+            raw = row["raw"] if row else ""
+            sources.append({"key": key, "raw": raw or None})
         data = {
             "page": dump_meta(record["meta"]),
             "rev": record["rev"],
             "path": wiki.page_ref(record),
+            "sources": sources,
             "outgoing": outgoing,
             "incoming": incoming,
             "body": record["body"],
@@ -975,6 +960,7 @@ def command_query():
             data,
             [f"outgoing: {', '.join(outgoing) or '(none)'}",
              f"incoming: {', '.join(incoming) or '(none)'}",
+             f"raw: {', '.join(item['raw'] for item in sources if item['raw']) or '(none)'}",
              "",
              record["body"]],
         )
@@ -1015,7 +1001,7 @@ def command_query():
         block = ["topics (read before exploring the same theme again):"]
         for item in topic_hits:
             block.append(f"{item['name']}  [{item['status'] or 'open'}]  {item['description']}")
-            block.append(f"    path: {item['path']}  read: {item['read']}")
+            block.append(f"    path: {item['path']}")
         sections.append(block)
     lines = []
     for block in sections:
@@ -1261,23 +1247,10 @@ def command_doctor():
             if not wiki.source_row(key):
                 issues.append({"severity": "warn", "code": "L4",
                                "message": f"{record['id']} cites unregistered source {key}"})
-    unprovenanced = {}
-    removable = []
-    for record in pages:
-        keys = record["meta"].get("sources") or []
-        usable = any(
-            (wiki.source_row(key) is not None
-             and wiki.source_row(key)["status"] not in ("missing", "unsupported", "oversize"))
-            for key in keys
-        )
-        if usable:
-            continue
-        outgoing, incoming = wiki.links_for(record["id"])
-        label = record["id"]
-        if not outgoing and not incoming:
-            label += " (orphan, removable)"
-            removable.append(record)
-        unprovenanced[record["id"]] = label
+    removable = wiki.removable_pages()
+    unprovenanced = {record["id"]: record["id"] for record in wiki.unprovenanced_pages()}
+    for record in removable:
+        unprovenanced[record["id"]] += " (orphan, removable)"
     deleted = []
     for record in removable:
         if wiki.delete_page(record["id"]):
@@ -1339,10 +1312,6 @@ def build_parser():
     submit.add_argument("--payload", help="JSON file or - for stdin; defaults to the task folder")
     release = sub.add_parser("release", parents=[common], help="return a task to the queue")
     release.add_argument("id")
-    read = sub.add_parser("read", parents=[common], help="read raw text or a page by ref")
-    read.add_argument("ref")
-    read.add_argument("--offset", type=int, default=1)
-    read.add_argument("--limit", type=int, default=200)
     query = sub.add_parser("query", parents=[common], help="search pages and topics, or inspect one page")
     query.add_argument("text", nargs="*")
     query.add_argument("--page")
@@ -1385,7 +1354,6 @@ COMMANDS = {
     "next": command_next,
     "submit": command_submit,
     "release": command_release,
-    "read": command_read,
     "query": command_query,
     "export": command_export,
     "status": command_status,
@@ -1395,7 +1363,7 @@ COMMANDS = {
 }
 
 LOCKED_COMMANDS = frozenset({
-    "init", "ingest", "next", "submit", "release", "read", "query",
+    "init", "ingest", "next", "submit", "release", "query",
     "export", "status", "sync", "doctor", "page import", "page restore",
 })
 

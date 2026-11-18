@@ -83,11 +83,19 @@ def render_brief(task_id, brief):
     return "\n".join(lines)
 
 
+def raw_groups(sources):
+    """Group task sources by raw: one decision covers every path of the same body."""
+    groups = {}
+    for item in sources:
+        groups.setdefault(item.get("raw_id") or item["key"], []).append(item["key"])
+    return list(groups.values())
+
+
 def route_template(sources):
     return {
         "decisions": [
             {
-                "source": item["key"],
+                "source": group[0],
                 "action": "",
                 "page": "",
                 "title": "",
@@ -95,23 +103,25 @@ def route_template(sources):
                 "links": [],
                 "reason": "",
             }
-            for item in sources
+            for group in raw_groups(sources)
         ]
     }
 
 
 def route_brief(task_id, sources, queries=None):
-    keys = "、".join(item["key"] for item in sources)
-    first = sources[0]["key"] if sources else ""
+    groups = raw_groups(sources)
+    keys = "、".join(group[0] for group in groups)
     chars = sum(item.get("chars") or 0 for item in sources)
     view = queries or {}
     used = view.get("used") or 0
     budget = view.get("budget") or 5
+    mount_list = "；".join("、".join(group) for group in groups) or "无"
     return {
-        "goal": f"读来源 {keys} 的全文，判断应归入哪些页面、或跳过；一份来源可拆到多页。",
+        "goal": f"读来源 {keys} 的全文，判断应归入哪些页面、或跳过；"
+                "同一份正文只决定一次，决定覆盖它的全部路径。",
         "steps": [
-            f"读原文：运行 `read \"raw:{first}\" --offset 1 --limit 120 --json`，先读完再抽词；"
-            "长文按 `--offset` 续读，不要只看开头就定案。",
+            "读原文：`work.json` 的 `sources[].raw` 是观看区里的文件路径，直接打开读全文再抽词；"
+            "长文分段读完，不要只看开头就定案。",
             f"抽主题词并登记：`query --task {task_id} 词1 词2 词3`。一次可给多个词，每个词独立"
             "检索、各返 5 条，可以分多次登记；配额按正文长度算，"
             f"当前已用 {used}/{budget} 个词（{chars} 字，5 个/1000 字，至少 5 个）。"
@@ -119,8 +129,9 @@ def route_brief(task_id, sources, queries=None):
             "逐词看命中页的 title、summary 与出入链数；有同主题候选时用 `query --page <id>` 读"
             "covered/not_covered 再决定 merge。命中被截断时换词重查，不要把「没搜到」当成"
             "「没有相似页」。`pending_pages` 里已排队、尚未写入的页面同样可以 merge。",
-            "填 `payload.json` 的 `decisions[]`：每个来源至少一条 decision，action 选 new/merge/skip；"
-            "一份文件含多个可独立检索的主题时拆成多条 decision、指向不同 page；"
+            "填 `payload.json` 的 `decisions[]`：每份正文至少一条 decision，`source` 填它的任一"
+            f"挂载路径（{mount_list}），这次决定覆盖该正文的全部路径；action 选 new/merge/skip；"
+            "同一份正文含多个可独立检索的主题时拆成多条 decision、指向不同 page；"
             "每条 decision 都必须写 reason；new 还要给 page、title、type，merge 要给 page。"
             "类型只表示形态：要求与规则用 concept，组织/系统/人物用 entity，可复用的办理步骤用"
             "process；拿不准用 concept。同一主题的要求与步骤写同一页，不要拆两页；"
@@ -189,7 +200,7 @@ def page_brief(task_id, inputs, record):
         "submit": submit_step(task_id),
         "effect": "提交后引擎写入新修订并按账本推送到观看区；"
         "旧来源和旧证据会保留，本任务的新来源会加入来源列表。"
-        "页面立即可 query/read，来源后续变化会标记待更新。之后重新运行 `next` 取下一个任务。",
+        "页面立即可 `query --page` 读到，来源后续变化会标记待更新。之后重新运行 `next` 取下一个任务。",
     }
 
 

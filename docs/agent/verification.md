@@ -19,7 +19,7 @@
 可以 merge 到已排队页面。复跑 `python3 tests/selftest.py`：40/40 通过，
 退出码 0。新增检查覆盖 route brief 的 reason、更新页旧证据保留、更新后 sources 并集、
 `pending_pages` 对下一条 route 可见、pending merge 合并两来源、批量页面双来源、
-read page 的 meta 不含 `source_digests`。
+`query --page` 的 page 元数据不含 `source_digests`。
 手工 `/tmp/llm-wiki-fix-test` 复测：A/B 首批合并为 rev1 双来源双证据；C 更新为 rev2 后
 sources 为 A/B/C，evidence 保留 A/B 并加入 C。Windows 侧没有跑过 PowerShell：技能目录由
 上游放置、运行时自带，安装脚本不在使用路径上。
@@ -66,7 +66,7 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。Windows 侧没有跑过 Po
 - `ingest` 不把 `话题/` 当来源，话题文件存在时 `pending_total` 不变；
 - `query` 恒返回 `topic_scenario`（id 为 `topic-exploration`），且 `topic_matches` 与页面
   `matches`、场景 `scenario_matches` 分开计数；
-- `topics` 命中项带 `path` 与可直接执行的 `read "<path>"`。
+- `topics` 命中项带 `path`，按路径直接打开话题文件。
 
 手工临时目录复测：只有 `话题/复机办理.md` 时，`query "复机"` 输出默认流程一行、topics 段，
 `matches=0`、`topic_matches=1`，段落之间只有一个空行；`scenario list` 在 `init` 前可用。
@@ -176,17 +176,18 @@ python3 tests/selftest.py
 | --- | --- |
 | `init` 建库 | 生成 `.wiki/`、`wiki.db`、`wiki.json`，来源为 0 |
 | `--root` 区外 | 指向工作区外的根目录返回 `E_PATH`，退出码 2 |
-| `read` 区外 | 读工作区外文件返回 `E_PATH` |
-| `ingest` 排队 | 每个来源一条 route 任务，`pending_total` 正确 |
+| `ingest` 排队 | 每份正文一条 route 任务（同正文多路径合并），`pending_total` 正确 |
+| 共享正文 | 两源同正文只有一份 raw，只排一条 route 任务，`subject` 是 raw id |
+| 挂载新路径 | 已排队的任务不受影响：不报 `E_SOURCE_DRIFT`，引用页不误标 `stale` |
+| 孤儿页清理 | 全源缺失且无出入链的页在 `ingest` 末尾删除，有链的只标 `stale` |
 | 图片分类 | `.png` 进 `unsupported`，不影响其他文件 |
-| route 领取 | 一个来源一条任务，`work.sources` 带 raw 路径 |
+| route 领取 | 一条任务带该正文的全部挂载源，`work.sources` 带 raw 路径 |
 | payload 区外 | 载荷文件在工作区外返回 `E_PATH` |
 | 任务目录 | `next` 生成 `.wiki/tasks/<id>/{brief.md,payload.json,work.json}` |
 | 任务目录生命周期 | 提交后删目录；释放后重领只刷新 brief/work，已填 `payload.json` 不变；关闭任务的残留目录被 `ingest` 清掉 |
 | 任务恢复 | 领取后不提交再 `next` 返回同一任务且 `payload.json` 不变；队列与租约都空时才返回 `no queued tasks` |
 | 单页单任务 | 第二个来源路由到已排队的页面时挂到该任务上，账本只有一条未关闭 page 任务；被领走时返回 `E_STATE` |
 | 工作区文件锁 | 另一进程持锁时写命令等 5 秒后 `E_BUSY`（退出码 4）；陈旧锁被接管 |
-| `read` raw | 返回解析文本，`content` 为正文 |
 | `skip` 决定 | 被拒决定返回可读错误，接受后来源变 `skipped` |
 | route `new` | 入队 page 任务，任务带来源与 raw |
 | route 拆页 | 同一来源两条 `new` 指向不同页 → 两个 page 任务，来源可挂两棵同源树；重复 `(source, page)` 与 `skip` 混用被拒 |
@@ -195,7 +196,7 @@ python3 tests/selftest.py
 | 任务关闭后重交 | `E_TASK_STALE`，退出码 3 |
 | `status` | 页数、stale、开放任务统计正确 |
 | `query` | 命中页数与 id 正确 |
-| `read` page | 读账本，`path` 指向观看区 |
+| `query --page` | 读账本，`path` 指向观看区，`sources[].raw` 由账本渲染 |
 | 观看区被改 | 推送只告警不覆盖，`sync` 收成新修订 |
 | `page import` | 生成 rev2，`origin=import` |
 | import 区外 | `--from` 越界返回 `E_PATH` |
@@ -248,7 +249,6 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
 | 载荷引用任务范围外来源 | `E_TASK_SCOPE`，退出码 3 |
 | 引文不在 raw 里 | `E_EVIDENCE_NOT_FOUND`，退出码 2 |
 | 缺 `boundaries` | `E_PAYLOAD`，退出码 2 |
-| `read ../outside.md` | `E_PATH`，退出码 2 |
 | `doctor` 有 `fail` 级问题 | 退出码 1 |
 
 ## 四、安装

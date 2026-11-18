@@ -12,6 +12,7 @@ Exit: 0 all checks passed, 1 a check failed.
 import argparse
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -533,10 +534,10 @@ def legacy_note_flow(results):
             "evidence": [{"source": "a.md", "quote": "工作日晚八点交接班"}],
             "boundaries": {"covered": "交接时间", "not_covered": "交接清单"}}))
         run(root, "status")
-        page = run(root, "read", "page:duty-handover")["data"]
-        check(results, "a legacy note page is readable and published",
-              page["meta"]["type"] == "note"
-              and (root / "wiki/pages/note/值班交接.md").is_file(), page["meta"])
+        page = run(root, "query", "--page", "duty-handover")["data"]
+        check(results, "a legacy note page is queryable and published",
+              page["page"]["type"] == "note"
+              and (root / "wiki/pages/note/值班交接.md").is_file(), page["page"])
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -682,12 +683,8 @@ def main(argv=None):
         data = run(root, "check")["data"]
         check(results, "check passes after init", data["ok"], data)
 
-        outside_file = root.parent / f"{root.name}-outside.md"
-        outside_file.write_text("# 区外\n", encoding="utf-8")
         escaped = run(root, "status", "--root", str(root.parent), expect=2)
         check(results, "root outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
-        escaped = run(root, "read", str(outside_file), expect=2)
-        check(results, "read outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
 
         topic = root / "话题" / "复机办理.md"
         topic.parent.mkdir()
@@ -753,7 +750,9 @@ def main(argv=None):
             "SELECT raw_digest, raw_size, raw_mtime FROM sources WHERE key = ?", ("a.md",)
         ).fetchone()
         conn.close()
-        raw_digest, raw_size, raw_mtime = wiki.file_facts(raw_path)
+        raw_stat = raw_path.stat()
+        raw_digest = wiki.raw_body_digest(raw_path)
+        raw_size, raw_mtime = raw_stat.st_size, raw_stat.st_mtime
         check(results, "the ledger mirrors the edited raw file",
               ledger_raw is not None and ledger_raw[0] == raw_digest and ledger_raw[1] == raw_size
               and abs(ledger_raw[2] - raw_mtime) < 1e-6,
@@ -785,7 +784,9 @@ def main(argv=None):
         touched_stamp = raw_path.stat().st_mtime + 30
         os.utime(raw_path, (touched_stamp, touched_stamp))
         after_touch = run(root, "ingest")["data"]
-        touched_digest, touched_size, touched_mtime = wiki.file_facts(raw_path)
+        touched_stat = raw_path.stat()
+        touched_digest = wiki.raw_body_digest(raw_path)
+        touched_size, touched_mtime = touched_stat.st_size, touched_stat.st_mtime
         conn = sqlite3.connect(root / ".wiki" / "wiki.db")
         touched_row = conn.execute(
             "SELECT raw_digest, raw_size, raw_mtime FROM sources WHERE key = ?", ("a.md",)
@@ -840,7 +841,7 @@ def main(argv=None):
         check(results, "query finds the saved topic",
               topics_hit["topic_matches"] == 1
               and topics_hit["topics"][0]["name"] == "复机办理"
-              and topics_hit["topics"][0]["read"].startswith("read "),
+              and topics_hit["topics"][0]["path"].startswith("话题/"),
               topics_hit["topics"])
         check(results, "topic hits stay separate from page hits",
               topics_hit["matches"] == 0, topics_hit)
@@ -856,21 +857,22 @@ def main(argv=None):
         check(results, "route template pre-fills the source",
               routes["a.md"]["template"]["decisions"][0]["source"] == "a.md", routes["a.md"]["template"])
         source_key = routes["a.md"]["work"]["sources"][0]["key"]
-        raw = run(root, "read", f"raw:{source_key}")["data"]
-        check(results, "read returns raw text", "复机" in raw["content"], raw)
-        check(results, "read strips raw frontmatter",
-              'type: "raw"' not in raw["content"], raw["content"][:80])
-        check(results, "read returns raw meta",
-              raw["meta"].get("type") == "raw", raw["meta"])
+        raw_rel = routes["a.md"]["work"]["sources"][0]["raw"]
+        raw_meta, raw_body = wiki.split_frontmatter(
+            (root / raw_rel).read_text(encoding="utf-8")
+        )
+        check(results, "the view tree carries the parsed raw text",
+              "复机" in raw_body and raw_rel.startswith("wiki/raw/"), raw_rel)
+        check(results, "raw frontmatter names the raw object and its mounts",
+              raw_meta.get("type") == "raw"
+              and "a.md" in json.dumps(raw_meta, ensure_ascii=False), raw_meta)
 
-        front = root / "front.md"
-        front.write_text("---\ntitle: 手工标题\n---\n\n# 正文\n\n内容。\n", encoding="utf-8")
-        front_read = run(root, "read", "front.md")["data"]
+        front_meta, front_body = wiki.split_frontmatter(
+            "---\ntitle: 手工标题\n---\n\n# 正文\n\n内容。\n"
+        )
         check(results, "frontmatter split keys on the first line, not on .wiki",
-              front_read["meta"].get("title") == "手工标题"
-              and "title: 手工标题" not in front_read["content"],
-              front_read["meta"])
-        front.unlink()
+              front_meta.get("title") == "手工标题" and "title: 手工标题" not in front_body,
+              front_meta)
 
         outside_payload = root.parent / f"{root.name}-payload.json"
         outside_payload.write_text("{}", encoding="utf-8")
@@ -979,9 +981,14 @@ def main(argv=None):
         check(results, "status counts page and pending", status["pages"] == 1, status)
         found = run(root, "query", "复机")["data"]
         check(results, "query finds the page", found["matches"] == 1, found)
-        page = run(root, "read", "page:anti-fraud-restore")["data"]
-        check(results, "read page comes from the ledger", "两个工作日" in page["content"], page)
-        check(results, "read page hides source digests", "source_digests" not in page["meta"], page["meta"])
+        page = run(root, "query", "--page", "anti-fraud-restore")["data"]
+        check(results, "query --page reads the ledger", "两个工作日" in page["body"], page)
+        check(results, "query --page hides source digests", "source_digests" not in page["page"], page["page"])
+        raw_paths = {item["key"]: item["raw"] for item in page["sources"]}
+        check(results, "query --page renders the raw path of every source",
+              bool(raw_paths) and all(
+                  raw and (root / raw).is_file() for raw in raw_paths.values()),
+              page["sources"])
 
         (root / "c.md").write_text("# 反诈复机\n\n补充：可拨打客服确认进度。\n", encoding="utf-8")
         run(root, "ingest")
@@ -1106,12 +1113,12 @@ def main(argv=None):
         check(results, "the hand edit is cleaned up for later blocks",
               page_file.exists() and "手改一段。" not in page_file.read_text(encoding="utf-8"))
 
-        page = run(root, "read", "page:anti-fraud-restore")["data"]
+        page = run(root, "query", "--page", "anti-fraud-restore")["data"]
         check(results, "update keeps old and new sources",
-              set(page["meta"]["sources"]) == {"a.md", c_key}, page["meta"]["sources"])
+              set(page["page"]["sources"]) == {"a.md", c_key}, page["page"]["sources"])
         check(results, "update keeps old evidence",
-              any(item.get("source") == "a.md" for item in page["meta"]["evidence"]),
-              page["meta"]["evidence"])
+              any(item.get("source") == "a.md" for item in page["page"]["evidence"]),
+              page["page"]["evidence"])
 
         (root / "d.md").write_text("# 机房巡检\n\n巡检周期为每周一次。\n", encoding="utf-8")
         (root / "e.md").write_text("# 机房巡检\n\n巡检记录保留一年。\n", encoding="utf-8")
@@ -1148,9 +1155,9 @@ def main(argv=None):
             "boundaries": {"covered": "巡检周期与记录保存", "not_covered": "巡检项目清单"},
         }
         run(root, "submit", task["id"], "--payload", payload_file(root, "batch-page.json", batch_payload))
-        page = run(root, "read", "page:machine-room-inspection")["data"]
+        page = run(root, "query", "--page", "machine-room-inspection")["data"]
         check(results, "batch page keeps both sources",
-              set(page["meta"]["sources"]) == {"d.md", "e.md"}, page["meta"]["sources"])
+              set(page["page"]["sources"]) == {"d.md", "e.md"}, page["page"]["sources"])
 
         edited = root / ".wiki/drafts/edited.md"
         edited.write_text("---\ntitle: 反诈复机\n---\n## 结论\n\n人工补充：可拨打客服确认进度。\n", encoding="utf-8")
@@ -1163,9 +1170,9 @@ def main(argv=None):
         check(results, "import outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
         outside_edit.unlink()
         restored = run(root, "page", "restore", "anti-fraud-restore", "--rev", "1")["data"]
-        restored_page = run(root, "read", "page:anti-fraud-restore")["data"]
+        restored_page = run(root, "query", "--page", "anti-fraud-restore")["data"]
         check(results, "page restore rolls back content",
-              restored["rev"] == 4 and "两个工作日" in restored_page["content"], restored)
+              restored["rev"] == 4 and "两个工作日" in restored_page["body"], restored)
 
         aliased = root / ".wiki/drafts/aliased.md"
         aliased.write_text(
@@ -1178,9 +1185,9 @@ def main(argv=None):
         )["data"]
         check(results, "page import accepts an aliased source file",
               imported_alias["rev"] == 5, imported_alias)
-        aliased_page = run(root, "read", "page:anti-fraud-restore")["data"]
+        aliased_page = run(root, "query", "--page", "anti-fraud-restore")["data"]
         check(results, "imported aliases do not leak into page meta",
-              "aliases" not in aliased_page["meta"], aliased_page["meta"])
+              "aliases" not in aliased_page["page"], aliased_page["page"])
 
         exported = run(root, "export", str(root / ".wiki/export"))["data"]["files"]
         check(results, "export writes rendered pages", exported, exported)
@@ -1284,14 +1291,16 @@ def main(argv=None):
             "SELECT inputs FROM tasks WHERE id = ?", (drift_task["id"],)
         ).fetchone()[0])["sources"][0]
         conn.close()
-        check(results, "the page task snapshot carries all eight fields",
-              set(snap) == {"key", "source_size", "source_mtime", "source_digest",
+        check(results, "the page task snapshot carries all nine fields",
+              set(snap) == {"key", "raw_id", "source_size", "source_mtime", "source_digest",
                             "raw", "raw_size", "raw_mtime", "raw_digest"}, snap)
+        check(results, "the snapshot names the raw the source mounts",
+              snap["raw_id"] == snap["raw_digest"], snap)
         check(results, "the snapshot records both the source and its raw copy",
               snap["raw"] != "" and snap["source_size"] > 0 and snap["raw_size"] > 0
               and len(snap["source_digest"]) == 32 and len(snap["raw_digest"]) == 32, snap)
 
-        # CLI 路径会先被 ingest 判重与 attach_page_source 拦住，所以越界组合只能在
+        # CLI 路径会先被 ingest 判重与 attach_task_source 拦住，所以越界组合只能在
         # 进程内直接调 enqueue_task 才看得到：另一个 page 树想用同一个源必须被拒。
         engine = wiki.Wiki(root)
         engine.ensure()
@@ -1330,7 +1339,9 @@ def main(argv=None):
         requeued = run(root, "ingest")["data"]
         conn = sqlite3.connect(root / ".wiki" / "wiki.db")
         reopened = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE subject = ? AND state = 'queued'", (drift_key,)
+            "SELECT COUNT(*) FROM task_sources ts JOIN tasks t ON t.id = ts.task_id "
+            "WHERE ts.source_key = ? AND t.state = 'queued'",
+            (drift_key,),
         ).fetchone()[0]
         conn.close()
         check(results, "an expired source is queued again on the next ingest",
@@ -1361,7 +1372,7 @@ def main(argv=None):
             "SELECT raw FROM sources WHERE key = 'd.md'"
         ).fetchone()[0]
         conn.close()
-        before = run(root, "read", "page:machine-room-inspection")["data"]["meta"]
+        before = run(root, "query", "--page", "machine-room-inspection")["data"]["page"]
         check(results, "the page is stable before its raw copy changes",
               before["status"] == "stable", before)
         (root / raw_d).write_text(
@@ -1369,10 +1380,10 @@ def main(argv=None):
             encoding="utf-8",
         )
         run(root, "ingest")
-        stale = run(root, "read", "page:machine-room-inspection")["data"]["meta"]
+        stale = run(root, "query", "--page", "machine-room-inspection")["data"]["page"]
         check(results, "editing a cited raw copy makes the page stale",
               stale["status"] == "stale", stale)
-        untouched = run(root, "read", "page:anti-fraud-restore")["data"]["meta"]
+        untouched = run(root, "query", "--page", "anti-fraud-restore")["data"]["page"]
         check(results, "editing an unrelated raw copy leaves the page stable",
               untouched["status"] == "stable", untouched)
 
@@ -1405,11 +1416,11 @@ def main(argv=None):
         check(results, "sync writes the canonical text back",
               "每周巡检两次；记录保留两年。" in room_view.read_text(encoding="utf-8"),
               room_view.read_text(encoding="utf-8"))
-        page = run(root, "read", "page:machine-room-inspection")["data"]
+        page = run(root, "query", "--page", "machine-room-inspection")["data"]
         check(results, "the adopted body lands in the ledger",
-              "每周巡检两次" in page["content"], page["content"])
+              "每周巡检两次" in page["body"], page["body"])
         check(results, "sync keeps the ledger metadata",
-              page["meta"]["title"] == "机房巡检", page["meta"])
+              page["page"]["title"] == "机房巡检", page["page"])
         conn = sqlite3.connect(root / ".wiki/wiki.db")
         facts = conn.execute(
             "SELECT rev, view_path, view_digest FROM page_revs "
@@ -1431,7 +1442,7 @@ def main(argv=None):
         check(results, "sync refuses a metadata edit",
               any(item["code"] == "E_META_CHANGED" for item in refused["failed"]), refused)
         check(results, "a refused page keeps its ledger summary",
-              run(root, "read", "page:machine-room-inspection")["data"]["meta"]["summary"]
+              run(root, "query", "--page", "machine-room-inspection")["data"]["page"]["summary"]
               == "机房每周巡检一次，巡检记录保留一年。")
         check(results, "a refused page file is left alone",
               "改过的摘要" in room_view.read_text(encoding="utf-8"),
@@ -1442,9 +1453,9 @@ def main(argv=None):
         adopted = run(root, "sync", "--body-only")["data"]
         check(results, "--body-only adopts the body",
               "machine-room-inspection" in adopted["imported"], adopted)
-        page = run(root, "read", "page:machine-room-inspection")["data"]
+        page = run(root, "query", "--page", "machine-room-inspection")["data"]
         check(results, "--body-only keeps the ledger metadata",
-              page["meta"]["summary"] == "机房每周巡检一次，巡检记录保留一年。", page["meta"])
+              page["page"]["summary"] == "机房每周巡检一次，巡检记录保留一年。", page["page"])
         check(results, "--body-only rewrites the canonical text",
               "改过的摘要" not in room_view.read_text(encoding="utf-8")
               and "每周巡检三次" in room_view.read_text(encoding="utf-8"))
@@ -1495,13 +1506,13 @@ def main(argv=None):
         room_view.write_text(room_view.read_text(encoding="utf-8").replace(
             "巡检周期为每周一次", "巡检周期为每周两次"), encoding="utf-8")
         run(root, "sync")
-        page = run(root, "read", "page:machine-room-inspection")["data"]
+        page = run(root, "query", "--page", "machine-room-inspection")["data"]
         check(results, "sync parses the evidence block back into meta",
               any(item["source"] == "d.md" and item["quote"] == "巡检周期为每周两次"
-                  for item in page["meta"]["evidence"]), page["meta"]["evidence"])
+                  for item in page["page"]["evidence"]), page["page"]["evidence"])
         check(results, "the evidence text stays out of the body",
-              "## 证据" not in page["content"] and "巡检周期为每周两次" not in page["content"],
-              page["content"])
+              "## 证据" not in page["body"] and "巡检周期为每周两次" not in page["body"],
+              page["body"])
         check(results, "the canonical text keeps one evidence block",
               room_view.read_text(encoding="utf-8").count("## 证据") == 1,
               room_view.read_text(encoding="utf-8"))
@@ -1518,12 +1529,12 @@ def main(argv=None):
               and broken_data["warnings"][0].startswith("pages/concept/机房巡检.md:")
               and "evidence block does not parse" in broken_data["warnings"][0],
               broken_data["warnings"])
-        page = run(root, "read", "page:machine-room-inspection")["data"]
+        page = run(root, "query", "--page", "machine-room-inspection")["data"]
         check(results, "a broken block keeps the ledger evidence",
               any(item["source"] == "d.md" and item["quote"] == "巡检周期为每周两次"
-                  for item in page["meta"]["evidence"]), page["meta"]["evidence"])
+                  for item in page["page"]["evidence"]), page["page"]["evidence"])
         check(results, "a broken block is adopted as body text",
-              "d.md 巡检周期为每周两次" in page["content"], page["content"])
+              "d.md 巡检周期为每周两次" in page["body"], page["body"])
 
         canonical = room_view.read_text(encoding="utf-8")
         head = canonical.split("\n---\n", 1)[0] + "\n---\n"
@@ -1697,8 +1708,179 @@ def main(argv=None):
                   and len(list((raw_root / "wiki/raw").glob("*.md"))) == 1,
                   again["ingested"])
 
+            # 一份正文一条任务：subject 是 raw id，任务带该正文的全部挂载路径。
+            raw_id = raws[0][0]
+            conn = sqlite3.connect(raw_root / ".wiki" / "wiki.db")
+            route_rows = conn.execute(
+                "SELECT id, subject FROM tasks WHERE kind = 'route'"
+            ).fetchall()
+            mounts = conn.execute(
+                "SELECT source_key FROM task_sources WHERE task_id = ? ORDER BY source_key",
+                (route_rows[0][0],),
+            ).fetchall()
+            conn.close()
+            check(results, "one raw queues one route task covering every mount",
+                  len(route_rows) == 1 and route_rows[0][1] == raw_id
+                  and [row[0] for row in mounts] == ["a.md", "copy/a.md"],
+                  (route_rows, mounts))
+
+            # 同一正文再挂一个路径：不算漂移，直接并进已排队的任务。
+            (raw_root / "copy" / "b.md").write_text(shared, encoding="utf-8")
+            mounted = run(raw_root, "ingest")["data"]
+            conn = sqlite3.connect(raw_root / ".wiki" / "wiki.db")
+            task_count = conn.execute("SELECT COUNT(*) FROM tasks WHERE kind = 'route'").fetchone()[0]
+            mounts = conn.execute(
+                "SELECT source_key FROM task_sources WHERE task_id = ? ORDER BY source_key",
+                (route_rows[0][0],),
+            ).fetchall()
+            digests = conn.execute("SELECT raw_digest FROM sources").fetchall()
+            conn.close()
+            check(results, "a new mount joins the open task without drift",
+                  not mounted["queued_tasks"] and task_count == 1
+                  and [row[0] for row in mounts] == ["a.md", "copy/a.md", "copy/b.md"]
+                  and {row[0] for row in digests} == {raw_id},
+                  (mounted, task_count, mounts, digests))
+
+            gone = subprocess.run(
+                [sys.executable, str(SCRIPT), "read", "a.md", "--json"],
+                cwd=raw_root, capture_output=True, text=True,
+            )
+            check(results, "the read command is gone",
+                  gone.returncode == 2 and "invalid choice" in gone.stderr,
+                  gone.stderr[-200:])
+
         finally:
             shutil.rmtree(raw_root, ignore_errors=True)
+
+        # 孤儿页：来源全没了、又没有出入链，ingest 末尾连同观看区文件一起删。
+        orphan_root = Path(tempfile.mkdtemp(prefix="llm-wiki-orphan-"))
+        try:
+            (orphan_root / "a.md").write_text("# 孤儿来源\n\n唯一正文。\n", encoding="utf-8")
+            run(orphan_root, "ingest")
+            route_task = run(orphan_root, "next", "--kind", "route")["data"]["tasks"][0]
+            route_query(orphan_root, route_task, "孤儿")
+            run(orphan_root, "submit", route_task["id"], "--payload", payload_file(
+                orphan_root, "orphan-route.json",
+                {"decisions": [{"source": "a.md", "action": "new", "page": "orphan-page",
+                                "title": "孤儿页", "type": "concept", "reason": "唯一来源"}]},
+            ))
+            page_task = run(orphan_root, "next", "--kind", "page")["data"]["tasks"][0]
+            draft = orphan_root / ".wiki/drafts/orphan.md"
+            draft.parent.mkdir(parents=True, exist_ok=True)
+            draft.write_text("## 结论\n\n唯一正文。\n\n## 要点\n\n- 唯一来源。\n",
+                             encoding="utf-8")
+            run(orphan_root, "submit", page_task["id"], "--payload", payload_file(
+                orphan_root, "orphan-page.json",
+                {"page": "orphan-page", "title": "孤儿页", "type": "concept",
+                 "summary": "一句话摘要。", "links": [],
+                 "body_file": ".wiki/drafts/orphan.md",
+                 "evidence": [{"source": "a.md", "quote": "唯一正文。"}],
+                 "boundaries": {"covered": "这一页", "not_covered": "其他"}},
+            ))
+            page_view = orphan_root / "wiki/pages/concept/孤儿页.md"
+            (orphan_root / "a.md").unlink()
+            cleaned = run(orphan_root, "ingest")["data"]
+            check(results, "a page whose sources are all gone is removed at ingest",
+                  cleaned["orphaned"] == ["orphan-page"] and not page_view.exists(),
+                  (cleaned, page_view.exists()))
+        finally:
+            shutil.rmtree(orphan_root, ignore_errors=True)
+
+        # 有链的孤儿只标 stale：删了会让其他页的链接悬空。
+        linked_root = Path(tempfile.mkdtemp(prefix="llm-wiki-orphan-link-"))
+        try:
+            (linked_root / "a.md").write_text("# 甲\n\n甲正文。\n", encoding="utf-8")
+            (linked_root / "b.md").write_text("# 乙\n\n乙正文。\n", encoding="utf-8")
+            run(linked_root, "ingest")
+            task_a = run(linked_root, "next", "--kind", "route")["data"]["tasks"][0]
+            route_query(linked_root, task_a, "正文")
+            run(linked_root, "submit", task_a["id"], "--payload", payload_file(
+                linked_root, "link-a.json",
+                {"decisions": [{"source": "a.md", "action": "new", "page": "page-a",
+                                "title": "甲页", "type": "concept", "reason": "甲"}]},
+            ))
+
+            def submit_linked(page_id, key, quote, links):
+                page_task = run(linked_root, "next", "--kind", "page")["data"]["tasks"][0]
+                draft = linked_root / ".wiki/drafts" / f"{page_id}.md"
+                draft.parent.mkdir(parents=True, exist_ok=True)
+                draft.write_text(f"## 结论\n\n{quote}\n\n## 要点\n\n- {quote}\n",
+                                 encoding="utf-8")
+                run(linked_root, "submit", page_task["id"], "--payload", payload_file(
+                    linked_root, f"{page_id}.json",
+                    {"page": page_id, "title": "甲页" if page_id == "page-a" else "乙页",
+                     "type": "concept", "summary": "一句话摘要。", "links": links,
+                     "body_file": f".wiki/drafts/{page_id}.md",
+                     "evidence": [{"source": key, "quote": quote}],
+                     "boundaries": {"covered": "这一页", "not_covered": "其他"}},
+                ))
+
+            # 甲先建页，乙再链过去：链接只能指向提交时已存在的页。
+            submit_linked("page-a", "a.md", "甲正文。", [])
+            task_b = run(linked_root, "next", "--kind", "route")["data"]["tasks"][0]
+            route_query(linked_root, task_b, "正文")
+            run(linked_root, "submit", task_b["id"], "--payload", payload_file(
+                linked_root, "link-b.json",
+                {"decisions": [{"source": "b.md", "action": "new", "page": "page-b",
+                                "title": "乙页", "type": "concept", "reason": "乙",
+                                "links": ["page-a"]}]},
+            ))
+            submit_linked("page-b", "b.md", "乙正文。", ["page-a"])
+            (linked_root / "a.md").unlink()
+            (linked_root / "b.md").unlink()
+            kept = run(linked_root, "ingest")["data"]
+            status = run(linked_root, "status")["data"]
+            check(results, "a linked orphan is only marked stale",
+                  kept["orphaned"] == [] and status["pages"] == 2
+                  and set(status["stale_pages"]) == {"page-a", "page-b"},
+                  (kept, status))
+        finally:
+            shutil.rmtree(linked_root, ignore_errors=True)
+
+        # 人工排版过的原文：账本换行但不回源覆盖，源本身变了才覆盖。
+        edit_root = Path(tempfile.mkdtemp(prefix="llm-wiki-raw-edit-"))
+        try:
+            (edit_root / "a.md").write_text("# 手改\n\n原始正文。\n", encoding="utf-8")
+            run(edit_root, "ingest")
+            conn = sqlite3.connect(edit_root / ".wiki" / "wiki.db")
+            before = conn.execute(
+                "SELECT raw, raw_id, last_parsed_digest FROM sources"
+            ).fetchone()
+            conn.close()
+            raw_path = edit_root / before[0]
+            parsed = before[2]
+            raw_path.write_text(
+                raw_path.read_text(encoding="utf-8").rstrip("\n") + "\n\n用户手改的一句。\n",
+                encoding="utf-8",
+            )
+            adopted = run(edit_root, "ingest")["data"]
+            conn = sqlite3.connect(edit_root / ".wiki" / "wiki.db")
+            raw_rows = conn.execute("SELECT id, path FROM raws").fetchall()
+            after = conn.execute("SELECT raw, raw_id, last_parsed_digest FROM sources").fetchone()
+            conn.close()
+            edited_body = wiki.raw_body_digest(raw_path)
+            check(results, "a hand-edited raw becomes a new row and keeps its parse stamp",
+                  len(raw_rows) == 1 and raw_rows[0][0] == edited_body
+                  and after[1] == edited_body and after[2] == parsed and after[0] == before[0]
+                  and adopted["vanished"] == [],
+                  (raw_rows, after, parsed, adopted))
+            kept = raw_path.read_text(encoding="utf-8")
+            again = run(edit_root, "ingest")["data"]
+            check(results, "the next ingest leaves the hand-edited raw alone",
+                  raw_path.read_text(encoding="utf-8") == kept and again["ingested"] == [],
+                  again)
+            (edit_root / "a.md").write_text("# 手改\n\n源又改了。\n", encoding="utf-8")
+            rewritten = run(edit_root, "ingest")["data"]
+            conn = sqlite3.connect(edit_root / ".wiki" / "wiki.db")
+            raw_rows = conn.execute("SELECT id, path FROM raws").fetchall()
+            current = conn.execute("SELECT raw_id, last_parsed_digest FROM sources").fetchone()
+            conn.close()
+            check(results, "a changed source rewrites the raw and reclaims the old row",
+                  len(raw_rows) == 1 and raw_rows[0][0] == current[0] == current[1]
+                  and "源又改了" in raw_path.read_text(encoding="utf-8"),
+                  (raw_rows, current, rewritten))
+        finally:
+            shutil.rmtree(edit_root, ignore_errors=True)
 
         # 旧版三字段快照（b2af7c9 那代引擎建的库）：没有源指纹，只能整体判漂移。
         # 用独立工作区，避免动到上面 fixture 的任务状态。
@@ -1906,6 +2088,25 @@ def main(argv=None):
             if path.is_file() and path.suffix.lower() in {".cmd", ".bat"}
         )
         check(results, "the skill package ships no .cmd/.bat wrapper", not wrappers, wrappers)
+
+        teaching = [
+            ROOT / "README.md",
+            ROOT / "skills" / "llm-wiki" / "SKILL.md",
+            *sorted((ROOT / "docs" / "readme").rglob("*.md")),
+            *sorted((ROOT / "docs" / "agent").rglob("*.md")),
+            *sorted((ROOT / "skills" / "llm-wiki" / "references").rglob("*.md")),
+            *sorted((ROOT / "skills" / "llm-wiki" / "scenarios").rglob("*.md")),
+            *sorted((ROOT / "scenario").rglob("*.md")),
+        ]
+        stale = [
+            f"{path.relative_to(ROOT).as_posix()}:{number}"
+            for path in teaching
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            )
+            if re.search(r'\bread\s+["“]', line)
+        ]
+        check(results, "no shipped doc teaches the deleted read command", not stale, stale)
     except AssertionError as error:
         results.append(("failed", False, str(error)))
     finally:

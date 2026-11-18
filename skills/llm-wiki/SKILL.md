@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query/read 查知识。回答知识问题时默认按内置「话题探索」场景办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。场景能力必须显式 `scenario search` 后再 `scenario load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
+description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识，原文直接读观看区文件。回答知识问题时默认按内置「话题探索」场景办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。场景能力必须显式 `scenario search` 后再 `scenario load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
 ---
 
 # llm-wiki：按任务填内容
@@ -95,8 +95,8 @@ python3 <skill>/scripts/wiki.py submit <id> --json
 从别处提交时用（`-` 表示从 stdin 读）。提交成功或任务过期后目录会被清掉；任务被释放后
 重新 `next` 会刷新 `brief.md`、`work.json`，但不会覆盖你已经填好的 `payload.json`。
 
-提交成功后重新 `next`。`next` 按任务树深度优先：当前来源拆出的页面任务没写完，不会发下一个
-来源。一次只做一件事：手头还有领了没交的任务时，`next` 直接报 `E_TASK_UNSUBMITTED`，错误里
+提交成功后重新 `next`。`next` 按任务树深度优先：当前这份正文拆出的页面任务没写完，不会发下一
+份正文。一次只做一件事：手头还有领了没交的任务时，`next` 直接报 `E_TASK_UNSUBMITTED`，错误里
 带着任务 id 和 `payload.json` 路径——接着填完 `submit` 即可（`.wiki/tasks/<id>/` 里的
 `brief.md`、`work.json` 与已填内容都还在，中断或上下文压缩后照这个路径续做），确实不要了
 再 `release` 把它放回队列。只有 `next` 说没有任务时才停止，不要自己造任务，也不要为了
@@ -129,13 +129,12 @@ python3 <skill>/scripts/wiki.py submit <id> --json
 python3 <skill>/scripts/wiki.py scenario load "topic-exploration" --json
 python3 <skill>/scripts/wiki.py query "关键词" --json
 python3 <skill>/scripts/wiki.py query --page <page-id> --json
-python3 <skill>/scripts/wiki.py read "page:<page-id>" --json
-python3 <skill>/scripts/wiki.py read "raw:<source-key>" --offset 1 --limit 120 --json
 ```
 
 `query` **不检索场景**；话题探索是先显式 `scenario load "topic-exploration"` 再照着走的流程，
 不是查询时自动注入的分支。`topics` 是已沉淀话题，相关的先读再探索，不重复劳动。单点查
-页面、查字段或确认某个已知事实，直接用 `query`/`read`，不必走完整流程。
+页面、查字段或确认某个已知事实，直接用 `query`，不必走完整流程；要读原文就打开
+`work.json` 里 `sources[].raw` 指向的观看区文件。
 
 回答时给出页面 id 和原始文件 key。页面与 raw 冲突时以 raw 为准，并说明冲突。
 
