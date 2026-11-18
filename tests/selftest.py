@@ -503,6 +503,44 @@ def batch_flow(results):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def legacy_note_flow(results):
+    """`note` 已从默认类型移除，但老库的 wiki.json 还留着它时必须照旧能用。"""
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-legacy-note-"))
+    try:
+        run(root, "init")
+        config_path = root / ".wiki/wiki.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        check(results, "a fresh ledger does not offer the note type",
+              config["schema"]["types"] == ["concept", "entity", "process"], config["schema"])
+        config["schema"]["types"].append("note")
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+
+        (root / "a.md").write_text("# 值班交接\n\n工作日晚八点交接班。\n", encoding="utf-8")
+        run(root, "ingest")
+        route = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+        route_query(root, route, "值班")
+        run(root, "submit", route["id"], "--payload", payload_file(root, "legacy-route.json", {
+            "decisions": [{"source": "a.md", "action": "new", "page": "duty-handover",
+                           "title": "值班交接", "type": "note", "reason": "老库留下的类型"}]}))
+        page_task = run(root, "next")["data"]["tasks"][0]
+        check(results, "a legacy note page keeps its own skeleton",
+              page_task["template"]["type"] == "note"
+              and page_task["template"]["body"] == "## 要点\n\n", page_task["template"])
+        run(root, "submit", page_task["id"], "--payload", payload_file(root, "legacy-page.json", {
+            "page": "duty-handover", "title": "值班交接", "type": "note",
+            "summary": "工作日晚八点交接班。", "links": [],
+            "body": "## 要点\n\n工作日晚八点交接班。\n",
+            "evidence": [{"source": "a.md", "quote": "工作日晚八点交接班"}],
+            "boundaries": {"covered": "交接时间", "not_covered": "交接清单"}}))
+        run(root, "status")
+        page = run(root, "read", "page:duty-handover")["data"]
+        check(results, "a legacy note page is readable and published",
+              page["meta"]["type"] == "note"
+              and (root / "wiki/pages/note/值班交接.md").is_file(), page["meta"])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--keep", action="store_true", help="keep the temp workspace")
@@ -1084,7 +1122,7 @@ def main(argv=None):
         run(root, "submit", first["id"], "--payload", payload_file(
             root, "batch-route-1.json",
             {"decisions": [{"source": first_key, "action": "new", "page": "machine-room-inspection",
-                            "title": "机房巡检", "type": "note", "reason": "新主题"}]},
+                            "title": "机房巡检", "type": "concept", "reason": "新主题"}]},
         ))
         second = run(root, "next", "--kind", "route")["data"]["tasks"][0]
         route_query(root, second, "机房巡检")
@@ -1102,9 +1140,9 @@ def main(argv=None):
               {item.get("source") for item in task["template"]["evidence"]} == {"d.md", "e.md"},
               task["template"]["evidence"])
         batch_payload = {
-            "page": "machine-room-inspection", "title": "机房巡检", "type": "note",
+            "page": "machine-room-inspection", "title": "机房巡检", "type": "concept",
             "summary": "机房每周巡检一次，巡检记录保留一年。",
-            "links": [], "body": "## 要点\n\n每周巡检一次；记录保留一年。\n",
+            "links": [], "body": "## 结论\n\n机房每周巡检一次，巡检记录保留一年。\n\n## 要点\n\n每周巡检一次；记录保留一年。\n",
             "evidence": [{"source": "d.md", "quote": "巡检周期为每周一次"},
                          {"source": "e.md", "quote": "巡检记录保留一年"}],
             "boundaries": {"covered": "巡检周期与记录保存", "not_covered": "巡检项目清单"},
@@ -1348,7 +1386,7 @@ def main(argv=None):
               wiki.split_evidence("## 要点\n\n正文。\n\n## 证据\n\n随手写的。\n")
               == ("## 要点\n\n正文。\n\n## 证据\n\n随手写的。\n", []))
 
-        room_view = root / "view/pages/note/机房巡检.md"
+        room_view = root / "view/pages/concept/机房巡检.md"
         room_text = room_view.read_text(encoding="utf-8")
         synced = run(root, "sync")["data"]
         check(results, "sync leaves an untouched view alone",
@@ -1379,7 +1417,7 @@ def main(argv=None):
         ).fetchone()
         conn.close()
         check(results, "sync records the published facts",
-              facts[0] == 2 and facts[1] == "pages/note/机房巡检.md"
+              facts[0] == 2 and facts[1] == "pages/concept/机房巡检.md"
               and facts[2] == wiki.digest_text(room_view.read_text(encoding="utf-8")), facts)
 
         again = run(root, "sync")["data"]
@@ -1411,19 +1449,19 @@ def main(argv=None):
               "改过的摘要" not in room_view.read_text(encoding="utf-8")
               and "每周巡检三次" in room_view.read_text(encoding="utf-8"))
 
-        note = root / "view/pages/note/我的笔记.md"
-        note.write_text("# 随手记\n\n不属于账本。\n", encoding="utf-8")
-        stranger = root / "view/pages/note/陌生人.md"
+        handmade = root / "view/pages/concept/我的笔记.md"
+        handmade.write_text("# 随手记\n\n不属于账本。\n", encoding="utf-8")
+        stranger = root / "view/pages/concept/陌生人.md"
         stranger.write_text("---\nid: no-such-page\n---\n\n## 内容\n\n别人的文件。\n", encoding="utf-8")
         skips = run(root, "sync")["data"]
         check(results, "sync skips files without an id",
-              {"file": "pages/note/我的笔记.md", "reason": "no id"} in skips["skipped"],
+              {"file": "pages/concept/我的笔记.md", "reason": "no id"} in skips["skipped"],
               skips["skipped"])
         check(results, "sync skips unknown ids",
-              {"file": "pages/note/陌生人.md", "reason": "unknown id"} in skips["skipped"],
+              {"file": "pages/concept/陌生人.md", "reason": "unknown id"} in skips["skipped"],
               skips["skipped"])
         check(results, "skipped files are left untouched",
-              note.read_text(encoding="utf-8") == "# 随手记\n\n不属于账本。\n"
+              handmade.read_text(encoding="utf-8") == "# 随手记\n\n不属于账本。\n"
               and stranger.read_text(encoding="utf-8").startswith("---\nid: no-such-page"))
 
         conn = sqlite3.connect(root / ".wiki/wiki.db")
@@ -1431,7 +1469,7 @@ def main(argv=None):
             "SELECT MAX(rev) FROM page_revs WHERE page = 'machine-room-inspection'"
         ).fetchone()[0]
         conn.close()
-        copy_path = root / "view/pages/note/机房巡检-副本.md"
+        copy_path = root / "view/pages/concept/机房巡检-副本.md"
         copy_path.write_text(room_view.read_text(encoding="utf-8"), encoding="utf-8")
         duplicate = run(root, "sync", expect=1)["data"]
         conn = sqlite3.connect(root / ".wiki/wiki.db")
@@ -1477,7 +1515,7 @@ def main(argv=None):
         broken_data = json.loads(broken.stdout)["data"]
         check(results, "an unparseable evidence block is reported in warnings",
               len(broken_data["warnings"]) == 1
-              and broken_data["warnings"][0].startswith("pages/note/机房巡检.md:")
+              and broken_data["warnings"][0].startswith("pages/concept/机房巡检.md:")
               and "evidence block does not parse" in broken_data["warnings"][0],
               broken_data["warnings"])
         page = run(root, "read", "page:machine-room-inspection")["data"]
@@ -1499,12 +1537,12 @@ def main(argv=None):
         rename_draft.write_text(
             "---\ntitle: 机房巡检记录\n---\n## 要点\n\n每周巡检三次。\n", encoding="utf-8")
         run(root, "page", "import", "machine-room-inspection", "--from", str(rename_draft))
-        old_path = root / "view/pages/note/机房巡检.md"
-        new_path = root / "view/pages/note/机房巡检记录.md"
+        old_path = root / "view/pages/concept/机房巡检.md"
+        new_path = root / "view/pages/concept/机房巡检记录.md"
         moved = run(root, "sync")["data"]
         check(results, "sync publishes a ledger-side title change",
               any(item["page"] == "machine-room-inspection"
-                  and item["to"] == "pages/note/机房巡检记录.md" for item in moved["written"])
+                  and item["to"] == "pages/concept/机房巡检记录.md" for item in moved["written"])
               and new_path.exists(), moved)
         check(results, "the old path is gone after the rename",
               not old_path.exists(), old_path.exists())
@@ -1518,17 +1556,17 @@ def main(argv=None):
         ).fetchone()
         conn.close()
         check(results, "the renamed page's facts follow the new path",
-              moved_facts[1] == "pages/note/机房巡检记录.md"
+              moved_facts[1] == "pages/concept/机房巡检记录.md"
               and moved_facts[2] == wiki.digest_text(new_path.read_text(encoding="utf-8")),
               moved_facts)
 
-        moved_away = root / "view/pages/note/临时位置.md"
+        moved_away = root / "view/pages/concept/临时位置.md"
         new_path.rename(moved_away)
         returned = run(root, "sync")["data"]
         check(results, "a page file moved by hand is put back",
               any(item["page"] == "machine-room-inspection"
-                  and item["from"] == "pages/note/临时位置.md"
-                  and item["to"] == "pages/note/机房巡检记录.md" for item in returned["written"])
+                  and item["from"] == "pages/concept/临时位置.md"
+                  and item["to"] == "pages/concept/机房巡检记录.md" for item in returned["written"])
               and new_path.exists() and not moved_away.exists(), returned)
 
         status = run(root, "status")["data"]
@@ -1856,6 +1894,7 @@ def main(argv=None):
 
         retrieval_flow(results)
         batch_flow(results)
+        legacy_note_flow(results)
         links_flow(results)
 
         healthy = run(root, "doctor", expect=(0, 1))["data"]

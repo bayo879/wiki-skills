@@ -128,7 +128,7 @@ python3 <skill>/scripts/wiki.py sync --body-only --json  # 只取正文与证据
 ```text
 skills/llm-wiki/          技能：SKILL.md、references/（curation.md）、
                           scenarios/（内置话题探索）、templates/（concept、entity、
-                          process、note）、scripts/
+                          process）、scripts/
 tests/                    开发/CI 的端到端自测，不随技能安装
 docs/readme/              产品说明：设计原则、CLI、场景、话题、安装、恢复
 docs/agent/               开发指导：决策、引擎内部、维护守则

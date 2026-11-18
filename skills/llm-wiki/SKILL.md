@@ -109,8 +109,10 @@ python3 <skill>/scripts/wiki.py submit <id> --json
 - 只写原文支持的事实；数字、日期、文号、责任主体都要能回到 `work.sources` 里的 raw。
 - `evidence[].quote` 从 raw 逐字复制，不改写、不概括；一句到两句，引文对不上会被拒绝。
 - 新建页面的章节由 `template.body` 固定，不要改章节名、不要删章节；更新页面沿用原有结构。
-  每节按页面类型的固定组合写，模板在 `templates/<type>.md`（concept、entity、process、note），
-  按 `template` 的类型读对应文件。
+  每节按页面类型的固定组合写，模板在 `templates/<type>.md`（concept、entity、process），
+  按 `template` 的类型读对应文件。类型只表示内容形态：要求与规则用 `concept`，组织/系统/
+  人物用 `entity`，可复用的办理步骤用 `process`；`process` 不承诺 agent 能执行，同一主题
+  的要求与步骤写在同一页，不要拆成两页。
 - 新建页面的 `summary` 必填，1–200 字，一句完整的话；更新页面时 `template.evidence`
   里旧来源的证据要保留，不要删。
 - `links` 由 route 预填，只含提交时已存在或同批已提交的页面 id；更新页只增不删，正文里

@@ -41,7 +41,7 @@ SCRIPT_FILES = (
     "runtime.py",
     "health.py",
 )
-TEMPLATES = ("concept.md", "entity.md", "process.md", "note.md")
+TEMPLATES = ("concept.md", "entity.md", "process.md")
 REFERENCES = ("curation.md", "recovery.md")
 BUILTIN_SCENARIOS = ("topic-exploration",)
 

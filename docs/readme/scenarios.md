@@ -13,12 +13,12 @@
 
 ```text
 <root>/scenario/
-└── account-opening/
+└── intake-backlog/
     ├── SCENARIO.md         主流程，必需
     ├── scripts/
-    │   └── check_materials.sh
+    │   └── drain_queue.sh
     └── references/
-        └── material-list.md
+        └── error-codes.md
 ```
 
 - `scenario/` 与 `场景能力/` 都只扫描一级子目录，每个子目录是一个场景；隐藏目录和普通文件忽略。
@@ -49,38 +49,46 @@ skills/llm-wiki/scenarios/
 
 ```markdown
 ---
-name: account-opening
-alias_name: 开户流程
-description: 新客户开户时核验身份、登记资料并完成激活
+name: intake-backlog
+alias_name: 入库清积压
+description: 把积压的来源跑完 route 与 page 任务，直到没有待处理来源
 tags:
-  - 开户
-  - 新客户
-  - 激活
+  - 维护
+  - 入库
 ---
 
-# 开户流程
+# 入库清积压
 
 ## 适用
 
-客户首次开立账户时使用。已有账户的补充资料不适用。
+`status` 显示 `pending` 非空，或有 route/page 任务排队时使用；空库先 `init`。
 
 ## 步骤
 
-1. 核对身份证件与本人是否一致；不一致时停止，并记录原因。
-2. 在系统登记客户基本信息，证件号码按页面规则脱敏。
-3. 让客户确认资料，保存确认记录。
-4. 激活账户，并把回执编号写进结果。
+1. 看积压：`status --json`，记下 `pending` 条数与 `tasks.open`，`next` 的提示决定下一步。
+2. 入库：有新文件就跑 `ingest --json`；`failed` 与 `oversize` 非空时先报给用户。
+3. 领任务：`next --kind route --json` 一次领一条，按任务目录里的 `brief.md`、`work.json`
+   执行；定案前先用 `query --task <id> 词...` 登记检索，同一批要搜的词全部搜完。
+4. 提交：把结果写进 `.wiki/tasks/<id>/payload.json`，运行 `submit <id> --json`；
+   被拒就按 `error.next` 修正后重交，不要 `release` 掉重来。
+5. 循环：重复 3–4 直到 `next` 说没有任务；页面任务同理，载荷换成正文与证据。
+6. 复核：`status --json` 的 `pending` 与 `tasks.open` 归零，`stale_pages` 里没有这次动过的页。
 
 ## 判断点
 
-- 证件过期：不继续，告知客户更新证件后再来。
-- 客户为未成年人：转到监护人办理流程。
+- `E_SOURCE_DRIFT`：raw 在排队期间被改过，重新读来源后重做这条 decision。
+- `E_TASK_UNSUBMITTED`：手头还有领了没交的任务，填完再 `next`，不要并发领。
+- `failed` 里有解析失败的来源：不猜内容，报给用户等修。
 
 ## 完成标准
 
-- 账户状态为已激活；
-- 有客户确认记录；
-- 结果里有回执编号。
+- 没有 pending 来源、没有未关闭的任务；
+- 每条新事实都有逐字引文；
+- 这次没动过的页面 `status` 仍是 `stable`。
+
+## 由人完成
+
+- 来源解析失败、需要补原始文件或用印件时由人处理，agent 不代填。
 ```
 
 frontmatter 字段：
@@ -111,10 +119,10 @@ frontmatter 字段：
 `query` 不检索场景；要用场景能力时必须显式检索，避免场景自动介入普通知识问答：
 
 ```bash
-python3 <skill>/scripts/wiki.py query "开户" --json
-python3 <skill>/scripts/wiki.py scenario search "开户" --json
+python3 <skill>/scripts/wiki.py query "入库" --json
+python3 <skill>/scripts/wiki.py scenario search "入库" --json
 python3 <skill>/scripts/wiki.py scenario list --json
-python3 <skill>/scripts/wiki.py scenario load account-opening --json
+python3 <skill>/scripts/wiki.py scenario load intake-backlog --json
 python3 <skill>/scripts/wiki.py scenario load "topic-exploration" --json
 ```
 
@@ -132,6 +140,10 @@ python3 <skill>/scripts/wiki.py scenario load "topic-exploration" --json
 - 场景是能力，不是知识页：不要把场景当来源摄入，也不要在页面里引用场景文件。
 - 场景步骤与知识页冲突时，流程以场景为准；事实依据仍以页面和 raw 为准。
 - 场景文件是活文件，直接编辑即可生效；不要在 `.wiki/` 里另存副本。
+- 场景只收 agent 真能执行的方法：每一步都要落到具体命令或脚本上；需要人工办理的环节
+  单列一节写「由人完成」，不要包装成场景步骤。
+- 没有系统权限、只能由经办人完成的流程（开户、审批、现场检查这类）不是场景：它们属于
+  知识页里的 `process` 知识，按页引用；不要把人工步骤改写成 agent 步骤。
 - `scenario list` / `scenario load` 只读，不要求先 `init`，也不会创建 `.wiki/`。
 - 话题探索的沉淀物是 `话题/`，不是场景；只有流程稳定、可重复执行时才另建场景。
 

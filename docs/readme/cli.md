@@ -365,13 +365,16 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 `.wiki/wiki.json`（首次运行生成）：
 
 ```json
-{"schema": {"types": ["concept", "entity", "process", "note"]},
+{"schema": {"types": ["concept", "entity", "process"]},
  "scan": {"ignore": [".git", "node_modules", "target", "dist"]},
  "ingest": {"max_source_bytes": 50000000},
  "publish": {"dir": "wiki", "enabled": true, "topics": true, "scenarios": true}}
 ```
 
-改 `schema.types` 会立即影响后续校验；已存在的页面不会被自动迁移。
+改 `schema.types` 会立即影响后续校验；已存在的页面不会被自动迁移。老库配置里的 `note`
+（连同 `wiki.json` 里显式列出的其他类型）继续可用：校验、章节骨架与推送都按原样走，
+只是新建页面不要再选它；要收口就人工把这些页并进 `concept`/`process`，再把它从
+`schema.types` 里删掉。
 
 `publish.dir` 是观看区目录名，必须是单个目录名：不能以点开头、不能含路径分隔符，也不能
 是 `.wiki`、`话题`、`scenario`、`场景能力`；非法值即使 `enabled:false` 也返回 `E_CONFIG`。

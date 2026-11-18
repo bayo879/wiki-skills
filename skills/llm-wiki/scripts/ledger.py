@@ -209,7 +209,9 @@ DB_NAME = "wiki.db"
 CONFIG_NAME = "wiki.json"
 
 DEFAULT_CONFIG = {
-    "schema": {"types": ["concept", "entity", "process", "note"]},
+    # 类型只表示内容形态：三类的判据互斥，没有「装不进就放这里」的兜底类型。
+    # 老库的 wiki.json 里可能还留着 "note"，那是遗留配置，引擎继续认（见 tasks.PAGE_SECTIONS）。
+    "schema": {"types": ["concept", "entity", "process"]},
     "scan": {
         "ignore": [
             ".git", ".hg", ".svn", ".wiki", "node_modules", "target", "dist",

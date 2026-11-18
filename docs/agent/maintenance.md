@@ -30,7 +30,10 @@
 `skills/llm-wiki/scenarios/topic-exploration/SCENARIO.md` 的归属、授权与格式约束。
 示例里的命令必须能直接跑通。
 改章节骨架（`tasks.py` 的 `PAGE_SECTIONS`）时，同步 `templates/` 下对应类型的正文模板，
-保证模板章节与引擎一致。
+保证模板章节与引擎一致。`PAGE_SECTIONS` 里可以留着不在默认 `schema.types` 中的类型
+（目前只有 `note`）：那是给老库兜底的遗留映射，删掉会让老库的这类页面更新时被套上
+`concept` 的骨架而被拒；新增或删除类型时，`ledger.DEFAULT_CONFIG`、`templates/`、
+`health.TEMPLATES`、`curation.md` 与 `tests/selftest.py` 要一起看。
 改 Windows 入口行为（`scripts/bootstrap.ps1`、`scripts/install.py`）时，同步 `README.md`、
 `docs/readme/install.md`、`SKILL.md`、`references/recovery.md` 的运行时小节；这两个脚本是
 可选的手动安装工具，不在默认使用路径上，行为没有实机证据前不要写成已验证。

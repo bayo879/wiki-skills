@@ -19,6 +19,9 @@ import re
 from pages import normalize_links, split_relations
 
 DEFAULT_TYPE = "concept"
+# 类型只决定章节骨架，由代码给、agent 填。`note` 已从默认 schema.types 移除，
+# 但老库的 wiki.json 可能还留着它：保留这一条，让那些页面继续能读、能改，
+# 不被悄悄套上 concept 的章节。
 PAGE_SECTIONS = {
     "concept": ("结论", "要点"),
     "entity": ("结论", "关键信息"),
@@ -118,7 +121,10 @@ def route_brief(task_id, sources, queries=None):
             "「没有相似页」。`pending_pages` 里已排队、尚未写入的页面同样可以 merge。",
             "填 `payload.json` 的 `decisions[]`：每个来源至少一条 decision，action 选 new/merge/skip；"
             "一份文件含多个可独立检索的主题时拆成多条 decision、指向不同 page；"
-            "每条 decision 都必须写 reason；new 还要给 page、title、type，merge 要给 page。",
+            "每条 decision 都必须写 reason；new 还要给 page、title、type，merge 要给 page。"
+            "类型只表示形态：要求与规则用 concept，组织/系统/人物用 entity，可复用的办理步骤用"
+            "process；拿不准用 concept。同一主题的要求与步骤写同一页，不要拆两页；"
+            "写不出一句「是什么/谁/怎么办」的 summary 就 skip，不要为了不丢内容硬建页。",
             "可选的 `links` 声明这页与哪些页面相关：只填已存在页，或同一载荷里 new 的兄弟页。"
             "兄弟页要等被链页面先提交；顺序错会报 `E_LINK_UNRESOLVED`，重新领取后按顺序重试。",
         ],
