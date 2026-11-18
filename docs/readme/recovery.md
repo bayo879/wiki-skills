@@ -103,7 +103,7 @@
 # 最小备份：账本 + 配置（不含原文与观看区）
 tar czf wiki-ledger-$(date +%F).tgz .wiki/wiki.db .wiki/wiki.json
 
-# 完整备份：账本 + 观看区（原文、页面、话题/工作流副本都在这里）
+# 完整备份：账本 + 观看区（原文、页面、话题与工作流副本都在这里）
 tar czf wiki-full-$(date +%F).tgz .wiki wiki
 
 # 只导出可读页面（不含账本，用于浏览或迁移参考）

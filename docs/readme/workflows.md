@@ -159,7 +159,7 @@ python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 后才按步骤执行。路由表只在 `SKILL.md` 定义一处，本文不复制。
 
 话题探索流程依次做：定主题、找现成能力、找已有话题、多轮查页面、补原始依据、判断收敛、
-总结，最后问用户是否沉淀到 `话题/<主题>.md`。`query` 的 `topics` 是已知话题，相关的先读
+总结，最后问用户是否沉淀到 `topics/<主题>.md`。`query` 的 `topics` 是已知话题，相关的先读
 再探索，避免重复劳动；话题格式见 [话题沉淀](topics.md)。
 
 ## 边界
@@ -172,7 +172,7 @@ python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 - 没有系统权限、只能由经办人完成的流程（开户、审批、现场检查这类）不是工作流：它们属于
   知识页里的 `process` 知识，按页引用；纯人工流程也没有 `tool:` 步骤，会被判为不合法。
 - `workflow list` / `workflow load` 只读，不要求先 `init`，也不会创建 `.wiki/`。
-- 话题探索的沉淀物是 `话题/`，不是工作流；只有流程稳定、可重复执行时才另建工作流。
+- 话题探索的沉淀物是 `topics/`，不是工作流；只有流程稳定、可重复执行时才另建工作流。
 - 观看区 `publish.workflows` 控制是否把项目工作流首次投放到 `workflows/`。
 
 完整命令字段与错误码见 [CLI 契约](cli.md#workflow)。

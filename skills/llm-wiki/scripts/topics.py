@@ -1,4 +1,4 @@
-"""Read-only topic notes stored under `<root>/话题/`.
+"""Read-only topic notes stored under `<root>/topics/`.
 
 A topic is one exploration record: the question, the answer, its evidence and
 what still needs digging. Topics are the wiki's exploration layer: Markdown
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from frontmatter import split_frontmatter
 
-TOPIC_DIR = "话题"
+TOPIC_DIR = "topics"
 TOPIC_SUFFIX = ".md"
 MAX_TOPIC_CHARS = 200_000
 

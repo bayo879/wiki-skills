@@ -84,10 +84,10 @@
 
 ### ingest
 
-扫描根目录（跳过隐藏目录、`scan.ignore`、`workflows/`、`话题/` 与观看区 `<view>/`），解析
+扫描根目录（跳过隐藏目录、`scan.ignore`、`workflows/`、`topics/` 与观看区 `<view>/`），解析
 新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），并为每个新来源入队任务，
 同一份正文的多个路径合成一条 route 任务。`<view>/raw` 被手改时按整份正文采纳：共享它的
-路径一起换摘要，文件留在原名原路径。`workflows/` 放可执行工作流，`话题/` 是 wiki 的探索
+路径一起换摘要，文件留在原名原路径。`workflows/` 放可执行工作流，`topics/` 是 wiki 的探索
 层，都不作为摄入来源，摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。工作流与话题
 的检索分别由 `workflow search` 和 `query` 直接扫描文件完成。
 
@@ -222,7 +222,7 @@ decision 的 `links` 声明这页与哪些页面相关；写页前应逐条判�
 ### query
 
 `query <词...> [--limit N] [--task <id>]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
-`话题/`，命中时在 `topics` 里返回。`query` **不检索工作流**，工作流必须显式
+`topics/`，命中时在 `topics` 里返回。`query` **不检索工作流**，工作流必须显式
 `workflow search`。`query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
 `path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`sources`（`[{key, raw}]`，`raw`
 是账本渲染的观看区副本路径，源缺失时为 `null`）、`outgoing`、`incoming`、`body`，不查话题。

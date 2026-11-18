@@ -27,7 +27,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；租约归属（`task_leases`、`sweep_leases`、`lease_owner`）；并发走同一条 CAS 约定 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；只扫 `workflows/`，再与技能内置工作流合并；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
-| 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `话题/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
+| 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `topics/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留并复核；纯函数，只读 `Wiki` |
 | 账本结构 | `ledger.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用 |
 | 账本 | `ledger.py` 的 `LedgerMixin` | `__init__`/`ensure`/`close`、来源与 raw、推送入口；`Wiki` 在文件末尾由四个 mixin 组合 |
@@ -117,12 +117,12 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     `W_STEP_EMPTY`；整份零标记、无 `## 步骤` 或该节无列表项在 `UNTYPED_ALLOWED` 为真
     （0.5.0）时只给 warning，翻转后（0.6.0）改判 error。有标记但没有 `tool:` 一律 invalid，
     hint 指向 `process` 页（纯人工流程不属于工作流）。
-13. **话题只读且不进账本。** `scan_files` 同时跳过 `话题/`，话题不会被当成来源。`topics.py`
-    只读 `话题/*.md`，取 frontmatter 的 `name/description/status/updated`；正文为空或文件超过
+13. **话题只读且不进账本。** `scan_files` 同时跳过 `topics/`，话题不会被当成来源。`topics.py`
+    只读 `topics/*.md`，取 frontmatter 的 `name/description/status/updated`；正文为空或文件超过
     200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的 `topic_matches` 与页面
     `matches` 分开计数；话题文件由 agent 直接写，不经账本。
 14. **观看区目录由 `publish` 配置决定。** `publish_dir_name` 要求 `dir` 是单个目录名，拒绝
-    `.wiki`、`话题`、`workflows`；`ensure()` 在开关判断之前调用它，
+    `.wiki`、`topics`、`workflows`；`ensure()` 在开关判断之前调用它，
     非法值即使 `enabled:false` 也报 `E_CONFIG`。`publish.workflows` 控制是否投放工作流。
     `ensure_publish` 始终创建 `<view>/` 与 `<view>/raw/`，
     `enabled:false` 只跳过 `sync_view`。`scan_files` 在扫描根无条件跳过该目录名，所以关了
@@ -168,7 +168,7 @@ page 载荷 / page link / page import / page link --repair → 校验 → page_r
 workflows/<id>/WORKFLOW.md ──query/scan──→ 工作流命中（只读，不落盘）
                               └─workflow load→ 全文 + 分类型步骤 + resources
 
-话题/*.md ──query/scan──→ topics 命中（只读，不落盘）
+topics/*.md ──query/scan──→ topics 命中（只读，不落盘）
 ```
 
 `raw` 文件名取来源 basename，同名按 `-2`、`-3` 顺延，不跟正文摘要走；`sources.raw` 存相对
@@ -210,7 +210,7 @@ workflows/<id>/WORKFLOW.md ──query/scan──→ 工作流命中（只读，
   改进步骤契约时同时改 `parse_steps`、`_contract`、selftest 与 `workflows.md` 的判定表。
 - 改话题：同步 `docs/readme/cli.md`、`docs/readme/topics.md`、`SKILL.md`、
   `skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md`、`scripts/health.py` 的
-  `SCRIPT_FILES`、`tests/selftest.py`；保持 `ingest` 跳过 `话题/`、`query` 只带话题。
+  `SCRIPT_FILES`、`tests/selftest.py`；保持 `ingest` 跳过 `topics/`、`query` 只带话题。
 - 改观看区或发布：同步 `docs/readme/cli.md`、`README.md`、
   `docs/readme/design-principles.md`、`SKILL.md`、`tests/selftest.py`；保持 `sync` 只回收、
   推送只发生在命令入口，且观看区目录名始终跳过扫描。

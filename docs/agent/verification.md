@@ -319,3 +319,15 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
   放置、agent 自带 3.12+ 运行时，这两个脚本是可选手动工具、不在默认使用路径上，因此不再
   作为未覆盖项跟踪；需要手动安装时再补测语法、参数透传与 `E_PYTHON`。
 - 页面删除：当前没有命令，未验证。
+
+## 2026-11-18 话题目录改名后复跑
+
+根目录 `话题/` 改名 `topics/`，同步 `topics.TOPIC_DIR`；`ledger.py` 的扫描跳过与
+`publish.dir` 保留名校验从该常量取值，`view.py` 投放目标不变。复跑
+`python3 -m py_compile skills/llm-wiki/scripts/*.py` 通过；`python3 tests/selftest.py`：
+290/290 通过，退出码 0。检查点：
+
+- `ingest` 跳过 `topics/`，话题文件不出现在 `ingested`；
+- `query` 命中话题时 `topics[].path` 以 `topics/` 开头；
+- `publish.dir=topics` 报 `E_CONFIG`（保留名）；
+- 观看区仍把话题首次投放到 `<view>/topics/`，用户改过的副本不被覆盖。

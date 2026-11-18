@@ -837,7 +837,7 @@ def main(argv=None):
         escaped = run(root, "status", "--root", str(root.parent), expect=2)
         check(results, "root outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
 
-        topic = root / "话题" / "复机办理.md"
+        topic = root / "topics" / "复机办理.md"
         topic.parent.mkdir()
         topic.write_text(
             "---\n"
@@ -863,7 +863,7 @@ def main(argv=None):
         check(results, "ingest skips the workflow directory",
               not any(item["key"].startswith("workflows/") for item in data["ingested"]), data["ingested"])
         check(results, "ingest skips topic files",
-              not any(item["key"].startswith("话题/") for item in data["ingested"]), data["ingested"])
+              not any(item["key"].startswith("topics/") for item in data["ingested"]), data["ingested"])
         check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
 
         check(results, "raw lives under the publish dir",
@@ -993,7 +993,7 @@ def main(argv=None):
         check(results, "query finds the saved topic",
               topics_hit["topic_matches"] == 1
               and topics_hit["topics"][0]["name"] == "复机办理"
-              and topics_hit["topics"][0]["path"].startswith("话题/"),
+              and topics_hit["topics"][0]["path"].startswith("topics/"),
               topics_hit["topics"])
         check(results, "topic hits stay separate from page hits",
               topics_hit["matches"] == 0, topics_hit)
@@ -1384,7 +1384,7 @@ def main(argv=None):
 
         config_path = root / ".wiki/wiki.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        for bad in ("../x", ".wiki", "a/b", "workflows", "", ".", "..", ".hidden", "/abs", "a\\b", "话题"):
+        for bad in ("../x", ".wiki", "a/b", "workflows", "", ".", "..", ".hidden", "/abs", "a\\b", "topics"):
             config["publish"]["dir"] = bad
             config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
             escaped = run(root, "status", expect=2)

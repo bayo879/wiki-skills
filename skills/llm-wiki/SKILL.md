@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: 当用户以 `wiki:` 开头下达任务，或要把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库时使用。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识，原文直接读观看区文件。回答知识问题时默认按内置「话题探索」工作流办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。可执行工作流必须显式 `workflow search` 后再 `workflow load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
+description: 当用户以 `wiki:` 开头下达任务，或要把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库时使用。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识，原文直接读观看区文件。回答知识问题时默认按内置「话题探索」工作流办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `topics/` 文件（附能力候选与待查资料）。可执行工作流必须显式 `workflow search` 后再 `workflow load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
 ---
 
 # llm-wiki：按任务填内容
@@ -191,7 +191,8 @@ python3 <skill>/scripts/wiki.py query --page <page-id> --json
 - `pages/`：按账本推送的知识页，按 `<type>/<标题>.md` 命名；手改不会覆盖，只会告警。
 - `raw/`：摄入时写入的原文副本，用于核对引文；不要手改。
 - `README.md`：目录说明与统计，每次推送重写。
-- `topics/`、`workflows/`：首次推送时从 `话题/`、`workflows/` 各投放一份；之后归用户。
+- `topics/`、`workflows/`：首次推送时从 `<root>/topics/`、`<root>/workflows/` 各投放一份；
+  之后归用户。
 
 不需要为了交付结果去动观看区；`next`/`submit` 正常跑完，下一次命令会自动推送。只有用户
 要求把观看区里的手改收回时，才运行 `sync`（先确认再跑；它只回收、不推送）：
@@ -246,9 +247,9 @@ python3 <skill>/scripts/wiki.py workflow load "<工作流>" --json
 ## 沉淀话题
 
 话题探索收尾时默认问用户是否沉淀；用户要求把一次讨论或调研留给下次时，写到**当前工作区
-根目录**的 `话题/<主题>.md`，一个主题一份。话题是 wiki 的探索层，不是正式知识页：不运行
+根目录**的 `topics/<主题>.md`，一个主题一份。话题是 wiki 的探索层，不是正式知识页：不运行
 `ingest`，不写 `.wiki/`，不建页面、不排任务；写入后报告“未执行摄入”。观看区的 `topics/`
-只是首次推送时的副本，之后归用户；改话题仍以根目录 `话题/` 为准。
+只是首次推送时的副本，之后归用户；改话题仍以根目录 `topics/` 为准。
 
 - 话题文件的 frontmatter、固定六节、归属判断、授权与完成标准，见内置工作流
   `workflow load "topic-exploration"` 的“话题文件”与“沉淀前的归属判断”两节。
