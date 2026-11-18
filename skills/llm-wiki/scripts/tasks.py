@@ -97,16 +97,25 @@ def route_template(sources):
     }
 
 
-def route_brief(task_id, sources):
+def route_brief(task_id, sources, queries=None):
     keys = "、".join(item["key"] for item in sources)
     first = sources[0]["key"] if sources else ""
+    chars = sum(item.get("chars") or 0 for item in sources)
+    view = queries or {}
+    used = view.get("used") or 0
+    budget = view.get("budget") or 5
     return {
-        "goal": f"判断来源 {keys} 应归入哪些页面，或跳过；一份来源可拆到多页。",
+        "goal": f"读来源 {keys} 的全文，判断应归入哪些页面、或跳过；一份来源可拆到多页。",
         "steps": [
-            f"读原文：运行 `read \"raw:{first}\" --offset 1 --limit 120 --json`。",
-            "在 `work.json` 的 `page_index` 里找同主题的已有页面：先看 title、summary 与"
-            "出入链数，再按需 `query --page <id>` 读 covered/not_covered；能覆盖时优先 merge。"
-            "`pending_pages` 是已排队、尚未写入的页面，同主题也可以 merge 到它的 id。",
+            f"读原文：运行 `read \"raw:{first}\" --offset 1 --limit 120 --json`，先读完再抽词；"
+            "长文按 `--offset` 续读，不要只看开头就定案。",
+            f"抽主题词并登记：`query --task {task_id} 词1 词2 词3`。一次可给多个词，每个词独立"
+            "检索、各返 5 条，可以分多次登记；配额按正文长度算，"
+            f"当前已用 {used}/{budget} 个词（{chars} 字，5 个/1000 字，至少 5 个）。"
+            "不登记查询就提交会报 `E_NO_QUERY`。词不必与原文逐字一致，只要能把主题分开。",
+            "逐词看命中页的 title、summary 与出入链数；有同主题候选时用 `query --page <id>` 读"
+            "covered/not_covered 再决定 merge。命中被截断时换词重查，不要把「没搜到」当成"
+            "「没有相似页」。`pending_pages` 里已排队、尚未写入的页面同样可以 merge。",
             "填 `payload.json` 的 `decisions[]`：每个来源至少一条 decision，action 选 new/merge/skip；"
             "一份文件含多个可独立检索的主题时拆成多条 decision、指向不同 page；"
             "每条 decision 都必须写 reason；new 还要给 page、title、type，merge 要给 page。",
@@ -183,7 +192,7 @@ def task_packet(task_id, kind, inputs, work):
     if kind == "route":
         return {
             "id": task_id,
-            "brief": route_brief(task_id, work["sources"]),
+            "brief": route_brief(task_id, work["sources"], work.get("queries")),
             "template": route_template(work["sources"]),
             "work": work,
         }

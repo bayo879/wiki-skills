@@ -63,6 +63,11 @@ def payload_file(root, name, data):
     return str(path)
 
 
+def route_query(root, task, *words):
+    """Register topic words: a route submit without a registered query is refused."""
+    return run(root, "query", "--task", task["id"], *(words or ["主题"]))
+
+
 def body_file(root):
     path = Path(root) / WIKI_CACHE / "drafts" / "page.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,6 +142,7 @@ def links_flow(results):
             (root / source).write_text(f"# {title}\n\n{sentence}\n", encoding="utf-8")
             run(root, "ingest")
             route = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            route_query(root, route, "主题")
             key = route["work"]["sources"][0]["key"]
             run(root, "submit", route["id"], "--payload", payload_file(
                 root, f"{page}-route.json",
@@ -228,6 +234,7 @@ def links_flow(results):
         (root / "c.md").write_text("# 丙\n\n甲还可以补充。\n", encoding="utf-8")
         run(root, "ingest")
         route = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+        route_query(root, route, "主题")
         key = route["work"]["sources"][0]["key"]
         run(root, "submit", route["id"], "--payload", payload_file(
             root, "merge-route.json",
@@ -273,6 +280,7 @@ def links_flow(results):
         (root / "d.md").write_text("# 兄弟讲话\n\n同一份讲话。\n", encoding="utf-8")
         run(root, "ingest")
         route = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+        route_query(root, route, "主题")
         key = route["work"]["sources"][0]["key"]
         run(root, "submit", route["id"], "--payload", payload_file(
             root, "sibling-route.json",
@@ -320,6 +328,7 @@ def links_flow(results):
             (bad_root / "x.md").write_text("# 未知\n\n未知链接。\n", encoding="utf-8")
             run(bad_root, "ingest")
             route = run(bad_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            route_query(bad_root, route, "主题")
             key = route["work"]["sources"][0]["key"]
             rejected = run(bad_root, "submit", route["id"], "--payload", payload_file(
                 bad_root, "bad-route.json",
@@ -332,6 +341,164 @@ def links_flow(results):
                   rejected["error"]["code"] == "E_LINK_UNRESOLVED", rejected)
         finally:
             shutil.rmtree(bad_root, ignore_errors=True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def retrieval_flow(results):
+    """Route work must register its searches, and a started tree drains first."""
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-retrieval-"))
+    try:
+        (root / "a.md").write_text("# 反诈\n\n复机提醒。\n", encoding="utf-8")
+        run(root, "ingest")
+        route = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+        payload = {"decisions": [{"source": "a.md", "action": "new", "page": "first-page",
+                                  "title": "首屏", "type": "concept", "reason": "唯一主题"}]}
+        refused = run(root, "submit", route["id"], "--payload",
+                      payload_file(root, "no-query.json", payload), expect=3)
+        check(results, "a route cannot be decided without a registered query",
+              refused["error"]["code"] == "E_NO_QUERY", refused)
+
+        reclaimed = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+        view = reclaimed["work"]["queries"]
+        check(results, "the route work view exposes the query budget", view["budget"] == 5, view)
+        check(results, "the route brief asks for registered searches",
+              f"query --task {reclaimed['id']}" in " ".join(reclaimed["brief"]["steps"]),
+              reclaimed["brief"]["steps"])
+
+        asked = run(root, "query", "--task", reclaimed["id"], "反诈", "复机", "提醒")["data"]
+        check(results, "query --task groups one block per word",
+              [group["word"] for group in asked["queries"]] == ["反诈", "复机", "提醒"], asked["queries"])
+        check(results, "query --task reports the spent budget",
+              asked["budget"]["used"] == 3 and asked["budget"]["remaining"] == 2, asked["budget"])
+        log = (root / ".wiki" / "tasks" / reclaimed["id"] / "queries.jsonl")
+        check(results, "every query --task call is logged in the task folder",
+              log.exists() and len(log.read_text(encoding="utf-8").splitlines()) == 1, log)
+
+        over = run(root, "query", "--task", reclaimed["id"], "四", "五", "六", expect=3)
+        check(results, "the query budget refuses words beyond five per 1000 characters",
+              over["error"]["code"] == "E_QUERY_BUDGET", over)
+        repeated = run(root, "query", "--task", reclaimed["id"], "反诈")["data"]
+        check(results, "repeating a word does not spend the budget",
+              repeated["budget"]["used"] == 3, repeated["budget"])
+
+        run(root, "submit", reclaimed["id"], "--payload", payload_file(root, "no-query.json", payload))
+        page = run(root, "next", "--kind", "page", "--batch", "1")["data"]["tasks"][0]
+
+        # A started tree drains before the next route task is handed out.
+        (root / "b.md").write_text("# 另一主题\n\n别的正文。\n", encoding="utf-8")
+        run(root, "ingest")
+        blocked = run(root, "next", "--batch", "1", expect=3)
+        check(results, "an open page task outranks a freshly queued route task",
+              blocked.get("error", {}).get("code") == "E_TASK_UNSUBMITTED"
+              and page["id"] in blocked["error"]["message"], blocked.get("error"))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # Sibling pages keep the order the route listed them in, so a link to an
+    # earlier sibling resolves on the first submit instead of by luck.
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-siblings-"))
+    try:
+        (root / "talk.md").write_text("# 云网安全讲话\n\n主题日启动。\n", encoding="utf-8")
+        run(root, "ingest")
+        route = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+        route_query(root, route, "云网安全")
+        run(root, "submit", route["id"], "--payload", payload_file(root, "sibling-order.json", {
+            "decisions": [
+                {"source": "talk.md", "action": "new", "page": "sib-one", "title": "兄弟一",
+                 "type": "concept", "reason": "第一页"},
+                {"source": "talk.md", "action": "new", "page": "sib-two", "title": "兄弟二",
+                 "type": "concept", "links": ["sib-one"], "reason": "链到第一页"},
+            ]}))
+        order = [task["template"]["page"] for task in
+                 run(root, "next", "--kind", "page", "--batch", "2")["data"]["tasks"]]
+        check(results, "sibling page tasks come out in the order the route listed them",
+              order == ["sib-one", "sib-two"], order)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def batch_flow(results):
+    """A batch stays inside one tree, so two sources never share a batch."""
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-batch-"))
+    try:
+        (root / "a.md").write_text("# 拆页来源\n\n三个可以分开的主题。\n", encoding="utf-8")
+        run(root, "ingest")
+        route = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+        route_query(root, route, "拆页")
+        run(root, "submit", route["id"], "--payload", payload_file(root, "batch-a.json", {
+            "decisions": [
+                {"source": "a.md", "action": "new", "page": "pa1", "title": "甲一",
+                 "type": "concept", "reason": "主题一"},
+                {"source": "a.md", "action": "new", "page": "pa2", "title": "甲二",
+                 "type": "concept", "reason": "主题二"},
+                {"source": "a.md", "action": "new", "page": "pa3", "title": "甲三",
+                 "type": "concept", "reason": "主题三"},
+            ]}))
+
+        (root / "b.md").write_text("# 另一来源\n\n单独一页。\n", encoding="utf-8")
+        run(root, "ingest")
+        second = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+        route_query(root, second, "另一来源")
+        run(root, "submit", second["id"], "--payload", payload_file(root, "batch-b.json", {
+            "decisions": [{"source": "b.md", "action": "new", "page": "pb", "title": "乙页",
+                           "type": "concept", "reason": "独立主题"}]}))
+
+        def submit_page(page_id, title, task_id, source, quote):
+            draft = root / ".wiki" / "drafts" / f"{page_id}.md"
+            draft.parent.mkdir(parents=True, exist_ok=True)
+            draft.write_text(
+                f"## 结论\n\n{title}的一句话结论。\n\n## 要点\n\n- 一句话。\n",
+                encoding="utf-8",
+            )
+            run(root, "submit", task_id, "--payload", payload_file(
+                root, f"{page_id}.json",
+                {"page": page_id, "title": title, "type": "concept",
+                 "summary": f"{title}的一句话结论。", "links": [],
+                 "body_file": str(draft.relative_to(root)),
+                 "evidence": [{"source": source, "quote": quote}],
+                 "boundaries": {"covered": title, "not_covered": "其他"}},
+            ))
+
+        first = run(root, "next", "--batch", "2")["data"]["tasks"]
+        check(results, "a batch smaller than the tree stays inside one tree",
+              [task["template"]["page"] for task in first] == ["pa1", "pa2"], first)
+        check(results, "page tasks expose the tree they belong to",
+              {task["work"]["tree"] for task in first} == {route["id"]},
+              [task["work"].get("tree") for task in first])
+
+        blocked = run(root, "next", "--batch", "2", expect=3)
+        check(results, "a taken batch is reported instead of reissued",
+              blocked.get("error", {}).get("code") == "E_TASK_UNSUBMITTED"
+              and all(task["id"] in blocked["error"]["message"] for task in first),
+              blocked.get("error"))
+
+        for task in first:
+            submit_page(task["template"]["page"], task["template"]["title"], task["id"],
+                        "a.md", "三个可以分开的主题")
+
+        rest = run(root, "next", "--batch", "2")["data"]["tasks"]
+        check(results, "a short tree emits one task instead of borrowing another tree",
+              [task["template"]["page"] for task in rest] == ["pa3"]
+              and {task["work"]["tree"] for task in rest} == {route["id"]},
+              [(task["template"].get("page"), task["work"].get("tree")) for task in rest])
+        submit_page("pa3", rest[0]["template"]["title"], rest[0]["id"],
+                    "a.md", "三个可以分开的主题")
+
+        other = run(root, "next", "--batch", "5")["data"]["tasks"]
+        check(results, "a drained tree hands the next tree its turn",
+              [task["template"]["page"] for task in other] == ["pb"]
+              and {task["work"]["tree"] for task in other} == {second["id"]},
+              [(task["template"].get("page"), task["work"].get("tree")) for task in other])
+        submit_page("pb", other[0]["template"]["title"], other[0]["id"],
+                    "b.md", "单独一页")
+
+        (root / "c.md").write_text("# 第三来源\n\n还没开始。\n", encoding="utf-8")
+        run(root, "ingest")
+        alone = run(root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+        check(results, "a route task is its own tree",
+              "decisions" in alone["template"] and alone["work"]["tree"] == alone["id"],
+              {"template": list(alone["template"]), "tree": alone["work"].get("tree")})
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -645,6 +812,8 @@ def main(argv=None):
         check(results, "next returns brief and template", all(t.get("brief") and t.get("template") for t in tasks), tasks)
         check(results, "next hides task internals",
               not any(key in tasks[0] for key in ("epoch", "state", "inputs", "lease_until")), tasks[0])
+        for task in tasks:
+            route_query(root, task, "复机")
         routes = {task["work"]["sources"][0]["key"]: task for task in tasks}
         check(results, "route template pre-fills the source",
               routes["a.md"]["template"]["decisions"][0]["source"] == "a.md", routes["a.md"]["template"])
@@ -778,7 +947,8 @@ def main(argv=None):
 
         (root / "c.md").write_text("# 反诈复机\n\n补充：可拨打客服确认进度。\n", encoding="utf-8")
         run(root, "ingest")
-        route = run(root, "next")["data"]["tasks"][0]
+        route = run(root, "next", "--kind", "route")["data"]["tasks"][0]
+        route_query(root, route, "复机")
         c_key = route["work"]["sources"][0]["key"]
         check(results, "route brief requires reason for every decision",
               "每条 decision 都必须写 reason" in " ".join(route["brief"]["steps"]), route["brief"])
@@ -908,14 +1078,16 @@ def main(argv=None):
         (root / "d.md").write_text("# 机房巡检\n\n巡检周期为每周一次。\n", encoding="utf-8")
         (root / "e.md").write_text("# 机房巡检\n\n巡检记录保留一年。\n", encoding="utf-8")
         run(root, "ingest")
-        first = run(root, "next")["data"]["tasks"][0]
+        first = run(root, "next", "--kind", "route")["data"]["tasks"][0]
+        route_query(root, first, "机房巡检")
         first_key = first["work"]["sources"][0]["key"]
         run(root, "submit", first["id"], "--payload", payload_file(
             root, "batch-route-1.json",
             {"decisions": [{"source": first_key, "action": "new", "page": "machine-room-inspection",
                             "title": "机房巡检", "type": "note", "reason": "新主题"}]},
         ))
-        second = run(root, "next")["data"]["tasks"][0]
+        second = run(root, "next", "--kind", "route")["data"]["tasks"][0]
+        route_query(root, second, "机房巡检")
         second_key = second["work"]["sources"][0]["key"]
         check(results, "pending page is visible to the next route",
               any(item["id"] == "machine-room-inspection" for item in second["work"]["pending_pages"]),
@@ -1059,6 +1231,7 @@ def main(argv=None):
                 drift_route = task
             else:
                 run(root, "release", task["id"])
+        route_query(root, drift_route, "复机")
         drift_key = drift_route["work"]["sources"][0]["key"]
         run(root, "submit", drift_route["id"], "--payload", payload_file(root, "drift-route.json", {"decisions": [
             {"source": drift_key, "action": "new", "page": "restore-progress",
@@ -1414,6 +1587,7 @@ def main(argv=None):
             check(results, "skip cannot be combined with new or merge",
                   mixed["error"]["code"] == "E_PAYLOAD", mixed)
             split_route = run(split_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            route_query(split_root, split_route, "主题日", "双零")
             split_submit = run(
                 split_root, "submit", split_route["id"],
                 "--payload", payload_file(split_root, "split-route.json", {"decisions": [
@@ -1537,6 +1711,7 @@ def main(argv=None):
             names = sorted(path.name for path in folder.iterdir())
             check(results, "next materializes the task folder",
                   names == ["brief.md", "payload.json", "work.json"], names)
+            route_query(task_root, handed, "任务目录")
             (folder / "payload.json").write_text(json.dumps({"decisions": [
                 {"source": handed["work"]["sources"][0]["key"], "action": "skip",
                  "reason": "与主题无关"}]}, ensure_ascii=False), encoding="utf-8")
@@ -1547,6 +1722,7 @@ def main(argv=None):
             (task_root / "b.md").write_text("# 第二个来源\n\n正文两句话。\n", encoding="utf-8")
             run(task_root, "ingest")
             route = run(task_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            route_query(task_root, route, "第二个来源")
             route_folder = task_root / ".wiki" / "tasks" / route["id"]
             (route_folder / "payload.json").write_text(json.dumps({"decisions": [
                 {"source": route["work"]["sources"][0]["key"], "action": "new",
@@ -1565,19 +1741,33 @@ def main(argv=None):
                   reclaimed["id"] == page_task["id"]
                   and filled.read_text(encoding="utf-8") == original, reclaimed["id"])
 
-            # 领取后不提交、租约未过期时再 next：恢复同一任务，不能报空让人停摆。
-            resumed = run(task_root, "next", "--kind", "page", "--batch", "1")
-            check(results, "next resumes a leased task instead of reporting no work",
-                  resumed["data"]["count"] == 1
-                  and resumed["data"]["tasks"][0]["id"] == page_task["id"]
-                  and "unfinished" in resumed["summary"]
-                  and filled.read_text(encoding="utf-8") == original, resumed)
+            # 领取后不提交、租约未过期时再 next：报出未提交的任务，不重发也不续租。
+            conn = sqlite3.connect(task_root / ".wiki" / "wiki.db")
+            before = conn.execute(
+                "SELECT epoch, attempts, lease_until FROM tasks WHERE id = ?", (page_task["id"],)
+            ).fetchone()
+            conn.close()
+            blocked = run(task_root, "next", "--kind", "page", "--batch", "1", expect=3)
+            error = blocked.get("error", {})
+            check(results, "next reports the open task instead of reissuing it",
+                  error.get("code") == "E_TASK_UNSUBMITTED"
+                  and page_task["id"] in error.get("message", "")
+                  and page_task["id"] in error.get("next", "")
+                  and filled.read_text(encoding="utf-8") == original, blocked)
+            conn = sqlite3.connect(task_root / ".wiki" / "wiki.db")
+            after = conn.execute(
+                "SELECT epoch, attempts, lease_until FROM tasks WHERE id = ?", (page_task["id"],)
+            ).fetchone()
+            conn.close()
+            check(results, "a refused next does not renew the lease or bump the epoch",
+                  before == after, (before, after))
 
             # 同一页面只允许一个未关闭的 page 任务：第二个来源挂上去，不新增第二条。
             run(task_root, "release", page_task["id"])
             (task_root / "c.md").write_text("# 第三个来源\n\n正文三句话。\n", encoding="utf-8")
             run(task_root, "ingest")
             second = run(task_root, "next", "--kind", "route", "--batch", "1")["data"]["tasks"][0]
+            route_query(task_root, second, "第三个来源")
             second_folder = task_root / ".wiki" / "tasks" / second["id"]
             (second_folder / "payload.json").write_text(json.dumps({"decisions": [
                 {"source": second["work"]["sources"][0]["key"], "action": "new",
@@ -1641,6 +1831,7 @@ def main(argv=None):
         run(drained_root, "ingest")
         claimed = run(drained_root, "next", "--batch", "10")["data"]["tasks"]
         check(results, "drained fixture claims one route task", len(claimed) == 1, claimed)
+        route_query(drained_root, claimed[0], "唯一来源")
         run(drained_root, "submit", claimed[0]["id"], "--payload", payload_file(
             drained_root, "skip.json",
             {"decisions": [{"source": "note.md", "action": "skip", "reason": "无进展，且无可沉淀的知识"}]}))
@@ -1663,6 +1854,8 @@ def main(argv=None):
               overridden["scenario"]["source"] == "project"
               and "项目版流程" in overridden["content"], overridden)
 
+        retrieval_flow(results)
+        batch_flow(results)
         links_flow(results)
 
         healthy = run(root, "doctor", expect=(0, 1))["data"]

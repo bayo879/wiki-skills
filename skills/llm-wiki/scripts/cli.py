@@ -416,7 +416,8 @@ def command_status():
         "tasks": {"open": tasks["open"], "queued": tasks["queued"],
                   "leased": tasks["leased"], "route": tasks["route"], "page": tasks["page"],
                   "expired": tasks["expired"], "accepted": tasks["accepted"]},
-        "next": "run `next`" if tasks["queued"] else ("wait for leased tasks to expire" if tasks["leased"] else "run `ingest`"),
+        "next": ("submit the open task first" if tasks["leased"]
+                 else "run `next`" if tasks["queued"] else "run `ingest`"),
     }
     emit(
         "status", wiki.root,
@@ -432,11 +433,22 @@ def command_next():
     require_install()
     wiki, _ = open_wiki()
     wiki.cleanup_task_dirs()
+    open_tasks = wiki.leased_tasks()
+    if open_tasks:
+        ids = ", ".join(row["id"] for row in open_tasks)
+        first = open_tasks[0]
+        raise WikiError(
+            "E_TASK_UNSUBMITTED",
+            f"task {ids} is taken but not submitted",
+            f"finish it first: submit {first['id']} --payload "
+            f"{wiki.task_dir(first['id']) / 'payload.json'}, or release {first['id']} "
+            "to return it to the queue",
+            3,
+        )
     batch = ARGS.batch or 1
-    claimed, resumed = wiki.claim_tasks(kind=ARGS.kind, batch=max(1, batch))
     tasks = []
     lines = []
-    for row in claimed + resumed:
+    for row in wiki.claim_tasks(kind=ARGS.kind, batch=max(1, batch)):
         item = wiki.materialize_task(row)
         tasks.append(item)
         lines.append(f"{row['id']}  {item['brief']['goal']}")
@@ -445,20 +457,9 @@ def command_next():
         emit("next", wiki.root, "no queued tasks", data, [])
         wiki.close()
         return 0
-    if len(resumed) == len(tasks):
-        summary = (
-            f"resuming {len(resumed)} unfinished task(s); keep the payload you already "
-            "have and submit"
-        )
-    elif resumed:
-        summary = (
-            f"{len(tasks)} task(s) ready ({len(resumed)} unfinished resumed); read each "
-            "brief, fill its payload.json, then submit"
-        )
-    else:
-        summary = (
-            f"{len(tasks)} task(s) ready; read each brief, fill its payload.json, then submit"
-        )
+    summary = (
+        f"{len(tasks)} task(s) ready; read each brief, fill its payload.json, then submit"
+    )
     emit("next", wiki.root, summary, data, lines)
     wiki.close()
     return 0
@@ -616,6 +617,21 @@ def submit_route(wiki, row, payload):
             "E_PAYLOAD",
             f"source {conflicting[0]}: skip cannot be combined with new or merge",
             "skip a source on its own, or decide its pages without skip", 2,
+        )
+    words = wiki.query_words(row["id"])
+    if not words:
+        raise WikiError(
+            "E_NO_QUERY",
+            f"route {row['id']} has no registered query",
+            f"register the topic words first: query --task {row['id']} 词1 词2",
+            3,
+        )
+    if len(words) > wiki.query_budget(row):
+        raise WikiError(
+            "E_QUERY_BUDGET",
+            f"route {row['id']} registered {len(words)} topic words",
+            "keep the words that separate pages; the new words are already logged",
+            3,
         )
     # Validate every decision before touching the ledger, so a bad payload
     # never leaves a half-applied route behind.
@@ -850,6 +866,94 @@ def resolve_ref(wiki, ref):
         raise WikiError("E_NOT_FOUND", f"no file {ref}", "check the path, or use `query` first", 3)
     return candidate
 
+
+def query_task(wiki, words):
+    """Register one search per topic word on a task, then show the hits.
+
+    Words are searched one by one on purpose: pooling them ranks a page that
+    repeats a common word above the page that answers one specific word, and
+    the agent reads the grouped output to judge similarity itself.
+    """
+    row = wiki.task_row(ARGS.task)
+    if not row:
+        raise WikiError("E_TASK_UNKNOWN", f"no task {ARGS.task}",
+                        "run `next` to get a task id", 2)
+    if row["state"] != "leased":
+        raise WikiError(
+            "E_TASK_STALE",
+            f"task {ARGS.task} is {row['state']}, not leased",
+            "run `next` to claim it again, then query", 3,
+        )
+    if not words:
+        raise WikiError("E_USAGE", "query --task needs topic words",
+                        "example: query --task t_xxx 反诈 复机", 2)
+    registered = wiki.query_words(ARGS.task)
+    budget = wiki.query_budget(row)
+    fresh = []
+    seen = {word.lower() for word in registered}
+    for word in words:
+        if word.lower() in seen:
+            continue
+        seen.add(word.lower())
+        fresh.append(word)
+    if len(registered) + len(fresh) > budget:
+        raise WikiError(
+            "E_QUERY_BUDGET",
+            f"task {ARGS.task} allows {budget} topic words: {len(registered)} used, "
+            f"{len(fresh)} new would exceed it",
+            "drop near-duplicates and keep the words that separate pages; "
+            "the budget is 5 words per 1000 source characters",
+            3,
+        )
+    limit = ARGS.limit or 5
+    groups = []
+    hits = {}
+    for word in words:
+        scored, results = search.search_pages(wiki, [word], limit)
+        groups.append({
+            "word": word,
+            "matches": len(scored),
+            "returned": len(results),
+            "results": results,
+        })
+        hits[word] = [item["id"] for item in results]
+    wiki.append_task_query(ARGS.task, words, hits)
+    view = wiki.query_view(row)
+    sections = []
+    for group in groups:
+        block = [f"{group['word']}  ({group['matches']} matches, showing {group['returned']})"]
+        if group["results"]:
+            block.extend(
+                f"{item['id']}  [{item['type']}/{item['status']}]  {item['title']}\n    {item['snippet']}"
+                for item in group["results"]
+            )
+        else:
+            block.append("  (no page matched: judge from page_index and pending_pages)")
+        sections.append(block)
+    sections.append([
+        f"topic words {view['used']}/{view['budget']} used, log: {view['log']}",
+        "a truncated hit list is not proof that no similar page exists",
+    ])
+    lines = []
+    for block in sections:
+        if lines:
+            lines.append("")
+        lines.extend(block)
+    data = {
+        "task": ARGS.task,
+        "queries": groups,
+        "budget": view,
+        "boundary": "hit count is a ranked subset, not proof of full coverage",
+    }
+    summary = (
+        f"{len(groups)} topic word(s) searched for task {ARGS.task}, "
+        f"{view['used']}/{view['budget']} words used"
+    )
+    emit("query", wiki.root, summary, data, lines)
+    wiki.close()
+    return 0
+
+
 def command_query():
     wiki, _ = open_wiki()
     if ARGS.page:
@@ -876,11 +980,21 @@ def command_query():
         )
         wiki.close()
         return 0
-    terms = [term for term in re.split(r"\s+", (ARGS.text or "").strip()) if term]
+    words = [
+        word
+        for chunk in (ARGS.text or [])
+        for word in re.split(r"\s+", chunk.strip())
+        if word
+    ]
+    if ARGS.task:
+        return query_task(wiki, words)
+    terms = words
     if not terms:
-        raise WikiError("E_USAGE", "query needs text or --page", "example: query 反诈 复机", 2)
-    scored, results = search.search_pages(wiki, terms, ARGS.limit)
-    topic_hits = topics.match(wiki.root, terms, ARGS.limit)
+        raise WikiError("E_USAGE", "query needs text, --page or --task",
+                        "example: query 反诈 复机", 2)
+    limit = ARGS.limit or 8
+    scored, results = search.search_pages(wiki, terms, limit)
+    topic_hits = topics.match(wiki.root, terms, limit)
     data = {
         "query": " ".join(terms),
         "matches": len(scored),
@@ -1138,7 +1252,6 @@ def command_doctor():
     if integrity != "ok":
         issues.append({"severity": "fail", "code": "L1", "message": f"database integrity: {integrity}"})
     pages = wiki.all_pages()
-    known = {record["id"] for record in pages}
     for record in pages:
         meta = record["meta"]
         if meta.get("status") == "stale":
@@ -1176,13 +1289,6 @@ def command_doctor():
         issues.append({"severity": "warn", "code": "L7",
                        "message": "pages without usable sources: "
                                   + ", ".join(sorted(unprovenanced.values())[:10])})
-    broken = []
-    for row in wiki.conn.execute("SELECT src, dst FROM links"):
-        if row["dst"] not in known and row["src"] in known:
-            broken.append(f"{row['src']} -> {row['dst']}")
-    if broken:
-        issues.append({"severity": "warn", "code": "L5",
-                       "message": f"broken links: {', '.join(sorted(broken)[:10])}"})
     stuck = wiki.conn.execute(
         "SELECT id FROM tasks WHERE state = 'leased' AND lease_until < ?", (now_iso(),)
     ).fetchall()
@@ -1238,9 +1344,10 @@ def build_parser():
     read.add_argument("--offset", type=int, default=1)
     read.add_argument("--limit", type=int, default=200)
     query = sub.add_parser("query", parents=[common], help="search pages and topics, or inspect one page")
-    query.add_argument("text", nargs="?")
+    query.add_argument("text", nargs="*")
     query.add_argument("--page")
-    query.add_argument("--limit", type=int, default=8)
+    query.add_argument("--task", help="register the search on a task; route tasks must query before deciding")
+    query.add_argument("--limit", type=int, default=None)
     scenario = sub.add_parser("scenario", help="inspect scenario capabilities")
     scenario_sub = scenario.add_subparsers(dest="scenario_command", required=True)
     scenario_sub.add_parser("list", parents=[common], help="list scenario capabilities and validity")

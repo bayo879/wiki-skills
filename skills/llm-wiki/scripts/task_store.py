@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -19,6 +20,9 @@ from util import digest_bytes, dump_meta, now_iso, same_stamp
 
 TASK_LEASE_SECONDS = 900
 TASK_OPEN_STATES = ("queued", "leased")
+QUERY_BUDGET_CHARS = 1000
+QUERY_WORDS_PER_WINDOW = 5
+QUERY_LOG = "queries.jsonl"
 
 
 class TaskStoreMixin:
@@ -47,6 +51,61 @@ class TaskStoreMixin:
             shutil.rmtree(entry, ignore_errors=True)
             dropped.append(entry.name)
         return dropped
+
+    def query_log_path(self, task_id):
+        return self.task_dir(task_id) / QUERY_LOG
+
+    def task_queries(self, task_id):
+        """Registered searches of one task, oldest first."""
+        path = self.query_log_path(task_id)
+        if not path.exists():
+            return []
+        records = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                # 日志只服务当前任务，坏行跳过比让任务卡死划算。
+                continue
+        return records
+
+    def query_words(self, task_id):
+        """Topic words registered so far: unique, first-seen order."""
+        words = []
+        seen = set()
+        for record in self.task_queries(task_id):
+            for word in record.get("words") or []:
+                text = str(word).strip()
+                if text and text.lower() not in seen:
+                    seen.add(text.lower())
+                    words.append(text)
+        return words
+
+    def query_budget(self, row):
+        """Topic words a task may register: five per 1000 source characters."""
+        inputs = json.loads(row["inputs"])
+        chars = sum(len(self.source_body(item["key"])) for item in inputs.get("sources", []))
+        windows = max(1, math.ceil(chars / QUERY_BUDGET_CHARS))
+        return QUERY_WORDS_PER_WINDOW * windows
+
+    def query_view(self, row):
+        used = self.query_words(row["id"])
+        budget = self.query_budget(row)
+        return {
+            "budget": budget,
+            "used": len(used),
+            "remaining": max(0, budget - len(used)),
+            "log": f"{self.tasks_dir.name}/{row['id']}/{QUERY_LOG}",
+        }
+
+    def append_task_query(self, task_id, words, hits):
+        path = self.query_log_path(task_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"ts": now_iso(), "words": list(words), "hits": hits}
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
     def materialize_task(self, row):
         """Write the task folder: the brief, its payload skeleton, and work data.
@@ -270,11 +329,12 @@ class TaskStoreMixin:
                     )
 
     def claim_tasks(self, kind=None, batch=None):
-        """Claim queued tasks, then reissue still-leased ones to fill the batch.
+        """Claim queued tasks in tree order.
 
-        A reissued task keeps its task folder, so an agent that lost its turn
-        continues the payload it already filled instead of stopping until the
-        lease expires. Returns `(claimed, resumed)`.
+        A task stays `leased` until it is submitted or released, and an agent
+        holds at most what it has not finished: `command_next` refuses to hand
+        out anything while a lease is open, so a claim never reissues work the
+        agent already has. Returns the claimed rows.
         """
         now = now_iso()
         with self.conn:
@@ -282,22 +342,37 @@ class TaskStoreMixin:
                 "UPDATE tasks SET state = 'queued', lease_until = NULL WHERE state = 'leased' AND lease_until < ?",
                 (now,),
             )
-            claimed = self._claim_queued(kind, batch)
-            resumed = self._resume_leased(
-                kind, max(0, batch - len(claimed)), {row["id"] for row in claimed}
-            )
-        return claimed, resumed
+            # 深度优先：先钉住手头那棵树，一批只在它里面发；树里没活可发
+            # （例如全被判漂移）才退回常规顺序。
+            active = self._active_page_tree() if kind != "route" else None
+            for pinned in (active, None):
+                claimed = self._claim_queued(kind, batch, pinned)
+                if claimed or pinned is None:
+                    break
+        return claimed
 
-    def _claim_queued(self, kind, batch):
-        sql = "SELECT * FROM tasks WHERE state = 'queued'"
+    def leased_tasks(self):
+        """Tasks an agent has taken but not submitted or released yet."""
+        rows = self.conn.execute(
+            "SELECT rowid, * FROM tasks WHERE state = 'leased'"
+        ).fetchall()
+        return self._task_order(rows)
+
+    def _claim_queued(self, kind, batch, tree=None):
+        sql = "SELECT rowid, * FROM tasks WHERE state = 'queued'"
         params = []
         if kind:
             sql += " AND kind = ?"
             params.append(kind)
-        sql += " ORDER BY CASE kind WHEN 'route' THEN 0 ELSE 1 END, created_at, id LIMIT ?"
-        params.append(batch)
         claimed = []
-        for row in self.conn.execute(sql, params).fetchall():
+        rows = self._task_order(self.conn.execute(sql, params).fetchall())
+        if not kind and self._open_child_task():
+            # 深度优先：一棵任务树还有页面没写完，就先不发新的来源。
+            rows = [row for row in rows if row["kind"] != "route"]
+        rows = self._batch_rows(rows, tree)
+        for row in rows:
+            if len(claimed) >= batch:
+                break
             reason = self.task_drift(row)
             if reason:
                 # 失效任务留在账本里作为历史，但不发出去。
@@ -310,36 +385,62 @@ class TaskStoreMixin:
             claimed.append(self.task_row(row["id"]))
         return claimed
 
-    def _resume_leased(self, kind, limit, skip):
-        """Reissue open leases in claim order, expiring drifted tasks.
+    def _active_page_tree(self):
+        """Tree of the oldest open page task: the one an agent is working on."""
+        rows = self.conn.execute(
+            "SELECT rowid, * FROM tasks WHERE kind = 'page' AND state IN ('queued', 'leased')"
+        ).fetchall()
+        rows = self._task_order(rows)
+        return self._tree_key(rows[0]) if rows else None
 
-        `skip` holds the ids claimed a moment ago in this same call; they are
-        leased again already and must not come back twice.
+    def _open_child_task(self):
+        """An open page task means its tree has not drained yet."""
+        return self.conn.execute(
+            "SELECT 1 FROM tasks WHERE kind = 'page' AND state IN ('queued', 'leased') LIMIT 1"
+        ).fetchone() is not None
+
+    def _tree_key(self, row):
+        """Tree of a task: the route that spawned it, or the task itself."""
+        try:
+            inputs = json.loads(row["inputs"] or "{}")
+        except json.JSONDecodeError:
+            inputs = {}
+        return inputs.get("route_task") or row["id"]
+
+    def _batch_rows(self, rows, tree=None):
+        """Keep one batch inside one tree; route tasks stay independent.
+
+        Page tasks of one tree share a source and their boundaries depend on
+        each other, so handing them out piecemeal with another tree in the
+        same batch is what let a route collide with its own batch. A batch
+        that cannot be filled from this tree stays short on purpose.
         """
-        if limit <= 0:
-            return []
-        sql = "SELECT * FROM tasks WHERE state = 'leased'"
-        params = []
-        if kind:
-            sql += " AND kind = ?"
-            params.append(kind)
-        sql += " ORDER BY CASE kind WHEN 'route' THEN 0 ELSE 1 END, created_at, id"
-        resumed = []
-        for row in self.conn.execute(sql, params).fetchall():
-            if len(resumed) >= limit:
-                break
-            if row["id"] in skip:
-                continue
-            reason = self.task_drift(row)
-            if reason:
-                self.expire_task(row["id"], reason)
-                continue
-            self.conn.execute(
-                "UPDATE tasks SET state = 'leased', epoch = epoch + 1, lease_until = ?, attempts = attempts + 1 WHERE id = ?",
-                (self._lease_deadline(), row["id"]),
-            )
-            resumed.append(self.task_row(row["id"]))
-        return resumed
+        if not rows:
+            return rows
+        if tree is None and rows[0]["kind"] == "page":
+            tree = self._tree_key(rows[0])
+        if tree is None:
+            return rows
+        return [row for row in rows if self._tree_key(row) == tree]
+
+    def _task_order(self, rows):
+        """Depth-first claim order: a started tree drains before the next source.
+
+        Page tasks carry `inputs.route_task`, so the parent tree is known
+        without adding a column. `rowid` keeps same-second enqueues in insert
+        order — the order the route listed its pages in — so sibling pages no
+        longer come out in an arbitrary order and links stop failing by luck.
+        """
+
+        def key(row):
+            try:
+                inputs = json.loads(row["inputs"] or "{}")
+            except json.JSONDecodeError:
+                inputs = {}
+            parent = 0 if inputs.get("route_task") else 1
+            return (parent, row["created_at"], row["rowid"])
+
+        return sorted(rows, key=key)
 
     def _lease_deadline(self):
         return datetime.fromtimestamp(
@@ -447,6 +548,8 @@ class TaskStoreMixin:
             ],
             "page_index": self.page_index(),
             "pending_pages": self.pending_pages(row["id"]),
+            "queries": self.query_view(row),
+            "tree": self._tree_key(row),
         }
         if row["kind"] == "page":
             record = self.page_record(inputs["page"])

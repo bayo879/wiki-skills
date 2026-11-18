@@ -71,7 +71,19 @@ python3 <skill>/scripts/wiki.py next --json
 - `id`：提交时用；
 - `brief`：这个任务要做什么、怎么做、提交后会发生什么；
 - `template`：已经固定好的载荷骨架，和 `payload.json` 内容一致，只填空；
-- `work`：原文位置、已有页面索引、已排队但尚未写入的页面（`pending_pages`）、当前页内容。
+- `work`：原文位置、已有页面索引、已排队但尚未写入的页面（`pending_pages`）、当前页内容；
+  route 任务另有 `queries{budget,used,remaining}`，是这次任务的检索配额。
+
+route 任务多一步：先登记检索，再定案。
+
+```bash
+python3 <skill>/scripts/wiki.py query --task <id> 词1 词2 词3 --json
+```
+
+每个词单独检索、各返 5 条约页面，按词分组显示；配额是 5 个词/1000 字（正文不足 1000 字也
+给 5 个），可以分多次登记，重复的词不重复计配额，超出报 `E_QUERY_BUDGET`。没登记就 `submit`
+会报 `E_NO_QUERY`，任务退回队列：重新 `next` 领回、补查后再交。命中被截断时换词重查，
+不要把「没搜到」当成「没有相似页」。
 
 按 `brief.md` 做，把 `.wiki/tasks/<id>/payload.json` 填好（只填空，不要改字段名），然后：
 
@@ -83,9 +95,12 @@ python3 <skill>/scripts/wiki.py submit <id> --json
 从别处提交时用（`-` 表示从 stdin 读）。提交成功或任务过期后目录会被清掉；任务被释放后
 重新 `next` 会刷新 `brief.md`、`work.json`，但不会覆盖你已经填好的 `payload.json`。
 
-提交成功后重新 `next`。如果上次领了任务但没提交（中断、上下文压缩、误重跑），`next` 会把
-同一个任务发回来，`payload.json` 保留，接着填完提交即可。只有 `next` 说没有任务时才停止，
-不要自己造任务，也不要为了“推进”去跑别的命令。同一页面同时只会有一个未关闭的页面任务：
+提交成功后重新 `next`。`next` 按任务树深度优先：当前来源拆出的页面任务没写完，不会发下一个
+来源。一次只做一件事：手头还有领了没交的任务时，`next` 直接报 `E_TASK_UNSUBMITTED`，错误里
+带着任务 id 和 `payload.json` 路径——接着填完 `submit` 即可（`.wiki/tasks/<id>/` 里的
+`brief.md`、`work.json` 与已填内容都还在，中断或上下文压缩后照这个路径续做），确实不要了
+再 `release` 把它放回队列。只有 `next` 说没有任务时才停止，不要自己造任务，也不要为了
+“推进”去跑别的命令。同一页面同时只会有一个未关闭的页面任务：
 给同一页面排第二个来源时，如果该页面已被领走，`submit` 返回 `E_STATE`，等那个任务提交后
 再试。
 

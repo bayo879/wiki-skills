@@ -107,7 +107,12 @@ pending_total, pending, queue{open,queued,leased,route,page}}`。`queued_tasks` 
 ### next
 
 领取 queued 任务，默认 1 个；`--batch N` 只用于调试或批量运维，`--kind` 可限定类型。
-route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包而不是内部状态：
+按任务树深度优先，一批只发一棵树：一棵来源树拆出的页面任务没做完，就不发新来源；一批里
+不会同时出现 route 任务和页面任务，页面任务只从当前这棵树取，树没做完时别的来源排在后面。
+批次没填满时用同一棵树里已领但未提交的任务补位，不拿别的树凑数——所以 `--batch 2` 在只剩
+1 个待写页面时返回 1 个，而不是混进下一个来源。同一秒入队的兄弟页按入队顺序发放，和
+route 里的书写顺序一致。
+`next` 是 agent 的唯一取任务入口，返回任务包而不是内部状态：
 
 `data.tasks[]`: `{id, brief, template, work}`。
 
@@ -119,15 +124,18 @@ route 任务优先。`next` 是 agent 的唯一取任务入口，返回任务包
 - `template`: 已固定结构的载荷；route 为 `decisions[]`，page 为 `page/title/type/
   summary/body/links/evidence/boundaries`。
 - `work`: `sources[{key,raw,chars}]`、`page_index[{id,title,type,summary,outgoing,incoming}]`、
-  `pending_pages[{id,title,type}]`（已排队、尚未写入的页面）；更新页任务另有
+  `pending_pages[{id,title,type}]`（已排队、尚未写入的页面）、`tree`（任务所属树的 id：
+  同一次 route 拆出的页面任务相同，route 任务是自己）、
+  `queries{budget,used,remaining,log}`（route 任务的检索配额与查询日志位置）；更新页任务另有
   `work.page{id,rev,meta,body}`。
 
 不再返回 `epoch`、`lease_until`、`attempts`、`last_error` 或原始 `inputs`。
 
-队列里没有 `queued`、但有已领取（`leased`）而未提交的任务时，`next` 按同样顺序把这些任务
-重新发放，`summary` 以 `resuming` 开头；任务目录与已填的 `payload.json` 保持不变，接着做
-同一个任务即可。重新发放前同样查一次漂移，失效任务置 `expired` 不发出。队列与已领取任务
-都为空时才返回 `no queued tasks`，此时才该停。
+一次只做一件事：只要有已领取（`leased`）而未提交的任务，`next` 直接失败并报
+`E_TASK_UNSUBMITTED`，`message` 列出任务 id，`error.next` 给出 `submit <id> --payload
+.wiki/tasks/<id>/payload.json` 与 `release <id>`。不再重发同一任务，也不续租、不加 epoch：
+已经领到手的任务继续做，会话重启后按错误里的路径接着填即可。`--kind` 与 `--batch` 同样受
+这条门禁限制——手头没结束，就不发任何新任务。只有队列与租约都空时才返回 `no queued tasks`。
 
 ### submit
 
@@ -208,7 +216,7 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 
 ### query
 
-`query <词...> [--limit N]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
+`query <词...> [--limit N] [--task <id>]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
 `话题/`，命中时在 `topics` 里返回。`query` **不检索场景**，场景必须显式
 `scenario search`。`query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
 `path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`outgoing`、`incoming`、`body`，不查话题。
@@ -216,6 +224,13 @@ frontmatter 不再出现在 `content` 里，也不会告警；`raw:` 读的是 r
 `data`: `{query, matches, returned, results, topic_matches, topics, boundary}`。
 `matches` 只数页面，`topic_matches` 只数话题；`topics[]` 为
 `{name, title, description, status, updated, path, read, score, snippet}`。
+
+`query --task <id> 词1 词2 ...`：把这次检索登记到任务上，route 任务提交前必须至少登记一次，
+否则 `submit` 报 `E_NO_QUERY`。每个词单独检索、各返上限 5 条，按词分组返回，不并成一次
+排序；重复的词不重复计配额。配额是 5 个词/1000 字（正文不足 1000 字也给 5 个），超出报
+`E_QUERY_BUDGET`。每次调用追加一行到 `.wiki/tasks/<id>/queries.jsonl`（`{ts,words,hits}`），
+任务关闭时随目录一起删除，不保留审计历史。`data`:
+`{task, queries[{word,matches,returned,results}], budget, boundary}`。
 
 检索结果是定位工具，不是覆盖证明。
 
@@ -305,7 +320,8 @@ unchanged[page], written[{page,from,to}], warnings[message]}`。有失败项时 
 
 `doctor [--fix]`：`PRAGMA integrity_check`、stale 页、未注册来源、
 无可用来源的页（`sources` 为空或全部缺失/失效，L7；其中零入零出的标 `removable`，
-doctor 直接删除，不新增命令、不逐页确认；有来源的零出链页不报）、断链、过期租约。
+doctor 直接删除，不新增命令、不逐页确认；有来源的零出链页不报）、过期租约。断链不再检查：
+links 表只由通过 `check_links` 的提交写入，没有留下悬空 `dst` 的路径。
 `--fix` 重建链接索引。`data`: `{issues[{severity,code,message}],
 fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看区：未收割的手改只在
 推送时告警，`healthy:true` 不代表观看区没有待回收内容，用 `sync` 收割。
@@ -315,8 +331,11 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | 码 | 含义 | 处理 |
 | --- | --- | --- |
 | `E_USAGE` | 参数缺失或组合非法 | 看 `error.next`，不要重试同一载荷 |
+| `E_NO_QUERY` | route 提交前没有登记任何检索 | 先 `query --task <id> 词...`，再 `next` 领回任务提交 |
+| `E_QUERY_BUDGET` | 登记的主题词超出「5 个/1000 字」配额 | 合并近义词，只留能区分页面的词 |
 | `E_PAYLOAD` | 载荷字段缺失/类型/长度不合法 | 按 message 修正字段 |
 | `E_TASK_UNKNOWN` | 任务 id 不存在 | `next` 取新任务 |
+| `E_TASK_UNSUBMITTED` | 有已领取但没提交的任务 | 按 `error.next` 先 `submit <id>`（`payload.json` 还在任务目录里）或 `release <id>`，再 `next` |
 | `E_TASK_STALE` | 任务已关闭或租约过期 | 重新 `next`，丢弃旧载荷；来源变化导致的过期是 `E_SOURCE_DRIFT` |
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
 | `E_TASK_CONFLICT` | 来源已属于另一棵未关闭的页面任务树（同一次 route 拆页除外） | 先完成或关闭那个页面任务；拆页请放在同一次 route 提交里 |

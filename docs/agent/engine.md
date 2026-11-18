@@ -60,14 +60,23 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
    落盘副本在 `<view>/pages/`，由 `sync_view` 按账本推送，`render_digest` 只是渲染文本的
    历史哈希，不再用于比对文件。
 5. **任务 epoch 单调。** `claim_tasks` 先回收过期 lease，领取时 `epoch = epoch + 1`；
-   队列不足一批时按同样顺序重新发放仍在租约里的任务（`_resume_leased`，同样 `epoch = epoch + 1`、
-   同样先查漂移），让中断后重跑的 agent 接着做同一个任务；`close_task` 用
+   不重发仍在租约里的任务：有 `leased` 行时 `next` 直接报 `E_TASK_UNSUBMITTED`，agent 先
+   `submit` 或 `release` 才能继续，避免「反复 next 续租」把 `attempts`、`epoch` 变成无效计数；
+   `close_task` 用
    `WHERE id=? AND epoch=? AND state='leased'` 的 CAS，rowcount=0 抛
    `E_TASK_STALE`。不要用先查后写替代 CAS。漂移任务不发出，`expire_task` 置终态
    `expired` 并写 `last_error`、`closed_at`；任务行只增不删，供审计。`enqueue_task` 做树
    唯一性：一个来源不能同时属于两棵未关闭的 page 任务树，冲突抛 `E_TASK_CONFLICT`；
    route 任务只是临时持有者，不挡新树。同一次 route 提交拆出的 page 任务共享
    `route_task`，允许同一来源按主题进入多页，是这条不变量的唯一例外。
+   领取顺序按任务树深度优先：`_task_order` 以 `inputs.route_task` 判是否属于某棵树，
+   页面任务（有 parent）排在来源任务之前，同层按 `created_at`、`rowid`；`rowid` 让同秒入队的
+   兄弟页保持 route 里的书写顺序，链接不再靠运气。`_claim_queued` 在未指定 `--kind` 时，只要
+   还有未关闭的 page 任务，就先不发新的 route 任务——一棵树没写完不换来源。
+   `claim_tasks` 先用 `_active_page_tree` 钉住最老那棵未关闭的页面树，`--batch` 只在这棵树里
+   发：`_batch_rows` 过滤成同一棵树，树里凑不满一批就少发，不拿别的树补位；`--kind route`
+   不钉树，route 任务各自成树。树里连漂移都没有可发的任务时才退回常规顺序，避免一棵坏树
+   饿死整条队列。
 6. **任务快照有 8 个来源指纹。** 入队时快照 `key`、`source_size`、`source_mtime`、
    `source_digest`、`raw`、`raw_size`、`raw_mtime`、`raw_digest`；`task_drift` 先比 stat，
    不一致再读字节比 digest（只是 touch 不算漂移），raw 副本同理，报错分别为
@@ -108,19 +117,26 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，场景能
     发布也不能拿它当来源；换掉名字后旧目录恢复为普通来源。`sync_view` 对 `pages/` 的手改
     只告警不覆盖，`topics/`、`scenarios/` 只在目标不存在时投放，`README.md` 每次推送重写，
     其他文件（含 `.obsidian/`）不删不改。
-15. **任务目录只是素材，不是队列。** `next` 领取后把任务物化到
+15. **route 任务必须登记检索。** `query --task <id> 词...` 每个词独立检索各返 5 条、按词分组，
+    追加一行 `{ts,words,hits}` 到 `<task_dir>/queries.jsonl`；重复词不重复计配额，配额是
+    `5 × max(1, ceil(chars/1000))`（`QUERY_BUDGET_CHARS`、`QUERY_WORDS_PER_WINDOW`）。
+    `submit_route` 在载荷结构校验之后、写账本之前检查：没登记报 `E_NO_QUERY`，超配额报
+    `E_QUERY_BUDGET`；两者都把任务退回队列，查询日志按任务目录保留，任务关闭时一起删掉，
+    不留审计历史。`task_work` 把这些数字放进 `work.queries`，route brief 直接读它。
+16. **任务目录只是素材，不是队列。** `next` 领取后把任务物化到
     `.wiki/tasks/<id>/`（`brief.md`、`work.json`、`payload.json`）；发放仍只由 `next` 决定。
     `payload.json` 只在不存在时写入，重领只刷新 `brief.md` 与 `work.json`，不覆盖 agent 已填
-    的内容；未提交的租约任务由 `next` 以同一 id 重新发放，不置 `expired`。
+    的内容；未提交的租约任务不重发：`next` 报 `E_TASK_UNSUBMITTED` 并指向这个目录，
+    租约到期后按现有规则回队，漂移任务置 `expired`。
     `close_task`/`expire_task` 成功后删目录，残留目录由 `next`、`ingest` 的
     `cleanup_task_dirs` 清掉。`submit` 默认读该目录的 `payload.json`，`--payload` 只是后备。
-16. **同一页面同时只有一个未关闭的 page 任务。** 账本里用部分唯一索引
+17. **同一页面同时只有一个未关闭的 page 任务。** 账本里用部分唯一索引
     `tasks_open_page ON tasks(subject) WHERE kind='page' AND state IN ('queued','leased')`
     兜底（`ledger.ensure_open_page_index` 建索引前把重复行置 `expired` 并迁移
     `task_sources`）。`enqueue_task` 撞 `IntegrityError` 时回查已有任务并复用；`submit_route`
     命中已领走的 page 任务仍报 `E_STATE`，不另开第二条。route 任务与来源自己的转换任务
     不计入这条约束。
-17. **写命令按工作区排队。** 会写账本或观看区的命令在 `main()` 里用
+18. **写命令按工作区排队。** 会写账本或观看区的命令在 `main()` 里用
     `workspace.workspace_lock` 抢 `<root>/.wiki/lock`（`O_CREAT|O_EXCL` 写入 pid），等待
     5 秒仍拿不到抛 `E_BUSY`（exit 4）；非 posix 平台不按 pid 判活，只按 30 分钟陈旧阈值
     接管，posix 用 `os.kill(pid, 0)` 判断持有者是否还在。`--dry-run` 且没有 `.wiki/` 时不

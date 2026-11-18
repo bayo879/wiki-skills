@@ -110,7 +110,7 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。Windows 侧没有跑过 Po
 `scenario/ppt_creator` 的 `resources` 识别到 `references/outline-template.md`；
 `scenario search "PPT"` 命中 1 条。
 
-## 2026-11-17 `next` 恢复未提交任务后复跑
+## 2026-11-17 `next` 恢复未提交任务后复跑（同日已改写，见下条）
 
 队列不足一批时 `next` 重新发放仍在租约里的任务（`Wiki._resume_leased`），`summary` 以
 `resuming` 开头，任务目录与已填 `payload.json` 保持不变；重新发放前照旧查漂移。
@@ -120,6 +120,22 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。Windows 侧没有跑过 Po
   任务，`payload.json` 不变；
 - `next keeps reporting no work when nothing is open`：队列与租约都空时仍返回
   `no queued tasks`，agent 才停止。
+
+## 2026-11-17 `next` 改为报出未提交任务后复跑
+
+`_resume_leased` 删除，`claim_tasks` 只回队过期租约再按树领取；`command_next` 见 `leased`
+行就报 `E_TASK_UNSUBMITTED`（退出码 3），错误里带任务 id、`payload.json` 路径与
+`submit`/`release` 命令；`status.data.next` 在同样情形下改说「先提交手头任务」。
+`python3 tests/selftest.py`：239/239 通过，退出码 0。相关检查：
+
+- `next reports the open task instead of reissuing it`：领取后不提交再 `next` 得到
+  `E_TASK_UNSUBMITTED`，`payload.json` 不变；
+- `a refused next does not renew the lease or bump the epoch`：被拒前后 `epoch`、`attempts`、
+  `lease_until` 三个字段完全相同；
+- `an open page task outranks a freshly queued route task`：手头页面任务未交时，队列里新到的
+  route 任务拿不到，`next` 报出页面任务；
+- `a taken batch is reported instead of reissued`：`--batch 2` 领了两个后再次 `next` 报出这两个
+  id，不重发。
 
 ## 2026-11-17 账本自愈与错误带手册定位
 
