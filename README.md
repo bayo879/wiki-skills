@@ -2,9 +2,9 @@
 
 把本地文档整理成可检索、可追溯的 Markdown 知识库。交付物是一个 agent 技能目录
 `skills/llm-wiki/`：纯 Python 标准库，没有服务端、没有构建步骤、没有二进制的分发包。
-项目还可以把一类任务的执行流程写成**可执行工作流**，放在根目录 `workflow/`（旧目录
-`scenario/`、`场景能力/` 仍兼容）下；`WORKFLOW.md` 的每一步标明是调工具、人做、agent 判断
-还是验证，检索命中后照着执行，不需要摄入成知识页。回答知识问题时默认走内置的「话题探索」
+项目还可以把一类任务的执行流程写成**可执行工作流**，放在根目录 `workflows/` 下；
+`WORKFLOW.md` 的每一步标明是调工具、人做、agent 判断还是验证，检索命中后照着执行，不需要
+摄入成知识页。回答知识问题时默认走内置的「话题探索」
 工作流：定主题、多轮检索、总结，收尾时询问是否把主题沉淀成根目录 `话题/<主题>.md`。
 
 设计前提：**确定性的事交给引擎，语义的事交给 agent。** 扫描、解析、哈希、任务状态、
@@ -42,6 +42,11 @@ Windows 首次使用运行
 它只查找已有的 Python 3.12+，不下载也不安装，找不到时用 `-Python <python.exe>` 指定运行时。
 其余命令里的 `python3` 用该解释器替代。
 
+在 agent 里也可以用 `wiki:` 开头直接下任务，例如
+`wiki: 找一些跟云网主题日相关的资料，我确定范围后，帮我生成ppt汇报材料`。前缀表示这次明确
+走 wiki，后面的内容决定走哪条路（问知识、建库、还是加载 PPT 等工作流），规则见
+[SKILL.md](skills/llm-wiki/SKILL.md)。
+
 完整命令与字段见 [CLI 契约](docs/readme/cli.md)。
 
 ## 工作方式
@@ -56,9 +61,8 @@ Windows 首次使用运行
    必须逐字命中来源文本，否则拒绝写入。
 4. 页面以修订形式写入账本，并由引擎推送到 `<view>/pages/<type>/<标题>.md`（观看区）；
    正文只存在账本与观看区两处。来源变化会让引用页变 `stale`，下次 `ingest` 重新排队。
-5. 可执行工作流放在 `workflow/<工作流>/`（旧目录 `scenario/`、`场景能力/` 仍扫描），由
-   `WORKFLOW.md`、`scripts/`、`references/` 组成；旧目录里没有 `WORKFLOW.md` 时回退
-   `SCENARIO.md`。`ingest` 跳过整个目录；`query` 不检索工作流，需要时显式 `workflow search`，
+5. 可执行工作流放在 `workflows/<工作流>/`，由 `WORKFLOW.md`、`scripts/`、`references/`
+   组成。`ingest` 跳过整个目录；`query` 不检索工作流，需要时显式 `workflow search`，
    命中后按 `workflow load` 返回的分类步骤执行。改工作流文件立即生效，不用重新摄入。技能自带
    `topic-exploration` 内置工作流，项目放同名工作流即可覆盖，显式检索时同样能被检出。
 6. 话题沉淀放在 `话题/<主题>.md`，一个主题一份，固定六节（主题、结论、依据、未决问题、
@@ -77,12 +81,13 @@ Windows 首次使用运行
   子目录，草稿、载荷、导出与临时文件都放 `.wiki/` 下。资料在区外时请用户切换工作区，
   不跨区读写。
 - **页面只能通过命令修改。** `<view>/pages` 里的手改不会被静默覆盖，引擎会告警，由人工
-  `sync` 决定是否收进账本。人工修改走 `page import`，回滚走 `page restore --rev N`。
+  `sync` 决定是否收进账本。人工修改走 `page import`，补关联走 `page link <id> <target...>`，
+  回滚走 `page restore --rev N`；批量按共享来源补链用 `page link --repair --dry-run` 先预览。
 - **观看区的所有权分开算。** `<view>/pages` 的手改不会被覆盖，只给告警，由人工 `sync`
   收进账本；`<view>/raw` 由摄入维护（手改会在下一次 `ingest` 被采纳为事实），
   `<view>/README.md` 每次推送重写；`topics/`、`workflows/` 首次投放后归用户，引擎不覆盖
   也不删除。详见[观看区与发布](#观看区与发布)。
-- **工作流不是知识页。** `workflow/`（或旧的 `scenario/`、`场景能力/`）不摄入、不进账本、
+- **工作流不是知识页。** `workflows/` 不摄入、不进账本、
   不生成任务；流程以 `WORKFLOW.md` 为准，事实依据仍以页面和 raw 为准。工作流命令只读，
   不要求先 `init`。
 - **话题是 wiki 的探索层，不是知识页。** `话题/` 由 agent 按内置「话题探索」工作流的格式
@@ -102,8 +107,7 @@ Windows 首次使用运行
   删掉该文件再 `ingest`，会用源文件重建（源文件也没了才会丢）。源文件内容改变且比 raw 新时
   `ingest` 会主动重写；只改 mtime（`touch`）不会触发。
 - `README.md`：目录说明与统计，每次推送重写。
-- `topics/`、`workflows/`：首次推送各投放一次，之后归用户；引擎不覆盖、不删除。旧的
-  `scenarios/` 不再同步，可删除或手动并入 `workflows/`。
+- `topics/`、`workflows/`：首次推送各投放一次，之后归用户；引擎不覆盖、不删除。
 - 其他文件（包括 `.obsidian/`）不删不改。
 
 手改尚未被 `sync` 收割期间，这一页在观看区整体冻结：推送既不覆盖它，也不按新标题改名或
@@ -111,10 +115,10 @@ Windows 首次使用运行
 被占等）只写 stderr，不进 JSON 的 `data`；只有 `sync` 会在 `data.warnings` 里给出同类信息。
 
 配置在 `.wiki/wiki.json` 的 `publish` 段，四个键：`dir`（默认 `wiki`）、`enabled`（默认
-`true`）、`topics`（默认 `true`）、`workflows`（默认 `true`；旧库的 `scenarios` 键仍兼容）。
+`true`）、`topics`（默认 `true`）、`workflows`（默认 `true`）。
 
 `dir` 必须是单个目录名：不能以点开头、不能含路径分隔符，也不能是 `.wiki`、`话题`、
-`workflow`、`scenario`、`场景能力`；名字非法时即使 `enabled:false` 也报 `E_CONFIG`。这个名字被引擎
+`workflows`；名字非法时即使 `enabled:false` 也报 `E_CONFIG`。这个名字被引擎
 占用，即使关了发布也仍跳过，所以不能拿它当来源目录。`enabled:false` 只停推送：不写
 `README.md`，不再更新 `pages/`、不投放 `topics/`、`workflows/`，但 `<view>/` 与
 `<view>/raw/` 仍会创建。换 `dir` 后旧目录名不再跳过，`ingest` 会把它当普通来源摄入，

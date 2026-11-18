@@ -24,6 +24,10 @@ python3 <skill>/scripts/wiki.py ingest --json   # 失败时 stdout 仍是一段 
 退出码含义：`0` 成功（含“没有变化”“任务被跳过”），`1` 命令失败，`2` 用法或载荷不合法，
 `3` 状态冲突（账本、任务、来源），`4` 工作区被占用。
 
+`page link` 或 `page import` 报 `E_LINK_UNRESOLVED` 时，目标是还没有写进账本的页：先用
+`query` 找已有页，或先完成目标页，再重试补链。空目标、指向自己报 `E_USAGE`，检查命令
+参数即可，不会写修订。
+
 自动补齐只有一种：任何打开账本的命令（`init`、`ingest`、`next`、`submit`、`query`、
 `status`、`doctor` 等）在打开时，缺的目录、缺的 `wiki.json`、缺的表会当场建出来，
 补了什么写在返回值的 `repaired` 里（路径列表，和 `created` 同形）。`repaired` 非空不是错误；

@@ -57,7 +57,7 @@
   `.wiki/tasks/<id>/`、`.wiki/export`、`.wiki/tmp/`）。`--dry-run` 的临时库在 `.wiki/tmp/`，
   退出时清理。
 - 会写账本或观看区的命令（`init`、`ingest`、`next`、`submit`、`release`、`query`、
-  `export`、`status`、`sync`、`doctor`、`page import`、`page restore`）持有一把工作区文件锁
+  `export`、`status`、`sync`、`doctor`、`page import`、`page restore`、`page link`）持有一把工作区文件锁
   `.wiki/lock`；锁被另一个存活进程占着时排队等待 5 秒，仍拿不到返回 `E_BUSY`（退出码 4）。
   进程崩溃留下的锁（记录 pid 已不存在，或超过 30 分钟）会被下一个命令接管。
 
@@ -84,13 +84,12 @@
 
 ### ingest
 
-扫描根目录（跳过隐藏目录、`scan.ignore`、`workflow/`、`scenario/`、`场景能力/`、`话题/`
-与观看区 `<view>/`），解析新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），
-并为每个新来源入队任务，同一份正文的多个路径合成一条 route 任务。`<view>/raw` 被手改时按
-整份正文采纳：共享它的路径一起换摘要，文件留在原名原路径。`workflow/`（旧目录
-`scenario/`、`场景能力/`）放可执行工作流，`话题/` 是 wiki 的探索层，都不作为摄入来源，
-摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。工作流与话题的检索分别由
-`workflow search` 和 `query` 直接扫描文件完成。
+扫描根目录（跳过隐藏目录、`scan.ignore`、`workflows/`、`话题/` 与观看区 `<view>/`），解析
+新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），并为每个新来源入队任务，
+同一份正文的多个路径合成一条 route 任务。`<view>/raw` 被手改时按整份正文采纳：共享它的
+路径一起换摘要，文件留在原名原路径。`workflows/` 放可执行工作流，`话题/` 是 wiki 的探索
+层，都不作为摄入来源，摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。工作流与话题
+的检索分别由 `workflow search` 和 `query` 直接扫描文件完成。
 
 `--dry-run` 用 `.wiki/tmp/` 下的临时库，退出时清理，不写账本；它只列 `would_ingest`，不预告
 末尾补偿入队会补哪些来源。`--force` 忽略哈希重新解析。`--only` 按根目录相对 key
@@ -182,10 +181,10 @@ route 里的书写顺序一致。
   （包括同一 route 载荷里的 `new`，顺序不限）。若该页已有未完成任务，来源并入该任务。
 - `skip`：把这份正文仍 `pending` 的挂载路径标记 `skipped`。
 
-decision 可带可选 `links`，声明这页与哪些页面相关。目标只能是提交时已存在的页，或同一
-载荷里 `new` 的兄弟页；兄弟页要等被链页面先提交，顺序错会报 `E_LINK_UNRESOLVED`，重新
-`next` 后按顺序重试。`new` 的 `links` 原样进入 page 模板；`merge` 的 `links` 是增量，
-提交时与页面已有链接取并集。
+decision 的 `links` 声明这页与哪些页面相关；写页前应逐条判断，确实没有相关页就写空数组。
+目标只能是提交时已存在的页，或同一载荷里 `new` 的兄弟页；兄弟页要等被链页面先提交，顺序
+错会报 `E_LINK_UNRESOLVED`，重新 `next` 后按顺序重试。`new` 的 `links` 原样进入 page 模板；
+`merge` 的 `links` 是增量，提交时与页面已有链接取并集。
 
 **page 载荷**：
 
@@ -244,13 +243,11 @@ decision 可带可选 `links`，声明这页与哪些页面相关。目标只能
 
 ### workflow
 
-`workflow list`：列出 `<root>/workflow/`、`<root>/scenario/`、`<root>/场景能力/` 下的一级
-工作流目录及技能内置工作流，包括结构不合法的项；同一 id 出现在多个目录时按
-`workflow/` > `scenario/` > `场景能力/` 只列第一份，项目工作流与内置工作流同 id 时只列
-项目版。
+`workflow list`：列出 `<root>/workflows/` 下的一级工作流目录及技能内置工作流，包括结构
+不合法的项；项目工作流与内置工作流同 id 时只列项目版。
 
-`data`: `{root, roots, count, valid, warned, workflows[]}`；`root` 是优先生效的目录名，
-`roots` 是实际存在的工作流目录（`workflow/` 在前），`warned` 是带 warning 的项数；每项为
+`data`: `{root, roots, count, valid, warned, workflows[]}`；`root` 是工作流目录名，
+`roots` 是实际存在的工作流目录（只有 `workflows/`），`warned` 是带 warning 的项数；每项为
 `{id, source, name, alias_name, description, tags, path, main, valid, error, resources,
 tools, human_steps, agent_steps, verify_steps, warnings[]}`。`tools`、`human_steps` 等是
 各类型步骤的数量，`warnings[]` 为 `{code, line, text, message}`；`name` 是工作流机器名、
@@ -273,7 +270,7 @@ tools, human_steps, verify_steps, warnings}`，`load` 是建议的加载命令�
 
 `data`: `{workflow, path, content, meta, resources, tools, human_steps, agent_steps,
 verify_steps, warnings}`。`content` 是 `WORKFLOW.md` 全文（含 frontmatter），`path` 是主
-文件的根目录相对路径；旧目录里没有 `WORKFLOW.md` 时读回退的 `SCENARIO.md`。`tools`、
+文件的根目录相对路径。`tools`、
 `human_steps`、`agent_steps`、`verify_steps` 每项为 `{line, text}`，`warnings[]` 同上。
 内置工作流的 `path` 是展示标签 `builtin/<id>/WORKFLOW.md`，不是磁盘路径；其 `resources`
 恒为空。
@@ -289,7 +286,19 @@ verify_steps, warnings}`。`content` 是 `WORKFLOW.md` 全文（含 frontmatter�
 ### page
 
 - `page import <id> --from <file>`：采用人工编辑的页面文件（可带 frontmatter），
-  生成新修订（`origin=import`），不强制 evidence。只允许已存在的页面。
+  生成新修订（`origin=import`），不强制 evidence。只允许已存在的页面。frontmatter 的
+  `title/type/summary/sources/links` 会并入；`links` 必须是块列表，与旧链接取并集，
+  未知目标报 `E_LINK_UNRESOLVED`；`aliases/status/updated` 忽略。
+- `page link <id> <target...>`：给已存在页面补关联，生成新修订（`origin=link`），只增不删。
+  目标必须是已存在页；未知页报 `E_LINK_UNRESOLVED`，空目标或指向自己报 `E_USAGE`；已链过
+  的目标不产生新修订。成功后立即推送观看区，告警写 stderr。单页模式可加 `--dry-run`
+  只预览、不写修订。`data`: `{mode:"single", dry_run, page, rev, links, added, view}`，
+  预览时没有 `links`/`view`。
+- `page link --repair [--dry-run]`：按“共享同一 raw 来源”推断缺失的边。同一来源下的页
+  两两配对，已有任一方向的边就跳过，每对只加一条（页 id 小的指向大的，观看区两边都会
+  显示）；不传页面 id 和目标。`--dry-run` 只输出计划。`data`:
+  `{mode:"repair", dry_run, rules:["shared-source"], edges, pages, view}`，`pages` 每项为
+  `{page, rev, added}`。只补不删，不改变已有边的方向。
 - `page restore <id> --rev N`：把第 N 版内容写成新修订（`origin=restore`）。该页在观看区
   有未收割手改时，推送跳过它，恢复内容不会出现；此时跑 `sync` 反而会把那份手改收成更新一版
   并盖过 restore。先 `sync` 处理手改，再 `restore`。
@@ -367,7 +376,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_PAGE_UNKNOWN` | merge 指向不存在的页面 | 改用 new，或查 `page_index` / `pending_pages` |
 | `E_PAGE_GONE` | update 时页面消失 | 重新 `next` |
 | `E_BAD_ID` | 页面 slug 非法 | 用小写字母数字与 `-_.` |
-| `E_LINK_UNRESOLVED` | 链接目标不存在 | 先建目标页，或去掉链接 |
+| `E_LINK_UNRESOLVED` | 链接目标不存在 | 先建目标页，或去掉链接；已有页补链用 `page link` |
 | `E_EVIDENCE_NOT_FOUND` | 引文（含保留的旧引文）不在来源原文里 | 重读 raw，逐字复制 |
 | `E_SOURCE_DRIFT` | 来源在任务领取后被改动或删除 | 重新 `next`，重读来源 |
 | `E_UNKNOWN_SOURCE` | 页面引用未登记的来源 | 先 `ingest` |
@@ -398,7 +407,6 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 `schema.types` 里删掉。
 
 `publish.dir` 是观看区目录名，必须是单个目录名：不能以点开头、不能含路径分隔符，也不能
-是 `.wiki`、`话题`、`workflow`、`scenario`、`场景能力`；非法值即使 `enabled:false` 也返回 `E_CONFIG`。
+是 `.wiki`、`话题`、`workflows`；非法值即使 `enabled:false` 也返回 `E_CONFIG`。
 `enabled:false` 只停推送，`<view>/` 与 `<view>/raw/` 仍会创建；`topics`、`workflows`
-控制首次推送时是否投放对应目录。旧库的 `publish.scenarios` 仍会读：没有 `workflows` 键时按
-`scenarios` 的值迁移，`scenarios` 为假则不再投放工作流。
+控制首次推送时是否投放对应目录。

@@ -9,7 +9,7 @@ from pathlib import Path
 import workflows
 import topics
 from errors import WikiError
-from pages import EVIDENCE_HEADING, meta_mismatch, split_evidence, view_name
+from pages import EVIDENCE_HEADING, meta_mismatch, split_evidence, split_relations, view_name
 from util import digest_text, norm_key, write_atomic
 from workspace import window_safe
 
@@ -28,11 +28,6 @@ def render_view_readme(wiki, records=None):
     workflow_count = sum(
         1 for path in (publish / "workflows").glob("*")
         if (path / workflows.WORKFLOW_FILE).is_file()
-        or (path / workflows.LEGACY_FILE).is_file()
-    )
-    legacy_count = sum(
-        1 for path in (publish / "scenarios").glob("*")
-        if (path / workflows.LEGACY_FILE).is_file()
     )
     lines = [
         "# Wiki 视图",
@@ -53,11 +48,6 @@ def render_view_readme(wiki, records=None):
         f"- `topics/`：话题副本，共 {topic_count} 篇。",
         f"- `workflows/`：工作流副本，共 {workflow_count} 个。",
     ])
-    if legacy_count:
-        lines.append(
-            f"- `scenarios/`：旧版场景副本，已停止同步，共 {legacy_count} 个；"
-            "可删除或手动并入 `workflows/`。"
-        )
     lines.extend([
         "",
         "## 说明",
@@ -100,7 +90,17 @@ def sync_view_file(wiki, item, target, body_only, warnings=None):
             f"view copy changed {', '.join(changed)}；保留账本元数据、只收正文用 sync --body-only；确实要改元数据用 page import",
             "", 1,
         )
-    body, evidence = split_evidence(item["body"])
+    # Relations are engine-owned and render after the evidence block, so drop
+    # them before looking for a trailing evidence block. A view written by an
+    # older revision can also carry repeated evidence sections; strip every
+    # valid trailing one and keep the newest (R5).
+    body = split_relations(item["body"])
+    body, evidence = split_evidence(body)
+    while EVIDENCE_HEADING in body:
+        stripped, _ = split_evidence(body)
+        if stripped == body:
+            break
+        body = stripped
     if not evidence:
         if EVIDENCE_HEADING in item["body"]:
             message = (f"{item['file']}: evidence block does not parse; "
@@ -147,7 +147,7 @@ class ViewMixin:
         publish = self.config["publish"]
         if publish.get("topics", True):
             self._seed_view_topics(events)
-        if publish.get("workflows", publish.get("scenarios", True)):
+        if publish.get("workflows", True):
             self._seed_view_workflows(events)
         write_atomic(self.publish_dir / "README.md", render_view_readme(self, records))
         events.append("README.md rewritten")

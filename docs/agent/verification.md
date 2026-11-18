@@ -171,6 +171,7 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。Windows 侧没有跑过 Po
 `scenario` 改为 `workflow`：命令硬切为 `workflow list/search/load`，目录仍三向读取
 （`workflow/` > `scenario/` > `场景能力/`），主文件 `WORKFLOW.md` 优先、缺失回退
 `SCENARIO.md`；步骤要求每步标 `tool:`/`human:`/`agent:`/`verify:`，整份至少一个 `tool:`。
+目录双读在同日复核后改为只认 `workflows/`，见下一节。
 
 `python3 tests/selftest.py`：258/258 通过，退出码 0。新增与改写的检查：
 
@@ -187,7 +188,21 @@ sources 为 A/B/C，evidence 保留 A/B 并加入 C。Windows 侧没有跑过 Po
 
 `wiki.py check` 的 `workflow:topic-exploration` 一项通过，账本完整性报 `ok`。
 
-## 一、自测：203/203 通过
+## 2026-11-18 工作流目录统一为 `workflows/` 后复跑
+
+项目工作流只从 `<root>/workflows/` 读取；`workflow/`、`scenario/`、`场景能力/` 的兼容扫描、
+`SCENARIO.md` 回退与 `publish.scenarios` 迁移一并移除，场景概念不再存在。复跑
+`python3 tests/selftest.py`：281/281 通过，退出码 0。相关检查：
+
+- `workflow_roots` 只返回实际存在的 `workflows/`，`workflow list` 的 `roots` 为 `["workflows"]`；
+- 目录里只有 `SCENARIO.md` 时判为不合法，`error` 为 `missing WORKFLOW.md`，不再回退；
+- 观看区投放 `workflows/`，`publish.workflows=false` 停止投放，遗留的 `publish.scenarios` 键被忽略；
+- `ingest` 跳过 `workflows/`。
+
+`python3 skills/llm-wiki/scripts/wiki.py workflow load ppt_creator --json`：`valid: true`、
+`warnings: []`，步骤计数 2 tool / 1 human / 4 agent / 1 verify。
+
+## 一、自测：281/281 通过
 
 ```bash
 python3 tests/selftest.py
@@ -223,6 +238,11 @@ python3 tests/selftest.py
 | 观看区被改 | 推送只告警不覆盖，`sync` 收成新修订 |
 | `page import` | 生成 rev2，`origin=import` |
 | import 区外 | `--from` 越界返回 `E_PATH` |
+| import links | frontmatter 块列表并入旧链接，未知目标报 `E_LINK_UNRESOLVED` |
+| `page link` | 新增边生成新 rev，重复链不写修订 |
+| `page link --repair` | 同源两页 dry-run 计划 1 条边；执行后两边 `## 关联` 可见；重跑 0 条 |
+| link 非法目标 | 未知目标、自己、空目标分别报 `E_LINK_UNRESOLVED`/`E_USAGE` |
+| 关系页 sync | 先剥关系段再解析证据，正文不重复累积证据块 |
 | `page restore` | 回滚内容生成 rev3 |
 | `export` | 渲染文本复制到目标目录 |
 | export 区外 | 目标目录越界返回 `E_PATH`，不写文件 |
@@ -230,7 +250,7 @@ python3 tests/selftest.py
 | `--dry-run` | 未初始化目录不创建 `.wiki/` |
 | `doctor` | 跑完并返回结构化 issues |
 
-输出以 `201/201 checks passed` 结尾，退出码 0。`--json` 输出可供 CI 解析。
+输出以 `281/281 checks passed` 结尾，退出码 0。`--json` 输出可供 CI 解析。
 
 ## 二、真实语料：4 份中国电信 PDF
 

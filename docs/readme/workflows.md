@@ -1,13 +1,9 @@
 # 可执行工作流
 
 可执行工作流把一类任务的执行流程写成可检索、可加载的文件，放在项目根目录的
-`workflow/` 下。它借用 skill 的组织方式：一个主流程文件，加上按需读取的脚本和说明。
+`workflows/` 下。它借用 skill 的组织方式：一个主流程文件，加上按需读取的脚本和说明。
 和知识页不同，工作流描述“怎么做”，而且每一步都要标明由谁执行；它不进入账本，也不参与
 页面引用。
-
-旧工作区使用的 `scenario/` 与 `场景能力/` 仍然有效：三个目录都会被扫描，同一 id 同时
-存在时按 `workflow/` > `scenario/` > `场景能力/` 取第一个，避免改过的英文目录被遗留的
-中文目录盖住。目录里没有 `WORKFLOW.md` 时回退读 `SCENARIO.md`。
 
 技能另带一个内置工作流 `topic-exploration`，是回答知识问题时的默认流程；项目放同名工作流
 即可覆盖它。
@@ -15,7 +11,7 @@
 ## 目录结构
 
 ```text
-<root>/workflow/
+<root>/workflows/
 └── intake-backlog/
     ├── WORKFLOW.md         主流程，必需
     ├── scripts/
@@ -24,11 +20,10 @@
         └── error-codes.md
 ```
 
-- `workflow/`、`scenario/`、`场景能力/` 都只扫描一级子目录，每个子目录是一个工作流；
-  隐藏目录和普通文件忽略。
+- `workflows/` 只扫描一级子目录，每个子目录是一个工作流；隐藏目录和普通文件忽略。
 - 工作流 id 就是子目录名，用英文与下划线，不要把中文写进路径。
 - `WORKFLOW.md` 是唯一入口，文件名固定；缺它、缺 `description`、正文为空或步骤契约不满足
-  都视为不合法。旧目录里没有 `WORKFLOW.md` 时，`SCENARIO.md` 作为回退入口。
+  都视为不合法。
 - `scripts/` 放确定性操作的脚本，`references/` 放执行时才需要读的细节。
 - 其他文件也会列进资源清单，`kind` 为 `other`；它们不会自动执行或加载。
 
@@ -48,7 +43,7 @@ skills/llm-wiki/workflows/
   `builtin/topic-exploration/WORKFLOW.md`，不是磁盘路径，`resources` 恒为空（内置流程自包含）。
 - 内置工作流不自动进入 `query` 结果；需要时显式 `workflow search`，内置工作流同样会被检出，
   `source` 为 `builtin`。项目覆盖后 `source` 变为 `project`。
-- 内置工作流只读，改流程请复制到 `workflow/topic-exploration/` 再改，不要改技能安装目录。
+- 内置工作流只读，改流程请复制到 `workflows/topic-exploration/` 再改，不要改技能安装目录。
 
 ## WORKFLOW.md
 
@@ -142,7 +137,7 @@ frontmatter 字段：
 
 ## 检索与加载
 
-工作流不经过 `ingest`，`workflow/`、`scenario/`、`场景能力/` 在摄入时整目录跳过，因此改流程
+工作流不经过 `ingest`，`workflows/` 在摄入时整目录跳过，因此改流程
 不需要重建知识库。`query` 不检索工作流；要用工作流时必须显式检索，避免工作流自动介入普通
 知识问答：
 
@@ -160,6 +155,9 @@ python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 结构不合法的工作流不会出现在 `workflow search` 结果里，但会出现在 `workflow list` 中并带
 `error`，方便修正。
 
+`wiki:` 前缀入口也走这里：需求由 `SKILL.md` 的路由表落到具体工作流，仍必须 `workflow load`
+后才按步骤执行。路由表只在 `SKILL.md` 定义一处，本文不复制。
+
 话题探索流程依次做：定主题、找现成能力、找已有话题、多轮查页面、补原始依据、判断收敛、
 总结，最后问用户是否沉淀到 `话题/<主题>.md`。`query` 的 `topics` 是已知话题，相关的先读
 再探索，避免重复劳动；话题格式见 [话题沉淀](topics.md)。
@@ -175,7 +173,6 @@ python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
   知识页里的 `process` 知识，按页引用；纯人工流程也没有 `tool:` 步骤，会被判为不合法。
 - `workflow list` / `workflow load` 只读，不要求先 `init`，也不会创建 `.wiki/`。
 - 话题探索的沉淀物是 `话题/`，不是工作流；只有流程稳定、可重复执行时才另建工作流。
-- 观看区 `publish.workflows` 控制是否把项目工作流首次投放到 `workflows/`；旧的
-  `scenarios/` 不再同步，可删除或手动并入。
+- 观看区 `publish.workflows` 控制是否把项目工作流首次投放到 `workflows/`。
 
 完整命令字段与错误码见 [CLI 契约](cli.md#workflow)。

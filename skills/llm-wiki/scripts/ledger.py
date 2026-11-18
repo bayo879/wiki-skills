@@ -245,15 +245,6 @@ def load_config(path):
     for section, values in raw.items():
         if section in config and isinstance(values, dict):
             config[section].update(values)
-    # 0.4.x 用 publish.scenarios 开关；改名后只有显式给了旧键、没给新键时才迁移，
-    # 这样 scripts 里写死 scenarios=false 的旧配置不会因为默认值变回开启。
-    raw_publish = raw.get("publish") if isinstance(raw, dict) else None
-    if (
-        isinstance(raw_publish, dict)
-        and "scenarios" in raw_publish
-        and "workflows" not in raw_publish
-    ):
-        config["publish"]["workflows"] = raw_publish["scenarios"]
     return config
 
 

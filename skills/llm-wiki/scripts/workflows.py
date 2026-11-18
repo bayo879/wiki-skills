@@ -1,15 +1,10 @@
-"""Read-only executable workflows stored under `<root>/workflow/`.
+"""Read-only executable workflows stored under `<root>/workflows/`.
 
 A workflow is shaped like a skill:
 
-    workflow/<id>/WORKFLOW.md      flow + frontmatter (name, description, tags)
-    workflow/<id>/scripts/         executable helpers
-    workflow/<id>/references/      notes read on demand
-
-The legacy directories `scenario/` and `场景能力/` are scanned as well, so
-workspaces created before the rename keep working; the first match wins
-(`workflow/` > `scenario/` > `场景能力/`), and `WORKFLOW.md` falls back to
-`SCENARIO.md` inside a legacy directory.
+    workflows/<id>/WORKFLOW.md     flow + frontmatter (name, description, tags)
+    workflows/<id>/scripts/        executable helpers
+    workflows/<id>/references/     notes read on demand
 
 A workflow is executable: every step in its `## 步骤` section carries one of
 `tool:`, `human:`, `agent:` or `verify:`. The engine reads those markers so
@@ -19,7 +14,7 @@ typed steps but no `tool:` step is a manual procedure: it is invalid here and
 belongs on a `process` page. Files written before the contract existed are
 still readable with a warning; `UNTYPED_ALLOWED` is flipped off in 0.6.0.
 
-Workflows are not knowledge pages: `ingest` skips the directories, nothing is
+Workflows are not knowledge pages: `ingest` skips the directory, nothing is
 written to `.wiki/`, and `query` reads the files directly. This keeps a flow
 editable without re-ingesting it, while `workflow load` still returns the full
 flow plus an inventory of the support files.
@@ -40,13 +35,11 @@ from pathlib import Path
 from errors import WikiError
 from frontmatter import split_frontmatter
 
-WORKFLOW_DIR = "workflow"
-LEGACY_DIRS = ("scenario", "场景能力")
-# All names are scanned, canonical first: a leftover 场景能力/<id> must not
-# shadow the copy the project actually edits under workflow/<id>.
-WORKFLOW_DIRS = (WORKFLOW_DIR, *LEGACY_DIRS)
+WORKFLOW_DIR = "workflows"
 WORKFLOW_FILE = "WORKFLOW.md"
-LEGACY_FILE = "SCENARIO.md"
+# Callers that reserve the workflow directory (ingest skip, publish.dir) read
+# this instead of hardcoding the name.
+WORKFLOW_DIRS = (WORKFLOW_DIR,)
 MAX_WORKFLOW_CHARS = 200_000
 BUILTIN_DIR = "workflows"
 BUILTIN_LABEL = "builtin"
@@ -95,8 +88,7 @@ def inventory(root):
 def scan(root, builtin=True):
     """Return full internal records for project workflows, then built-ins.
 
-    A project workflow shadows a built-in one with the same id, and a workflow
-    under `workflow/` shadows a `scenario/` or `场景能力/` copy of the same id.
+    A project workflow shadows a built-in one with the same id.
     """
     root = Path(root)
     entries = []
@@ -381,12 +373,8 @@ def _entry(root, directory, source="project"):
         record["error"] = "workflow directory escapes the workspace root"
         return record
     record["resources"] = _resources(directory, root)
-    canonical = directory / WORKFLOW_FILE
-    main = canonical if canonical.is_file() else directory / LEGACY_FILE
+    main = directory / WORKFLOW_FILE
     record["main"] = main.relative_to(root).as_posix()
-    if canonical.is_symlink() and not _within(root, canonical):
-        record["error"] = f"{WORKFLOW_FILE} escapes the workspace root"
-        return record
     if main.is_symlink() and not _within(root, main):
         record["error"] = f"{main.name} escapes the workspace root"
         return record
@@ -503,7 +491,7 @@ def _resources(directory, root):
             if filename.startswith("."):
                 continue
             path = Path(current) / filename
-            if path.parent == directory and path.name in (WORKFLOW_FILE, LEGACY_FILE):
+            if path.parent == directory and path.name == WORKFLOW_FILE:
                 continue
             if path.is_symlink() and not _within(root, path):
                 continue

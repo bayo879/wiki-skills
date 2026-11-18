@@ -291,7 +291,7 @@ class PagesMixin:
         meta = dict(meta)
         meta["id"] = page
         # Add-only at the storage boundary: no caller (submit, import, restore,
-        # sync) can silently drop an edge, because there is no delete command.
+        # sync, link) can silently drop an edge, because there is no delete command.
         existing = (record or {}).get("meta", {}).get("links") or []
         links = normalize_links(list(meta.get("links") or []) + list(existing))
         meta["links"] = [link for link in links if link != page]

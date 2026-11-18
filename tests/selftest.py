@@ -83,7 +83,7 @@ def body_file(root):
 
 
 def workflow_files(root):
-    base = Path(root) / "workflow"
+    base = Path(root) / "workflows"
     good = base / "account-opening"
     (good / "scripts").mkdir(parents=True)
     (good / "references").mkdir(parents=True)
@@ -126,34 +126,98 @@ def workflow_files(root):
         "## 步骤\n\n1. tool: **取证**\n2. 复核\n",
         encoding="utf-8",
     )
-    english = Path(root) / "scenario" / "deck-flow"
-    english.mkdir(parents=True)
-    (english / "SCENARIO.md").write_text(
-        "---\nname: 旧英文流程\ndescription: 旧目录里的流程\n---\n\n"
-        "## 步骤\n\n1. tool: **旧步骤**\n",
-        encoding="utf-8",
-    )
     deck = base / "deck-flow"
     deck.mkdir()
     (deck / "WORKFLOW.md").write_text(
-        "---\nname: Deck flow\ndescription: Flow stored under the canonical workflow directory\n---\n\n"
+        "---\nname: Deck flow\ndescription: Flow stored under the workflow directory\n---\n\n"
         "## 步骤\n\n1. tool: **draft**\n2. human: **hand off**\n",
         encoding="utf-8",
     )
-    legacy = base / "legacy-flow"
-    legacy.mkdir()
-    (legacy / "SCENARIO.md").write_text(
-        "---\nname: 旧流程\ndescription: 还没有类型标记的旧文件\n---\n\n"
-        "# 旧流程\n\n## 步骤\n\n1. 老步骤\n",
-        encoding="utf-8",
-    )
-    shadow = Path(root) / "场景能力" / "account-opening"
-    shadow.mkdir(parents=True)
-    (shadow / "SCENARIO.md").write_text(
-        "---\nname: 影子流程\ndescription: 中文目录里的旧副本\n---\n\n1. 旧\n",
+    scenario_only = base / "scenario-only"
+    scenario_only.mkdir()
+    (scenario_only / "SCENARIO.md").write_text(
+        "---\nname: 旧流程\ndescription: 只剩旧文件名\n---\n\n"
+        "# 旧流程\n\n## 步骤\n\n1. tool: **旧步骤**\n",
         encoding="utf-8",
     )
     return main
+
+
+def repair_flow(results):
+    """Repair missing edges from pages that cite the same raw source."""
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-repair-"))
+    try:
+        (root / "shared.md").write_text(
+            "# 共享来源\n\n同一份来源支撑甲、乙两页。\n", encoding="utf-8"
+        )
+        run(root, "ingest")
+        route = run(root, "next", "--kind", "route")["data"]["tasks"][0]
+        route_query(root, route, "共享")
+        key = route["work"]["sources"][0]["key"]
+        run(root, "submit", route["id"], "--payload", payload_file(
+            root, "repair-route.json",
+            {"decisions": [
+                {"source": key, "action": "new", "page": "page-a",
+                 "title": "甲页", "type": "concept", "reason": "甲"},
+                {"source": key, "action": "new", "page": "page-b",
+                 "title": "乙页", "type": "concept", "reason": "乙"},
+            ]},
+        ))
+        tasks = run(root, "next", "--kind", "page", "--batch", "2")["data"]["tasks"]
+        check(results, "repair fixture claims both pages", len(tasks) == 2, tasks)
+        for task in tasks:
+            page = task["template"]["page"]
+            title = task["template"]["title"]
+            draft = root / ".wiki/drafts" / f"{page}.md"
+            draft.parent.mkdir(parents=True, exist_ok=True)
+            sentence = f"{title}的正文。"
+            quote = "同一份来源支撑甲、乙两页。"
+            draft.write_text(
+                f"## 结论\n\n{sentence}\n\n## 要点\n\n- {sentence}\n",
+                encoding="utf-8",
+            )
+            run(root, "submit", task["id"], "--payload", payload_file(
+                root, f"{page}-repair.json",
+                {"page": page, "title": title, "type": "concept", "summary": sentence,
+                 "links": [], "body_file": str(draft.relative_to(root)),
+                 "evidence": [{"source": key, "quote": quote}],
+                 "boundaries": {"covered": title, "not_covered": "其他"}},
+            ))
+
+        before = run(root, "query", "--page", "page-a")["data"]
+        check(results, "repair fixture starts without edges",
+              before["outgoing"] == [] and before["incoming"] == [], before)
+        dry = run(root, "page", "link", "--repair", "--dry-run")["data"]
+        check(results, "link repair previews shared-source edges",
+              dry["dry_run"] is True and dry["edges"] == 1
+              and dry["pages"][0]["page"] == "page-a"
+              and dry["pages"][0]["added"] == ["page-b"], dry)
+        still = run(root, "query", "--page", "page-a")["data"]
+        check(results, "a repair preview writes no revision",
+              still["rev"] == before["rev"] and still["outgoing"] == [], still)
+
+        applied = run(root, "page", "link", "--repair")["data"]
+        check(results, "link repair applies shared-source edges",
+              applied["edges"] == 1 and applied["pages"][0]["page"] == "page-a"
+              and applied["pages"][0]["added"] == ["page-b"], applied)
+        page_a = run(root, "query", "--page", "page-a")["data"]
+        page_b = run(root, "query", "--page", "page-b")["data"]
+        check(results, "repaired edges point from the first page to the second",
+              page_a["outgoing"] == ["page-b"] and page_b["incoming"] == ["page-a"],
+              (page_a["outgoing"], page_b["incoming"]))
+        view_a = (root / page_a["path"]).read_text(encoding="utf-8")
+        view_b = (root / page_b["path"]).read_text(encoding="utf-8")
+        check(results, "a repaired edge renders on both sides of the view",
+              "[[page-b]]" in view_a and "[[page-a]]" in view_b, (view_a, view_b))
+
+        again = run(root, "page", "link", "--repair")["data"]
+        check(results, "link repair is idempotent",
+              again["edges"] == 0 and again["pages"] == [], again)
+        bad = run(root, "page", "link", "--repair", "page-a", expect=2)
+        check(results, "link repair rejects positional page ids",
+              bad["error"]["code"] == "E_USAGE", bad)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def links_flow(results):
@@ -619,9 +683,10 @@ def main(argv=None):
 
         listing = run(root, "workflow", "list")["data"]
         check(results, "workflow list includes project and builtin entries",
-              listing["count"] == 7 and listing["valid"] == 5 and listing["warned"] == 3, listing)
-        check(results, "workflow list reports all project roots",
-              listing["roots"] == ["workflow", "scenario", "场景能力"], listing.get("roots"))
+              listing["count"] == 7 and listing["valid"] == 4 and listing["warned"] == 2, listing)
+        check(results, "workflow list reports the workflows/ root only",
+              listing["roots"] == ["workflows"] and listing["root"] == "workflows",
+              listing.get("roots"))
         check(results, "workflow commands leave no .wiki", not (root / ".wiki").exists(), listing)
         check(results, "workflow tags follow the obsidian rules",
               workflows._tags(["#话题", "见证 开户", "2024", "a/b#c", "话题"])
@@ -632,8 +697,8 @@ def main(argv=None):
             config_file = legacy_config / ".wiki" / "wiki.json"
             config_file.write_text('{"publish": {"scenarios": false}}', encoding="utf-8")
             migrated = ledger.load_config(config_file)["publish"]
-            check(results, "publish.scenarios migrates to publish.workflows",
-                  migrated["workflows"] is False and migrated["topics"] is True, migrated)
+            check(results, "a leftover publish.scenarios key is ignored",
+                  migrated["workflows"] is True and migrated["topics"] is True, migrated)
         finally:
             shutil.rmtree(legacy_config, ignore_errors=True)
         parsed, has_section = workflows.parse_steps(
@@ -662,13 +727,14 @@ def main(argv=None):
         check(results, "workflow load inventories support files",
               {item["kind"] for item in loaded["resources"]} == {"script", "reference"}, loaded["resources"])
         deck = run(root, "workflow", "load", "deck-flow")["data"]
-        check(results, "workflow/ wins over scenario/ and 场景能力/",
-              deck["path"] == "workflow/deck-flow/WORKFLOW.md"
+        check(results, "workflows/ is the only workflow directory",
+              deck["path"] == "workflows/deck-flow/WORKFLOW.md"
               and deck["workflow"]["name"] == "Deck flow", deck["path"])
-        legacy = run(root, "workflow", "load", "legacy-flow")["data"]
-        check(results, "a legacy SCENARIO.md still loads with a warning",
-              legacy["path"] == "workflow/legacy-flow/SCENARIO.md"
-              and legacy["warnings"][0]["code"] == "W_STEPS_UNTYPED", legacy)
+        legacy = run(root, "workflow", "list")["data"]["workflows"]
+        scenario_only = next(item for item in legacy if item["id"] == "scenario-only")
+        check(results, "a bare SCENARIO.md is not a workflow",
+              scenario_only["valid"] is False
+              and scenario_only["error"] == "missing WORKFLOW.md", scenario_only)
         partial = run(root, "workflow", "load", "partial")["data"]
         check(results, "an untyped step only warns",
               partial["workflow"]["valid"]
@@ -794,8 +860,8 @@ def main(argv=None):
         check(results, "ingest reports the open queue",
               data["queue"]["open"] == data["queue"]["queued"] + data["queue"]["leased"]
               and data["queue"]["route"] == 2, data.get("queue"))
-        check(results, "ingest skips the workflow directories",
-              not any(item["key"].startswith(("workflow", "scenario", "场景能力")) for item in data["ingested"]), data["ingested"])
+        check(results, "ingest skips the workflow directory",
+              not any(item["key"].startswith("workflows/") for item in data["ingested"]), data["ingested"])
         check(results, "ingest skips topic files",
               not any(item["key"].startswith("话题/") for item in data["ingested"]), data["ingested"])
         check(results, "image classified unsupported", [i["key"] for i in data["unsupported"]] == ["scan.png"], data["unsupported"])
@@ -1185,10 +1251,8 @@ def main(argv=None):
               (root / "wiki/workflows/account-opening/WORKFLOW.md").exists()
               and (root / "wiki/workflows/account-opening/scripts/check.sh").exists())
         deck = root / "wiki/workflows/deck-flow/WORKFLOW.md"
-        check(results, "the workflow copy follows the workflow/ precedence",
-              deck.exists()
-              and "Deck flow" in deck.read_text(encoding="utf-8")
-              and "旧英文流程" not in deck.read_text(encoding="utf-8"))
+        check(results, "the workflow copy follows the workflows/ directory",
+              deck.exists() and "Deck flow" in deck.read_text(encoding="utf-8"))
         config_path = root / ".wiki/wiki.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
         config["publish"]["workflows"] = False
@@ -1200,12 +1264,6 @@ def main(argv=None):
         config["publish"]["workflows"] = True
         config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         run(root, "status")
-        old_view = root / "wiki/scenarios/keep.md"
-        old_view.parent.mkdir(parents=True, exist_ok=True)
-        old_view.write_text("旧观看区自己留的文件\n", encoding="utf-8")
-        run(root, "status")
-        check(results, "the old scenarios/ view dir is left alone",
-              old_view.read_text(encoding="utf-8") == "旧观看区自己留的文件\n")
         (root / "wiki/topics/复机办理.md").write_text("我改过的话题\n", encoding="utf-8")
         run(root, "status")
         check(results, "user owned topic copies are never overwritten",
@@ -1292,6 +1350,33 @@ def main(argv=None):
         check(results, "imported aliases do not leak into page meta",
               "aliases" not in aliased_page["page"], aliased_page["page"])
 
+        linked = run(root, "page", "link", "anti-fraud-restore",
+                     "machine-room-inspection")["data"]
+        check(results, "page link adds an edge in a new revision",
+              linked["rev"] == 6 and linked["added"] == ["machine-room-inspection"], linked)
+        linked_page = run(root, "query", "--page", "anti-fraud-restore")["data"]
+        check(results, "page link is visible in outgoing links",
+              linked_page["outgoing"] == ["machine-room-inspection"], linked_page["outgoing"])
+        linked_view = (root / "wiki/pages/process/反诈复机.md").read_text(encoding="utf-8")
+        check(results, "page link pushes the relation section to the view",
+              "## 关联" in linked_view and "[[machine-room-inspection]]" in linked_view,
+              linked_view)
+        missing_link = run(root, "page", "link", "anti-fraud-restore",
+                           "no-such-page", expect=2)
+        check(results, "page link rejects an unknown target",
+              missing_link["error"]["code"] == "E_LINK_UNRESOLVED", missing_link)
+        self_link = run(root, "page", "link", "anti-fraud-restore",
+                        "anti-fraud-restore", expect=2)
+        check(results, "page link rejects linking to itself",
+              self_link["error"]["code"] == "E_USAGE", self_link)
+        blank_link = run(root, "page", "link", "anti-fraud-restore", " ", expect=2)
+        check(results, "page link rejects blank targets",
+              blank_link["error"]["code"] == "E_USAGE", blank_link)
+        repeated = run(root, "page", "link", "anti-fraud-restore",
+                       "machine-room-inspection")["data"]
+        check(results, "page link does not rewrite an existing edge",
+              repeated["rev"] == 6 and repeated["added"] == [], repeated)
+
         exported = run(root, "export", str(root / ".wiki/export"))["data"]["files"]
         check(results, "export writes rendered pages", exported, exported)
         escaped = run(root, "export", str(root.parent / "wiki-export"), expect=2)
@@ -1299,7 +1384,7 @@ def main(argv=None):
 
         config_path = root / ".wiki/wiki.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        for bad in ("../x", ".wiki", "a/b", "场景能力", "scenario", "workflow", "", ".", "..", ".hidden", "/abs", "a\\b", "话题"):
+        for bad in ("../x", ".wiki", "a/b", "workflows", "", ".", "..", ".hidden", "/abs", "a\\b", "话题"):
             config["publish"]["dir"] = bad
             config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
             escaped = run(root, "status", expect=2)
@@ -1682,6 +1767,40 @@ def main(argv=None):
                   and item["from"] == "pages/concept/临时位置.md"
                   and item["to"] == "pages/concept/机房巡检记录.md" for item in returned["written"])
               and new_path.exists() and not moved_away.exists(), returned)
+
+        room_before = run(root, "query", "--page", "machine-room-inspection")["data"]
+        linked_import = root / ".wiki/drafts/linked.md"
+        linked_import.write_text(
+            "---\ntitle: 机房巡检记录\nlinks:\n  - anti-fraud-restore\n---\n"
+            + room_before["body"],
+            encoding="utf-8",
+        )
+        imported_link = run(
+            root, "page", "import", "machine-room-inspection", "--from", str(linked_import)
+        )["data"]
+        check(results, "page import accepts a frontmatter link list",
+              imported_link["rev"] == room_before["rev"] + 1, imported_link)
+        imported_page = run(root, "query", "--page", "machine-room-inspection")["data"]
+        check(results, "imported links join the page edges",
+              "anti-fraud-restore" in imported_page["outgoing"], imported_page["outgoing"])
+        imported_view = new_path.read_text(encoding="utf-8")
+        check(results, "imported links reach the view after the next push",
+              "[[anti-fraud-restore]]" in imported_view, imported_view)
+
+        bad_link = root / ".wiki/drafts/bad-link.md"
+        bad_link.write_text(
+            "---\ntitle: 机房巡检记录\nlinks:\n  - no-such-page\n---\n"
+            "## 要点\n\nunknown link.\n",
+            encoding="utf-8",
+        )
+        rejected = run(root, "page", "import", "machine-room-inspection",
+                       "--from", str(bad_link), expect=2)
+        check(results, "page import rejects an unknown link",
+              rejected["error"]["code"] == "E_LINK_UNRESOLVED", rejected)
+        stable = run(root, "query", "--page", "machine-room-inspection")["data"]
+        check(results, "a rejected import leaves the page untouched",
+              stable["rev"] == imported_link["rev"]
+              and "anti-fraud-restore" in stable["outgoing"], stable)
 
         status = run(root, "status")["data"]
         check(results, "status counts invalidated tasks without opening them",
@@ -2320,7 +2439,7 @@ def main(argv=None):
         check(results, "next keeps reporting no work when nothing is open",
               empty["data"]["count"] == 0 and empty["summary"] == "no queued tasks", empty)
 
-        override = root / "workflow" / "topic-exploration"
+        override = root / "workflows" / "topic-exploration"
         override.mkdir()
         (override / "WORKFLOW.md").write_text(
             "---\nname: topic-exploration\ndescription: 项目自定义的话题流程\n---\n\n"
@@ -2336,6 +2455,7 @@ def main(argv=None):
         batch_flow(results)
         legacy_note_flow(results)
         links_flow(results)
+        repair_flow(results)
 
         healthy = run(root, "doctor", expect=(0, 1))["data"]
         check(results, "doctor runs", isinstance(healthy["issues"], list), healthy)
@@ -2354,7 +2474,7 @@ def main(argv=None):
             *sorted((ROOT / "docs" / "agent").rglob("*.md")),
             *sorted((ROOT / "skills" / "llm-wiki" / "references").rglob("*.md")),
             *sorted((ROOT / "skills" / "llm-wiki" / "workflows").rglob("*.md")),
-            *sorted((ROOT / "workflow").rglob("*.md")),
+            *sorted((ROOT / "workflows").rglob("*.md")),
         ]
         stale = [
             f"{path.relative_to(ROOT).as_posix()}:{number}"

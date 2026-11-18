@@ -26,7 +26,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`topics/`、`workflows/` 只首次投放；手改只告警，`sync` 回收 |
 | 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；租约归属（`task_leases`、`sweep_leases`、`lease_owner`）；并发走同一条 CAS 约定 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
-| 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；`workflow/`、`scenario/`、`场景能力/` 都扫描（同 id 按序优先，`WORKFLOW.md` 回退 `SCENARIO.md`），再与 `workflows/` 内置工作流合并；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
+| 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；只扫 `workflows/`，再与技能内置工作流合并；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
 | 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `话题/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留并复核；纯函数，只读 `Wiki` |
 | 账本结构 | `ledger.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用 |
@@ -55,7 +55,8 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 2. **`computed_status` 每次重算。** `meta.source_digests` 与当前 `sources.digest` 不一致，
    或来源 `missing/unsupported/oversize`，页面即 `stale`；不把 status 存成可漂移的字段。
 3. **修订只增不改。** `write_rev` 取 `MAX(rev)+1`，写 `digest`（元数据+正文的规范化哈希）
-   与 `render_digest`（渲染文本哈希），再重建链接；页面文件只由观看区推送写出。
+   与 `render_digest`（渲染文本哈希），再重建链接；页面文件只由观看区推送写出。关系边
+   同样只增不删，`page link`、`page import` 与提交共用这条存储不变量。
 4. **账本不写页面副本。** `.wiki/` 只放账本、任务目录与草稿（原文在 `<view>/raw/`）；页面正文的唯一
    落盘副本在 `<view>/pages/`，由 `sync_view` 按账本推送，`render_digest` 只是渲染文本的
    历史哈希，不再用于比对文件。
@@ -101,15 +102,14 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
     解析后落在扫描根外的符号链接。导入 `errors.py` / `workspace.py` 前设
     `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。
-12. **工作流只读、不进账本、不随查询注入。** `scan_files` 在扫描根一级跳过 `workflow/`、
-    `scenario/` 与旧 `场景能力/`（`workflows.WORKFLOW_DIRS`），不因旧 `scan.ignore` 是否包含
-    它们而改变；`workflows.py` 不打开数据库、不写 `.wiki/`、不排任务。`workflow_roots` 按
-    `(workflow, scenario, 场景能力)` 顺序返回实际存在的目录，`scan` 逐目录收一级子目录并跳过
-    重复 id，因此同名时 `workflow/` 生效；目录里没有 `WORKFLOW.md` 时回退 `SCENARIO.md`。
+12. **工作流只读、不进账本、不随查询注入。** `scan_files` 在扫描根一级跳过 `workflows/`
+    （`workflows.WORKFLOW_DIRS`），不因旧 `scan.ignore` 是否包含它而改变；`workflows.py` 不
+    打开数据库、不写 `.wiki/`、不排任务。`workflow_roots` 只返回实际存在的 `workflows/`，
+    `scan` 收其一级子目录，主文件固定为 `WORKFLOW.md`。
     `query` 不读工作流文件，工作流只通过显式 `workflow search` 检索，项目工作流与内置工作流
-    一起参与，只返回 `valid` 项。`workflow list` 仍列出非法项并带 `error`，在 `roots` 里报告
-    实际扫描到的目录，并汇总带 warning 的项数。`workflow load` 的 id 必须是这些目录之一的
-    一级目录名或内置工作流 id，拒绝 `.`、`..`、路径分隔符和区外符号链接。工作流文件是活
+    一起参与，只返回 `valid` 项。`workflow list` 仍列出非法项并带 `error`，`roots` 只有
+    实际扫描到的 `workflows/`，并汇总带 warning 的项数。`workflow load` 的 id 必须是
+    该目录的一级目录名或内置工作流 id，拒绝 `.`、`..`、路径分隔符和区外符号链接。工作流文件是活
     文件，不做缓存或 digest。
     步骤契约在 `parse_steps` / `_contract`：只取第一个 `## 步骤` 到下一个二级标题之间的顶层
     列表项（缩进最浅一层），代码块、缩进子项和其他节不算；`tool:`/`human:`/`agent:`/`verify:`
@@ -122,9 +122,9 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的 `topic_matches` 与页面
     `matches` 分开计数；话题文件由 agent 直接写，不经账本。
 14. **观看区目录由 `publish` 配置决定。** `publish_dir_name` 要求 `dir` 是单个目录名，拒绝
-    `.wiki`、`话题`、`workflow`、`scenario`、`场景能力`；`ensure()` 在开关判断之前调用它，
-    非法值即使 `enabled:false` 也报 `E_CONFIG`。`publish.workflows` 控制是否投放工作流，旧库
-    的 `publish.scenarios` 在没有 `workflows` 键时按值迁移。`ensure_publish` 始终创建 `<view>/` 与 `<view>/raw/`，
+    `.wiki`、`话题`、`workflows`；`ensure()` 在开关判断之前调用它，
+    非法值即使 `enabled:false` 也报 `E_CONFIG`。`publish.workflows` 控制是否投放工作流。
+    `ensure_publish` 始终创建 `<view>/` 与 `<view>/raw/`，
     `enabled:false` 只跳过 `sync_view`。`scan_files` 在扫描根无条件跳过该目录名，所以关了
     发布也不能拿它当来源；换掉名字后旧目录恢复为普通来源。`sync_view` 对 `pages/` 的手改
     只告警不覆盖，`topics/`、`workflows/` 只在目标不存在时投放，`README.md` 每次推送重写，
@@ -162,9 +162,10 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 源文件 → scan_files → extract_text → <view>/raw/<key>-<digest>.md + sources 行
                                         ↓ enqueue route 任务
 route 载荷 → 校验 → 页面任务（new/merge）或来源结算（skip）
-page 载荷 → 校验 → page_revs + links → 推送 → <view>/pages 副本
+page 载荷 / page link / page import / page link --repair → 校验 → page_revs + links → 推送
+→ <view>/pages 副本
 
-workflow/<id>/WORKFLOW.md ──query/scan──→ 工作流命中（只读，不落盘）
+workflows/<id>/WORKFLOW.md ──query/scan──→ 工作流命中（只读，不落盘）
                               └─workflow load→ 全文 + 分类型步骤 + resources
 
 话题/*.md ──query/scan──→ topics 命中（只读，不落盘）
@@ -176,7 +177,17 @@ workflow/<id>/WORKFLOW.md ──query/scan──→ 工作流命中（只读，�
 
 `links` 是 `page_revs.meta` 里的页面 id 数组，并镜像到 `links` 表；`write_rev` 按 meta 重建，
 不再从 body 的 `[[...]]` 或 `## 关联` 段解析。观看区由 `links_for` 取出链与入链，渲染成一个
-`## 关联` 段；正文里的该段在提交与推送时剥掉。
+`## 关联` 段；正文里的该段在提交与推送时剥掉。`page link` 与 `page import` 的 `links` 走
+同一套 `check_links`/`write_rev`；`page link` 成功后立即 `sync_view`，不等下一个命令。
+
+`page link --repair` 是唯一的推断式补链：把 `meta.sources` 经 `sources.raw` 归并到同一条
+原始正文，同组页两两配对，
+已有任一方向就跳过，每对只加小 id → 大 id 一条；`--dry-run` 不写修订。它只补缺边，不改变
+已有方向，也不把正文 `[[...]]` 变成第二套边。
+
+`sync` 回收观看区时先剥掉关系段，再解析末尾证据段：关系段渲染在证据之后，若先解析证据，
+带关联的页面会把证据块当正文收进来、下次推送再追加一份。重复的证据段也会在回收时一并
+剥掉，只保留最后一份。
 
 观看区 `pages/` 是账本的唯一页面落盘副本（按标题命名，`view_digest` 记录上次推送的
 字节）；手改过的副本不覆盖，`sync` 收成新修订后才恢复推送。`sync` 只认

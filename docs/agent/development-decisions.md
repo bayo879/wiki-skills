@@ -21,6 +21,25 @@
 - 文档同步 `SKILL.md`（取任务硬约束、提交失败两条）、`references/recovery.md`（新小节）、
   `cli.md`、`recovery.md`、`design-principles.md`、`engine.md`。
 
+## 2026-11-18：已有页面可以补关联，仍然只增不删
+
+用户确认方案 A：补引擎能力，不做迁移、不做删链。触发是实际库检查时 22 页的 `links`
+全为空，Obsidian 图谱全孤立；当天复查该库已增至 35 页、3 条边。
+
+- 新增 `page link <id> <target...>`：只改已存在页，写新修订（`origin=link`），目标必须是
+  已存在页；空目标或指向自己报 `E_USAGE`，未知目标报 `E_LINK_UNRESOLVED`，重复链不产生
+  新修订。写入后立即推送观看区，不再等下一个命令。
+- `page import` 读 frontmatter 的块列表 `links`，与旧链接取并集；内联 `[a, b]` 不认，报
+  `E_PAYLOAD`，避免把字符串当 id。
+- route/page brief 与 `SKILL.md`、`curation.md` 改为写页时必须判断关联（2–5 个出链，确实
+  没有才留空），避免“可选”继续制造孤立页。
+- 存储层继续只增不删；不设删链入口、不做 pending edge、不做红链。
+- 增加 `page link --repair [--dry-run]`：按共享同一 raw 来源把页两两配对，已有任一方向的
+  边就跳过，每对只补一条（小 id → 大 id）；先 `--dry-run` 看计划，确认后执行。它只补
+  缺边，不改变已有方向，也不把正文 `[[...]]` 变成第二套边。
+- 落地时发现并修复：观看区把 `## 关联` 排在 `## 证据` 之后，`sync` 回收时先按关系段剥掉再
+  解析证据，否则带关系的页面会在正文里重复累积证据块。
+
 ## 2026-11-13：转型为 skills-only
 
 用户原话："这个项目要开始转型了，把重心放在skills内的能力开发上，把之前使用rust的设定
@@ -93,7 +112,8 @@
 - 观看区按 `links` 表渲染一个 `## 关联` 段，出链与入链混排去重；旧页 body 不动也能看到
   指向它的新页。
 - 不做 pending edge：`links` 只能指向提交时已存在的页（含同批已先提交的兄弟页）；同批
-  兄弟页按提交顺序，顺序错报 `E_LINK_UNRESOLVED` 后重试。没有人工补链或删链入口。
+  兄弟页按提交顺序，顺序错报 `E_LINK_UNRESOLVED` 后重试。当时没有人工补链或删链入口；
+  2026-11-18 增加只增的 `page link` 与 import `links`，仍不设删链。
 - 理由：关联原来在写页时冻结在 body 里，旧页无法指向新页；改成 route 决策后入库即有边，
   观看区靠入链补齐阅读导航。
 
@@ -394,16 +414,16 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   「适用场景/使用场景」这类普通词不替换。
 - **命令硬切，不设别名。** 只留 `workflow list/search/load`，`scenario` 命令直接移除；
   目录双读已经保住旧工作区的内容，再留一套旧命令只会让两种说法并存。
-- **目录与主文件双读。** `workflow/` > `scenario/` > `场景能力/`，`WORKFLOW.md` 优先、
-  缺失回退 `SCENARIO.md`；旧工作区零迁移，内容不会在 `workflow list` 里消失。
+- **目录曾短期双读。** 改名当次保留 `workflow/` > `scenario/` > `场景能力/` 与 `SCENARIO.md`
+  回退，同日复核后收成只认 `workflows/`（见下条），旧目录不再读取。
 - **步骤契约四类、每步必标。** `tool:`/`human:`/`agent:`/`verify:`，只解析第一个 `## 步骤`
   的顶层列表项；整份至少一个 `tool:`，纯人工流程判 invalid 并指向 `process` 页。issue 原设想
   的 tool/human 二分装不下「判断收敛」「组论点」这类纯判断步骤，故加 `agent:`。
 - **旧内容 0.6.0 截止。** `UNTYPED_ALLOWED` 控制：0.5.0 零标记仍合法但给 warning，0.6.0
-  翻转后判 invalid；仓库内两份（内置 `topic-exploration`、`workflow/ppt_creator`）当次补标记。
-- **观看区保留旧目录。** 新投放 `workflows/`，旧 `scenarios/` 不搬不删，README 注明「已停止
-  同步」；`publish.workflows` 为新键，旧 `publish.scenarios` 按值迁移。
-- **0.5.0 一次装完，0.6.0 只收紧。** 双读长期保留，不再为旧目录设移除窗口。
+  翻转后判 invalid；仓库内两份（内置 `topic-exploration`、`workflows/ppt_creator`）当次补标记。
+- **观看区随目录收口。** 只投放 `workflows/`；`publish.workflows` 为新键，旧
+  `publish.scenarios` 的迁移兼容同日移除，遗留键按未知键忽略。
+- **0.5.0 一次装完，0.6.0 只收紧。** 没有为旧目录设移除窗口，旧目录支持在改名当天删掉。
 - 代码把 `scenarios.py` 改为 `workflows.py`，`SCENARIO_DIRS`→`WORKFLOW_DIRS`，
   `E_SCENARIO_INVALID`→`E_WORKFLOW_INVALID`；内置目录改 `skills/llm-wiki/workflows/`；
   同步 `README.md`、`SKILL.md`、`docs/readme/workflows.md`、`cli.md`、`design-principles.md`、
@@ -434,3 +454,36 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   载荷为该来源补一条新引文。
 - 来源已不可用（没有 raw）时无从比对，原样保留；这类页面仍由 stale 与 doctor L7 兜底。
 - 同步 `docs/readme/cli.md` 与 `docs/agent/engine.md`；自检新增 3 条，265 项全过。
+
+## 2026-11-18：工作流目录统一为 `workflows/`
+
+项目工作流目录 `workflow/` 和观看区 `workflows/`、内置 `skills/llm-wiki/workflows/` 的复数
+写法打架，同一个词在根目录与安装目录两种拼法。用户确认保留新目录名，并明确项目里只剩
+workflow 一个概念、场景相关的一切都移除。
+
+- **唯一目录 `workflows/`。** `WORKFLOW_DIR = "workflows"`、`WORKFLOW_DIRS = (WORKFLOW_DIR,)`；
+  删除 `LEGACY_DIRS`、`SCENARIO.md` 回退与 `publish.scenarios` 迁移，`ingest` 跳过与观看区
+  投放都读常量，不再各写一份目录名。只有 `SCENARIO.md` 的目录判 `missing WORKFLOW.md`。
+- **命令名不变。** 改的只是磁盘目录，`workflow list/search/load`、工作流 id 与 `path`
+  字段照旧，`path` 前缀变为 `workflows/<id>/`。
+- **不提供迁移脚本。** 旧工作区把 `workflow/`、`scenario/`、`场景能力/` 删掉或改名为
+  `workflows/` 即可；同时存在时只读 `workflows/`，不再回退。
+
+用户已明确「是我有意改名，保留 workflows/」「已经没有场景这个概念了」，文档与测试按此同步。
+
+## 2026-11-18：`wiki:` 前缀作为固定入口
+
+用户要一句话就固定进 wiki，而不是每次靠 agent 猜意图。两条实测否掉了别的做法：整句丢给
+`workflow search` 不成立（`match()` 按词做子串计数，中文长句 0 命中）；技能描述里没有
+`wiki:` 字样，前缀本身也没有被写进任何规则，只能靠 agent 自己联想。
+
+- **前缀即显式 load。** 只认消息开头（接受全角冒号、前导空白、大小写，正文出现不算，单独的
+  `wiki` 不算）；去掉前缀后按 `SKILL.md` 的路由表落位：交付物走 `ppt_creator` 等工作流，
+  问/找/梳理走内置 `topic-exploration`，建库整理走 `ingest`。不改引擎，不加 `triggers:` 字段。
+- **与「不做强制注入」不冲突。** 2026-11-16 定的是不做自动注入、只有显式 `scenario load`
+  才生效；前缀是用户亲手写的，等于用户替 agent 做了这次显式 load。
+- **两段式停点。** 需求里写明「我确定范围后 / 确认后 / 再…」时，先只做到材料范围确认，用户
+  挑完再进交付物工作流。为此 `ppt_creator` 把取证提到补问之前：第 2 步粗查，第 3 步先摆候选
+  范围与缺口，再问听众、时长等缺失项。
+- **仍是软触发。** 靠描述被认出，不是硬保证；要硬保证得做引擎级 `triggers:` 字段，代价是改
+  契约与测试，当前不做。

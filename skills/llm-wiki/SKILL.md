@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: 把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识，原文直接读观看区文件。回答知识问题时默认按内置「话题探索」工作流办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。可执行工作流必须显式 `workflow search` 后再 `workflow load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
+description: 当用户以 `wiki:` 开头下达任务，或要把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库时使用。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识，原文直接读观看区文件。回答知识问题时默认按内置「话题探索」工作流办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `话题/` 文件（附能力候选与待查资料）。可执行工作流必须显式 `workflow search` 后再 `workflow load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
 ---
 
 # llm-wiki：按任务填内容
@@ -9,6 +9,29 @@ description: 把工作区里的本地文档整理成可检索、可追溯的 Mar
 `.wiki/` 下的数据库或任务文件**，手改不会生效，页面只能通过 `submit` 修改。
 观看区（`publish.dir`，默认 `wiki/`）里，`pages/` 由引擎按账本推送，手改不会被覆盖、只会
 告警，只有人工 `sync` 才能收进账本；`raw/` 是原文副本，`README.md` 每次推送重写，都不要手改。
+
+## 入口：`wiki:` 前缀
+
+用户消息以 `wiki:` 开头（也接受全角 `wiki：`、前导空白、`Wiki:` 大小写）时，这次就明确走
+wiki：去掉前缀照办，不再问「要不要用 wiki」，也不再问「资料在哪」。前缀只认消息开头，正文里
+出现的 `wiki:` 不算；单独一个不带冒号的 `wiki` 也不算。
+
+去前缀后按需求落位，不推测意图：
+
+| 去前缀后的需求 | 去向 |
+| --- | --- |
+| 要交付物：PPT、演示、幻灯片、汇报材料、逐页大纲 | `workflow load ppt_creator`，按它的步骤执行 |
+| 问、找、梳理、有哪些、有什么区别 | 内置 `topic-exploration` |
+| 建库、整理、把这批资料摄入 | 本文「建库或增量摄入」一节 |
+| 点名了工作流（`wiki:ppt_creator …` 或「按 xx 工作流」） | 直接 `workflow load` 那个 |
+
+两段式：需求里既有「找资料」又有交付物，且用「我确定范围后」「确认后」「再…」隔开时，
+**先只做到范围确认**——`query` 2–4 组关键词，按主题簇列出命中页面、能支撑什么、缺什么，
+停下来等用户挑；挑定后把它记为「已明确」，再 `workflow load` 交付物工作流接着做，不重复
+取证。没写这句话，就一次做到交付物。
+
+- 只写了 `wiki:`：问一句要做什么，不猜。
+- 需求超出 wiki（联网找资料、OCR、写代码、排版渲染）：直接说明不覆盖，不硬套摄入或工作流。
 
 ## 工作区边界
 
@@ -29,6 +52,16 @@ description: 把工作区里的本地文档整理成可检索、可追溯的 Mar
 `py -3.12` 或指向 3.12+ 的 `python`；首次使用可运行 `scripts\bootstrap.ps1`，它查找已有的
 Python 3.12+（agent 自带运行时用 `-Python <python.exe>` 指定）并把技能放进 agent 的技能目录。
 脚本不下载、不安装 Python；放置只在技能目录外进行，不要把它当成 wiki 任务的一步。
+
+### TeleAgent：初始化时记一条长期偏好
+
+在 TeleAgent 里运行时，把下面这条写进当前账号的 `USER.md`（长期偏好，每次对话自动载入；
+已有同义条目就跳过）：
+
+> 当目录下存在 llm-wiki 技能和 `.wiki/` 文件夹时，这个工作区的问题默认先通过 wiki 进行检索。
+
+按 memory-manager 的约定写：`##` 分大类、每条一行列表项；文件由 Runtime 托管，只说明目标
+文件与内容，不猜绝对路径、不指定工具名。
 
 ## 建库或增量摄入
 
@@ -125,8 +158,9 @@ id；终端会话用 `--owner <id>` 或 `export LLM_WIKI_OWNER=<id>` 固定一�
   的要求与步骤写在同一页，不要拆成两页。
 - 新建页面的 `summary` 必填，1–200 字，一句完整的话；更新页面时 `template.evidence`
   里旧来源的证据要保留，不要删。
-- `links` 由 route 预填，只含提交时已存在或同批已提交的页面 id；更新页只增不删，正文里
-  不要写 `[[page-id]]` 或 `## 关联`；`boundaries` 写清覆盖与不覆盖。
+- `links` 由 route 预填，只含提交时已存在或同批已提交的页面 id；提交前再判断一次读者下一步
+  该看哪页（2–5 个），确实没有相关页才留空。更新页只增不删，正文里不要写 `[[page-id]]` 或
+  `## 关联`；已有页补链用 `page link`，批量按共享 raw 来源补链先用 `page link --repair --dry-run` 看计划。`boundaries` 写清覆盖与不覆盖。
 - 推断要标“据此推断”；个人联系方式不写入页面。
 - 页面边界、标题、摘要、合并优先等标准见 [references/curation.md](references/curation.md)。
 
@@ -157,8 +191,7 @@ python3 <skill>/scripts/wiki.py query --page <page-id> --json
 - `pages/`：按账本推送的知识页，按 `<type>/<标题>.md` 命名；手改不会覆盖，只会告警。
 - `raw/`：摄入时写入的原文副本，用于核对引文；不要手改。
 - `README.md`：目录说明与统计，每次推送重写。
-- `topics/`、`workflows/`：首次推送时从 `话题/`、`workflow/` 各投放一份；之后归用户。
-  旧的 `scenarios/` 不再同步，可删除或手动并入 `workflows/`。
+- `topics/`、`workflows/`：首次推送时从 `话题/`、`workflows/` 各投放一份；之后归用户。
 
 不需要为了交付结果去动观看区；`next`/`submit` 正常跑完，下一次命令会自动推送。只有用户
 要求把观看区里的手改收回时，才运行 `sync`（先确认再跑；它只回收、不推送）：
@@ -170,11 +203,10 @@ python3 <skill>/scripts/wiki.py sync --body-only --json
 
 ## 按工作流执行
 
-项目可以把一类可执行任务的流程写成工作流，放在 `<root>/workflow/<工作流>/`：`WORKFLOW.md`
-是主流程，`scripts/` 和 `references/` 是配套脚本与说明。旧目录 `scenario/`、`场景能力/`
-仍然能读，同 id 时优先级 `workflow/` > `scenario/` > `场景能力/`；目录里没有 `WORKFLOW.md`
-时回退读 `SCENARIO.md`。技能自带 `topic-exploration` 内置工作流；项目放同名工作流即可覆盖它，
-内置项的 `path` 只是展示标签（`builtin/<id>/WORKFLOW.md`）。工作流 frontmatter 的 `name` 写
+项目可以把一类可执行任务的流程写成工作流，放在 `<root>/workflows/<工作流>/`：`WORKFLOW.md`
+是主流程，`scripts/` 和 `references/` 是配套脚本与说明。技能自带 `topic-exploration`
+内置工作流；项目放同名工作流即可覆盖它，内置项的 `path` 只是展示标签
+（`builtin/<id>/WORKFLOW.md`）。工作流 frontmatter 的 `name` 写
 英文机器名，中文展示名放 `alias_name`；`workflow list` 以 `id（alias_name）` 显示。
 
 工作流是可执行流程，不是知识页：它不会被 `ingest` 写进账本；`query` 也不检索它，必须显式
@@ -220,7 +252,7 @@ python3 <skill>/scripts/wiki.py workflow load "<工作流>" --json
 
 - 话题文件的 frontmatter、固定六节、归属判断、授权与完成标准，见内置工作流
   `workflow load "topic-exploration"` 的“话题文件”与“沉淀前的归属判断”两节。
-- 流程稳定、可重复执行时，同时给出 `workflow/<id>/WORKFLOW.md` 的工作流候选草稿，用户确认
+- 流程稳定、可重复执行时，同时给出 `workflows/<id>/WORKFLOW.md` 的工作流候选草稿，用户确认
   后再建；资料不足时列出待摄入来源与下一轮要查的关键词。
 - 项目事实归产品文档，强制规则归指导文档，未决问题归 issues；只有可复用的方法、经验、
   踩坑、方案取舍和探索结论写话题。凭据不落盘。
