@@ -38,7 +38,8 @@
 
 观看区多了手工修改的回流通道：`<view>/pages` 被手改时推送只告警、不覆盖，由人工 `sync`
 收进账本；只同步正文用 `sync --body-only`，元数据也改过的改用 `page import`。`<view>/raw`
-由摄入维护：手改会在下一次 `ingest` 被采纳为账本事实；`<view>/README.md` 每次推送重写。
+由摄入维护：手改会在下一次 `ingest` 按整份正文被采纳为账本事实，共享它的来源一起换摘要、
+文件不改名；`<view>/README.md` 每次推送重写。
 `topics/`、`workflows/` 首次投放后归用户；旧的 `scenarios/` 不再同步。
 
 ## 工作流是可执行能力，不是页面

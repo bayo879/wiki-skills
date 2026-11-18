@@ -390,3 +390,19 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   `E_SCENARIO_INVALID`→`E_WORKFLOW_INVALID`；内置目录改 `skills/llm-wiki/workflows/`；
   同步 `README.md`、`SKILL.md`、`docs/readme/workflows.md`、`cli.md`、`design-principles.md`、
   `topics.md`、`docs/agent/` 与 selftest；`VERSION=0.5.0`，`selftest.py` 258 项。
+
+## 2026-11-18：共享 raw 的手改属于整份正文
+
+复核 `docs/issues/2026-11-17-P2-shared-raw-hand-edit.md`：同一份正文被多个路径共享时，
+手改曾转 `attach_raw` 另存一份，文件名跟着摘要跳，原路径消失。
+
+- **归属单位是一个 raw 行。** `raws.id` 是正文摘要，一份正文一行；手改视为这份正文变更，
+  挂载它的所有 `sources` 一起迁到新摘要，不是整个 wiki，也不回写源文件。
+- **文件留在原名原路径。** 采纳只换账本行：删旧行、按原 `name`/`path` 插入新行，文件字节
+  不动；重复手改不再在 `a.md` 与 `a-2.md` 之间来回跳。
+- **同摘要已存在时整份并过去。** 新正文在其他 raw 行已落过一份，所有挂载指向那一行，旧行
+  留给 `collect_raws` 回收。
+- **任务快照一起对齐。** 采纳后对每个挂载调用 `pin_open_task_raw`，排队或租用任务的
+  `raw`、`raw_digest`、`raw_size`、`raw_mtime` 跟着换，不会被自己的任务判成漂移。
+- 同步 `docs/agent/engine.md`、`docs/readme/cli.md`、`recovery.md`、`design-principles.md`；
+  `tests/selftest.py` 补共享手改三条与并库一条，共 262 项。

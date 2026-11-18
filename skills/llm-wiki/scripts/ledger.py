@@ -548,52 +548,76 @@ class LedgerMixin:
         return rel, raw_id
 
     def adopt_raw_edit(self, key, parser):
-        """Re-key a hand-edited raw in place; the file itself is left untouched.
+        """Adopt a hand-edited raw for every source path that mounts it.
 
-        The body digest is the ledger identity, so a reformatted copy becomes a
-        new row. The user's own bytes stay exactly as written — the ledger is
-        the fact source, the frontmatter inside a hand-edited raw is whatever
-        the parse wrote back then.
+        A raw row is one body however many source keys share it, so a hand edit
+        belongs to the whole document: all mounts move to the new digest in one
+        step, and the file keeps its name and path. The user's own bytes stay
+        exactly as written — the ledger is the fact source, and the frontmatter
+        inside a hand-edited raw is whatever the parse wrote back then.
         """
         row = self.source_row(key)
         if row is None or not row["raw"]:
             return "", ""
+        old_id = row["raw_id"]
         target = self.root / row["raw"]
         try:
             _, body = split_frontmatter(target.read_text(encoding="utf-8", errors="replace"))
         except OSError:
-            return row["raw"], row["raw_id"]
+            return row["raw"], old_id
         raw_id = body_digest(body)
-        if raw_id == row["raw_id"]:
+        if raw_id == old_id:
             return row["raw"], raw_id
+        # 空 raw_id 只可能是没有原文的来源，不能拿它反查挂载，否则会把别人一起改掉。
+        mounts = self.raw_mounts(old_id) if old_id else [key]
+        today = date.today().isoformat()
         known = self.conn.execute(
             "SELECT * FROM raws WHERE id = ?", (raw_id,)
         ).fetchone()
+        previous = None
         if known is not None:
-            # 同样的正文已经在别处落过一份：直接挂过去，不再造第二份。
-            return known["path"], raw_id
-        if self.raw_mounts(row["raw_id"]) != [key]:
-            # 这份原文还被别的源共享：不能就地改行，另存一份给这个源。
-            return self.attach_raw(key, body, parser, target.name)
-        previous = self.conn.execute(
-            "SELECT * FROM raws WHERE id = ?", (row["raw_id"],)
-        ).fetchone()
-        stat = target.stat()
-        with self.conn:
+            # 同样的正文已经在别处落过一份：整份文档并过去，旧行没有挂载后由
+            # collect_raws 连同旧文件一起回收。
+            rel = known["path"]
+            known_file = self.root / rel
+            try:
+                stat = known_file.stat()
+                size, mtime = stat.st_size, stat.st_mtime
+            except OSError:
+                size, mtime = int(known["size"]), float(known["mtime"])
+        else:
+            if old_id:
+                previous = self.conn.execute(
+                    "SELECT * FROM raws WHERE id = ?", (old_id,)
+                ).fetchone()
+            stat = target.stat()
             if previous is not None:
-                self.conn.execute("DELETE FROM raws WHERE id = ?", (row["raw_id"],))
-                name, rel, updated = previous["name"], previous["path"], date.today().isoformat()
+                name, rel = previous["name"], previous["path"]
             else:
                 name = self._raw_name(key, raw_id)
                 rel = norm_key((self.publish_raw_dir / f"{name}.md").relative_to(self.root))
-                updated = date.today().isoformat()
+            size, mtime = stat.st_size, stat.st_mtime
+        with self.conn:
+            if known is None:
+                if previous is not None:
+                    self.conn.execute("DELETE FROM raws WHERE id = ?", (old_id,))
+                self.conn.execute(
+                    """
+                    INSERT INTO raws (id, name, path, parser, size, mtime, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (raw_id, name, rel, parser, size, mtime, today),
+                )
+            marks = ",".join("?" for _ in mounts)
             self.conn.execute(
-                """
-                INSERT INTO raws (id, name, path, parser, size, mtime, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (raw_id, name, rel, parser, stat.st_size, stat.st_mtime, updated),
+                f"UPDATE sources SET raw = ?, raw_id = ?, raw_digest = ?, raw_size = ?, "
+                f"raw_mtime = ?, updated_at = ? WHERE key IN ({marks})",
+                (rel, raw_id, raw_id, size, mtime, today, *mounts),
             )
+        # 采纳后的原文就是账本事实：仍在排队或租用的任务快照要一起对齐，
+        # 否则同一份原文会被自己的任务判成漂移。
+        for mount in mounts:
+            self.pin_open_task_raw(mount, rel, raw_id, size, mtime)
         return rel, raw_id
 
     def collect_raws(self):

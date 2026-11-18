@@ -27,6 +27,10 @@ raw 用例就中断。
 5. `collect_raws`（`skills/llm-wiki/scripts/wiki.py:847`）发现旧行已无来源引用，连同旧
    文件一起删除。
 
+（2026-11-18 复核：这段链路已从 `wiki.py` 搬进 `skills/llm-wiki/scripts/ledger.py`，
+`adopt_raw_edit` 在 `ledger.py:550`，`attach_raw` 在 `ledger.py:481`，`collect_raws` 在
+`ledger.py:623`；下文旧行号仅保留排查时的原貌。）
+
 根因是账本只存 raw 的文件路径，不存正文（`skills/llm-wiki/scripts/ledger.py` 的
 `raws` 表）。用户覆盖共享文件后，旧正文在系统里已无副本，因此「其他源保持原
 `raw_id` 且内容不变」在事后无法同时成立。测试的期望与「旧行无引用即回收」也
@@ -41,28 +45,49 @@ raw 用例就中断。
 - P3 issue 的验收项「共享 raw」「人工排版保持」没有可执行的判定标准，实施顺序第 7 步
   无法收口。
 
-## 候选方案（未定案）
+## 候选方案（2026-11-18 选定方案 1）
 
-1. **共享即全体迁移**：把共享 raw 的人工修改视为对整份内容的修改，所有挂载来源一起
-   改指新行，旧行回收；测试改为「只剩一行、两个来源都指向新行」。
-   最简单、与现有回收逻辑一致；代价是放弃「其他来源不受影响」的字面语义。
-2. **从来源重建旧正文**：检测到共享 raw 被人工修改时，对未变的来源重新解析其源文件，
-   把旧正文写到新的 raw 文件（新路径），旧行保留原 `id` 但更新 `path`；编辑来源保留
-   原路径和新行。需要 raw 行路径可变，并在 `collect_raws` 前完成文件迁移；测试可原样
-   通过。代价是顺序复杂，源文件也变了或缺失时要额外定规则。
-3. **账本保存正文**：给 `raws` 增加正文列或历史表，人工修改时先把旧正文落盘到新路径，
-   再让编辑来源接管原文件。schema 迁移和库体积增加，但能同时满足审计与回滚。
-4. **禁止共享 raw 人工编辑**：`ingest` 返回结构化错误（附 `next`），要求先拆分来源。
-   与「CLI 能处理的自行处理」相悖，除非把拆分做成自动修复，实际接近方案 2。
+1. **共享即全体迁移（选定）**：把共享 raw 的人工修改视为对整份内容的修改，所有挂载来源一起
+   改指新行；raw 文件留在原名原路径，账本行换摘要，旧行回收。最简单、与现有回收逻辑一致，
+   也保住用户手改的字节。
+2. **从来源重建旧正文**（未采用）：要区分「谁改了文件」，还要为源文件也变了或缺失定规则，
+   顺序复杂。
+3. **账本保存正文**（未采用）：schema 迁移与库体积代价大，本版不需要审计或回滚到旧正文。
+4. **禁止共享 raw 人工编辑**（未采用）：把 CLI 能自行处理的场景推回给人，和现有原则相悖。
 
 ## 待确认与验收条件
 
-- [ ] 确认语义：共享 raw 的人工编辑是「全局变更」还是「按来源分离」。
-- [ ] 选定方案，并回写 P3 issue 的对象模型、行为规则与实施顺序。
-- [ ] 修复后原路径保留用户字节，不再抛 `FileNotFoundError`。
-- [ ] `copy/a.md` 的 `raw_id` 与文件内容有明确断言，不再依赖未定义行为。
-- [ ] 恢复被临时删除的用例（`tests/selftest.py` 的 `llm-wiki-raw-` 段），`selftest.py` 全绿。
-- [ ] 契约有变化时同步 `docs/agent/engine.md`、`docs/readme/cli.md`。
+- [x] 确认语义：共享 raw 的人工编辑是「全局变更」还是「按来源分离」——归属单位是一个 raw
+  行（一份按正文摘要去重的正文），整份变更。
+- [x] 选定方案，并回写 P3 issue 的对象模型、行为规则与实施顺序——P3 issue 已随
+  `bc30a8d` 删除，语义直接落在本文件与 `docs/agent/development-decisions.md`（2026-11-18）。
+- [x] 修复后原路径保留用户字节，不再抛 `FileNotFoundError`。
+- [x] `copy/a.md` 的 `raw_id` 与文件内容有明确断言，不再依赖未定义行为。
+- [x] 恢复被临时删除的用例（`tests/selftest.py` 的 `llm-wiki-raw-` 段），`selftest.py` 全绿。
+- [x] 契约有变化时同步 `docs/agent/engine.md`、`docs/readme/cli.md`。
+
+## 定案与验证（2026-11-18）
+
+`adopt_raw_edit`（`skills/llm-wiki/scripts/ledger.py:550`）不再在共享时转 `attach_raw`：
+
+- 读原 raw 正文算新摘要；挂载 = 旧 `raw_id` 的全部来源（空 `raw_id` 只按当前 key）。
+- 同摘要的 `raws` 行已存在时，所有挂载指向那一行的路径；旧行没有挂载后由 `collect_raws`
+  回收。
+- 否则删旧行、按原 `name`/`path` 插入新行，文件不重写，用户字节原样保留；
+  `last_parsed_digest` 不动，`parser` 沿用。
+- 一条 `UPDATE sources` 换掉所有挂载的 `raw`、`raw_id`、`raw_digest`、`raw_size`、
+  `raw_mtime`，再对每个挂载 `pin_open_task_raw`，排队或租用任务的快照不会被自己的任务判成
+  漂移。
+
+验证：
+
+- 一次手改后 `raws` 只剩一行、`path` 仍是原路径；`a.md` 与 `copy/a.md` 的 `raw_id` 都是新
+  摘要，`last_parsed_digest` 保持旧值，文件内容仍是手改后的字节，`data.reclaimed` 为空。
+- 紧接的 `ingest` 无新增摄入；连续第二次手改后文件名仍是 `a.md`，不再在 `a.md`/`a-2.md`
+  之间来回跳。
+- `python3 tests/selftest.py`：262/262 通过。
+- 文档同步：`docs/agent/engine.md`、`docs/readme/cli.md`、`docs/readme/recovery.md`、
+  `docs/readme/design-principles.md`、`docs/agent/development-decisions.md`。
 
 ## 现状（2026-11-17 补记）
 
@@ -72,3 +97,4 @@ raw 用例就中断。
   `a changed source re-parses and drops the dead row`）已删除；当时自检 201 项全绿。
 - 语义仍未裁决，实现未改：本文件描述的行为缺陷现在没有任何用例覆盖，删除用例只是
   让红基线不再挡住别的改动，不等于问题已解决。
+- 2026-11-18 已按方案 1 修复并补齐共享用例，本节保留为排查时的历史记录。

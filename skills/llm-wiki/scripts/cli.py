@@ -243,8 +243,8 @@ def command_ingest():
                     raw_id=raw_id,
                     last_parsed_digest=row["last_parsed_digest"],
                 )
-                # 采纳用户改动后的原文即账本事实：仍在排队或租用的快照要对齐，
-                # 否则同一份原文会被自己的任务判成漂移。
+                # 账本跟着磁盘上的原文走：当前源的快照要对齐；共享 raw 的其他挂载
+                # 由 adopt_raw_edit 一并处理。
                 if raw_rel:
                     wiki.pin_open_task_raw(
                         key, raw_rel, disk_digest, disk_size, disk_mtime

@@ -1949,6 +1949,90 @@ def main(argv=None):
         finally:
             shutil.rmtree(edit_root, ignore_errors=True)
 
+        # 共享 raw 的手改属于整份正文：所有挂载一起换行，文件名不跟着摘要跳。
+        shared_root = Path(tempfile.mkdtemp(prefix="llm-wiki-raw-shared-"))
+        try:
+            shared_body = "# 共享手改\n\n同一份正文。\n"
+            (shared_root / "a.md").write_text(shared_body, encoding="utf-8")
+            (shared_root / "copy").mkdir()
+            (shared_root / "copy" / "a.md").write_text(shared_body, encoding="utf-8")
+            run(shared_root, "ingest")
+            conn = sqlite3.connect(shared_root / ".wiki" / "wiki.db")
+            raw_rel, _, parsed = conn.execute(
+                "SELECT raw, raw_id, last_parsed_digest FROM sources WHERE key = 'a.md'"
+            ).fetchone()
+            conn.close()
+            raw_path = shared_root / raw_rel
+            raw_path.write_text(
+                raw_path.read_text(encoding="utf-8").rstrip("\n") + "\n\n用户手改的一句。\n",
+                encoding="utf-8",
+            )
+            adopted = run(shared_root, "ingest")["data"]
+            conn = sqlite3.connect(shared_root / ".wiki" / "wiki.db")
+            raw_rows = conn.execute("SELECT id, path FROM raws").fetchall()
+            after = conn.execute(
+                "SELECT key, raw, raw_id, last_parsed_digest FROM sources ORDER BY key"
+            ).fetchall()
+            conn.close()
+            edited_body = wiki.raw_body_digest(raw_path)
+            check(results, "a shared hand edit moves every mount and keeps the file",
+                  len(raw_rows) == 1 and raw_rows[0] == (edited_body, raw_rel)
+                  and [row[2] for row in after] == [edited_body, edited_body]
+                  and [row[3] for row in after] == [parsed, parsed]
+                  and [row[1] for row in after] == [raw_rel, raw_rel]
+                  and adopted["reclaimed"] == [],
+                  (raw_rows, after, edited_body, adopted))
+            kept = raw_path.read_text(encoding="utf-8")
+            again = run(shared_root, "ingest")["data"]
+            conn = sqlite3.connect(shared_root / ".wiki" / "wiki.db")
+            raw_rows = conn.execute("SELECT id, path FROM raws").fetchall()
+            conn.close()
+            check(results, "a shared hand edit stays put on the next ingest",
+                  again["ingested"] == [] and len(raw_rows) == 1
+                  and raw_rows[0] == (edited_body, raw_rel)
+                  and raw_path.read_text(encoding="utf-8") == kept,
+                  (again, raw_rows))
+            raw_path.write_text(
+                kept.rstrip("\n") + "\n\n再手改一句。\n", encoding="utf-8"
+            )
+            run(shared_root, "ingest")
+            names = sorted(p.name for p in (shared_root / "wiki/raw").glob("*.md"))
+            check(results, "repeated shared edits keep the raw at its original name",
+                  names == [raw_path.name], names)
+        finally:
+            shutil.rmtree(shared_root, ignore_errors=True)
+
+        # 手改成另一份已存在的正文：整份并过去，旧行和旧文件回收。
+        merge_root = Path(tempfile.mkdtemp(prefix="llm-wiki-raw-merge-"))
+        try:
+            (merge_root / "a.md").write_text("# 甲\n\n甲正文。\n", encoding="utf-8")
+            (merge_root / "b.md").write_text("# 乙\n\n乙正文。\n", encoding="utf-8")
+            (merge_root / "copy").mkdir()
+            (merge_root / "copy" / "b.md").write_text("# 乙\n\n乙正文。\n", encoding="utf-8")
+            run(merge_root, "ingest")
+            conn = sqlite3.connect(merge_root / ".wiki" / "wiki.db")
+            a_raw = conn.execute("SELECT raw FROM sources WHERE key = 'a.md'").fetchone()[0]
+            b_raw = conn.execute("SELECT raw FROM sources WHERE key = 'b.md'").fetchone()[0]
+            conn.close()
+            (merge_root / b_raw).write_text(
+                (merge_root / a_raw).read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            merged = run(merge_root, "ingest")["data"]
+            conn = sqlite3.connect(merge_root / ".wiki" / "wiki.db")
+            raw_rows = conn.execute("SELECT id, path FROM raws").fetchall()
+            moved = conn.execute(
+                "SELECT key, raw, raw_id FROM sources WHERE key LIKE '%b.md' ORDER BY key"
+            ).fetchall()
+            conn.close()
+            check(results, "a hand edit equal to another raw merges the whole document",
+                  len(raw_rows) == 1 and merged["reclaimed"] == [b_raw]
+                  and [row[1] for row in moved] == [a_raw, a_raw]
+                  and [row[2] for row in moved] == [raw_rows[0][0], raw_rows[0][0]]
+                  and not (merge_root / b_raw).exists(),
+                  (raw_rows, moved, merged))
+        finally:
+            shutil.rmtree(merge_root, ignore_errors=True)
+
         # 旧版三字段快照（b2af7c9 那代引擎建的库）：没有源指纹，只能整体判漂移。
         # 用独立工作区，避免动到上面 fixture 的任务状态。
         legacy_root = Path(tempfile.mkdtemp(prefix="llm-wiki-legacy-"))

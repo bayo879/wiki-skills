@@ -166,7 +166,9 @@ workflow/<id>/WORKFLOW.md ──query/scan──→ 工作流命中（只读，�
 话题/*.md ──query/scan──→ topics 命中（只读，不落盘）
 ```
 
-`raw` 文件名带 digest 后缀（`<basename>-<digest8>.md`），避免同名覆盖；`sources.raw` 存相对路径。
+`raw` 文件名取来源 basename，同名按 `-2`、`-3` 顺延，不跟正文摘要走；`sources.raw` 存相对
+路径。一份正文一行 `raws`：手改按整份正文采纳，挂载它的 `sources` 一起换到新摘要，文件留在
+原路径。
 
 `links` 是 `page_revs.meta` 里的页面 id 数组，并镜像到 `links` 表；`write_rev` 按 meta 重建，
 不再从 body 的 `[[...]]` 或 `## 关联` 段解析。观看区由 `links_for` 取出链与入链，渲染成一个
