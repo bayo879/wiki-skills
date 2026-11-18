@@ -406,3 +406,13 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   `raw`、`raw_digest`、`raw_size`、`raw_mtime` 跟着换，不会被自己的任务判成漂移。
 - 同步 `docs/agent/engine.md`、`docs/readme/cli.md`、`recovery.md`、`design-principles.md`；
   `tests/selftest.py` 补共享手改三条与并库一条，共 262 项。
+
+## 2026-11-18：重写页面时复核旧证据
+
+`submit` 只校验本次载荷带来的引文；旧页面没被重写的 evidence 整条保留，之前不再复核。
+来源改写后，失效引文会跟着新修订一起留下，重算 `source_digests` 后 `stale` 也会消失。
+
+- 保留旧 evidence 时逐条对照当前 raw；原句不在就报 `E_EVIDENCE_NOT_FOUND`，要求本次
+  载荷为该来源补一条新引文。
+- 来源已不可用（没有 raw）时无从比对，原样保留；这类页面仍由 stale 与 doctor L7 兜底。
+- 同步 `docs/readme/cli.md` 与 `docs/agent/engine.md`；自检新增 3 条，265 项全过。

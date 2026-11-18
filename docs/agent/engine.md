@@ -28,7 +28,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；`workflow/`、`scenario/`、`场景能力/` 都扫描（同 id 按序优先，`WORKFLOW.md` 回退 `SCENARIO.md`），再与 `workflows/` 内置工作流合并；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
 | 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `话题/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
-| 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留；纯函数，只读 `Wiki` |
+| 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留并复核；纯函数，只读 `Wiki` |
 | 账本结构 | `ledger.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用 |
 | 账本 | `ledger.py` 的 `LedgerMixin` | `__init__`/`ensure`/`close`、来源与 raw、推送入口；`Wiki` 在文件末尾由四个 mixin 组合 |
 | 安装自检 | `health.py` | 解释器、技能文件与模板、工作区可写、账本可读；`check` 只读深检，命令入口只跑安装级轻检（`require_install`） |

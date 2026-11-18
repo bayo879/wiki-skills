@@ -196,7 +196,9 @@ decision 可带可选 `links`，声明这页与哪些页面相关。目标只能
   `body` 里不要写 `## 关联`，引擎会剥掉；观看区按 `links` 表在页末渲染出链与入链。
 - `evidence` 至少一条；`quote` 去空白后须逐字命中该来源的 raw 文本。
 - 更新页时 `sources` 取旧来源与本任务来源的并集，旧 evidence 未在本次载荷中重写时保留；
-  更新任务模板会带出旧 evidence。
+  更新任务模板会带出旧 evidence。保留下来的旧引文同样逐字复核：来源改写后原句已不在
+  raw 里时，提交报 `E_EVIDENCE_NOT_FOUND`，需在本次载荷里为该来源补一条新引文；来源已
+  不可用（没有 raw）时无从比对，原样保留。
 - `boundaries.covered`、`boundaries.not_covered` 必填。
 
 成功后 `data`: `{task, page, rev, sources, queued_page_tasks}`；page 的 `sources` 是并集。
@@ -348,7 +350,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_PAGE_GONE` | update 时页面消失 | 重新 `next` |
 | `E_BAD_ID` | 页面 slug 非法 | 用小写字母数字与 `-_.` |
 | `E_LINK_UNRESOLVED` | 链接目标不存在 | 先建目标页，或去掉链接 |
-| `E_EVIDENCE_NOT_FOUND` | 引文不在来源原文里 | 重读 raw，逐字复制 |
+| `E_EVIDENCE_NOT_FOUND` | 引文（含保留的旧引文）不在来源原文里 | 重读 raw，逐字复制 |
 | `E_SOURCE_DRIFT` | 来源在任务领取后被改动或删除 | 重新 `next`，重读来源 |
 | `E_UNKNOWN_SOURCE` | 页面引用未登记的来源 | 先 `ingest` |
 | `E_EMPTY` | 还没有任何来源 | 先 `ingest` |

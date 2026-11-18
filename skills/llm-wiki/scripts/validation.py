@@ -117,10 +117,29 @@ def validate_page_payload(wiki, row, payload, sources):
             )
     if old_meta:
         cited = {item.get("source") for item in evidence}
-        evidence.extend(
+        carried = [
             item for item in old_meta.get("evidence") or []
             if isinstance(item, dict) and item.get("source") not in cited
-        )
+        ]
+        for item in carried:
+            key = item.get("source")
+            quote = str(item.get("quote") or "")
+            if key not in available:
+                raise WikiError(
+                    "E_PAYLOAD",
+                    f"old evidence cites source {key!r}, which the page does not list",
+                    "resubmit the page with fresh evidence for its sources", 2,
+                )
+            raw = re.sub(r"\s+", "", wiki.source_body(key))
+            # 来源已经不可用（没有 raw）时没有正文可比，页面本来就是 stale；
+            # 其余情况下旧引文必须仍能逐字命中，不能带着失效证据重写页面。
+            if raw and re.sub(r"\s+", "", quote) not in raw:
+                raise WikiError(
+                    "E_EVIDENCE_NOT_FOUND",
+                    f"old evidence for {key} is no longer in its raw: {quote[:60]!r}",
+                    f"re-read {key} and pass a fresh quote for it in evidence", 2,
+                )
+        evidence.extend(carried)
     boundaries = payload.get("boundaries")
     if not isinstance(boundaries, dict) or not str(boundaries.get("covered") or "").strip() \
             or not str(boundaries.get("not_covered") or "").strip():
