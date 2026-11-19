@@ -225,7 +225,7 @@ DEFAULT_CONFIG = {
         ]
     },
     "ingest": {"max_source_bytes": 50_000_000},
-    "publish": {"dir": "wiki", "enabled": True, "topics": True, "workflows": True},
+    "publish": {"dir": "wiki", "enabled": True},
 }
 
 
@@ -279,6 +279,12 @@ def publish_dir_name(config):
             2,
         )
     return name
+
+
+def view_dir(root):
+    """Return the configured view directory without creating or opening it."""
+    root = Path(root)
+    return root / publish_dir_name(load_config(root / WIKI_DIR / CONFIG_NAME))
 
 
 class LedgerMixin:
@@ -379,6 +385,13 @@ class LedgerMixin:
             if not directory.exists():
                 directory.mkdir(parents=True)
                 created.append(shown)
+        # 工作流定义和话题是项目内容，目录必须始终存在；runs/ 按需创建。
+        view = self.publish_dir
+        for name in ("workflows", topics.TOPIC_DIR):
+            target = view / name
+            if not target.exists():
+                target.mkdir(parents=True, exist_ok=True)
+                created.append(target.relative_to(self.root).as_posix())
         # 目录本身始终存在（raw/ 是引擎数据，位置不随开关变化）；剩下的事情
         # 归 sync_view，开关为假时它直接返回。
         if not self.config["publish"]["enabled"]:

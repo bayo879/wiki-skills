@@ -84,6 +84,32 @@ def body_file(root):
     return path
 
 
+def view_dir_checks(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-viewdir-"))
+    try:
+        (root / ".wiki").mkdir()
+        (root / ".wiki/wiki.json").write_text(
+            json.dumps({"publish": {"dir": "kb"}}), encoding="utf-8")
+        check(results, "view_dir reads publish.dir",
+              ledger.view_dir(root) == root / "kb" and not (root / "kb").exists())
+        (root / ".wiki/wiki.json").write_text("{}", encoding="utf-8")
+        check(results, "view_dir defaults to wiki",
+              ledger.view_dir(root) == root / "wiki")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-viewdir-off-"))
+    try:
+        (root / ".wiki").mkdir()
+        (root / ".wiki/wiki.json").write_text(
+            json.dumps({"publish": {"enabled": False}}), encoding="utf-8")
+        run(root, "status")
+        check(results, "disabled publish still creates content dirs",
+              (root / "wiki/workflows").is_dir() and (root / "wiki/topics").is_dir())
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def workflow_files(root):
     base = Path(root) / "workflows"
     good = base / "account-opening"
@@ -703,10 +729,11 @@ def main(argv=None):
             config_file = legacy_config / ".wiki" / "wiki.json"
             config_file.write_text('{"publish": {"scenarios": false}}', encoding="utf-8")
             migrated = ledger.load_config(config_file)["publish"]
-            check(results, "a leftover publish.scenarios key is ignored",
-                  migrated["workflows"] is True and migrated["topics"] is True, migrated)
+            check(results, "publish drops seed switches",
+                  "topics" not in migrated and "workflows" not in migrated, migrated)
         finally:
             shutil.rmtree(legacy_config, ignore_errors=True)
+        view_dir_checks(results)
         parsed, has_section = workflows.parse_steps(
             "## 步骤\n\n1. TOOL：**a**\n2. Human: **b**\n   - tool: 子项\n"
             "3. 没标\n\n## 其他\n\n- tool: 不算\n")
@@ -846,6 +873,8 @@ def main(argv=None):
         check(results, "init creates .wiki", (root / ".wiki/wiki.db").exists() and data["sources"] == 0, data)
         check(results, "init creates the publish directory",
               (root / "wiki").is_dir() and not (root / ".wiki/raw").exists(), data)
+        check(results, "init creates workflow/topic content dirs",
+              (root / "wiki/workflows").is_dir() and (root / "wiki/topics").is_dir())
         check(results, "publish README is written", (root / "wiki/README.md").exists())
 
         data = run(root, "check")["data"]
@@ -1283,7 +1312,7 @@ def main(argv=None):
         shutil.rmtree(root / "wiki/workflows")
         run(root, "status")
         check(results, "publish.workflows=false stops seeding new copies",
-              not (root / "wiki/workflows").exists())
+              not any((root / "wiki/workflows").iterdir()))
         config["publish"]["workflows"] = True
         config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         run(root, "status")
