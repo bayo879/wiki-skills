@@ -1061,6 +1061,7 @@ def command_query():
     limit = ARGS.limit or 8
     scored, results = search.search_pages(wiki, terms, limit)
     topic_hits = topics.match(wiki.root, terms, limit)
+    workflow_hits = workflows.match(wiki.root, terms, 5)
     data = {
         "query": " ".join(terms),
         "matches": len(scored),
@@ -1068,9 +1069,19 @@ def command_query():
         "results": results,
         "topic_matches": len(topic_hits),
         "topics": topic_hits,
+        "workflow_matches": len(workflow_hits),
+        "workflows": workflow_hits,
         "boundary": "hit count is a ranked subset, not proof of full coverage",
     }
     sections = []
+    if workflow_hits:
+        block = ["workflows (check applies before loading):"]
+        for item in workflow_hits:
+            alias = f"（{item['alias_name']}）" if item["alias_name"] else ""
+            block.append(f"{item['id']}{alias}  {item['description']}")
+            block.append(f"    applies: {item['applies'] or '(none)'}")
+            block.append(f"    load: {item['load']}")
+        sections.append(block)
     pages = [
         f"{item['id']}  [{item['type']}/{item['status']}]  {item['title']}\n    {item['snippet']}"
         for item in results
@@ -1091,6 +1102,8 @@ def command_query():
     summary = f"{len(scored)} matching pages"
     if topic_hits:
         summary += f", {len(topic_hits)} matching topics"
+    if workflow_hits:
+        summary += f", {len(workflow_hits)} workflow candidates"
     summary += f", showing {len(results)} pages for {' '.join(terms)}"
     emit("query", wiki.root, summary, data, lines)
     wiki.close()
@@ -1111,8 +1124,11 @@ def command_workflow():
                 "E_USAGE", "workflow search needs text",
                 'example: workflow search "开户"', 2,
             )
-        hits = workflows.match(root, terms, ARGS.limit)
+        limit = min(5, max(1, ARGS.limit))
+        hits = workflows.match(root, terms, limit)
         data = {"query": " ".join(terms), "matches": len(hits), "workflows": hits}
+        if not hits:
+            data["message"] = "无可用workflow"
         lines = []
         for item in hits:
             alias = f"（{item['alias_name']}）" if item["alias_name"] else ""
@@ -1121,6 +1137,9 @@ def command_workflow():
                 f"    path: {item['path']}  tools: {item['tools']}"
                 f"  human: {item['human_steps']}  load: {item['load']}"
             )
+            lines.append(f"    applies: {item['applies'] or '(none)'}")
+        if not lines:
+            lines.append("无可用workflow")
         emit("workflow search", root, f"{len(hits)} matching workflows", data, lines)
         return 0
     if ARGS.workflow_command == "list":
@@ -1579,7 +1598,7 @@ def build_parser():
     submit.add_argument("--payload", help="JSON file or - for stdin; defaults to the task folder")
     release = sub.add_parser("release", parents=[common], help="return a task to the queue")
     release.add_argument("id")
-    query = sub.add_parser("query", parents=[common], help="search pages and topics, or inspect one page")
+    query = sub.add_parser("query", parents=[common], help="search pages, topics and workflows, or inspect one page")
     query.add_argument("text", nargs="*")
     query.add_argument("--page")
     query.add_argument("--task", help="register the search on a task; route tasks must query before deciding")

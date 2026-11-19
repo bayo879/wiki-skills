@@ -89,7 +89,7 @@
 同一份正文的多个路径合成一条 route 任务。`<view>/raw` 被手改时按整份正文采纳：共享它的
 路径一起换摘要，文件留在原名原路径。`workflows/` 放可执行工作流，`topics/` 是 wiki 的探索
 层，都不作为摄入来源，摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。工作流与话题
-的检索分别由 `workflow search` 和 `query` 直接扫描文件完成。
+一样由 `query` 直接扫描文件、返回候选；显式 `workflow search` 也可用。
 
 `--dry-run` 用 `.wiki/tmp/` 下的临时库，退出时清理，不写账本；它只列 `would_ingest`，不预告
 末尾补偿入队会补哪些来源。`--force` 忽略哈希重新解析。`--only` 按根目录相对 key
@@ -222,18 +222,20 @@ decision 的 `links` 声明这页与哪些页面相关；写页前应逐条判�
 ### query
 
 `query <词...> [--limit N] [--task <id>]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
-`topics/`，命中时在 `topics` 里返回。`query` **不检索工作流**，工作流必须显式
-`workflow search`。`query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
+`topics/` 与 `workflows/`，命中时分别在 `topics`、`workflows` 里返回。工作流候选最多 5 个，
+每条带 `applies`，但不会自动加载；是否按流程办事由调用方核对后显式 `workflow load`。
+`query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
 `path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`sources`（`[{key, raw}]`，`raw`
 是账本渲染的观看区副本路径，源缺失时为 `null`）、`outgoing`、`incoming`、`body`，不查话题。
 
-`data`: `{query, matches, returned, results, topic_matches, topics, boundary}`。
-`matches` 只数页面，`topic_matches` 只数话题；`topics[]` 为
-`{name, title, description, status, updated, path, score, snippet}`；按 `path` 直接打开文件。
+`data`: `{query, matches, returned, results, topic_matches, topics, workflow_matches, workflows,
+boundary}`。`matches` 只数页面，`topic_matches` 只数话题，`workflow_matches` 只数工作流；
+`topics[]` 为 `{name, title, description, status, updated, path, score, snippet}`，按 `path`
+直接打开文件；`workflows[]` 的字段与 `workflow search` 的候选相同。
 
 `query --task <id> 词1 词2 ...`：把这次检索登记到任务上，route 任务提交前必须至少登记一次，
 否则 `submit` 报 `E_NO_QUERY`。每个词单独检索、各返上限 5 条，按词分组返回，不并成一次
-排序；重复的词不重复计配额。配额是 5 个词/1000 字（正文不足 1000 字也给 5 个），超出报
+排序；这次检索只查页面，不带工作流候选。重复的词不重复计配额。配额是 5 个词/1000 字（正文不足 1000 字也给 5 个），超出报
 `E_QUERY_BUDGET`。登记要求任务归本会话：别的会话持有的任务报 `E_TASK_FOREIGN`。每次调用
 追加一行到 `.wiki/tasks/<id>/queries.jsonl`（`{ts,words,hits}`），
 任务关闭时随目录一起删除，不保留审计历史。`data`:
@@ -257,13 +259,14 @@ tools, human_steps, agent_steps, verify_steps, warnings[]}`。`tools`、`human_s
 （`references/` 下）或 `other`。
 
 `workflow search <词...> [--limit N]`：显式检索工作流，返回命中的项目工作流与内置工作流；
-不传词返回 `E_USAGE`。只有显式检索并 `load` 后，才按工作流的分支流程执行，避免工作流
-自动介入普通知识问答。
+最多 5 个，按分数排序；不传词返回 `E_USAGE`。候选带 `applies`（`## 适用` 原文），0 命中时
+data 带 `message: "无可用workflow"`。只有核对 `applies` 并 `load` 后，才按工作流的分支流程
+执行；候选不会自动加载。
 
-`data`: `{query, matches, workflows[]}`；`matches` 只数工作流，`workflows[]` 为
-`{id, source, name, alias_name, description, tags, path, main, load, score, resources,
-tools, human_steps, verify_steps, warnings}`，`load` 是建议的加载命令。非法工作流不进
-`workflow search` 结果。
+`data`: `{query, matches, workflows[], message?}`；`matches` 只数工作流，`workflows[]` 为
+`{id, source, name, alias_name, description, tags, applies, path, main, load, score, resources,
+tools, human_steps, verify_steps, warnings}`，`load` 是建议的加载命令；0 命中时 `message` 为
+`"无可用workflow"`。非法工作流不进 `workflow search` 结果。
 
 `workflow load <id>`：加载一个合法工作流（项目或内置），返回主文件全文、资源清单与按类型
 分好的步骤。

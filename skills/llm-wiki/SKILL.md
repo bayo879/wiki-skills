@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: 当用户以 `wiki:` 开头下达任务，或要把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库时使用。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识，原文直接读观看区文件。回答知识问题时默认按内置「话题探索」工作流办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `topics/` 文件（附能力候选与待查资料）。可执行工作流必须显式 `workflow search` 后再 `workflow load`，不会随 query 自动介入。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
+description: 当用户以 `wiki:` 或 `workflow:` 开头下达任务，或要把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库时使用。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识并带回最多 5 个工作流候选，候选不会自动加载，核对 `applies` 后才 `workflow load`。回答知识问题时默认按内置「话题探索」工作流办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `topics/` 文件（附能力候选与待查资料）。`workflow:` 前缀只走工作流，不查页面。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
 ---
 
 # llm-wiki：按任务填内容
@@ -10,13 +10,13 @@ description: 当用户以 `wiki:` 开头下达任务，或要把工作区里的�
 观看区（`publish.dir`，默认 `wiki/`）里，`pages/` 由引擎按账本推送，手改不会被覆盖、只会
 告警，只有人工 `sync` 才能收进账本；`raw/` 是原文副本，`README.md` 每次推送重写，都不要手改。
 
-## 入口：`wiki:` 前缀
+## 入口：`wiki:` 与 `workflow:` 前缀
 
-用户消息以 `wiki:` 开头（也接受全角 `wiki：`、前导空白、`Wiki:` 大小写）时，这次就明确走
-wiki：去掉前缀照办，不再问「要不要用 wiki」，也不再问「资料在哪」。前缀只认消息开头，正文里
-出现的 `wiki:` 不算；单独一个不带冒号的 `wiki` 也不算。
+用户消息以 `wiki:` 或 `workflow:` 开头（也接受全角冒号、前导空白、大小写）时，这次就明确走
+对应入口：`wiki:` 去掉前缀后按需求落位，`workflow:` 只走工作流。前缀只认消息开头，正文里
+出现的不算；单独一个不带冒号的 `wiki` / `workflow` 也不算。
 
-去前缀后按需求落位，不推测意图：
+`wiki:` 去前缀后按需求落位，不推测意图：
 
 | 去前缀后的需求 | 去向 |
 | --- | --- |
@@ -32,6 +32,16 @@ wiki：去掉前缀照办，不再问「要不要用 wiki」，也不再问「�
 
 - 只写了 `wiki:`：问一句要做什么，不猜。
 - 需求超出 wiki（联网找资料、OCR、写代码、排版渲染）：直接说明不覆盖，不硬套摄入或工作流。
+
+### `workflow:`：独占的工作流入口
+
+- 去掉前缀后为空：问一句要办什么，不猜。
+- 前缀后是有效工作流 id（如 `workflow:ppt_creator`）：直接 `workflow load`，再核对返回
+  `content` 里的 `## 适用` 与 `## 前置检查`。
+- 否则拆成 2–4 个关键词跑 `workflow search`，最多 5 个候选；先看候选的 `applies`，符合启动
+  条件才 `load` 并按步骤执行。中文长句不要整句丢给检索。
+- 0 命中，或候选都不符合 `applies`：直接回“无可用workflow”，不硬套、不转去查知识，也不做
+  页面兜底。需要查知识时让用户改用 `wiki:`。
 
 ## 工作区边界
 
@@ -175,8 +185,11 @@ python3 <skill>/scripts/wiki.py query "关键词" --json
 python3 <skill>/scripts/wiki.py query --page <page-id> --json
 ```
 
-`query` **不检索工作流**；话题探索是先显式 `workflow load "topic-exploration"` 再照着走的流程，
-不是查询时自动注入的分支。`topics` 是已沉淀话题，相关的先读再探索，不重复劳动。单点查
+`query` 会带回最多 5 个工作流候选：`workflows` 是候选列表，`workflow_matches` 是数量，每条
+候选带 `applies`（`## 适用` 原文）。候选不是自动注入：只有 `applies` 与当前场景相符时才
+`workflow load` 照做；不符合就忽略，照常按页面/话题回答。话题探索仍是先显式
+`workflow load "topic-exploration"` 再照着走的流程。`query --task` 只登记任务检索，不带工作流
+候选。`topics` 是已沉淀话题，相关的先读再探索，不重复劳动。单点查
 页面、查字段或确认某个已知事实，直接用 `query`，不必走完整流程；要读原文就打开
 `work.json` 里 `sources[].raw` 指向的观看区文件。
 
@@ -210,8 +223,10 @@ python3 <skill>/scripts/wiki.py sync --body-only --json
 （`builtin/<id>/WORKFLOW.md`）。工作流 frontmatter 的 `name` 写
 英文机器名，中文展示名放 `alias_name`；`workflow list` 以 `id（alias_name）` 显示。
 
-工作流是可执行流程，不是知识页：它不会被 `ingest` 写进账本；`query` 也不检索它，必须显式
-`workflow search`，避免工作流自动介入普通知识问答。改完流程不用重新摄入。
+工作流是可执行流程，不是知识页：它不会被 `ingest` 写进账本；普通 `query` 会带回最多 5 个
+候选（`workflows`，每条带 `applies`），显式 `workflow search` 也只返回最多 5 个，0 命中时带
+`message: "无可用workflow"`。候选不会自动加载，只有核对 `applies` 成立后才 `workflow load`。
+改完流程不用重新摄入。
 
 `## 步骤` 一节里的每一步都要标类型：
 
@@ -224,7 +239,7 @@ python3 <skill>/scripts/wiki.py sync --body-only --json
 `process` 页面，`workflow load` 会判它无效并指向 `process`。没有类型标记的旧文件 0.5.0
 仍能加载，但会给出 warning；`0.6.0` 起没有标记将判无效。
 
-需要工作流时，先显式检索，再加载照做：
+需要按工作流办事时，先看 `query` 带回的候选或显式检索，再加载照做：
 
 ```bash
 python3 <skill>/scripts/wiki.py workflow search "开户" --json
@@ -234,15 +249,19 @@ python3 <skill>/scripts/wiki.py workflow load "<工作流>" --json
 
 `load` 返回 `workflow`（元数据）、`content`（全文）、`resources`（配套文件），以及按类型分好
 的 `tools`、`human_steps`、`agent_steps`、`verify_steps`（每项 `{line, text}`）和 `warnings`；
-`list` 的每一项也带 `tools`/`human_steps` 计数与 `warnings`。
+`search` 与 `query` 的候选带 `applies`；`list` 的每一项也带 `tools`/`human_steps` 计数与
+`warnings`。
 
-- 只有确认要按工作流办事时才检索；普通提问不要先搜工作流，也不要让工作流替用户决定范围。
+- 普通提问直接用 `query`；它带回的候选只作提示，不要为了找流程额外先搜，也不要让工作流替用户
+  决定范围。只有 `applies` 明确成立、且用户要按流程办事时才 `load`。
 - 按 `tools` 调工具、按 `human_steps` 停下来问人；用 `resources` 找配套文件，需要细节时再读
   `references/`，不要一次把所有脚本和说明都倒进上下文。
 - 运行 `scripts/` 前先看清用途与参数；没有把握时先向用户确认，不要盲跑。
 - 工作流步骤与知识页冲突时，流程以 `WORKFLOW.md` 为准；事实依据仍以 raw 和页面为准，
   缺依据就说明，不要补编步骤。
-- 没有命中工作流时按普通知识检索回答；不要凭目录名猜流程，也不要声称执行了不存在的工作流。
+- 普通提问没有命中候选时按普通知识检索回答；`workflow:` 前缀下没有命中或候选都不符合
+  `applies` 时，直接回“无可用workflow”，不转页面兜底。不要凭目录名猜流程，也不要声称执行了
+  不存在的工作流。
 
 ## 沉淀话题
 

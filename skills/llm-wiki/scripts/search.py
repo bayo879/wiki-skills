@@ -1,9 +1,9 @@
 """Ranked page search used by `query`.
 
 The scoring is intentionally simple: count query-term hits in title, summary and
-body, then weight title hits 5x and summary hits 3x. `query` combines these page
-results with workflow matches, so the page half lives here and stays free of
-command-line state.
+body, then weight title hits 5x and summary hits 3x. `query` pairs these page
+results with topic and workflow candidates, so the page half lives here and stays
+free of command-line state.
 """
 
 from __future__ import annotations

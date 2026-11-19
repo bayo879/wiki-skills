@@ -51,6 +51,7 @@ UNTYPED_ALLOWED = True
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 
 STEP_HEADING = re.compile(r"^##\s+步骤\s*$")
+APPLIES_HEADING = re.compile(r"^##\s+适用\s*$")
 HEADING2 = re.compile(r"^##\s")
 LIST_ITEM = re.compile(r"^( {0,3})([-*+]|\d+[.)])\s+(.*)$")
 MARKER = re.compile(r"^(tool|human|agent|verify)\s*[:：]\s*(.*)$", re.IGNORECASE)
@@ -162,6 +163,22 @@ def load(root, workflow_id):
     }
 
 
+def _applies(text):
+    """Return the `## 适用` section verbatim, or an empty string."""
+    lines = []
+    in_section = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if APPLIES_HEADING.match(stripped):
+            in_section = True
+            continue
+        if in_section and HEADING2.match(stripped):
+            break
+        if in_section:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def match(root, terms, limit, builtin=True):
     """Rank valid workflows against search terms; reads only files."""
     terms = [term for term in terms if term]
@@ -171,32 +188,32 @@ def match(root, terms, limit, builtin=True):
     for entry in scan(root, builtin=builtin):
         if not entry["valid"]:
             continue
-        title = entry["name"]
-        alias = entry["alias_name"]
-        description = entry["description"]
-        tags = " ".join(entry["tags"])
-        haystack = f"{title}\n{alias}\n{description}\n{tags}\n{entry['body']}"
-        hits = sum(haystack.lower().count(term.lower()) for term in terms)
-        if hits == 0:
-            continue
-        labels = f"{title}\n{alias}"
-        score = hits + 5 * sum(labels.lower().count(term.lower()) for term in terms)
-        score += 3 * sum(
-            description.lower().count(term.lower()) + tags.lower().count(term.lower())
-            for term in terms
+        fields = (
+            (entry["name"], 4),
+            (entry["alias_name"], 4),
+            (entry["description"], 2),
+            (" ".join(entry["tags"]), 6),
+            (entry["body"], 1),
         )
+        score = sum(
+            weight * sum(text.lower().count(term.lower()) for term in terms)
+            for text, weight in fields
+        )
+        if score == 0:
+            continue
         scored.append(
             {
                 "id": entry["id"],
                 "source": entry["source"],
-                "name": title,
-                "alias_name": alias,
-                "description": description,
+                "name": entry["name"],
+                "alias_name": entry["alias_name"],
+                "description": entry["description"],
                 "tags": entry["tags"],
                 "path": entry["path"],
                 "main": entry["main"],
                 "load": f'workflow load "{entry["id"]}"',
                 "score": score,
+                "applies": _applies(entry["body"]),
                 "resources": len(entry["resources"]),
                 "tools": len(entry["tools"]),
                 "human_steps": len(entry["human_steps"]),

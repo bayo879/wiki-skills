@@ -102,13 +102,14 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
     解析后落在扫描根外的符号链接。导入 `errors.py` / `workspace.py` 前设
     `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。
-12. **工作流只读、不进账本、不随查询注入。** `scan_files` 在扫描根一级跳过 `workflows/`
+12. **工作流只读、不进账本、查询只返回候选。** `scan_files` 在扫描根一级跳过 `workflows/`
     （`workflows.WORKFLOW_DIRS`），不因旧 `scan.ignore` 是否包含它而改变；`workflows.py` 不
     打开数据库、不写 `.wiki/`、不排任务。`workflow_roots` 只返回实际存在的 `workflows/`，
     `scan` 收其一级子目录，主文件固定为 `WORKFLOW.md`。
-    `query` 不读工作流文件，工作流只通过显式 `workflow search` 检索，项目工作流与内置工作流
-    一起参与，只返回 `valid` 项。`workflow list` 仍列出非法项并带 `error`，`roots` 只有
-    实际扫描到的 `workflows/`，并汇总带 warning 的项数。`workflow load` 的 id 必须是
+    `query` 会读工作流文件，在页面、话题之外带回最多 5 个候选（`workflows`，每条带
+    `applies`），但不自动加载；`workflow:` 前缀只走工作流。`workflow search` 与 query 共用
+    `match()`，项目工作流与内置工作流一起参与，只返回 `valid` 项。`workflow list` 仍列出非法项并带
+    `error`，`roots` 只有实际扫描到的 `workflows/`，并汇总带 warning 的项数。`workflow load` 的 id 必须是
     该目录的一级目录名或内置工作流 id，拒绝 `.`、`..`、路径分隔符和区外符号链接。工作流文件是活
     文件，不做缓存或 digest。
     步骤契约在 `parse_steps` / `_contract`：只取第一个 `## 步骤` 到下一个二级标题之间的顶层
@@ -206,7 +207,8 @@ topics/*.md ──query/scan──→ topics 命中（只读，不落盘）
   `tests/selftest.py`。
 - 改工作流：同步 `docs/readme/cli.md`、`docs/readme/workflows.md`、`SKILL.md`、
   `skills/llm-wiki/scripts/health.py` 的 `SCRIPT_FILES` 与 `BUILTIN_WORKFLOWS`、
-  `tests/selftest.py`；保持工作流只经显式 `workflow search` 检索、`load` 只读、内置可覆盖。
+  `tests/selftest.py`；保持 query 只返回候选、显式 `workflow search` 与 query 共用 `match()`、
+  `load` 只读、内置可覆盖。
   改进步骤契约时同时改 `parse_steps`、`_contract`、selftest 与 `workflows.md` 的判定表。
 - 改话题：同步 `docs/readme/cli.md`、`docs/readme/topics.md`、`SKILL.md`、
   `skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md`、`scripts/health.py` 的

@@ -45,9 +45,9 @@
 ## 工作流是可执行能力，不是页面
 
 知识页回答"是什么"，工作流回答"怎么做"，而且是 agent（或人）能照着执行的做法。工作流放在
-`<root>/workflows/<id>/`，由 `WORKFLOW.md`、`scripts/`、`references/` 组成，只在显式
-`workflow search` 后由 `workflow load` 返回主流程、分好类型的步骤和资源清单。项目工作流只从
-`<root>/workflows/` 读取。
+`<root>/workflows/<id>/`，由 `WORKFLOW.md`、`scripts/`、`references/` 组成；普通 `query`
+会带回最多 5 个候选，但只有 `workflow load` 才返回主流程、分好类型的步骤和资源清单。项目
+工作流只从 `<root>/workflows/` 读取。
 
 工作流不摄入、不进账本，理由有三点：
 
@@ -65,9 +65,9 @@
 warning，0.6.0 起没有类型判无效。
 
 只读也意味着 `workflow list` / `workflow search` / `workflow load` 不创建 `.wiki/`、
-不依赖 `init`，在没有知识库的项目里也能单独使用。工作流检索与知识查询分开：`query` 只管
-页面与话题，工作流必须显式检索，避免流程分支自动介入普通问答；代价是多一条命令，换来的
-是主流程不被工作流带偏。
+不依赖 `init`，在没有知识库的项目里也能单独使用。工作流检索与知识查询的边界是「候选不自动
+执行」：`query` 会返回页面、话题和工作流候选，但工作流只有核对 `applies` 并显式
+`workflow load` 后才按步骤执行，避免流程分支自动介入普通问答。
 
 技能自带 `topic-exploration` 内置工作流，回答知识问题时默认进入：定主题、多轮检索、总结，
 再问是否沉淀。默认进入靠的是显式 `workflow load "topic-exploration"`，不是 `query` 自动注入。

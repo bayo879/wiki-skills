@@ -86,8 +86,9 @@ updated: 2026-11-16
 
 - `ingest` 整目录跳过 `topics/`，话题不会被当成来源，也不会生成 route/page 任务。
 - `query` 直接扫描 `topics/*.md`，命中时放在 `topics`；话题计数 `topic_matches` 与页面
-  `matches` 分开。每项带 `name`、`description`、`status`、`path`，按 `path` 直接打开话题文件。工作流不进
-  `query` 结果，需要流程时显式 `workflow search`。
+  `matches` 分开。每项带 `name`、`description`、`status`、`path`，按 `path` 直接打开话题文件。
+  工作流候选在 `workflows`，最多 5 个、带 `applies`，但不会自动加载；需要按流程办事时核对后
+  再 `workflow load`，也可显式 `workflow search`。
 - 话题由 agent 直接写，不经账本、不排任务；写入后要报告“未执行摄入”，不能说成已建页。
 - 话题改动立即对下一次 `query` 生效，不需要重新 `ingest`。
 

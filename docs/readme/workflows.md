@@ -41,8 +41,8 @@ skills/llm-wiki/workflows/
   `builtin`）；同 id 时项目版优先，内置版不重复列出。
 - `workflow load "topic-exploration"` 返回内置流程；它的 `path` 是展示标签
   `builtin/topic-exploration/WORKFLOW.md`，不是磁盘路径，`resources` 恒为空（内置流程自包含）。
-- 内置工作流不自动进入 `query` 结果；需要时显式 `workflow search`，内置工作流同样会被检出，
-  `source` 为 `builtin`。项目覆盖后 `source` 变为 `project`。
+- 内置工作流也会进入 `query` 候选和显式 `workflow search`，`source` 为 `builtin`。项目覆盖后
+  `source` 变为 `project`。
 - 内置工作流只读，改流程请复制到 `workflows/topic-exploration/` 再改，不要改技能安装目录。
 
 ## WORKFLOW.md
@@ -137,9 +137,9 @@ frontmatter 字段：
 
 ## 检索与加载
 
-工作流不经过 `ingest`，`workflows/` 在摄入时整目录跳过，因此改流程
-不需要重建知识库。`query` 不检索工作流；要用工作流时必须显式检索，避免工作流自动介入普通
-知识问答：
+工作流不经过 `ingest`，`workflows/` 在摄入时整目录跳过，因此改流程不需要重建知识库。
+普通 `query` 会在页面、话题之外带回最多 5 个工作流候选（每条带 `applies`），但不自动加载；
+要按流程办事时再看候选或显式检索：
 
 ```bash
 python3 <skill>/scripts/wiki.py query "入库" --json
@@ -149,14 +149,17 @@ python3 <skill>/scripts/wiki.py workflow load intake-backlog --json
 python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 ```
 
-`workflow search` 返回命中的项目工作流与内置工作流，按分数排序；`workflow load` 返回
-`content`（`WORKFLOW.md` 全文）、`meta`、`path`、`resources` 和分好类型的步骤。
+`workflow search` 返回命中的项目工作流与内置工作流，按分数排序，最多 5 个；候选带
+`applies`（`## 适用` 原文），0 命中时 data 带 `message: "无可用workflow"`。`workflow load`
+返回 `content`（`WORKFLOW.md` 全文）、`meta`、`path`、`resources` 和分好类型的步骤。
 按 `tools` 调工具、按 `human_steps` 停下来问人，需要细节时再读 `resources` 里的文件。
 结构不合法的工作流不会出现在 `workflow search` 结果里，但会出现在 `workflow list` 中并带
 `error`，方便修正。
 
 `wiki:` 前缀入口也走这里：需求由 `SKILL.md` 的路由表落到具体工作流，仍必须 `workflow load`
-后才按步骤执行。路由表只在 `SKILL.md` 定义一处，本文不复制。
+后才按步骤执行。`workflow:` 前缀是独占入口，只跑 `workflow search`/`load`，不查页面和话题；
+0 命中或候选都不符合 `applies` 时回复“无可用workflow”。路由表只在 `SKILL.md` 定义一处，
+本文不复制。
 
 话题探索流程依次做：定主题、找现成能力、找已有话题、多轮查页面、补原始依据、判断收敛、
 总结，最后问用户是否沉淀到 `topics/<主题>.md`。`query` 的 `topics` 是已知话题，相关的先读

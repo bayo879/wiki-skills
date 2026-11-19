@@ -97,6 +97,8 @@ def workflow_files(root):
         "  - 新客户\n"
         "---\n"
         "# 开户流程\n\n"
+        "## 适用\n\n"
+        "新客户首次开户，且需要核验身份。\n\n"
         "## 步骤\n\n"
         "1. tool: **核验身份**：运行 `scripts/check.sh`\n"
         "2. human: **收资料**：请客户签字确认\n"
@@ -457,6 +459,8 @@ def retrieval_flow(results):
               [group["word"] for group in asked["queries"]] == ["反诈", "复机", "提醒"], asked["queries"])
         check(results, "query --task reports the spent budget",
               asked["budget"]["used"] == 3 and asked["budget"]["remaining"] == 2, asked["budget"])
+        check(results, "query --task leaves workflow candidates out",
+              "workflow_matches" not in asked and "workflows" not in asked, asked)
         log = (root / ".wiki" / "tasks" / reclaimed["id"] / "queries.jsonl")
         check(results, "every query --task call is logged in the task folder",
               log.exists() and len(log.read_text(encoding="utf-8").splitlines()) == 1, log)
@@ -966,12 +970,18 @@ def main(argv=None):
               [wiki.ingest_decision(*args) for args, _ in cases] == [want for _, want in cases], cases)
 
         found = run(root, "query", "开户")["data"]
-        check(results, "query does not mix in workflow matches",
-              "workflows" not in found and "workflow_matches" not in found, found)
+        check(results, "query carries workflow candidates without loading them",
+              found.get("workflow_matches") == 1
+              and found.get("workflows", [{}])[0].get("id") == "account-opening"
+              and found.get("workflows", [{}])[0].get("applies") == "新客户首次开户，且需要核验身份。"
+              and found.get("workflows", [{}])[0].get("load") == 'workflow load "account-opening"',
+              found)
         searched = run(root, "workflow", "search", "开户")["data"]
         check(results, "workflow search finds a project workflow",
               searched["matches"] == 1 and searched["workflows"][0]["id"] == "account-opening"
-              and searched["workflows"][0]["tools"] == 1, searched)
+              and searched["workflows"][0]["tools"] == 1
+              and searched["workflows"][0].get("applies") == "新客户首次开户，且需要核验身份。",
+              searched)
         workflow_main.write_text(
             workflow_main.read_text(encoding="utf-8") + "\n补充：支持见证开户。\n",
             encoding="utf-8",
@@ -981,7 +991,7 @@ def main(argv=None):
               live["matches"] == 1, live)
         invalid = run(root, "workflow", "search", "坏流程")["data"]
         check(results, "invalid workflows stay out of workflow search",
-              invalid["matches"] == 0, invalid)
+              invalid["matches"] == 0 and invalid.get("message") == "无可用workflow", invalid)
 
         topics_hit = run(root, "query", "复机")["data"]
         builtin_hit = run(root, "workflow", "search", "话题")["data"]

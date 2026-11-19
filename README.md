@@ -62,9 +62,11 @@ Windows 首次使用运行
 4. 页面以修订形式写入账本，并由引擎推送到 `<view>/pages/<type>/<标题>.md`（观看区）；
    正文只存在账本与观看区两处。来源变化会让引用页变 `stale`，下次 `ingest` 重新排队。
 5. 可执行工作流放在 `workflows/<工作流>/`，由 `WORKFLOW.md`、`scripts/`、`references/`
-   组成。`ingest` 跳过整个目录；`query` 不检索工作流，需要时显式 `workflow search`，
-   命中后按 `workflow load` 返回的分类步骤执行。改工作流文件立即生效，不用重新摄入。技能自带
-   `topic-exploration` 内置工作流，项目放同名工作流即可覆盖，显式检索时同样能被检出。
+   组成。`ingest` 跳过整个目录；普通 `query` 会带回最多 5 个工作流候选（每条带 `applies`），
+   但不自动加载；需要时显式 `workflow search`，核对适用条件后按 `workflow load` 返回的分类
+   步骤执行。`workflow:` 前缀是独占入口，只搜工作流，不查页面和话题。改工作流文件立即生效，
+   不用重新摄入。技能自带 `topic-exploration` 内置工作流，项目放同名工作流即可覆盖，显式检索
+   或 `query` 候选里同样能被检出。
 6. 话题沉淀放在 `topics/<主题>.md`，一个主题一份，固定六节（主题、结论、依据、未决问题、
    下一步、能力候选）。`ingest` 跳过 `topics/`；`query` 把命中话题放在 `topics`，与页面
    计数分开。话题由 agent 直接写，不进账本、不排任务。
