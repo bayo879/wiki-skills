@@ -3,6 +3,30 @@
 本文件记录用户已确认的方向与关键取舍。新决策由用户拍板后追加；未确认的候选方案写进
 `docs/issues/`，不要写在这里。
 
+## 2026-11-19：工作流与话题定义收进观看区
+
+用户确认实际知识库会提交 `wiki/`，工作流定义和话题不应再裸露在观看区外；产物也要和定义
+分层，避免任务目录挡住定义。此决策取代 2026-11-16 观看区设计里 `topics/`/`workflows/` 的
+“首次投放后归用户”模型。
+
+- 项目工作流定义放 `<view>/workflows/<id>/`，话题放 `<view>/topics/`，任务产物放
+  `<view>/runs/workflows/<id>/<task>/`。`runs/` 不叫 `cache/`，因为其中的 `output/` 是最终
+  交付物，叫缓存会诱导清理。
+- 查找顺序：观看区 → 旧根 `<root>/workflows/`、`<root>/topics/`（只读兜底）→ 内置工作流。
+  同 id 观看区优先；旧根与观看区 `WORKFLOW.md` 不同时只给 `legacy_conflict` 警告，加载仍用
+  观看区版。旧根兜底保留一个发布版本，不自动搬迁。
+- 新增 `origin`（`view`/`legacy`/`builtin`）；`source` 仍是 `project`/`builtin`，不合并两个
+  语义。`workflow list` 的 `roots` 列出观看区与旧根中实际存在的目录，观看区在前。
+- 删除 `view._seed_view_topics`、`view._seed_view_workflows` 与 `publish.topics`、
+  `publish.workflows`；`publish` 只留 `dir`/`enabled`。`ensure_publish` 建
+  `<view>/workflows`、`<view>/topics`，`enabled:false` 也建；`runs/` 在第一次产物时创建。
+- 新增只读 `ledger.view_dir(root)`，供不打开账本的 `workflow` 命令解析 `publish.dir`；
+  `query` 直接用已打开账本的 `publish_dir`。
+- `SKILL.md` 必须自包含目录树、所有权、查找顺序、产物路径与 `publish.dir` 语义，技能单独
+  拿出去也能落地。
+- 本仓库根 `workflows/` 是示例/开发用定义，和 `skills/` 一样是可选产物，不是运行时加载入口；
+  本仓库不迁移、不改 `.gitignore`、不在根跑写状态命令。
+
 ## 2026-11-19：页面证据与 raw 来源用标准 Markdown 链接
 
 用户要求“先完成图谱的三层链接”，并指出有明确路径的信息应可用超链接标定图谱关系、在其他
@@ -442,6 +466,8 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   翻转后判 invalid；仓库内两份（内置 `topic-exploration`、`workflows/ppt_creator`）当次补标记。
 - **观看区随目录收口。** 只投放 `workflows/`；`publish.workflows` 为新键，旧
   `publish.scenarios` 的迁移兼容同日移除，遗留键按未知键忽略。
+  > 该条已被 2026-11-19「工作流与话题定义收进观看区」取代：不再投放，
+  > `publish.workflows` 已移除。
 - **0.5.0 一次装完，0.6.0 只收紧。** 没有为旧目录设移除窗口，旧目录支持在改名当天删掉。
 - 代码把 `scenarios.py` 改为 `workflows.py`，`SCENARIO_DIRS`→`WORKFLOW_DIRS`，
   `E_SCENARIO_INVALID`→`E_WORKFLOW_INVALID`；内置目录改 `skills/llm-wiki/workflows/`；
