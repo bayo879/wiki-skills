@@ -1133,8 +1133,13 @@ def command_workflow():
         for item in hits:
             alias = f"（{item['alias_name']}）" if item["alias_name"] else ""
             lines.append(f"{item['id']}{alias}  {item['description']}")
+            where = (
+                f"skill_path: {item['skill_path']}"
+                if item["source"] == "builtin"
+                else f"path: {item['path']}"
+            )
             lines.append(
-                f"    path: {item['path']}  tools: {item['tools']}"
+                f"    {where}  tools: {item['tools']}"
                 f"  human: {item['human_steps']}  load: {item['load']}"
             )
             lines.append(f"    applies: {item['applies'] or '(none)'}")
@@ -1152,8 +1157,13 @@ def command_workflow():
             state = "ok" if item["valid"] else f"invalid: {item['error']}"
             alias = f"（{item['alias_name']}）" if item["alias_name"] else ""
             lines.append(f"{item['id']}{alias}  [{state}]  {item['description']}")
+            where = (
+                f"skill_path: {item['skill_path']}"
+                if item["source"] == "builtin"
+                else f"path: {item['path']}"
+            )
             detail = (
-                f"    path: {item['path']}  resources: {len(item['resources'])}"
+                f"    {where}  resources: {len(item['resources'])}"
                 f"  tools: {item['tools']}  human: {item['human_steps']}"
             )
             if item["warnings"]:
@@ -1172,7 +1182,11 @@ def command_workflow():
         f"{len(data['tools'])} tool steps, {len(data['human_steps'])} human steps",
         data,
         [
-            f"path: {data['path']}",
+            (
+                f"skill_path: {data['skill_path']}"
+                if record["source"] == "builtin"
+                else f"path: {data['path']}"
+            ),
             f"description: {record['description']}",
             f"steps: {len(data['tools'])} tool, {len(data['human_steps'])} human, "
             f"{len(data['agent_steps'])} agent, {len(data['verify_steps'])} verify",

@@ -43,7 +43,7 @@ SCRIPT_FILES = (
 )
 TEMPLATES = ("concept.md", "entity.md", "process.md")
 REFERENCES = ("curation.md", "recovery.md")
-BUILTIN_WORKFLOWS = ("topic-exploration",)
+BUILTIN_WORKFLOWS = ("topic-exploration", "workflow-review", "workflow-create")
 
 LEDGER_OK = "ok"
 LEDGER_REPAIRABLE = "repairable"

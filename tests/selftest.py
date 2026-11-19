@@ -687,7 +687,7 @@ def main(argv=None):
 
         listing = run(root, "workflow", "list")["data"]
         check(results, "workflow list includes project and builtin entries",
-              listing["count"] == 7 and listing["valid"] == 4 and listing["warned"] == 2, listing)
+              listing["count"] == 9 and listing["valid"] == 6 and listing["warned"] == 2, listing)
         check(results, "workflow list reports the workflows/ root only",
               listing["roots"] == ["workflows"] and listing["root"] == "workflows",
               listing.get("roots"))
@@ -713,12 +713,23 @@ def main(argv=None):
         builtin = run(root, "workflow", "load", "topic-exploration")["data"]
         check(results, "builtin workflow is loadable without project files",
               builtin["workflow"]["source"] == "builtin"
-              and builtin["path"].startswith("builtin/")
+              and "path" not in builtin and "main" not in builtin
+              and builtin["skill_path"] == "workflows/topic-exploration/WORKFLOW.md"
+              and builtin["workflow"]["skill_path"] == "workflows/topic-exploration/WORKFLOW.md"
               and "话题文件" in builtin["content"]
               and builtin["workflow"]["name"] == "topic-exploration"
               and builtin["workflow"]["alias_name"] == "话题探索"
               and len(builtin["tools"]) == 4 and len(builtin["human_steps"]) == 1
               and builtin["resources"] == [], builtin)
+        for name in ("workflow-review", "workflow-create"):
+            entry = run(root, "workflow", "load", name)["data"]
+            check(results, f"builtin {name} is loadable and self-contained",
+                  entry["workflow"]["source"] == "builtin"
+                  and "path" not in entry and "main" not in entry
+                  and entry["skill_path"] == f"workflows/{name}/WORKFLOW.md"
+                  and entry["workflow"]["skill_path"] == f"workflows/{name}/WORKFLOW.md"
+                  and entry["resources"] == []
+                  and len(entry["tools"]) >= 1, entry)
         check(results, "builtin workflow id cannot escape",
               run(root, "workflow", "load", "../x", expect=2)["error"]["code"] == "E_USAGE")
         loaded = run(root, "workflow", "load", "account-opening")["data"]

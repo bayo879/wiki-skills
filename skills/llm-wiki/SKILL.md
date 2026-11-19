@@ -21,6 +21,8 @@ description: 当用户以 `wiki:` 或 `workflow:` 开头下达任务，或要把
 | 去前缀后的需求 | 去向 |
 | --- | --- |
 | 要交付物：PPT、演示、幻灯片、汇报材料、逐页大纲 | `workflow load ppt_creator`，按它的步骤执行 |
+| 评审、检查或优化某个工作流（「这个工作流有什么不足」） | `workflow load workflow-review`，按它给的清单出结论 |
+| 新建、起草或搭建工作流（「建个工作流」「把这套流程写成工作流」） | `workflow load workflow-create`，前提不过先给替代方案，不硬建 |
 | 问、找、梳理、有哪些、有什么区别 | 内置 `topic-exploration` |
 | 建库、整理、把这批资料摄入 | 本文「建库或增量摄入」一节 |
 | 点名了工作流（`wiki:ppt_creator …` 或「按 xx 工作流」） | 直接 `workflow load` 那个 |
@@ -218,9 +220,11 @@ python3 <skill>/scripts/wiki.py sync --body-only --json
 ## 按工作流执行
 
 项目可以把一类可执行任务的流程写成工作流，放在 `<root>/workflows/<工作流>/`：`WORKFLOW.md`
-是主流程，`scripts/` 和 `references/` 是配套脚本与说明。技能自带 `topic-exploration`
-内置工作流；项目放同名工作流即可覆盖它，内置项的 `path` 只是展示标签
-（`builtin/<id>/WORKFLOW.md`）。工作流 frontmatter 的 `name` 写
+是主流程，`scripts/` 和 `references/` 是配套脚本与说明。技能自带 `topic-exploration`、
+`workflow-review`、`workflow-create` 内置工作流；项目放同名工作流即可覆盖它。内置项不给根目录
+相对的 `path`，只给 `skill_path`（技能目录相对，如 `workflows/<id>/WORKFLOW.md`），
+`resources` 恒为空：正文直接用 `workflow load` 返回的 `content`，不要按工作区去找这个文件。
+工作流 frontmatter 的 `name` 写
 英文机器名，中文展示名放 `alias_name`；`workflow list` 以 `id（alias_name）` 显示。
 
 工作流是可执行流程，不是知识页：它不会被 `ingest` 写进账本；普通 `query` 会带回最多 5 个

@@ -22,8 +22,9 @@ flow plus an inventory of the support files.
 The skill also ships built-in workflows under `<skill>/workflows/`. They are
 read-only and always available, and a project workflow with the same id takes
 precedence, so a project can override the default flow. Built-in flows are
-self-contained: they list no resources and their `path` values are display
-labels rather than workspace paths.
+self-contained: they list no resources and report `skill_path` (relative to
+the skill's own `workflows/` directory) instead of the workspace-relative
+`path`/`main` a project workflow carries.
 """
 
 from __future__ import annotations
@@ -42,7 +43,6 @@ WORKFLOW_FILE = "WORKFLOW.md"
 WORKFLOW_DIRS = (WORKFLOW_DIR,)
 MAX_WORKFLOW_CHARS = 200_000
 BUILTIN_DIR = "workflows"
-BUILTIN_LABEL = "builtin"
 STEP_TYPES = ("tool", "human", "agent", "verify")
 # The typed-step contract ships in 0.5.0. Old files stay valid with a warning
 # until 0.6.0; flip this constant and drop the warning branch at that release.
@@ -149,9 +149,14 @@ def load(root, workflow_id):
             entry["hint"] or "run `workflow list` and fix the workflow directory",
             2,
         )
+    where = (
+        {"skill_path": entry["skill_path"]}
+        if entry["source"] == "builtin"
+        else {"path": entry["main"]}
+    )
     return {
         "workflow": _public(entry),
-        "path": entry["main"],
+        **where,
         "content": entry["text"],
         "meta": entry["meta"],
         "resources": entry["resources"],
@@ -209,8 +214,7 @@ def match(root, terms, limit, builtin=True):
                 "alias_name": entry["alias_name"],
                 "description": entry["description"],
                 "tags": entry["tags"],
-                "path": entry["path"],
-                "main": entry["main"],
+                **_location(entry),
                 "load": f'workflow load "{entry["id"]}"',
                 "score": score,
                 "applies": _applies(entry["body"]),
@@ -358,8 +362,8 @@ def _warning(code, line, text, message):
 
 def _builtin_entry(base, directory):
     entry = _entry(base, directory, source="builtin")
-    entry["path"] = f"{BUILTIN_LABEL}/{entry['path']}"
-    entry["main"] = f"{BUILTIN_LABEL}/{entry['main']}"
+    entry["skill_path"] = f"{BUILTIN_DIR}/{entry.pop('main')}"
+    entry.pop("path")
     entry["resources"] = []
     return entry
 
@@ -450,6 +454,13 @@ def _steps_of(steps, kind):
     ]
 
 
+def _location(entry):
+    """Return the flow's location, keyed by the base its path is relative to."""
+    if entry["source"] == "builtin":
+        return {"skill_path": entry["skill_path"]}
+    return {"path": entry["path"], "main": entry["main"]}
+
+
 def _public(entry):
     return {
         "id": entry["id"],
@@ -458,8 +469,7 @@ def _public(entry):
         "alias_name": entry["alias_name"],
         "description": entry["description"],
         "tags": entry["tags"],
-        "path": entry["path"],
-        "main": entry["main"],
+        **_location(entry),
         "valid": entry["valid"],
         "error": entry["error"],
         "resources": entry["resources"],

@@ -65,7 +65,8 @@ Windows 首次使用运行
    组成。`ingest` 跳过整个目录；普通 `query` 会带回最多 5 个工作流候选（每条带 `applies`），
    但不自动加载；需要时显式 `workflow search`，核对适用条件后按 `workflow load` 返回的分类
    步骤执行。`workflow:` 前缀是独占入口，只搜工作流，不查页面和话题。改工作流文件立即生效，
-   不用重新摄入。技能自带 `topic-exploration` 内置工作流，项目放同名工作流即可覆盖，显式检索
+   不用重新摄入。技能自带 `topic-exploration`、`workflow-review`、`workflow-create` 内置工作流，
+   项目放同名工作流即可覆盖，显式检索
    或 `query` 候选里同样能被检出。
 6. 话题沉淀放在 `topics/<主题>.md`，一个主题一份，固定六节（主题、结论、依据、未决问题、
    下一步、能力候选）。`ingest` 跳过 `topics/`；`query` 把命中话题放在 `topics`，与页面

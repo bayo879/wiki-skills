@@ -5,7 +5,8 @@
 和知识页不同，工作流描述“怎么做”，而且每一步都要标明由谁执行；它不进入账本，也不参与
 页面引用。
 
-技能另带一个内置工作流 `topic-exploration`，是回答知识问题时的默认流程；项目放同名工作流
+技能自带三个内置工作流：`topic-exploration`（回答知识问题时的默认流程）、`workflow-review`
+（评审一个工作流）、`workflow-create`（新建工作流，建前先过评审前提）；项目放同名工作流
 即可覆盖它。
 
 ## 目录结构
@@ -33,17 +34,22 @@
 
 ```text
 skills/llm-wiki/workflows/
-└── topic-exploration/
-    └── WORKFLOW.md         定主题、多轮检索、总结、按需沉淀
+├── topic-exploration/     定主题、多轮检索、总结、按需沉淀
+├── workflow-review/       按七条维度评审一个工作流
+└── workflow-create/       先过评审前提，再起草工作流并自审
 ```
 
 - `workflow list` 把项目工作流和内置工作流列在一起，每项带 `source`（`project` 或
   `builtin`）；同 id 时项目版优先，内置版不重复列出。
-- `workflow load "topic-exploration"` 返回内置流程；它的 `path` 是展示标签
-  `builtin/topic-exploration/WORKFLOW.md`，不是磁盘路径，`resources` 恒为空（内置流程自包含）。
+- `workflow load "<内置 id>"` 返回内置流程；它不给根目录相对的 `path`/`main`，而是给
+  `skill_path`（技能目录相对，形如 `workflows/<id>/WORKFLOW.md`），`resources` 恒为空
+  （内置流程自包含）。项目工作流反过来只给 `path`（目录）与 `main`（主文件），两者都以
+  工作区根目录为基准。
 - 内置工作流也会进入 `query` 候选和显式 `workflow search`，`source` 为 `builtin`。项目覆盖后
   `source` 变为 `project`。
-- 内置工作流只读，改流程请复制到 `workflows/topic-exploration/` 再改，不要改技能安装目录。
+- 内置工作流只读，改流程请复制到 `workflows/<id>/` 再改，不要改技能安装目录。新增或改动内置
+  工作流要同步 `skills/llm-wiki/scripts/health.py` 的 `BUILTIN_WORKFLOWS`，否则 `doctor`
+  不检查它。
 
 ## WORKFLOW.md
 

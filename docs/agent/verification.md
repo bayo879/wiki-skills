@@ -331,3 +331,18 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
 - `query` 命中话题时 `topics[].path` 以 `topics/` 开头；
 - `publish.dir=topics` 报 `E_CONFIG`（保留名）；
 - 观看区仍把话题首次投放到 `<view>/topics/`，用户改过的副本不被覆盖。
+
+## 2026-11-19 内置工作流路径改为 skill_path 后复跑
+
+内置工作流不再使用 `builtin/` 展示标签，也不给根目录相对的 `path`/`main`，改给技能目录相对的
+`skill_path`（`workflows/<id>/WORKFLOW.md`）；项目工作流保持 `path`（目录）与 `main`（主文件）。
+复跑 `python3 -m py_compile skills/llm-wiki/scripts/*.py` 通过；
+`python3 tests/selftest.py`：294/294 通过，退出码 0。检查点：
+
+- `workflow list` 六个工作流：三个项目项带 `path`/`main`，三个内置项只有 `skill_path`、
+  `resources` 为 0，文本行打印 `skill_path:` 而不是 `path:`；
+- `workflow load workflow-create` 的 `data` 顶层没有 `path`/`main`，`skill_path` 为
+  `workflows/workflow-create/WORKFLOW.md`；`workflow load ppt_creator` 仍返回
+  `path: workflows/ppt_creator/WORKFLOW.md`；
+- `workflow search 工作流 评审` 与 `query 工作流` 的候选按来源二选一给 `path` 或
+  `skill_path`，内置项不再出现 `builtin/` 前缀。

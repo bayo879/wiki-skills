@@ -250,11 +250,14 @@ boundary}`。`matches` 只数页面，`topic_matches` 只数话题，`workflow_m
 
 `data`: `{root, roots, count, valid, warned, workflows[]}`；`root` 是工作流目录名，
 `roots` 是实际存在的工作流目录（只有 `workflows/`），`warned` 是带 warning 的项数；每项为
-`{id, source, name, alias_name, description, tags, path, main, valid, error, resources,
-tools, human_steps, agent_steps, verify_steps, warnings[]}`。`tools`、`human_steps` 等是
+`{id, source, name, alias_name, description, tags, path, main, skill_path, valid, error,
+resources, tools, human_steps, agent_steps, verify_steps, warnings[]}`。`tools`、
+`human_steps` 等是
 各类型步骤的数量，`warnings[]` 为 `{code, line, text, message}`；`name` 是工作流机器名、
 `alias_name` 是可选的中文展示名（人类可读行优先显示它）；`tags` 按 Obsidian 规则规范化
-（去 `#`、空白切分、保留 `a/b` 层级、丢弃纯数字），`source` 取 `project` 或 `builtin`。
+（去 `#`、空白切分、保留 `a/b` 层级、丢弃纯数字），`source` 取 `project` 或 `builtin`；
+`path`/`main` 只给项目工作流（工作区根目录相对），内置项改给 `skill_path`（技能目录相对，
+形如 `workflows/<id>/WORKFLOW.md`），两者互斥。
 `resources[]` 为 `{path, kind, size}`，`kind` 取 `script`（`scripts/` 下）、`reference`
 （`references/` 下）或 `other`。
 
@@ -264,8 +267,9 @@ data 带 `message: "无可用workflow"`。只有核对 `applies` 并 `load` 后�
 执行；候选不会自动加载。
 
 `data`: `{query, matches, workflows[], message?}`；`matches` 只数工作流，`workflows[]` 为
-`{id, source, name, alias_name, description, tags, applies, path, main, load, score, resources,
-tools, human_steps, verify_steps, warnings}`，`load` 是建议的加载命令；0 命中时 `message` 为
+`{id, source, name, alias_name, description, tags, applies, path, main, skill_path, load,
+score, resources, tools, human_steps, verify_steps, warnings}`，`load` 是建议的加载命令，
+`path`/`skill_path` 按来源二选一（规则同 `workflow list`）；0 命中时 `message` 为
 `"无可用workflow"`。非法工作流不进 `workflow search` 结果。
 
 `workflow load <id>`：加载一个合法工作流（项目或内置），返回主文件全文、资源清单与按类型
@@ -273,10 +277,11 @@ tools, human_steps, verify_steps, warnings}`，`load` 是建议的加载命令�
 
 `data`: `{workflow, path, content, meta, resources, tools, human_steps, agent_steps,
 verify_steps, warnings}`。`content` 是 `WORKFLOW.md` 全文（含 frontmatter），`path` 是主
-文件的根目录相对路径。`tools`、
+文件的根目录相对路径（项目工作流）。`tools`、
 `human_steps`、`agent_steps`、`verify_steps` 每项为 `{line, text}`，`warnings[]` 同上。
-内置工作流的 `path` 是展示标签 `builtin/<id>/WORKFLOW.md`，不是磁盘路径；其 `resources`
-恒为空。
+内置工作流不给 `path`/`main`，改给 `skill_path`（技能目录相对，形如
+`workflows/<id>/WORKFLOW.md`）；其 `resources` 恒为空。`workflow list` 与 `workflow search`
+的条目按同一规则给 `path` 或 `skill_path`。
 
 三个命令都只读：不创建 `.wiki/`，不写账本，不要求先 `init` 或 `ingest`。工作流文件改动后
 下一次 `workflow list` / `workflow load` 立即生效。`id` 必须是工作流目录下的一级目录名
