@@ -1390,38 +1390,23 @@ def main(argv=None):
               and (root / "wiki/raw/用户笔记.md").exists())
 
         readme = (root / "wiki/README.md").read_text(encoding="utf-8")
-        check(results, "view readme lists the directories",
-              all(word in readme for word in ("pages", "raw", "topics", "workflows")), readme)
-        check(results, "view readme names who owns what",
-              "由引擎维护" in readme and "归你" in readme and "sync" in readme, readme)
+        check(results, "view readme lists directories and ownership",
+              all(name in readme for name in ("pages/", "raw/", "workflows/", "topics/", "runs/"))
+              and "由引擎维护" in readme and "项目内容" in readme
+              and "首次投放" not in readme
+              and "工作流副本" not in readme and "话题副本" not in readme,
+              readme)
         (root / "wiki/README.md").unlink()
         run(root, "status")
         check(results, "view readme is rewritten on every push",
               (root / "wiki/README.md").exists())
 
-        check(results, "topics are seeded into the view dir",
-              (root / "wiki/topics/复机办理.md").exists())
-        check(results, "workflows are seeded into the view dir",
-              (root / "wiki/workflows/account-opening/WORKFLOW.md").exists()
-              and (root / "wiki/workflows/account-opening/scripts/check.sh").exists())
-        deck = root / "wiki/workflows/deck-flow/WORKFLOW.md"
-        check(results, "the workflow copy follows the workflows/ directory",
-              deck.exists() and "Deck flow" in deck.read_text(encoding="utf-8"))
-        config_path = root / ".wiki/wiki.json"
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        config["publish"]["workflows"] = False
-        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
-        shutil.rmtree(root / "wiki/workflows")
-        run(root, "status")
-        check(results, "publish.workflows=false stops seeding new copies",
-              not any((root / "wiki/workflows").iterdir()))
-        config["publish"]["workflows"] = True
-        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
-        run(root, "status")
-        (root / "wiki/topics/复机办理.md").write_text("我改过的话题\n", encoding="utf-8")
-        run(root, "status")
-        check(results, "user owned topic copies are never overwritten",
-              (root / "wiki/topics/复机办理.md").read_text(encoding="utf-8") == "我改过的话题\n")
+        check(results, "view content dirs exist",
+              (root / "wiki/workflows").is_dir() and (root / "wiki/topics").is_dir())
+        check(results, "view does not seed root workflows",
+              not (root / "wiki/workflows/account-opening").exists())
+        check(results, "view does not seed root topics",
+              not (root / "wiki/topics/复机办理.md").exists())
 
         page_file.unlink()  # 手改件留在树上会持续告警，也会干扰后面的漂移检查
         run(root, "status")
