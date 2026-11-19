@@ -110,6 +110,71 @@ def view_dir_checks(results):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def write_workflow(base, name, description, body="## 步骤\n\n1. tool: **运行**\n"):
+    directory = base / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "WORKFLOW.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n"
+        "## 步骤\n\n1. tool: **运行**\n\n"
+        f"{body}",
+        encoding="utf-8")
+    return directory
+
+
+def workflow_view_checks(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-viewwf-"))
+    try:
+        view = root / "wiki/workflows"
+        legacy = root / "workflows"
+        write_workflow(view, "account-opening", "观看区开户", "观看区版本")
+        write_workflow(legacy, "account-opening", "旧根开户", "旧版本")
+        write_workflow(legacy, "legacy-only", "旧根流程")
+
+        roots = [p.relative_to(root).as_posix()
+                 for p in workflows.workflow_roots(root, view_root=view)]
+        check(results, "workflow_roots puts view first",
+              roots == ["wiki/workflows", "workflows"], roots)
+
+        entries = workflows.scan(root, builtin=False, view_root=view)
+        by_id = {item["id"]: item for item in entries}
+        check(results, "view workflow wins over legacy",
+              by_id["account-opening"]["origin"] == "view"
+              and by_id["account-opening"]["path"] == "wiki/workflows/account-opening"
+              and by_id["account-opening"]["main"]
+              == "wiki/workflows/account-opening/WORKFLOW.md")
+        check(results, "legacy conflict is marked",
+              by_id["account-opening"]["legacy_conflict"] is True
+              and by_id["account-opening"]["legacy_path"] == "workflows/account-opening/WORKFLOW.md")
+        check(results, "legacy-only workflow keeps legacy origin",
+              by_id["legacy-only"]["origin"] == "legacy")
+
+        inv = workflows.inventory(root, view_root=view)
+        check(results, "inventory reports relative roots",
+              inv["root"] == "wiki/workflows"
+              and inv["roots"] == ["wiki/workflows", "workflows"], inv)
+
+        loaded = workflows.load(root, "account-opening", view_root=view)
+        check(results, "load reads view workflow",
+              loaded["workflow"]["main"] == "wiki/workflows/account-opening/WORKFLOW.md"
+              and loaded["workflow"]["origin"] == "view", loaded["workflow"])
+
+        matched = workflows.match(root, ["观看区"], 5, view_root=view)
+        check(results, "workflow search finds view workflow",
+              matched and matched[0]["id"] == "account-opening"
+              and matched[0]["origin"] == "view", matched)
+
+        write_workflow(view, "workflow-create", "观看区覆盖内置")
+        shadowed = workflows.load(root, "workflow-create", view_root=view)
+        check(results, "view workflow shadows builtin",
+              shadowed["workflow"]["origin"] == "view", shadowed["workflow"])
+
+        builtin = workflows.load(root, "topic-exploration", view_root=view)
+        check(results, "builtin workflow keeps builtin origin",
+              builtin["workflow"]["origin"] == "builtin", builtin["workflow"])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def workflow_files(root):
     base = Path(root) / "workflows"
     good = base / "account-opening"
@@ -734,6 +799,7 @@ def main(argv=None):
         finally:
             shutil.rmtree(legacy_config, ignore_errors=True)
         view_dir_checks(results)
+        workflow_view_checks(results)
         parsed, has_section = workflows.parse_steps(
             "## 步骤\n\n1. TOOL：**a**\n2. Human: **b**\n   - tool: 子项\n"
             "3. 没标\n\n## 其他\n\n- tool: 不算\n")
