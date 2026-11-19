@@ -40,6 +40,19 @@
 `docs/readme/install.md`、`SKILL.md`、`references/recovery.md` 的运行时小节；这两个脚本是
 可选的手动安装工具，不在默认使用路径上，行为没有实机证据前不要写成已验证。
 
+## SKILL.md 的 description
+
+`description` 是技能表（catalog）里唯一常驻的元数据，只负责“要不要加载”，不承担加载后的
+契约；它随会话预载，写了什么就等于每次会话都付费。
+
+- 只写两件事：什么情况下用（`wiki:` / `workflow:` 前缀与请求类型）、一句话能力。流程
+  （`next`/`brief`/`submit`、`query` 的工作流候选、默认话题探索）、命令字段、依赖与安装
+  事实都不写，分别归 `SKILL.md` 正文、`docs/readme/cli.md`、`docs/readme/install.md`。
+- 反例（联网取数、OCR、写代码、排版渲染）留在 `SKILL.md` 正文的“需求超出 wiki”一条，
+  不进 `description`：触发后读到再退出，代价小于让负条款压低触发率。
+- 上限沿用 Anthropic 规范的 1024 字符（`.dsh/skills/writing-skills/references/anthropic-best-practices.md:150`），
+  `tests/selftest.py` 有对应守卫；这条守卫只拦失控，正常改动仍按上面两条判。
+
 ## 机器守卫
 
 ```bash

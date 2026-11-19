@@ -2477,6 +2477,17 @@ def main(argv=None):
         )
         check(results, "the skill package ships no .cmd/.bat wrapper", not wrappers, wrappers)
 
+        skill_meta, _ = wiki.split_frontmatter(
+            (ROOT / "skills" / "llm-wiki" / "SKILL.md").read_text(encoding="utf-8")
+        )
+        description = str(skill_meta.get("description") or "").strip()
+        check(
+            results,
+            "SKILL.md description stays inside the 1024-character metadata budget",
+            bool(description) and len(description) <= 1024,
+            f"{len(description)} chars",
+        )
+
         teaching = [
             ROOT / "README.md",
             ROOT / "skills" / "llm-wiki" / "SKILL.md",

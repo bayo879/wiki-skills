@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: 当用户以 `wiki:` 或 `workflow:` 开头下达任务，或要把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库时使用。引擎负责扫描、解析、任务、校验与落盘；agent 按 next 返回的 brief 和 template 填内容，再 submit；query 查知识并带回最多 5 个工作流候选，候选不会自动加载，核对 `applies` 后才 `workflow load`。回答知识问题时默认按内置「话题探索」工作流办事：定主题、多轮检索、总结，再询问是否把主题沉淀成 `topics/` 文件（附能力候选与待查资料）。`workflow:` 前缀只走工作流，不查页面。适用于「建个 wiki」「把这些资料整理成知识库」「查一下已有知识」「梳理某个主题」「按开户/巡检等流程办事」「把这次调研沉淀下来」等场景。仅依赖 Python 标准库；PDF 可选 pdftotext 或 pypdf。
+description: 当用户以 `wiki:` 或 `workflow:` 开头下达任务，或要把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库时使用：建库与增量摄入、检索已有知识、梳理某个主题、按点名的工作流办事、把这次调研沉淀成话题。
 ---
 
 # llm-wiki：按任务填内容
