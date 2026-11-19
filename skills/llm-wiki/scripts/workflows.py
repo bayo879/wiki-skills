@@ -1,10 +1,12 @@
-"""Read-only executable workflows stored under `<root>/workflows/`.
+"""Read-only executable workflows stored under `<view>/workflows/`.
 
 A workflow is shaped like a skill:
 
-    workflows/<id>/WORKFLOW.md     flow + frontmatter (name, description, tags)
-    workflows/<id>/scripts/        executable helpers
-    workflows/<id>/references/     notes read on demand
+    <view>/workflows/<id>/WORKFLOW.md     flow + frontmatter
+    <view>/workflows/<id>/scripts/        executable helpers
+    <view>/workflows/<id>/references/     notes read on demand
+
+The legacy `<root>/workflows/` directory is read only as a fallback.
 
 A workflow is executable: every step in its `## 步骤` section carries one of
 `tool:`, `human:`, `agent:` or `verify:`. The engine reads those markers so

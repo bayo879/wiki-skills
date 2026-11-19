@@ -23,7 +23,8 @@
 - **改工作流目录、步骤契约或命令**：读 [可执行工作流](docs/readme/workflows.md) 与
   [引擎内部](docs/agent/engine.md)，查观看区优先、旧根只读兜底、四类步骤标记、
   `workflow list/search/load` 与 query 工作流候选的输出字段（含 `origin`、`legacy_conflict`、
-  `applies`）。本仓库根 `workflows/` 是示例，不是运行时加载入口。
+  `applies`）。本仓库根 `workflows/` 是示例，不是观看区定义；旧根兜底仍会把它们列为
+  `legacy` 项，迁移到观看区后应删除。
 - **改技能文字、命令契约或输出格式**：读 [技能与契约维护](docs/agent/maintenance.md)，
   查 SKILL.md 与 references 的同步范围、`tests/selftest.py` 守卫、文档编辑的核验要求。
 - **改文档或准备提交**：读 [技能与契约维护](docs/agent/maintenance.md)；

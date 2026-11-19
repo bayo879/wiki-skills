@@ -1,4 +1,6 @@
-"""Read-only topic notes stored under `<root>/topics/`.
+"""Read-only topic notes stored under `<view>/topics/`.
+
+The legacy `<root>/topics/` directory is read only as a fallback.
 
 A topic is one exploration record: the question, the answer, its evidence and
 what still needs digging. Topics are the wiki's exploration layer: Markdown
