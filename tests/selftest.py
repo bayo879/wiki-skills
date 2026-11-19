@@ -61,6 +61,12 @@ def run(root, *args, expect=0, stdin=None):
     return payload
 
 
+def run_text(root, *args):
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        cwd=root, capture_output=True, text=True)
+
+
 def payload_file(root, name, data):
     path = Path(root) / WIKI_CACHE / "payloads" / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,6 +214,79 @@ def topics_view_checks(results):
               and matched[0]["origin"] == "view", matched)
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def view_definition_suite(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-view-defs-"))
+    try:
+        (root / "source.md").write_text("# 观看区流程\n\n内容\n", encoding="utf-8")
+        write_workflow(root / "workflows", "legacy-only", "旧根目录流程")
+        run(root, "ingest")
+        check(results, "view creates content dirs", (root / "wiki/workflows").is_dir())
+
+        write_workflow(root / "wiki/workflows", "account-opening", "观看区开户", "观看区版本")
+        write_workflow(root / "workflows", "account-opening", "旧根开户", "旧版本")
+        listing = run(root, "workflow", "list")["data"]
+        by_id = {item["id"]: item for item in listing["workflows"]}
+        check(results, "workflow list reports view first",
+              listing["root"] == "wiki/workflows"
+              and listing["roots"] == ["wiki/workflows", "workflows"], listing)
+        check(results, "workflow list marks view origin and legacy conflict",
+              by_id["account-opening"]["origin"] == "view"
+              and by_id["account-opening"]["legacy_conflict"] is True
+              and by_id["account-opening"]["legacy_path"]
+              == "workflows/account-opening/WORKFLOW.md")
+        check(results, "workflow list keeps legacy-only",
+              by_id["legacy-only"]["origin"] == "legacy")
+        check(results, "workflow id appears once",
+              [item["id"] for item in listing["workflows"]].count("account-opening") == 1)
+
+        loaded = run(root, "workflow", "load", "account-opening")["data"]
+        check(results, "workflow load reads view",
+              loaded["path"] == "wiki/workflows/account-opening/WORKFLOW.md"
+              and loaded["workflow"]["origin"] == "view", loaded)
+        legacy = run(root, "workflow", "load", "legacy-only")["data"]
+        check(results, "workflow load falls back to legacy",
+              legacy["path"] == "workflows/legacy-only/WORKFLOW.md"
+              and legacy["workflow"]["origin"] == "legacy", legacy)
+
+        proc = run_text(root, "workflow", "list")
+        check(results, "workflow list warns about legacy conflict",
+              proc.returncode == 0 and "观看区版本生效" in proc.stdout, proc.stdout)
+
+        write_topic(root / "wiki/topics", "观看区话题.md", "观看区话题", "观看区版本")
+        write_topic(root / "topics", "观看区话题.md", "旧话题", "旧版本")
+        query = run(root, "query", "观看区")["data"]
+        topic_hits = [item for item in query["topics"] if item["name"] == "观看区话题"]
+        check(results, "query reads view topic once",
+              len(topic_hits) == 1
+              and topic_hits[0]["path"] == "wiki/topics/观看区话题.md"
+              and topic_hits[0]["origin"] == "view", topic_hits)
+        check(results, "query reads view workflow",
+              any(item["id"] == "account-opening" and item["origin"] == "view"
+                  for item in query["workflows"]), query["workflows"])
+
+        before = (root / "wiki/workflows/account-opening/WORKFLOW.md").read_text(encoding="utf-8")
+        run(root, "status")
+        after = (root / "wiki/workflows/account-opening/WORKFLOW.md").read_text(encoding="utf-8")
+        check(results, "sync does not overwrite view workflow", before == after)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    custom = Path(tempfile.mkdtemp(prefix="llm-wiki-view-custom-"))
+    try:
+        (custom / ".wiki").mkdir()
+        (custom / ".wiki/wiki.json").write_text(
+            json.dumps({"publish": {"dir": "kb"}}), encoding="utf-8")
+        write_workflow(custom / "wiki/workflows", "old-flow", "旧观看区")
+        write_workflow(custom / "kb/workflows", "new-flow", "新观看区")
+        data = run(custom, "workflow", "list")["data"]
+        ids = [item["id"] for item in data["workflows"]]
+        check(results, "workflow list uses custom publish.dir",
+              data["root"] == "kb/workflows" and "new-flow" in ids and "old-flow" not in ids,
+              data)
+    finally:
+        shutil.rmtree(custom, ignore_errors=True)
 
 
 def workflow_files(root):
@@ -836,6 +915,7 @@ def main(argv=None):
         view_dir_checks(results)
         workflow_view_checks(results)
         topics_view_checks(results)
+        view_definition_suite(results)
         parsed, has_section = workflows.parse_steps(
             "## 步骤\n\n1. TOOL：**a**\n2. Human: **b**\n   - tool: 子项\n"
             "3. 没标\n\n## 其他\n\n- tool: 不算\n")
