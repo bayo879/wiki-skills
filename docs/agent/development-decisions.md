@@ -12,8 +12,9 @@ Markdown 软件里也有效果。
   链接文字仍显示 raw 路径，括号里保留机器 key，引文校验与 `sources` 并集都不变。
 - raw 副本末尾由引擎追加 `<!-- llm-wiki:provenance -->` + `## 原文来源`，每行链回一个挂载
   来源；读者从页面可点到 raw，从 raw 可点到原始文件，形成 page → raw → source 的可点击链。
-- page ↔ page 继续用 `[[id]]` + 页面 `aliases`：Obsidian 的图谱边依赖它，且改标题不断链；
-  标准 Markdown 链接只用于跨软件也能打开的溯源边。
+- page ↔ page 也改成标准 Markdown 链接 `[目标页标题](相对路径)`：账本 `meta.links` 仍只存
+  page id，标题和路径由渲染层按当前观看区/导出目录现算；Obsidian 仍能建立图谱边，其他
+  Markdown 软件也能点开。`[[id]]` 只作为找不到目标时的降级输出，正常页面不再出现。
 - 链接目标按发布位置现算，不写进账本正文；空格、括号、`#`、`?`、`%` 做 percent-encode。
   `render_page` 的 `view_path` 是仓库相对路径，`view_repo_path` 负责把发布相对路径换过来。
 - raw 的来源段不是正文：`split_provenance` 在 `body_digest` 前剥掉它，给旧文件补链接不会让
