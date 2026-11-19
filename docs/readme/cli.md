@@ -84,7 +84,7 @@
 
 ### ingest
 
-扫描根目录（跳过隐藏目录、`scan.ignore`、`workflows/`、`topics/` 与观看区 `<view>/`），解析
+扫描根目录（跳过隐藏目录、`scan.ignore`、旧根 `workflows/`、`topics/` 与观看区 `<view>/`），解析
 新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），并为每个新来源入队任务，
 同一份正文的多个路径合成一条 route 任务。`<view>/raw` 被手改时按整份正文采纳：共享它的
 路径一起换摘要，文件留在原名原路径。raw 末尾的 `## 原文来源` 段由引擎生成，链回每个挂载
@@ -226,16 +226,18 @@ decision 的 `links` 声明这页与哪些页面相关；写页前应逐条判�
 ### query
 
 `query <词...> [--limit N] [--task <id>]`：按标题、摘要、正文命中数排序，返回页面子集；同时直接扫描
-`topics/` 与 `workflows/`，命中时分别在 `topics`、`workflows` 里返回。工作流候选最多 5 个，
-每条带 `applies`，但不会自动加载；是否按流程办事由调用方核对后显式 `workflow load`。
+观看区 `<view>/topics/` 与 `<view>/workflows/`，旧根 `topics/`、`workflows/` 只作兜底；命中时
+分别在 `topics`、`workflows` 里返回。工作流候选最多 5 个，每条带 `applies`，但不会自动加载；
+是否按流程办事由调用方核对后显式 `workflow load`。
 `query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
 `path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`sources`（`[{key, raw}]`，`raw`
 是账本渲染的观看区副本路径，源缺失时为 `null`）、`outgoing`、`incoming`、`body`，不查话题。
 
 `data`: `{query, matches, returned, results, topic_matches, topics, workflow_matches, workflows,
 boundary}`。`matches` 只数页面，`topic_matches` 只数话题，`workflow_matches` 只数工作流；
-`topics[]` 为 `{name, title, description, status, updated, path, score, snippet}`，按 `path`
-直接打开文件；`workflows[]` 的字段与 `workflow search` 的候选相同。
+`topics[]` 为 `{name, title, description, status, updated, path, origin, score, snippet}`，
+`origin` 为 `view` 或 `legacy`，按 `path` 直接打开文件；`workflows[]` 的字段与
+`workflow search` 的候选相同。
 
 `query --task <id> 词1 词2 ...`：把这次检索登记到任务上，route 任务提交前必须至少登记一次，
 否则 `submit` 报 `E_NO_QUERY`。每个词单独检索、各返上限 5 条，按词分组返回，不并成一次
@@ -249,19 +251,24 @@ boundary}`。`matches` 只数页面，`topic_matches` 只数话题，`workflow_m
 
 ### workflow
 
-`workflow list`：列出 `<root>/workflows/` 下的一级工作流目录及技能内置工作流，包括结构
-不合法的项；项目工作流与内置工作流同 id 时只列项目版。
+`workflow list`：先列观看区 `<view>/workflows/` 下的一级工作流目录，再列旧根
+`<root>/workflows/` 的兼容兜底，最后列技能内置工作流，包括结构不合法的项；同 id 时观看区
+优先、旧根其次、内置最后，只列一次。
 
-`data`: `{root, roots, count, valid, warned, workflows[]}`；`root` 是工作流目录名，
-`roots` 是实际存在的工作流目录（只有 `workflows/`），`warned` 是带 warning 的项数；每项为
-`{id, source, name, alias_name, description, tags, path, main, skill_path, valid, error,
-resources, tools, human_steps, agent_steps, verify_steps, warnings[]}`。`tools`、
-`human_steps` 等是
-各类型步骤的数量，`warnings[]` 为 `{code, line, text, message}`；`name` 是工作流机器名、
-`alias_name` 是可选的中文展示名（人类可读行优先显示它）；`tags` 按 Obsidian 规则规范化
-（去 `#`、空白切分、保留 `a/b` 层级、丢弃纯数字），`source` 取 `project` 或 `builtin`；
-`path`/`main` 只给项目工作流（工作区根目录相对），内置项改给 `skill_path`（技能目录相对，
-形如 `workflows/<id>/WORKFLOW.md`），两者互斥。
+`data`: `{root, roots, count, valid, warned, workflows[]}`；`root` 是首选工作流目录（观看区
+存在时如 `wiki/workflows`，否则 `workflows`），`roots` 是实际存在的目录（观看区在前，旧根
+兜底，如 `["wiki/workflows", "workflows"]`），`warned` 是带 warning 的项数；每项为
+`{id, source, origin, name, alias_name, description, tags, path, main, skill_path, valid,
+error, resources, tools, human_steps, agent_steps, verify_steps, warnings[]}`；冲突项另带
+`legacy_path`、`legacy_conflict`。`tools`、`human_steps` 等是各类型步骤的数量，`warnings[]`
+为 `{code, line, text, message}`；`name` 是工作流机器名、`alias_name` 是可选的中文展示名
+（人类可读行优先显示它）；`tags` 按 Obsidian 规则规范化（去 `#`、空白切分、保留 `a/b`
+层级、丢弃纯数字），`source` 取 `project` 或 `builtin`，`origin` 取 `view`、`legacy` 或
+`builtin`。`path`/`main` 只给项目工作流（工作区根目录相对），观看区版以 `wiki/` 开头，旧根
+兜底以 `workflows/` 开头；内置项改给 `skill_path`（技能目录相对，形如
+`workflows/<id>/WORKFLOW.md`），两者互斥。同 id 的观看区版与旧根版 `WORKFLOW.md` 不同时，
+`legacy_conflict` 为 `true`，`legacy_path` 指向旧根主文件；人类输出打印“观看区版本生效”，
+加载仍用观看区版。
 `resources[]` 为 `{path, kind, size}`，`kind` 取 `script`（`scripts/` 下）、`reference`
 （`references/` 下）或 `other`。
 
@@ -271,9 +278,9 @@ data 带 `message: "无可用workflow"`。只有核对 `applies` 并 `load` 后�
 执行；候选不会自动加载。
 
 `data`: `{query, matches, workflows[], message?}`；`matches` 只数工作流，`workflows[]` 为
-`{id, source, name, alias_name, description, tags, applies, path, main, skill_path, load,
-score, resources, tools, human_steps, verify_steps, warnings}`，`load` 是建议的加载命令，
-`path`/`skill_path` 按来源二选一（规则同 `workflow list`）；0 命中时 `message` 为
+`{id, source, origin, name, alias_name, description, tags, applies, path, main, skill_path,
+load, score, resources, tools, human_steps, verify_steps, warnings}`，`load` 是建议的加载
+命令，`path`/`skill_path` 按来源二选一（规则同 `workflow list`）；0 命中时 `message` 为
 `"无可用workflow"`。非法工作流不进 `workflow search` 结果。
 
 `workflow load <id>`：加载一个合法工作流（项目或内置），返回主文件全文、资源清单与按类型
@@ -281,7 +288,8 @@ score, resources, tools, human_steps, verify_steps, warnings}`，`load` 是建�
 
 `data`: `{workflow, path, content, meta, resources, tools, human_steps, agent_steps,
 verify_steps, warnings}`。`content` 是 `WORKFLOW.md` 全文（含 frontmatter），`path` 是主
-文件的根目录相对路径（项目工作流）。`tools`、
+文件的根目录相对路径（项目工作流；观看区版以 `wiki/` 开头，旧根版以 `workflows/` 开头），
+`workflow.origin` 标明来源。`tools`、
 `human_steps`、`agent_steps`、`verify_steps` 每项为 `{line, text}`，`warnings[]` 同上。
 内置工作流不给 `path`/`main`，改给 `skill_path`（技能目录相对，形如
 `workflows/<id>/WORKFLOW.md`）；其 `resources` 恒为空。`workflow list` 与 `workflow search`
@@ -411,7 +419,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 {"schema": {"types": ["concept", "entity", "process"]},
  "scan": {"ignore": [".git", "node_modules", "target", "dist"]},
  "ingest": {"max_source_bytes": 50000000},
- "publish": {"dir": "wiki", "enabled": true, "topics": true, "workflows": true}}
+ "publish": {"dir": "wiki", "enabled": true}}
 ```
 
 改 `schema.types` 会立即影响后续校验；已存在的页面不会被自动迁移。老库配置里的 `note`
@@ -420,6 +428,6 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 `schema.types` 里删掉。
 
 `publish.dir` 是观看区目录名，必须是单个目录名：不能以点开头、不能含路径分隔符，也不能
-是 `.wiki`、`话题`、`workflows`；非法值即使 `enabled:false` 也返回 `E_CONFIG`。
-`enabled:false` 只停推送，`<view>/` 与 `<view>/raw/` 仍会创建；`topics`、`workflows`
-控制首次推送时是否投放对应目录。
+是 `.wiki`、`topics`、`workflows`；非法值即使 `enabled:false` 也返回 `E_CONFIG`。
+`enabled:false` 只停推送，`<view>/` 与 `raw/`、`workflows/`、`topics/` 仍会创建；`pages/` 不推送，`runs/` 不主动创建。`publish.dir` 改名等于换观看区：旧目录不再跳过，定义、话题和产物
+不会自动搬迁；需要保留时先手动移动，再改配置。
