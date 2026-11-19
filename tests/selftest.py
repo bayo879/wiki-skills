@@ -2499,6 +2499,15 @@ def main(argv=None):
             f"{len(description)} chars",
         )
 
+        project_flows = [entry for entry in workflows.scan(ROOT) if entry["source"] == "project"]
+        check(results, "repo's own project workflows are all valid",
+              len(project_flows) >= 4 and all(entry["valid"] for entry in project_flows),
+              [entry["id"] for entry in project_flows if not entry["valid"]])
+        meeting = workflows.match(ROOT, ["会议", "纪要", "行动项"], 5)
+        check(results, "meeting workflow tops the meeting search with applies",
+              bool(meeting) and meeting[0]["id"] == "meeting-actions"
+              and bool(meeting[0]["applies"]), [(w["id"], w["score"]) for w in meeting])
+
         teaching = [
             ROOT / "README.md",
             ROOT / "skills" / "llm-wiki" / "SKILL.md",

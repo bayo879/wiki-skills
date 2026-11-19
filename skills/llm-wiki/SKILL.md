@@ -21,6 +21,7 @@ description: 当用户以 `wiki:` 或 `workflow:` 开头下达任务，或要把
 | 去前缀后的需求 | 去向 |
 | --- | --- |
 | 要交付物：PPT、演示、幻灯片、汇报材料、逐页大纲 | `workflow load ppt_creator`，按它的步骤执行 |
+| 把会议记录、纪要拆成行动清单或待办（谁做什么、什么时候前） | `workflow load meeting-actions`，按它的步骤检索记录、读原文、拆带依据的清单 |
 | 评审、检查或优化某个工作流（「这个工作流有什么不足」） | `workflow load workflow-review`，按它给的清单出结论 |
 | 新建、起草或搭建工作流（「建个工作流」「把这套流程写成工作流」） | `workflow load workflow-create`，前提不过先给替代方案，不硬建 |
 | 问、找、梳理、有哪些、有什么区别 | 内置 `topic-exploration` |
