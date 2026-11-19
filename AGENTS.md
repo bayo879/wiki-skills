@@ -3,6 +3,13 @@
 本页是项目开发指导的索引中心，与 [README](README.md) 的入口定位类似：提供查找方向，
 不汇总全部事实。按本次工作读取相关主题，不默认加载全部指导文档。
 
+## 硬性约束
+
+- 不拿开发目录当 wiki 测试场：`init`、`ingest`、`next`、`submit`、`sync` 等会写状态的命令
+  不要在仓库根执行；验证一律放 `tests/selftest.py` 的临时工作区或另起的临时目录，测试代码
+  进 `tests/`，一次性复现脚本与语料放临时目录。细则见
+  [技能与契约维护](docs/agent/maintenance.md) 的「机器守卫」。
+
 ## 按工作主题查找
 
 - **确认开发边界或方向**：读 [开发方向与决策](docs/agent/development-decisions.md)。
