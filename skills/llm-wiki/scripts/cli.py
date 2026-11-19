@@ -52,7 +52,7 @@ from workspace import (
 )
 
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 # 领取任务的会话身份：显式参数 > 用户导出 > 宿主注入的会话 id。
@@ -394,6 +394,8 @@ def command_ingest():
         )
     # 没有任何来源指向的旧 raw 行连同文件一起回收，观看区不留孤儿副本。
     reclaimed = wiki.collect_raws()
+    # 旧版 raw 没有“原文来源”脚注；ingest 是 raw/ 的维护者，顺手补齐。
+    refreshed_raws = wiki.refresh_raw_provenance()
     # 孤儿页：来源全没了、也没有出入链的页面没有保留价值，连同观看区副本一起删除；
     # 还有链的页面只由 computed_status 标 stale，等链断了再清。
     orphaned = []
@@ -412,6 +414,7 @@ def command_ingest():
         "restored": restored,
         "queued_tasks": queued,
         "reclaimed": reclaimed,
+        "raw_links": refreshed_raws,
         "orphaned": orphaned,
         "pending_total": len(remaining),
         "pending": remaining,

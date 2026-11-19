@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 from datetime import date
 
 from frontmatter import yaml_scalar
-from util import digest_text, norm_key, now_iso
+from util import (
+    PROVENANCE_HEADING, PROVENANCE_MARKER, digest_text, norm_key, now_iso,
+    split_provenance,
+)
 
 
 VIEW_NAME_LIMIT = 60
@@ -20,7 +24,34 @@ RELATION_HEADING = "## 关联"
 
 EVIDENCE_ROW = re.compile(r"^- `([^`]+)`：(.+)$")
 
+EVIDENCE_LINK_ROW = re.compile(r"^- \[`([^`]+)`\]\(([^)\s]+)\)（`([^`]+)`）：(.+)$")
+
 RELATION_HEADING_RE = re.compile(r"^##\s+关联\s*$")
+
+LINK_ESCAPES = (
+    ("%", "%25"), (" ", "%20"), ("(", "%28"), (")", "%29"),
+    ("#", "%23"), ("?", "%3F"), ("<", "%3C"), (">", "%3E"),
+)
+
+
+def _link_target(target):
+    """Percent-encode the bytes that would end or redirect a Markdown link."""
+    for raw, encoded in LINK_ESCAPES:
+        target = target.replace(raw, encoded)
+    return target
+
+
+def _markdown_link(label, target):
+    """A code-span label that opens a standard Markdown link on any renderer."""
+    label = str(label).replace("`", "'")
+    return f"[`{label}`]({_link_target(str(target))})"
+
+
+def _relative_target(from_rel, to_rel):
+    """Target for a link written inside ``from_rel``, both repo-relative POSIX."""
+    from_rel = from_rel.as_posix() if hasattr(from_rel, "as_posix") else str(from_rel)
+    to_rel = to_rel.as_posix() if hasattr(to_rel, "as_posix") else str(to_rel)
+    return posixpath.relpath(to_rel, posixpath.dirname(from_rel))
 
 
 def normalize_links(links):
@@ -61,14 +92,18 @@ def view_name(title, page_id):
     return text or page_id
 
 
-def render_page(meta, body, aliases=None, links=None):
+def render_page(meta, body, aliases=None, links=None, view_path=None, raw_of=None):
     """Deterministic page text: frontmatter, body, evidence, then relations.
 
     Relations are rendered only when ``links`` is passed (the published view);
     the ledger's internal render stays relation-free so ``meta.links`` is the
-    single stored edge set.
+    single stored edge set. ``view_path`` (repo-relative) turns evidence into
+    standard Markdown links to the raw copy and adds raw provenance links; it
+    is only passed when writing the view, never for the ledger's stored body.
     """
     body = split_relations(body)
+    if meta.get("type") == "raw":
+        body, _ = split_provenance(body)
     lines = ["---"]
     for field in ("id", "title", "type", "summary"):
         lines.append(f"{field}: {yaml_scalar(meta[field])}")
@@ -86,8 +121,24 @@ def render_page(meta, body, aliases=None, links=None):
     if evidence:
         rows = ["", "## 证据", ""]
         for item in evidence:
-            rows.append(f"- `{item['source']}`：{item['quote']}")
+            raw = (raw_of or {}).get(item["source"])
+            if view_path and raw:
+                rows.append(
+                    f"- {_markdown_link(raw, _relative_target(view_path, raw))}"
+                    f"（`{item['source']}`）：{item['quote']}"
+                )
+            else:
+                rows.append(f"- `{item['source']}`：{item['quote']}")
         text += "\n".join(rows) + "\n"
+    if meta.get("type") == "raw" and view_path:
+        sources = sorted(set(meta.get("sources") or []))
+        if sources:
+            rows = ["", PROVENANCE_MARKER, "", PROVENANCE_HEADING, ""]
+            rows.extend(
+                f"- {_markdown_link(source, _relative_target(view_path, source))}"
+                for source in sources
+            )
+            text += "\n".join(rows) + "\n"
     if links:
         rows = ["", RELATION_HEADING, ""]
         rows.extend(f"- [[{link}]]" for link in normalize_links(links))
@@ -98,8 +149,12 @@ def render_page(meta, body, aliases=None, links=None):
 def split_evidence(body):
     """把已发布正文末尾的 `## 证据` 段切下来（R5）。
 
-    返回 (正文, 行列表)。末尾标题之后只要有一行不是 ``- `source`：quote``，就整段留在
-    正文里、返回空列表：调用方沿用账本证据并打 warning。空行忽略。
+    返回 (正文, 行列表)。末尾标题之后只要有一行不是证据行，就整段留在正文里、
+    返回空列表：调用方沿用账本证据并打 warning。空行忽略。
+
+    证据行有两种写法：旧版 ``- `source`：quote``，以及渲染层写出的
+    ``- [`raw/rel`](target)（`source-key`）：quote``；两者都解析，反向回收
+    才不会被新的链接写法卡住。
     """
     lines = body.split("\n")
     start = None
@@ -112,6 +167,12 @@ def split_evidence(body):
     rows = []
     for line in lines[start + 1:]:
         if not line.strip():
+            continue
+        match = EVIDENCE_LINK_ROW.match(line)
+        if match:
+            rows.append(
+                {"source": match.group(3).strip(), "quote": match.group(4).strip()}
+            )
             continue
         match = EVIDENCE_ROW.match(line)
         if not match:
@@ -272,16 +333,29 @@ class PagesMixin:
             relpath = f"pages/{meta['type']}/{base} ({page_id}).md"
         return relpath
 
-    def view_text(self, record):
+    def view_repo_path(self, target):
+        """A publish-dir-relative path as repo-relative, for link targets."""
+        return norm_key(self.publish_dir.relative_to(self.root) / target)
+
+    def view_text(self, record, view_path=None):
         """Page text as published in the view tree: same template, id alias.
 
         Relations are outgoing and incoming edges mixed together: a reader who
-        lands on an older page still sees newer pages that point at it.
+        lands on an older page still sees newer pages that point at it. When
+        ``view_path`` is known, evidence also links to the raw copy and source,
+        giving the reader a clickable page → raw → source chain.
         """
         outgoing, incoming = self.links_for(record["id"])
         links = sorted(set(outgoing) | set(incoming))
+        path = view_path or self.view_repo_path(self.view_relpath(record))
+        raw_of = {}
+        for key in record["meta"].get("sources") or []:
+            row = self.source_row(key)
+            if row is not None and row["raw"]:
+                raw_of[key] = row["raw"]
         return render_page(
-            record["meta"], record["body"], aliases=[record["id"]], links=links
+            record["meta"], record["body"], aliases=[record["id"]], links=links,
+            view_path=path, raw_of=raw_of,
         )
 
     def write_rev(self, page, meta, body, origin):

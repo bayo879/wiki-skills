@@ -8,8 +8,16 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
+
+
+PROVENANCE_MARKER = "<!-- llm-wiki:provenance -->"
+
+PROVENANCE_HEADING = "## 原文来源"
+
+PROVENANCE_ROW = re.compile(r"^- \[`([^`]+)`\]\(([^)\s]+)\)$")
 
 
 def norm_key(path):
@@ -33,6 +41,38 @@ def body_digest(text):
     """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return digest_text(text.lstrip("\n").rstrip())
+
+
+def split_provenance(body):
+    """剥掉 raw 末尾由引擎生成的“原文来源”段，返回 (正文, 链接)。
+
+    这段只服务观看区导航，不是原文内容；摘要在比较 raw 身份与手改时必须
+    先剥掉它，否则给旧文件补链接会把整篇原文误判成已编辑。只有同时满足
+    标记、标题与逐行链接格式才剥离；手写的其他内容原样保留。
+    """
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    start = None
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip() == PROVENANCE_MARKER:
+            start = index
+            break
+    if start is None:
+        return body, []
+    rest = lines[start + 1:]
+    index = 0
+    while index < len(rest) and not rest[index].strip():
+        index += 1
+    if index >= len(rest) or rest[index].strip() != PROVENANCE_HEADING:
+        return body, []
+    links = []
+    for line in rest[index + 1:]:
+        if not line.strip():
+            continue
+        match = PROVENANCE_ROW.match(line)
+        if not match:
+            return body, []
+        links.append({"source": match.group(1).strip(), "target": match.group(2).strip()})
+    return "\n".join(lines[:start]).rstrip(), links
 
 
 def same_stamp(size, mtime, known_size, known_mtime):

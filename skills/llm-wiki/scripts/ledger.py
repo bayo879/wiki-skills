@@ -26,7 +26,7 @@ from ingest import raw_facts
 from pages import PagesMixin, render_page
 from tasks import TASK_DIR
 from task_store import TaskStoreMixin
-from util import body_digest, norm_key, write_atomic
+from util import body_digest, norm_key, split_provenance, write_atomic
 from view import ViewMixin
 from workspace import WIKI_DIR, window_safe
 
@@ -519,7 +519,7 @@ class LedgerMixin:
         }
         target = self.root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        write_atomic(target, render_page(meta, text))
+        write_atomic(target, render_page(meta, text, view_path=rel))
         size, mtime = target.stat().st_size, target.stat().st_mtime
         with self.conn:
             if row is None:
@@ -544,6 +544,54 @@ class LedgerMixin:
             )
         return rel, raw_id
 
+    def refresh_raw_provenance(self):
+        """Give every published raw copy a current page → raw → source footer.
+
+        Raw files are owned by ingest, not sync.  Existing copies written before
+        the footer existed are repaired here; the body digest ignores the footer,
+        so this is display-only and never makes a citing page stale.
+        """
+        if not self.config["publish"]["enabled"]:
+            return 0
+        today = date.today().isoformat()
+        changed = 0
+        for row in self.conn.execute("SELECT id, path FROM raws ORDER BY id").fetchall():
+            target = self.root / row["path"]
+            try:
+                text = target.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            # 已有脚注就不再重排：用户可能在后记里手写了内容，ingest 不能改原文。
+            if "<!-- llm-wiki:provenance -->" in text:
+                continue
+            meta, body = split_frontmatter(text)
+            if not meta.get("id") or not meta.get("title"):
+                continue
+            body, _ = split_provenance(body)
+            mounts = sorted(
+                item["key"] for item in self.conn.execute(
+                    "SELECT key FROM sources WHERE raw_id = ? AND raw <> ''", (row["id"],)
+                ).fetchall()
+            )
+            meta["sources"] = mounts
+            desired = render_page(meta, body, view_path=row["path"])
+            if desired == text:
+                continue
+            write_atomic(target, desired)
+            stat = target.stat()
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE raws SET size = ?, mtime = ?, updated_at = ? WHERE id = ?",
+                    (stat.st_size, stat.st_mtime, today, row["id"]),
+                )
+                self.conn.execute(
+                    "UPDATE sources SET raw_size = ?, raw_mtime = ?, updated_at = ? "
+                    "WHERE raw_id = ?",
+                    (stat.st_size, stat.st_mtime, today, row["id"]),
+                )
+            changed += 1
+        return changed
+
     def adopt_raw_edit(self, key, parser):
         """Adopt a hand-edited raw for every source path that mounts it.
 
@@ -562,6 +610,7 @@ class LedgerMixin:
             _, body = split_frontmatter(target.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             return row["raw"], old_id
+        body, _ = split_provenance(body)
         raw_id = body_digest(body)
         if raw_id == old_id:
             return row["raw"], raw_id

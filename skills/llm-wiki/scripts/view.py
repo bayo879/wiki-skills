@@ -66,7 +66,7 @@ def sync_view_file(wiki, item, target, body_only, warnings=None):
     page_id = item["page"]
     record = item["record"]
     target_path = wiki.publish_dir / target
-    canonical = wiki.view_text(record)
+    canonical = wiki.view_text(record, wiki.view_repo_path(target))
     if item["text"] == canonical:
         if item["path"] == target_path:
             if record["view_path"] != target or record["view_digest"] != digest_text(canonical):
@@ -124,7 +124,7 @@ def sync_view_file(wiki, item, target, body_only, warnings=None):
         raise WikiError("E_PAYLOAD", f"type {merged.get('type')!r} not in schema.types", "", 1)
     rev = wiki.write_rev(page_id, merged, body, "sync")
     fresh = wiki.page_record(page_id)
-    text = wiki.view_text(fresh)
+    text = wiki.view_text(fresh, wiki.view_repo_path(target))
     write_atomic(target_path, text)
     if item["path"] != target_path:
         item["path"].unlink()
@@ -179,7 +179,7 @@ class ViewMixin:
         targets = self._view_targets(records)
         for record in records:
             target = targets[record["id"]]
-            desired = self.view_text(record)
+            desired = self.view_text(record, self.view_repo_path(target))
             target_digest = digest_text(desired)
             published = record["view_path"]
             known = record["view_digest"]

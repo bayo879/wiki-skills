@@ -16,7 +16,7 @@ from pathlib import Path
 
 from errors import WikiError
 from frontmatter import split_frontmatter
-from util import body_digest, digest_bytes, same_stamp
+from util import body_digest, digest_bytes, same_stamp, split_provenance
 
 
 MAX_RAW_CHARS = 4_000_000
@@ -69,6 +69,7 @@ def raw_body_digest(path):
     """Digest of one raw copy's body: frontmatter is ledger state, not content."""
     text = Path(path).read_text(encoding="utf-8", errors="replace")
     _, body = split_frontmatter(text)
+    body, _ = split_provenance(body)
     return body_digest(body)
 
 

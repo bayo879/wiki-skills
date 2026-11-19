@@ -164,6 +164,8 @@ id；终端会话用 `--owner <id>` 或 `export LLM_WIKI_OWNER=<id>` 固定一�
 
 - 只写原文支持的事实；数字、日期、文号、责任主体都要能回到 `work.sources` 里的 raw。
 - `evidence[].quote` 从 raw 逐字复制，不改写、不概括；一句到两句，引文对不上会被拒绝。
+  `evidence[].source` 写 `work.sources` 里的来源 key，不要写链接或 raw 路径；观看区由引擎
+  渲染成指向 raw 的 Markdown 链接。
 - 新建页面的章节由 `template.body` 固定，不要改章节名、不要删章节；更新页面沿用原有结构。
   每节按页面类型的固定组合写，模板在 `templates/<type>.md`（concept、entity、process），
   按 `template` 的类型读对应文件。类型只表示内容形态：要求与规则用 `concept`，组织/系统/
@@ -205,7 +207,9 @@ python3 <skill>/scripts/wiki.py query --page <page-id> --json
 一般不需要动）：
 
 - `pages/`：按账本推送的知识页，按 `<type>/<标题>.md` 命名；手改不会覆盖，只会告警。
-- `raw/`：摄入时写入的原文副本，用于核对引文；不要手改。
+  证据段每行是标准 Markdown 链接：先链到 raw 副本，括号里保留来源 key。
+- `raw/`：摄入时写入的原文副本，用于核对引文；不要手改。末尾的 `## 原文来源` 段由引擎
+  生成，链回挂载它的原始文件。
 - `README.md`：目录说明与统计，每次推送重写。
 - `topics/`、`workflows/`：首次推送时从 `<root>/topics/`、`<root>/workflows/` 各投放一份；
   之后归用户。

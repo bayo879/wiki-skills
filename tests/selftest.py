@@ -33,6 +33,8 @@ require_python()
 import ledger  # noqa: E402  (config migration)
 import workflows  # noqa: E402  (frontmatter normalisation, for tag checks)
 import wiki  # noqa: E402  (the engine itself, for table-level checks)
+from ingest import raw_body_digest  # noqa: E402
+from util import split_provenance  # noqa: E402
 
 WIKI_CACHE = ".wiki"
 CHECKED = []
@@ -1584,6 +1586,23 @@ def main(argv=None):
         before = run(root, "query", "--page", "machine-room-inspection")["data"]["page"]
         check(results, "the page is stable before its raw copy changes",
               before["status"] == "stable", before)
+        raw_text = (root / raw_d).read_text(encoding="utf-8")
+        raw_link = re.search(r"- \[`d.md`\]\(([^)]+)\)", raw_text)
+        check(results, "the raw copy links to its source",
+              "<!-- llm-wiki:provenance -->" in raw_text
+              and "## 原文来源" in raw_text
+              and raw_link is not None
+              and ((root / raw_d).parent / raw_link.group(1)).resolve().is_file(),
+              raw_text)
+        (root / raw_d).write_text(
+            raw_text.split("\n<!-- llm-wiki:provenance -->")[0] + "\n",
+            encoding="utf-8",
+        )
+        run(root, "ingest")
+        repaired_raw = (root / raw_d).read_text(encoding="utf-8")
+        check(results, "ingest repairs the provenance footer on an old raw copy",
+              "<!-- llm-wiki:provenance -->" in repaired_raw
+              and "[`d.md`]" in repaired_raw, repaired_raw)
         (root / raw_d).write_text(
             (root / raw_d).read_text(encoding="utf-8") + "\n巡检记录留档。\n",
             encoding="utf-8",
@@ -1605,6 +1624,21 @@ def main(argv=None):
         check(results, "split_evidence keeps a broken block in the body",
               wiki.split_evidence("## 要点\n\n正文。\n\n## 证据\n\n随手写的。\n")
               == ("## 要点\n\n正文。\n\n## 证据\n\n随手写的。\n", []))
+        check(results, "split_evidence parses rendered evidence links",
+              wiki.split_evidence(
+                  "## 要点\n\n正文。\n\n## 证据\n\n"
+                  "- [`wiki/raw/a.md`](../../raw/a.md)（`a.md`）：引文。\n"
+              ) == ("## 要点\n\n正文。", [{"source": "a.md", "quote": "引文。"}]))
+        provenance_body = (
+            "正文。\n\n<!-- llm-wiki:provenance -->\n\n## 原文来源\n\n"
+            "- [`files/a.pdf`](../../files/a.pdf)\n"
+        )
+        check(results, "split_provenance strips generated source links",
+              split_provenance(provenance_body)
+              == ("正文。", [{"source": "files/a.pdf", "target": "../../files/a.pdf"}]))
+        hand_written = "正文。\n\n## 原文来源\n\n手写。\n"
+        check(results, "split_provenance leaves hand-written sections alone",
+              split_provenance(hand_written) == (hand_written, []))
 
         room_view = root / "view/pages/concept/机房巡检.md"
         room_text = room_view.read_text(encoding="utf-8")
@@ -1725,9 +1759,18 @@ def main(argv=None):
         check(results, "the canonical text keeps one evidence block",
               room_view.read_text(encoding="utf-8").count("## 证据") == 1,
               room_view.read_text(encoding="utf-8"))
+        linked = re.search(r"- \[`[^`]+`\]\(([^)]*)\)（`d.md`）：",
+                           room_view.read_text(encoding="utf-8"))
+        check(results, "page evidence links to the raw copy and names the source",
+              linked is not None
+              and (room_view.parent / linked.group(1)).resolve().is_file(),
+              room_view.read_text(encoding="utf-8"))
 
-        room_view.write_text(room_view.read_text(encoding="utf-8").replace(
-            "- `d.md`：巡检周期为每周两次", "- d.md 巡检周期为每周两次"), encoding="utf-8")
+        room_view.write_text(re.sub(
+            r"- \[`[^`]+`\]\([^)]*\)（`d.md`）：巡检周期为每周两次",
+            "- d.md 巡检周期为每周两次",
+            room_view.read_text(encoding="utf-8"),
+        ), encoding="utf-8")
         broken = subprocess.run([sys.executable, str(SCRIPT), "sync", "--json"], cwd=root,
                                 capture_output=True, text=True)
         check(results, "an unparseable evidence block warns",

@@ -21,7 +21,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 摄入与解析 | `ingest.py` | `extract_text`/`pdf_to_text`/`docx_to_text`/`html_to_text`、`decode_bytes`、`raw_facts`、`raw_body_digest`、`ingest_decision`；纯函数，不碰数据库；超限在 `read_bytes` 抛 |
 | frontmatter | `frontmatter.py` | `split_frontmatter`、`unquote_scalar`、`yaml_scalar`；页面渲染与工作流加载共用一套语法 |
 | 页面层 | `pages.py` 的 `PagesMixin` | `page_record`、`write_rev`、`rebuild_links`、`links_for`、`view_text`、`page_ids` |
-| 页面渲染 | `pages.py` 的 `render_page` | 依赖 `frontmatter.yaml_scalar`；改动一侧要同步另一侧 |
+| 页面渲染 | `pages.py` 的 `render_page` | 依赖 `frontmatter.yaml_scalar`；`view_path`/`raw_of` 只在写观看区时传入，证据行链到 raw、raw 末尾追加原文来源段；改动一侧要同步另一侧 |
 | 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
 | 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`topics/`、`workflows/` 只首次投放；手改只告警，`sync` 回收 |
 | 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；租约归属（`task_leases`、`sweep_leases`、`lease_owner`）；并发走同一条 CAS 约定 |
@@ -160,7 +160,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 ## 数据方向
 
 ```text
-源文件 → scan_files → extract_text → <view>/raw/<key>-<digest>.md + sources 行
+源文件 → scan_files → extract_text → <view>/raw/<key>-<digest>.md（含原文来源段）+ sources 行
                                         ↓ enqueue route 任务
 route 载荷 → 校验 → 页面任务（new/merge）或来源结算（skip）
 page 载荷 / page link / page import / page link --repair → 校验 → page_revs + links → 推送
@@ -174,7 +174,9 @@ topics/*.md ──query/scan──→ topics 命中（只读，不落盘）
 
 `raw` 文件名取来源 basename，同名按 `-2`、`-3` 顺延，不跟正文摘要走；`sources.raw` 存相对
 路径。一份正文一行 `raws`：手改按整份正文采纳，挂载它的 `sources` 一起换到新摘要，文件留在
-原路径。
+原路径。raw 末尾的 `## 原文来源` 段是渲染层生成的导航，不是原文：`split_provenance` 在
+`body_digest`/`raw_body_digest` 前剥掉它，所以补链接、换挂载路径都不会让引用页 stale；
+`ingest` 末尾的 `refresh_raw_provenance` 只给缺段的旧 raw 补一次，已有段的文件不重排。
 
 `links` 是 `page_revs.meta` 里的页面 id 数组，并镜像到 `links` 表；`write_rev` 按 meta 重建，
 不再从 body 的 `[[...]]` 或 `## 关联` 段解析。观看区由 `links_for` 取出链与入链，渲染成一个
@@ -188,7 +190,9 @@ topics/*.md ──query/scan──→ topics 命中（只读，不落盘）
 
 `sync` 回收观看区时先剥掉关系段，再解析末尾证据段：关系段渲染在证据之后，若先解析证据，
 带关联的页面会把证据块当正文收进来、下次推送再追加一份。重复的证据段也会在回收时一并
-剥掉，只保留最后一份。
+剥掉，只保留最后一份。证据行兼容旧式 ``- `source`：quote`` 和新式
+``- [`raw`](target)（`source`）：quote``；后者从括号里的 code span 取 source key，链接本身
+不参与账本。
 
 观看区 `pages/` 是账本的唯一页面落盘副本（按标题命名，`view_digest` 记录上次推送的
 字节）；手改过的副本不覆盖，`sync` 收成新修订后才恢复推送。`sync` 只认

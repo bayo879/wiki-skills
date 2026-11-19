@@ -87,7 +87,8 @@
 扫描根目录（跳过隐藏目录、`scan.ignore`、`workflows/`、`topics/` 与观看区 `<view>/`），解析
 新文件或内容变化的文件，写入 `<view>/raw/`（默认 `wiki/raw/`），并为每个新来源入队任务，
 同一份正文的多个路径合成一条 route 任务。`<view>/raw` 被手改时按整份正文采纳：共享它的
-路径一起换摘要，文件留在原名原路径。`workflows/` 放可执行工作流，`topics/` 是 wiki 的探索
+路径一起换摘要，文件留在原名原路径。raw 末尾的 `## 原文来源` 段由引擎生成，链回每个挂载
+来源；旧 raw 缺这段时，`ingest` 会补上而不会改正文。`workflows/` 放可执行工作流，`topics/` 是 wiki 的探索
 层，都不作为摄入来源，摄入时整目录跳过；观看区目录名即使关了发布也仍跳过。工作流与话题
 一样由 `query` 直接扫描文件、返回候选；显式 `workflow search` 也可用。
 
@@ -98,7 +99,8 @@
 
 `data`: `{ingested[{key,raw,parser,digest,size,chars}], unchanged, unsupported[{key,suffix,reason,hint}],
 oversize[{key,message}], failed[{key,message}], vanished, restored, queued_tasks,
-pending_total, pending, queue{open,queued,leased,route,page}}`。`queued_tasks` 只列本次
+raw_links, pending_total, pending, queue{open,queued,leased,route,page}}`。`raw_links` 是
+本轮为旧 raw 补上“原文来源”段的文件数。`queued_tasks` 只列本次
 新入队的任务 id；`queue` 是提交后的未完成任务快照，`open` 为 `queued` 与 `leased` 之和。
 没有新来源时 `queue.open` 可以为 0，此时再跑 `next` 只会得到空任务列表。
 
@@ -204,7 +206,9 @@ decision 的 `links` 声明这页与哪些页面相关；写页前应逐条判�
 - `summary` 必填，1–200 字符；`title` 1–120 字符；`type` 必须在 `schema.types` 里。
 - `links` 只能指向提交时已存在的页；更新页取模板带入的旧链接与本次新增的并集，只增不删。
   `body` 里不要写 `## 关联`，引擎会剥掉；观看区按 `links` 表在页末渲染出链与入链。
-- `evidence` 至少一条；`quote` 去空白后须逐字命中该来源的 raw 文本。
+- `evidence` 至少一条；`source` 写来源 key（如 `docs/a.md`），不要写链接或 raw 路径；
+  `quote` 去空白后须逐字命中该来源的 raw 文本。观看区渲染时引擎会把证据行写成
+  ``- [`<raw 路径>`](<相对链接>)（`<来源 key>`）：<引文>``，链到 raw 副本。
 - 更新页时 `sources` 取旧来源与本任务来源的并集，旧 evidence 未在本次载荷中重写时保留；
   更新任务模板会带出旧 evidence。保留下来的旧引文同样逐字复核：来源改写后原句已不在
   raw 里时，提交报 `E_EVIDENCE_NOT_FOUND`，需在本次载荷里为该来源补一条新引文；来源已
@@ -341,8 +345,9 @@ next}`。`leases` 是 `[{task, owner}]`，列出当前租约及其归属会话�
   `unknown id` 跳过。
 - 正文为空 `E_PAYLOAD`；证据引用未登记来源 `E_UNKNOWN_SOURCE`；文件读不出 `E_IO`。
 - `## 证据` 段存在但格式不合法：整段保留为正文并在 stderr 警告，账本原证据不变；同一条
-  警告也会追加到 `data.warnings`。最常见的情形是在证据块后面追加一行——整块会被当正文，
-  规范化重写后正文里会多出一个 `## 证据` 段。
+  警告也会追加到 `data.warnings`。回收同时认旧式纯文本证据行和新式 Markdown 链接
+  证据行。最常见的情形是在证据块后面追加一行——整块会被当正文，规范化重写后正文里会
+  多出一个 `## 证据` 段。
 - 回收成功后把规范化文本写回观看区；只是位置或字节与上次发布一致的文件记为 `written`，
   不产生新修订。
 
