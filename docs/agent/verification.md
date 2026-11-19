@@ -355,7 +355,7 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
 
 项目工作流与话题改为从观看区读取，旧根目录只作只读兜底；任务产物移到
 `<view>/runs/workflows/`。复跑 `python3 -m py_compile skills/llm-wiki/scripts/*.py` 通过；
-`python3 tests/selftest.py`：327/327 通过，退出码 0。检查点：
+`python3 tests/selftest.py`：328/328 通过，退出码 0。检查点：
 
 - 观看区定义优先：`<view>/workflows` 与 `<view>/topics` 命中时 `origin=view`，同 id 不再用
   旧根版本；旧根独有项 `origin=legacy`，`workflow list` 人类行标 `[legacy]`；

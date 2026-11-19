@@ -229,6 +229,7 @@ python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 - `workflow list` / `workflow load` 只读，不要求先 `init`，也不会创建 `.wiki/`。
 - 话题探索的沉淀物是 `<view>/topics/`，不是工作流；只有流程稳定、可重复执行时才另建工作流。
 - 观看区的 `workflows/`、`topics/`、`runs/` 属于项目内容，引擎不覆盖、不删除；`<view>/`
-  与四个内容目录在任何配置下都会创建。
+  与 `raw/`、`workflows/`、`topics/` 在任何配置下都会创建，`pages/` 推送时创建，`runs/`
+  首次写产物时创建。
 
 完整命令字段与错误码见 [CLI 契约](cli.md#workflow)。
