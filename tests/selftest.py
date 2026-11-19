@@ -31,6 +31,7 @@ from runtime import require_python
 
 require_python()
 import ledger  # noqa: E402  (config migration)
+import topics  # noqa: E402  (view/legacy topic resolution)
 import workflows  # noqa: E402  (frontmatter normalisation, for tag checks)
 import wiki  # noqa: E402  (the engine itself, for table-level checks)
 from ingest import raw_body_digest  # noqa: E402
@@ -171,6 +172,40 @@ def workflow_view_checks(results):
         builtin = workflows.load(root, "topic-exploration", view_root=view)
         check(results, "builtin workflow keeps builtin origin",
               builtin["workflow"]["origin"] == "builtin", builtin["workflow"])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def write_topic(base, name, title, description):
+    base.mkdir(parents=True, exist_ok=True)
+    (base / name).write_text(
+        f"---\ntitle: {title}\ndescription: {description}\nstatus: open\n---\n\n"
+        f"## 结论\n\n{description}\n",
+        encoding="utf-8")
+
+
+def topics_view_checks(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-viewtopic-"))
+    try:
+        view = root / "wiki/topics"
+        legacy = root / "topics"
+        write_topic(view, "观看区话题.md", "观看区话题", "观看区版本")
+        write_topic(legacy, "观看区话题.md", "旧话题", "旧版本")
+        write_topic(legacy, "旧话题.md", "旧话题", "旧版本")
+
+        entries = topics.scan(root, view_root=view)
+        by_name = {item["name"]: item for item in entries}
+        check(results, "view topic wins over legacy",
+              by_name["观看区话题"]["origin"] == "view"
+              and by_name["观看区话题"]["path"] == "wiki/topics/观看区话题.md")
+        check(results, "legacy-only topic keeps legacy origin",
+              by_name["旧话题"]["origin"] == "legacy"
+              and by_name["旧话题"]["path"] == "topics/旧话题.md")
+
+        matched = topics.match(root, ["观看区"], 5, view_root=view)
+        check(results, "topic search finds view topic",
+              matched and matched[0]["name"] == "观看区话题"
+              and matched[0]["origin"] == "view", matched)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -800,6 +835,7 @@ def main(argv=None):
             shutil.rmtree(legacy_config, ignore_errors=True)
         view_dir_checks(results)
         workflow_view_checks(results)
+        topics_view_checks(results)
         parsed, has_section = workflows.parse_steps(
             "## 步骤\n\n1. TOOL：**a**\n2. Human: **b**\n   - tool: 子项\n"
             "3. 没标\n\n## 其他\n\n- tool: 不算\n")

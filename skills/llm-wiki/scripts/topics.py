@@ -18,34 +18,44 @@ TOPIC_SUFFIX = ".md"
 MAX_TOPIC_CHARS = 200_000
 
 
-def topic_root(root):
+def topic_root(root, view_root=None):
+    if view_root is not None:
+        return Path(view_root)
     return Path(root) / TOPIC_DIR
 
 
-def scan(root):
-    """Return one record per topic file, including unreadable or empty ones."""
+def scan(root, view_root=None):
+    """Return view topics first, then legacy root topics; invalid files kept."""
     root = Path(root)
-    base = topic_root(root)
-    if not base.is_dir():
-        return []
-    try:
-        children = sorted(base.iterdir(), key=lambda path: path.name)
-    except OSError:
-        return []
-    return [
-        _entry(root, child)
-        for child in children
-        if child.is_file() and child.suffix == TOPIC_SUFFIX and not child.name.startswith(".")
-    ]
+    sources = []
+    if view_root is not None:
+        sources.append((Path(view_root), "view"))
+    sources.append((root / TOPIC_DIR, "legacy"))
+    entries = []
+    seen = set()
+    for base, origin in sources:
+        if not base.is_dir():
+            continue
+        try:
+            children = sorted(base.iterdir(), key=lambda path: path.name)
+        except OSError:
+            continue
+        for child in children:
+            if (not child.is_file() or child.suffix != TOPIC_SUFFIX
+                    or child.name.startswith(".") or child.name in seen):
+                continue
+            seen.add(child.name)
+            entries.append(_entry(root, child, origin=origin))
+    return entries
 
 
-def match(root, terms, limit):
+def match(root, terms, limit, view_root=None):
     """Rank valid topics against query terms; reads files, writes nothing."""
     terms = [term for term in terms if term]
     if not terms:
         return []
     scored = []
-    for entry in scan(root):
+    for entry in scan(root, view_root=view_root):
         if not entry["valid"]:
             continue
         haystack = f"{entry['title']}\n{entry['description']}\n{entry['body']}"
@@ -64,6 +74,7 @@ def match(root, terms, limit):
                 "status": entry["status"],
                 "updated": entry["updated"],
                 "path": entry["path"],
+                "origin": entry["origin"],
                 "score": score,
                 "snippet": snippet(entry["body"], terms[0]),
             }
@@ -84,10 +95,11 @@ def snippet(body, term):
     return prefix + flat[start:end] + suffix
 
 
-def _entry(root, path):
+def _entry(root, path, origin="view"):
     root = Path(root)
     record = {
         "name": path.stem,
+        "origin": origin,
         "title": path.stem,
         "description": "",
         "status": "",
