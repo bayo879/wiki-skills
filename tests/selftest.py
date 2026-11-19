@@ -417,7 +417,7 @@ def repair_flow(results):
         view_a = (root / page_a["path"]).read_text(encoding="utf-8")
         view_b = (root / page_b["path"]).read_text(encoding="utf-8")
         check(results, "a repaired edge renders on both sides of the view",
-              "[[page-b]]" in view_a and "[[page-a]]" in view_b, (view_a, view_b))
+              "[乙页](乙页.md)" in view_a and "[甲页](甲页.md)" in view_b, (view_a, view_b))
 
         again = run(root, "page", "link", "--repair")["data"]
         check(results, "link repair is idempotent",
@@ -480,8 +480,8 @@ def links_flow(results):
                   "## 关联" not in page_a["body"] and "## 关联" not in page_b["body"],
                   (page_a["body"], page_b["body"]))
             check(results, "the view renders outgoing and incoming edges together",
-                  "- [[page-b]]" in engine.view_text(page_a)
-                  and "- [[page-a]]" in engine.view_text(page_b),
+                  "[乙页](乙页.md)" in engine.view_text(page_a)
+                  and "[甲页](甲页.md)" in engine.view_text(page_b),
                   engine.view_text(page_a))
             check(results, "the view has exactly one relation section",
                   engine.view_text(page_b).count("## 关联") == 1,
@@ -566,7 +566,7 @@ def links_flow(results):
             check(results, "a body relation section is stripped on submit",
                   "## 关联" not in record["body"], record["body"])
             check(results, "the merge-added edge is rendered",
-                  "- [[page-b]]" in engine.view_text(record), engine.view_text(record))
+                  "[乙页](乙页.md)" in engine.view_text(record), engine.view_text(record))
         finally:
             engine.close()
 
@@ -613,7 +613,7 @@ def links_flow(results):
             record = engine.page_record("page-s2")
             sibling_text = (root / "wiki" / engine.view_relpath(record)).read_text(encoding="utf-8")
             check(results, "the sibling view shows its edge",
-                  "- [[page-s1]]" in sibling_text, sibling_text)
+                  "[兄弟一](兄弟一.md)" in sibling_text, sibling_text)
         finally:
             engine.close()
 
@@ -1578,7 +1578,7 @@ def main(argv=None):
               linked_page["outgoing"] == ["machine-room-inspection"], linked_page["outgoing"])
         linked_view = (root / "wiki/pages/process/反诈复机.md").read_text(encoding="utf-8")
         check(results, "page link pushes the relation section to the view",
-              "## 关联" in linked_view and "[[machine-room-inspection]]" in linked_view,
+              "## 关联" in linked_view and "[机房巡检](../concept/机房巡检.md)" in linked_view,
               linked_view)
         missing_link = run(root, "page", "link", "anti-fraud-restore",
                            "no-such-page", expect=2)
@@ -1598,6 +1598,10 @@ def main(argv=None):
 
         exported = run(root, "export", str(root / ".wiki/export"))["data"]["files"]
         check(results, "export writes rendered pages", exported, exported)
+        exported_page = (root / ".wiki/export/process/anti-fraud-restore.md").read_text(
+            encoding="utf-8")
+        check(results, "export renders real page links",
+              "[机房巡检](../concept/machine-room-inspection.md)" in exported_page, exported_page)
         escaped = run(root, "export", str(root.parent / "wiki-export"), expect=2)
         check(results, "export outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
 
@@ -2045,7 +2049,7 @@ def main(argv=None):
               "anti-fraud-restore" in imported_page["outgoing"], imported_page["outgoing"])
         imported_view = new_path.read_text(encoding="utf-8")
         check(results, "imported links reach the view after the next push",
-              "[[anti-fraud-restore]]" in imported_view, imported_view)
+              "[反诈复机](../process/反诈复机.md)" in imported_view, imported_view)
 
         bad_link = root / ".wiki/drafts/bad-link.md"
         bad_link.write_text(

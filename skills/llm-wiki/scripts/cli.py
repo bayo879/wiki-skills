@@ -52,7 +52,7 @@ from workspace import (
 )
 
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 # 领取任务的会话身份：显式参数 > 用户导出 > 宿主注入的会话 id。
@@ -1517,14 +1517,26 @@ def command_export():
         "export into a directory inside the workspace, e.g. .wiki/export",
     )
     written = []
-    for record in wiki.all_pages():
+    records = wiki.all_pages()
+    page_of = {
+        record["id"]: (
+            record["meta"].get("title") or record["id"],
+            f"{record['meta']['type']}/{record['id']}.md",
+        )
+        for record in records
+    }
+    for record in records:
         meta = dict(record["meta"])
         meta["status"] = wiki.computed_status(meta)
-        destination = target / meta["type"] / f"{record['id']}.md"
+        relative = f"{meta['type']}/{record['id']}.md"
+        destination = target / relative
         outgoing, incoming = wiki.links_for(record["id"])
         write_atomic(
             destination,
-            render_page(meta, record["body"], links=sorted(set(outgoing) | set(incoming))),
+            render_page(
+                meta, record["body"], links=sorted(set(outgoing) | set(incoming)),
+                view_path=relative, page_of=page_of,
+            ),
         )
         written.append(norm_key(destination.relative_to(target)))
     emit(

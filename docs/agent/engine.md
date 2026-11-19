@@ -186,8 +186,10 @@ page 载荷 / page link / page import / page link --repair → 校验 → page_r
 
 `links` 是 `page_revs.meta` 里的页面 id 数组，并镜像到 `links` 表；`write_rev` 按 meta 重建，
 不再从 body 的 `[[...]]` 或 `## 关联` 段解析。观看区由 `links_for` 取出链与入链，渲染成一个
-`## 关联` 段；正文里的该段在提交与推送时剥掉。`page link` 与 `page import` 的 `links` 走
-同一套 `check_links`/`write_rev`；`page link` 成功后立即 `sync_view`，不等下一个命令。
+`## 关联` 段，每行是 `[目标页标题](相对路径)`（账本只存 id，标题和路径由 `render_page`
+的 `page_of`/`view_path` 现算）；正文里的该段在提交与推送时剥掉。`page link` 与
+`page import` 的 `links` 走同一套 `check_links`/`write_rev`；`page link` 成功后立即
+`sync_view`，不等下一个命令。
 
 `page link --repair` 是唯一的推断式补链：把 `meta.sources` 经 `sources.raw` 归并到同一条
 原始正文，同组页两两配对，
