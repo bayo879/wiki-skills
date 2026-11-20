@@ -14,7 +14,7 @@ tags:
 
 ## 适用
 
-用户点名一个工作流（`workflows/<id>/` 目录、`workflow list` 里的 id、`workflow:` 前缀后的 id，
+用户点名一个工作流（`<view>/workflows/<id>/` 目录、`workflow list` 里的 id、`workflow:` 前缀后的 id，
 或直接贴出一份 `WORKFLOW.md`），要判断它够不够用、有哪些不足、怎么改。只审已有对象；
 用户要新建工作流时用内置 `workflow-create`，不套评审流程。
 
@@ -122,8 +122,9 @@ tags:
   的 `output/`；跨工作流引用能 `workflow load` 成功；`resources` 引用的文件存在。
 - 查法：读正文的命令清单与“不做”；对每个引用的 id 跑 `workflow load "<id>" --json`；
   按 `resources[].path` 确认文件存在。
-- 失败样例：产物直接写在工作区根目录（会被 `ingest` 当来源排队），或写进
-  `<view>/workflows/<id>/` 与投放副本混放。
+- 失败样例：产物直接写在工作区根目录（会被 `ingest` 当来源排队），或写进定义目录
+  `<view>/workflows/<id>/` 与 `WORKFLOW.md`、`scripts/` 混放；产物应在
+  `<view>/runs/workflows/<id>/<task>/`。
 
 ### 7 完成标准可勾
 

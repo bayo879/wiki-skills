@@ -1,4 +1,6 @@
-"""Read-only topic notes stored under `<root>/topics/`.
+"""Read-only topic notes stored under `<view>/topics/`.
+
+The legacy `<root>/topics/` directory is read only as a fallback.
 
 A topic is one exploration record: the question, the answer, its evidence and
 what still needs digging. Topics are the wiki's exploration layer: Markdown
@@ -9,6 +11,8 @@ topic can be updated without re-ingesting.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from pathlib import Path
 
 from frontmatter import split_frontmatter
@@ -16,36 +20,133 @@ from frontmatter import split_frontmatter
 TOPIC_DIR = "topics"
 TOPIC_SUFFIX = ".md"
 MAX_TOPIC_CHARS = 200_000
+REF_SECTION = "## 依据"
+# (依据里的前缀词, 结果键, 告警/JSON 用的 kind)
+REF_KINDS = (
+    ("页面", "pages", "page"),
+    ("原文", "raws", "raw"),
+    ("话题", "topics", "topic"),
+    ("工作流", "workflows", "workflow"),
+)
+REF_TOKEN_RE = re.compile(r"`([^`]+)`")
 
 
-def topic_root(root):
+def parse_refs(body):
+    """Parse the ``## 依据`` sections into four ref groups; pure, no I/O."""
+    groups = {key: [] for _, key, _ in REF_KINDS}
+    malformed = []
+    sections = 0
+    in_section = False
+    fence = ""
+    for line in body.split("\n"):
+        marker = line.lstrip()[:3]
+        if marker in ("```", "~~~"):
+            if not fence:
+                fence = marker
+            elif fence == marker:
+                fence = ""
+            continue
+        if fence:
+            continue
+        if line.startswith("## "):
+            in_section = line.strip() == REF_SECTION
+            if in_section:
+                sections += 1
+            continue
+        if not in_section or not line.startswith("- "):
+            continue
+        item = line[2:].strip()
+        for word, key, _ in REF_KINDS:
+            if not item.startswith(word):
+                continue
+            rest = item[len(word):]
+            if not rest[:1]:
+                continue
+            if rest[0] in "：:":
+                match = REF_TOKEN_RE.search(rest)
+                if match:
+                    _append_ref(groups[key], key, match.group(1))
+                else:
+                    malformed.append(line)
+            elif rest[0] == "`":
+                malformed.append(line)
+            break
+    return {
+        "pages": groups["pages"],
+        "raws": groups["raws"],
+        "topics": groups["topics"],
+        "workflows": groups["workflows"],
+        "malformed": malformed,
+        "sections": sections,
+    }
+
+
+def _blank_refs():
+    """Empty ``refs`` for an entry whose body never got parsed."""
+    return parse_refs("")
+
+
+def _nfc(text):
+    """Normalize to NFC so a name and the token referring to it compare equal."""
+    return unicodedata.normalize("NFC", text)
+
+
+def _append_ref(target, key, token):
+    value = _nfc(token.strip())
+    if key == "pages" or key == "workflows":
+        value = value.lower()
+    elif key == "raws":
+        if value.startswith("raw:"):
+            value = value[len("raw:"):]
+        value = value[2:] if value.startswith("./") else value
+    if value and value not in target:
+        target.append(value)
+
+
+def topic_root(root, view_root=None):
+    if view_root is not None:
+        return Path(view_root)
     return Path(root) / TOPIC_DIR
 
 
-def scan(root):
-    """Return one record per topic file, including unreadable or empty ones."""
+def scan(root, view_root=None):
+    """Return view topics first, then legacy root topics; invalid files kept."""
     root = Path(root)
-    base = topic_root(root)
-    if not base.is_dir():
-        return []
-    try:
-        children = sorted(base.iterdir(), key=lambda path: path.name)
-    except OSError:
-        return []
-    return [
-        _entry(root, child)
-        for child in children
-        if child.is_file() and child.suffix == TOPIC_SUFFIX and not child.name.startswith(".")
-    ]
+    sources = []
+    if view_root is not None:
+        sources.append((Path(view_root), "view"))
+    sources.append((root / TOPIC_DIR, "legacy"))
+    entries = []
+    seen = set()
+    for base, origin in sources:
+        if not base.is_dir():
+            continue
+        try:
+            children = sorted(base.iterdir(), key=lambda path: path.name)
+        except OSError:
+            continue
+        for child in children:
+            key = _nfc(child.name)
+            if (not child.is_file() or child.suffix != TOPIC_SUFFIX
+                    or child.name.startswith(".") or key in seen):
+                continue
+            seen.add(key)
+            entries.append(_entry(root, child, origin=origin))
+    return entries
 
 
-def match(root, terms, limit):
+def match(root, terms, limit, view_root=None):
     """Rank valid topics against query terms; reads files, writes nothing."""
+    return rank(scan(root, view_root=view_root), terms, limit)
+
+
+def rank(entries, terms, limit):
+    """Score scanned topics; each hit carries its parsed ``refs``."""
     terms = [term for term in terms if term]
     if not terms:
         return []
     scored = []
-    for entry in scan(root):
+    for entry in entries:
         if not entry["valid"]:
             continue
         haystack = f"{entry['title']}\n{entry['description']}\n{entry['body']}"
@@ -64,8 +165,10 @@ def match(root, terms, limit):
                 "status": entry["status"],
                 "updated": entry["updated"],
                 "path": entry["path"],
+                "origin": entry["origin"],
                 "score": score,
                 "snippet": snippet(entry["body"], terms[0]),
+                "refs": entry["refs"],
             }
         )
     scored.sort(key=lambda item: (-item["score"], item["name"]))
@@ -84,11 +187,12 @@ def snippet(body, term):
     return prefix + flat[start:end] + suffix
 
 
-def _entry(root, path):
+def _entry(root, path, origin="view"):
     root = Path(root)
     record = {
-        "name": path.stem,
-        "title": path.stem,
+        "name": _nfc(path.stem),
+        "origin": origin,
+        "title": _nfc(path.stem),
         "description": "",
         "status": "",
         "updated": "",
@@ -96,6 +200,7 @@ def _entry(root, path):
         "valid": False,
         "error": "",
         "body": "",
+        "refs": _blank_refs(),
     }
     if path.is_symlink() and not _within(root, path):
         record["error"] = "topic file escapes the workspace root"
@@ -110,7 +215,8 @@ def _entry(root, path):
         return record
     meta, body = split_frontmatter(text)
     body = body.strip()
-    title = str(meta.get("name") or meta.get("title") or path.stem).strip() or path.stem
+    title = _nfc(str(meta.get("name") or meta.get("title") or path.stem).strip()
+                 or path.stem)
     description = str(meta.get("description") or "").strip()
     if not description:
         description = _first_line(body)
@@ -122,6 +228,7 @@ def _entry(root, path):
             "updated": str(meta.get("updated") or "").strip(),
             "body": body,
             "valid": bool(body),
+            "refs": parse_refs(body),
         }
     )
     if not body:

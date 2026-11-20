@@ -23,11 +23,11 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 页面层 | `pages.py` 的 `PagesMixin` | `page_record`、`write_rev`、`rebuild_links`、`links_for`、`view_text`、`page_ids` |
 | 页面渲染 | `pages.py` 的 `render_page` | 依赖 `frontmatter.yaml_scalar`；`view_path`/`raw_of` 只在写观看区时传入，证据行链到 raw、raw 末尾追加原文来源段；改动一侧要同步另一侧 |
 | 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
-| 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`topics/`、`workflows/` 只首次投放；手改只告警，`sync` 回收 |
+| 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`workflows/`、`topics/`、`runs/` 是项目内容，引擎不覆盖、不删除；手改只告警，`sync` 回收 |
 | 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；租约归属（`task_leases`、`sweep_leases`、`lease_owner`）；并发走同一条 CAS 约定 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
-| 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；只扫 `workflows/`，再与技能内置工作流合并；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
-| 话题沉淀 | `topics.py` | `scan`/`match`；只扫 `topics/*.md`，只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
+| 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；先扫 `<view>/workflows/`，再扫旧根 `workflows/` 兜底，最后合并技能内置工作流；条目带 `origin`（`view`/`legacy`/`builtin`）与 `legacy_conflict`；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
+| 话题沉淀 | `topics.py` | `scan`/`match`/`rank`/`parse_refs`（`match` 是 `rank(scan(...))` 的薄包装）；先扫 `<view>/topics/*.md`，再扫旧根 `topics/` 兜底；条目带 `origin`；只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留并复核；纯函数，只读 `Wiki` |
 | 账本结构 | `ledger.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用 |
 | 账本 | `ledger.py` 的 `LedgerMixin` | `__init__`/`ensure`/`close`、来源与 raw、推送入口；`Wiki` 在文件末尾由四个 mixin 组合 |
@@ -92,9 +92,10 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
    `validate_page_payload`（字段、长度、slug、链接存在性、引文逐字命中）再 `write_rev`。
    任何一步失败都不得留下部分写入。
 8. **引文比较忽略空白。** 两侧都做 `re.sub(r"\s+", "", ...)`，其余逐字。
-9. **观看区只在命令入口推送。** `open_wiki()` 按 `publish` 开关调用 `sync_view()` 推送
-   `<view>/pages`；`sync` 用 `open_wiki(push=False)`，先读磁盘再改账本，避免推送把刚挪走
-   的文件重建出第二份。`--dry-run` 不建库、不推送。
+9. **观看区只在命令入口推送。** `open_wiki()` 按 `publish.enabled` 调用 `sync_view()` 推送
+   `<view>/pages` 并重写 `README.md`；`workflows/`、`topics/`、`runs/` 不由推送维护。`sync`
+   用 `open_wiki(push=False)`，先读磁盘再改账本，避免推送把刚挪走的文件重建出第二份。
+   `--dry-run` 不建库、不推送。
 10. **没有旧页面接管。** `page_revs` 为空时也不扫描 `.wiki/pages/`：该目录不再被读取，
    账本里没有的页面不会被文件内容凭空生成；升级后残留的 `.wiki/pages/` 由用户手动删除。
 11. **工作区边界。** `open_wiki` 以 cwd 为 workspace，`--root` 必须是 workspace 或其子目录；
@@ -102,34 +103,40 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     `inside_root`。`--dry-run` 临时库在 `<root>/.wiki/tmp/`，进程退出时删除。`ingest` 跳过
     解析后落在扫描根外的符号链接。导入 `errors.py` / `workspace.py` 前设
     `sys.dont_write_bytecode`，避免全局技能目录在区外留下 `__pycache__`。
-12. **工作流只读、不进账本、查询只返回候选。** `scan_files` 在扫描根一级跳过 `workflows/`
-    （`workflows.WORKFLOW_DIRS`），不因旧 `scan.ignore` 是否包含它而改变；`workflows.py` 不
-    打开数据库、不写 `.wiki/`、不排任务。`workflow_roots` 只返回实际存在的 `workflows/`，
-    `scan` 收其一级子目录，主文件固定为 `WORKFLOW.md`。
+12. **工作流只读、不进账本、查询只返回候选。** `scan_files` 在扫描根一级跳过观看区目录名和
+    旧根 `workflows/`（`workflows.WORKFLOW_DIRS`），不因旧 `scan.ignore` 是否包含它而改变；
+    `workflows.py` 不打开数据库、不写 `.wiki/`、不排任务。`workflow_roots(root, view_root)`
+    返回观看区与旧根中实际存在的 `workflows/`，观看区在前；`scan` 按观看区、旧根、内置的顺序
+    收一级子目录，同 id 只留先出现的，主文件固定为 `WORKFLOW.md`。旧根条目 `origin="legacy"`；
+    同 id 两边 `WORKFLOW.md` 不同时带 `legacy_conflict`/`legacy_path`，不改变加载优先级。
     `query` 会读工作流文件，在页面、话题之外带回最多 5 个候选（`workflows`，每条带
     `applies`），但不自动加载；`workflow:` 前缀只走工作流。`workflow search` 与 query 共用
     `match()`，项目工作流与内置工作流一起参与，只返回 `valid` 项。`workflow list` 仍列出非法项并带
-    `error`，`roots` 只有实际扫描到的 `workflows/`，并汇总带 warning 的项数。`workflow load` 的 id 必须是
-    该目录的一级目录名或内置工作流 id，拒绝 `.`、`..`、路径分隔符和区外符号链接。工作流文件是活
-    文件，不做缓存或 digest。
+    `error`，`roots` 只列实际扫描到的目录（观看区在前，旧根兜底），并汇总带 warning 的项数。
+    `workflow load` 的 id 必须是该目录的一级目录名或内置工作流 id，拒绝 `.`、`..`、路径分隔符
+    和区外符号链接。工作流文件是活文件，不做缓存或 digest。
     步骤契约在 `parse_steps` / `_contract`：只取第一个 `## 步骤` 到下一个二级标题之间的顶层
     列表项（缩进最浅一层），代码块、缩进子项和其他节不算；`tool:`/`human:`/`agent:`/`verify:`
     接受全角冒号与大小写变体，输出统一小写。部分步骤未标给 `W_STEP_UNTYPED`、标记后无内容给
     `W_STEP_EMPTY`；整份零标记、无 `## 步骤` 或该节无列表项在 `UNTYPED_ALLOWED` 为真
     （0.5.0）时只给 warning，翻转后（0.6.0）改判 error。有标记但没有 `tool:` 一律 invalid，
     hint 指向 `process` 页（纯人工流程不属于工作流）。
-13. **话题只读且不进账本。** `scan_files` 同时跳过 `topics/`，话题不会被当成来源。`topics.py`
-    只读 `topics/*.md`，取 frontmatter 的 `name/description/status/updated`；正文为空或文件超过
-    200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的 `topic_matches` 与页面
-    `matches` 分开计数；话题文件由 agent 直接写，不经账本。
+13. **话题只读且不进账本。** `scan_files` 同时跳过观看区与旧根 `topics/`，话题不会被当成
+    来源。`topics.py` 先读 `<view>/topics/*.md`，再读旧根 `topics/`，按文件名去重；取
+    frontmatter 的 `name/description/status/updated`，条目带 `origin`（`view`/`legacy`）；
+    正文为空或文件超过 200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的
+    `topic_matches` 与页面 `matches` 分开计数；命中页面时 `query` 反向给 `citing_topics`；
+    话题文件由 agent 直接写，不经账本。
+    `parse_refs` 是纯函数，只认 `## 依据` 节的 `- ` 列表项；校验在 `cli.py` 的
+    `resolve_topic_refs` 里做，`topics.py` 不依赖账本。
 14. **观看区目录由 `publish` 配置决定。** `publish_dir_name` 要求 `dir` 是单个目录名，拒绝
-    `.wiki`、`topics`、`workflows`；`ensure()` 在开关判断之前调用它，
-    非法值即使 `enabled:false` 也报 `E_CONFIG`。`publish.workflows` 控制是否投放工作流。
-    `ensure_publish` 始终创建 `<view>/` 与 `<view>/raw/`，
-    `enabled:false` 只跳过 `sync_view`。`scan_files` 在扫描根无条件跳过该目录名，所以关了
-    发布也不能拿它当来源；换掉名字后旧目录恢复为普通来源。`sync_view` 对 `pages/` 的手改
-    只告警不覆盖，`topics/`、`workflows/` 只在目标不存在时投放，`README.md` 每次推送重写，
-    其他文件（含 `.obsidian/`）不删不改。
+    `.wiki`、`topics`、`workflows`；`ensure()` 在开关判断之前调用它，非法值即使
+    `enabled:false` 也报 `E_CONFIG`。`ensure_publish` 始终创建 `<view>/`、`<view>/raw/`、
+    `<view>/workflows/`、`<view>/topics/`；`enabled:false` 只跳过 `sync_view`。`runs/` 在第一次
+    产物时由工作流创建，`pages/` 在推送时创建。`scan_files` 在扫描根无条件跳过该目录名，所以
+    关了发布也不能拿它当来源；换掉名字后旧目录恢复为普通来源，定义、话题、产物不会自动搬迁。
+    `sync_view` 对 `pages/` 的手改只告警不覆盖，`README.md` 每次推送重写；`workflows/`、
+    `topics/`、`runs/` 不覆盖、不删除。
 15. **route 任务必须登记检索。** `query --task <id> 词...` 每个词独立检索各返 5 条、按词分组，
     追加一行 `{ts,words,hits}` 到 `<task_dir>/queries.jsonl`；重复词不重复计配额，配额是
     `5 × max(1, ceil(chars/1000))`（`QUERY_BUDGET_CHARS`、`QUERY_WORDS_PER_WINDOW`）。
@@ -150,12 +157,24 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     `task_sources`）。`enqueue_task` 撞 `IntegrityError` 时回查已有任务并复用；`submit_route`
     命中已领走的 page 任务仍报 `E_STATE`，不另开第二条。route 任务与来源自己的转换任务
     不计入这条约束。
-18. **写命令按工作区排队。** 会写账本或观看区的命令在 `main()` 里用
+18. **写命令按工作区排队。** 会写账本或观看区的命令（含 `query --task`）在 `main()` 里用
     `workspace.workspace_lock` 抢 `<root>/.wiki/lock`（`O_CREAT|O_EXCL` 写入 pid），等待
     5 秒仍拿不到抛 `E_BUSY`（exit 4）；非 posix 平台不按 pid 判活，只按 30 分钟陈旧阈值
-    接管，posix 用 `os.kill(pid, 0)` 判断持有者是否还在。`--dry-run` 且没有 `.wiki/` 时不
-    加锁，避免试运行留下目录。
+    接管，posix 用 `os.kill(pid, 0)` 判断持有者是否还在。锁路径不是普通文件或陈旧锁无法
+    删除时快速抛 `E_STATE`（exit 3），创建锁失败抛 `E_HEALTH`（exit 1）；判陈旧前先检查
+    deadline，任何分支都不会绕过 5 秒上限。`--dry-run` 且没有 `.wiki/` 时不加锁，避免
+    试运行留下目录。
 
+## 锁的分层现状（2026-11-20）
+
+普通 `query`（文本检索、`--page`）已按只读快照落地：`Wiki.open_readonly` 用
+`mode=ro` + `query_only` 打开账本，不执行 `ensure(push=True)`/`sync_view`，不创建
+`.wiki/lock`，也不创建 `.wiki/`；`.wiki/wiki.db` 不存在或 schema 缺列时报 `E_STATE`。
+它不进入第 18 条的整命令工作区锁；`query --task` 仍因写 `queries.jsonl` 保留锁。
+
+更长期的方向尚未实现：任务租约带进程身份、心跳与 epoch fencing，互斥粒度缩到任务树/
+共享资源，观看区推送收敛为单写者。第 18 条仍是写命令的实际行为；决策见
+`docs/agent/development-decisions.md`，实施项见 `docs/issues/2026-11-20-P2-lock-file-hang.md`。
 
 ## 数据方向
 
@@ -166,10 +185,12 @@ route 载荷 → 校验 → 页面任务（new/merge）或来源结算（skip）
 page 载荷 / page link / page import / page link --repair → 校验 → page_revs + links → 推送
 → <view>/pages 副本
 
-workflows/<id>/WORKFLOW.md ──query/scan──→ 工作流命中（只读，不落盘）
-                              └─workflow load→ 全文 + 分类型步骤 + resources
+<view>/workflows/<id>/WORKFLOW.md ──query/scan──→ 工作流命中（只读，不落盘）
+                                        └─workflow load→ 全文 + 分类型步骤 + resources
+<root>/workflows/<id>/WORKFLOW.md ──legacy 兜底──┘
 
-topics/*.md ──query/scan──→ topics 命中（只读，不落盘）
+<view>/topics/*.md ──query/scan──→ topics 命中（只读，不落盘）
+<root>/topics/*.md ──legacy 兜底──┘
 ```
 
 `raw` 文件名取来源 basename，同名按 `-2`、`-3` 顺延，不跟正文摘要走；`sources.raw` 存相对
@@ -180,8 +201,10 @@ topics/*.md ──query/scan──→ topics 命中（只读，不落盘）
 
 `links` 是 `page_revs.meta` 里的页面 id 数组，并镜像到 `links` 表；`write_rev` 按 meta 重建，
 不再从 body 的 `[[...]]` 或 `## 关联` 段解析。观看区由 `links_for` 取出链与入链，渲染成一个
-`## 关联` 段；正文里的该段在提交与推送时剥掉。`page link` 与 `page import` 的 `links` 走
-同一套 `check_links`/`write_rev`；`page link` 成功后立即 `sync_view`，不等下一个命令。
+`## 关联` 段，每行是 `[目标页标题](相对路径)`（账本只存 id，标题和路径由 `render_page`
+的 `page_of`/`view_path` 现算）；正文里的该段在提交与推送时剥掉。`page link` 与
+`page import` 的 `links` 走同一套 `check_links`/`write_rev`；`page link` 成功后立即
+`sync_view`，不等下一个命令。
 
 `page link --repair` 是唯一的推断式补链：把 `meta.sources` 经 `sources.raw` 归并到同一条
 原始正文，同组页两两配对，

@@ -47,6 +47,12 @@ def _markdown_link(label, target):
     return f"[`{label}`]({_link_target(str(target))})"
 
 
+def _page_link(label, target):
+    """A plain-label link to another page, readable outside Obsidian."""
+    label = str(label).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    return f"[{label}]({_link_target(str(target))})"
+
+
 def _relative_target(from_rel, to_rel):
     """Target for a link written inside ``from_rel``, both repo-relative POSIX."""
     from_rel = from_rel.as_posix() if hasattr(from_rel, "as_posix") else str(from_rel)
@@ -92,7 +98,8 @@ def view_name(title, page_id):
     return text or page_id
 
 
-def render_page(meta, body, aliases=None, links=None, view_path=None, raw_of=None):
+def render_page(meta, body, aliases=None, links=None, view_path=None, raw_of=None,
+                page_of=None):
     """Deterministic page text: frontmatter, body, evidence, then relations.
 
     Relations are rendered only when ``links`` is passed (the published view);
@@ -100,6 +107,8 @@ def render_page(meta, body, aliases=None, links=None, view_path=None, raw_of=Non
     single stored edge set. ``view_path`` (repo-relative) turns evidence into
     standard Markdown links to the raw copy and adds raw provenance links; it
     is only passed when writing the view, never for the ledger's stored body.
+    ``page_of`` maps a page id to ``(title, repo-relative path)`` so relation
+    rows are real Markdown links, not Obsidian-only ``[[id]]`` strings.
     """
     body = split_relations(body)
     if meta.get("type") == "raw":
@@ -141,7 +150,15 @@ def render_page(meta, body, aliases=None, links=None, view_path=None, raw_of=Non
             text += "\n".join(rows) + "\n"
     if links:
         rows = ["", RELATION_HEADING, ""]
-        rows.extend(f"- [[{link}]]" for link in normalize_links(links))
+        for link in normalize_links(links):
+            target = (page_of or {}).get(link)
+            if target and view_path:
+                title, target_path = target
+                rows.append(
+                    f"- {_page_link(title, _relative_target(view_path, target_path))}"
+                )
+            else:
+                rows.append(f"- [[{link}]]")
         text += "\n".join(rows) + "\n"
     return text
 
@@ -348,6 +365,12 @@ class PagesMixin:
         outgoing, incoming = self.links_for(record["id"])
         links = sorted(set(outgoing) | set(incoming))
         path = view_path or self.view_repo_path(self.view_relpath(record))
+        page_of = {}
+        for other in self.all_pages():
+            other_path = self.view_repo_path(self.view_relpath(other))
+            page_of[other["id"]] = (
+                other["meta"].get("title") or other["id"], other_path,
+            )
         raw_of = {}
         for key in record["meta"].get("sources") or []:
             row = self.source_row(key)
@@ -355,7 +378,7 @@ class PagesMixin:
                 raw_of[key] = row["raw"]
         return render_page(
             record["meta"], record["body"], aliases=[record["id"]], links=links,
-            view_path=path, raw_of=raw_of,
+            view_path=path, raw_of=raw_of, page_of=page_of,
         )
 
     def write_rev(self, page, meta, body, origin):

@@ -225,7 +225,7 @@ DEFAULT_CONFIG = {
         ]
     },
     "ingest": {"max_source_bytes": 50_000_000},
-    "publish": {"dir": "wiki", "enabled": True, "topics": True, "workflows": True},
+    "publish": {"dir": "wiki", "enabled": True},
 }
 
 
@@ -281,6 +281,12 @@ def publish_dir_name(config):
     return name
 
 
+def view_dir(root):
+    """Return the configured view directory without creating or opening it."""
+    root = Path(root)
+    return root / publish_dir_name(load_config(root / WIKI_DIR / CONFIG_NAME))
+
+
 class LedgerMixin:
     """账本连接、来源行与原文读写；由 Wiki 组合，不自带业务判断。"""
 
@@ -308,6 +314,66 @@ class LedgerMixin:
     @property
     def publish_raw_dir(self):
         return self.publish_dir / RAW_SUBDIR
+
+    def open_readonly(self):
+        """Open an existing ledger without creating, migrating or publishing.
+
+        `query` is a snapshot read: it must not create `.wiki/`, repair the
+        schema or push the view. Requiring an existing database also keeps a
+        misspelled `--root` from silently looking like an empty wiki.
+        """
+        if not self.db_path.is_file():
+            raise WikiError(
+                "E_STATE",
+                "workspace is not initialized",
+                "run `ingest` first; query only reads an existing ledger",
+                3,
+                section="工作区未初始化",
+            )
+        self.config = load_config(self.config_path)
+        publish_dir_name(self.config)
+        self.raw_dir = self.publish_raw_dir
+        try:
+            self.conn = sqlite3.connect(f"{self.db_path.as_uri()}?mode=ro", uri=True)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA query_only = ON")
+            self.conn.execute("PRAGMA busy_timeout = 5000")
+            missing = set()
+            for table, columns in REQUIRED_COLUMNS:
+                present = {
+                    row[1]
+                    for row in self.conn.execute(f"PRAGMA table_info({table})")
+                }
+                missing.update(
+                    f"{table}.{column}" for column in columns if column not in present
+                )
+            for table in ("sources", "page_revs", "links"):
+                if self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table,),
+                ).fetchone() is None:
+                    missing.add(table)
+        except sqlite3.DatabaseError as error:
+            conn, self.conn = self.conn, None
+            if conn is not None:
+                conn.close()
+            raise WikiError(
+                "E_DB",
+                f"ledger cannot be opened: {error}",
+                "run `status` or `ingest` to repair the ledger, or restore it from backup",
+                3,
+            ) from error
+        if missing:
+            self.conn.close()
+            self.conn = None
+            raise WikiError(
+                "E_STATE",
+                f"ledger schema is out of date: missing {', '.join(sorted(missing))}",
+                "run `status` or `ingest` to migrate the ledger",
+                3,
+                section="旧账本",
+            )
+        return self
 
     def ensure(self, push=True):
         created = []
@@ -379,6 +445,13 @@ class LedgerMixin:
             if not directory.exists():
                 directory.mkdir(parents=True)
                 created.append(shown)
+        # 工作流定义和话题是项目内容，目录必须始终存在；runs/ 按需创建。
+        view = self.publish_dir
+        for name in ("workflows", topics.TOPIC_DIR):
+            target = view / name
+            if not target.exists():
+                target.mkdir(parents=True, exist_ok=True)
+                created.append(target.relative_to(self.root).as_posix())
         # 目录本身始终存在（raw/ 是引擎数据，位置不随开关变化）；剩下的事情
         # 归 sync_view，开关为假时它直接返回。
         if not self.config["publish"]["enabled"]:

@@ -1,10 +1,12 @@
-"""Read-only executable workflows stored under `<root>/workflows/`.
+"""Read-only executable workflows stored under `<view>/workflows/`.
 
 A workflow is shaped like a skill:
 
-    workflows/<id>/WORKFLOW.md     flow + frontmatter (name, description, tags)
-    workflows/<id>/scripts/        executable helpers
-    workflows/<id>/references/     notes read on demand
+    <view>/workflows/<id>/WORKFLOW.md     flow + frontmatter
+    <view>/workflows/<id>/scripts/        executable helpers
+    <view>/workflows/<id>/references/     notes read on demand
+
+The legacy `<root>/workflows/` directory is read only as a fallback.
 
 A workflow is executable: every step in its `## 步骤` section carries one of
 `tool:`, `human:`, `agent:` or `verify:`. The engine reads those markers so
@@ -58,26 +60,43 @@ MARKER = re.compile(r"^(tool|human|agent|verify)\s*[:：]\s*(.*)$", re.IGNORECAS
 FENCE = re.compile(r"^(```|~~~)")
 
 
-def workflow_root(root):
+def workflow_root(root, view_root=None):
+    if view_root is not None:
+        return Path(view_root)
     return Path(root) / WORKFLOW_DIR
 
 
-def workflow_roots(root):
-    """Existing project workflow directories, in precedence order."""
-    root = Path(root)
-    return [root / name for name in WORKFLOW_DIRS if (root / name).is_dir()]
+def workflow_roots(root, view_root=None):
+    """Existing project workflow directories, view first, then legacy root."""
+    bases = []
+    if view_root is not None:
+        bases.append(Path(view_root))
+    bases.append(Path(root) / WORKFLOW_DIR)
+    roots = []
+    for base in bases:
+        if base.is_dir() and base not in roots:
+            roots.append(base)
+    return roots
 
 
 def builtin_root():
     return SKILL_ROOT / BUILTIN_DIR
 
 
-def inventory(root):
+def inventory(root, view_root=None):
     """List every workflow directory, valid or not."""
-    entries = scan(root)
-    roots = [path.name for path in workflow_roots(root)]
+    root = Path(root)
+    entries = scan(root, view_root=view_root)
+    paths = workflow_roots(root, view_root=view_root)
+    roots = [path.relative_to(root).as_posix() for path in paths]
+    if roots:
+        first = roots[0]
+    elif view_root is not None:
+        first = Path(view_root).relative_to(root).as_posix()
+    else:
+        first = WORKFLOW_DIR
     return {
-        "root": roots[0] if roots else WORKFLOW_DIR,
+        "root": first,
         "roots": roots,
         "count": len(entries),
         "valid": sum(1 for entry in entries if entry["valid"]),
@@ -86,20 +105,29 @@ def inventory(root):
     }
 
 
-def scan(root, builtin=True):
-    """Return full internal records for project workflows, then built-ins.
+def scan(root, builtin=True, view_root=None):
+    """Return project workflows (view, legacy root), then built-ins.
 
-    A project workflow shadows a built-in one with the same id.
+    The view wins over the legacy root and the legacy root wins over a built-in
+    with the same id. Invalid directories still occupy their id.
     """
     root = Path(root)
     entries = []
     seen = set()
-    for base in workflow_roots(root):
-        for child in _children(base):
+    if view_root is not None:
+        for child in _children(Path(view_root)):
             if child.name in seen:
                 continue
             seen.add(child.name)
-            entries.append(_entry(root, child))
+            entries.append(_entry(
+                root, child, origin="view",
+                legacy_path=_legacy_conflict(root, child),
+            ))
+    for child in _children(root / WORKFLOW_DIR):
+        if child.name in seen:
+            continue
+        seen.add(child.name)
+        entries.append(_entry(root, child, origin="legacy"))
     if not builtin:
         return entries
     seen.update(entry["id"] for entry in entries)
@@ -109,6 +137,22 @@ def scan(root, builtin=True):
             continue
         entries.append(_builtin_entry(base, child))
     return entries
+
+
+def _legacy_conflict(root, child):
+    """Return the legacy WORKFLOW path when both definitions exist and differ."""
+    view_main = child / WORKFLOW_FILE
+    legacy_main = Path(root) / WORKFLOW_DIR / child.name / WORKFLOW_FILE
+    if not view_main.is_file() or not legacy_main.is_file():
+        return None
+    try:
+        if view_main.read_text(encoding="utf-8", errors="replace") == legacy_main.read_text(
+            encoding="utf-8", errors="replace"
+        ):
+            return None
+    except OSError:
+        return None
+    return f"{WORKFLOW_DIR}/{child.name}/{WORKFLOW_FILE}"
 
 
 def _children(base):
@@ -127,12 +171,12 @@ def _children(base):
         return []
 
 
-def load(root, workflow_id):
+def load(root, workflow_id, view_root=None):
     """Return one workflow's flow, metadata, step inventory and resources."""
     workflow_id = _valid_id(workflow_id)
     root = Path(root)
     entry = next(
-        (item for item in scan(root) if item["id"] == workflow_id),
+        (item for item in scan(root, view_root=view_root) if item["id"] == workflow_id),
         None,
     )
     if entry is None:
@@ -184,13 +228,13 @@ def _applies(text):
     return "\n".join(lines).strip()
 
 
-def match(root, terms, limit, builtin=True):
+def match(root, terms, limit, builtin=True, view_root=None):
     """Rank valid workflows against search terms; reads only files."""
     terms = [term for term in terms if term]
     if not terms:
         return []
     scored = []
-    for entry in scan(root, builtin=builtin):
+    for entry in scan(root, builtin=builtin, view_root=view_root):
         if not entry["valid"]:
             continue
         fields = (
@@ -210,6 +254,7 @@ def match(root, terms, limit, builtin=True):
             {
                 "id": entry["id"],
                 "source": entry["source"],
+                "origin": entry["origin"],
                 "name": entry["name"],
                 "alias_name": entry["alias_name"],
                 "description": entry["description"],
@@ -361,18 +406,19 @@ def _warning(code, line, text, message):
 
 
 def _builtin_entry(base, directory):
-    entry = _entry(base, directory, source="builtin")
+    entry = _entry(base, directory, source="builtin", origin="builtin")
     entry["skill_path"] = f"{BUILTIN_DIR}/{entry.pop('main')}"
     entry.pop("path")
     entry["resources"] = []
     return entry
 
 
-def _entry(root, directory, source="project"):
+def _entry(root, directory, source="project", origin="view", legacy_path=None):
     root = Path(root)
     record = {
         "id": directory.name,
         "source": source,
+        "origin": origin,
         "name": directory.name,
         "alias_name": "",
         "description": "",
@@ -390,6 +436,9 @@ def _entry(root, directory, source="project"):
         "verify_steps": [],
         "warnings": [],
     }
+    if legacy_path:
+        record["legacy_path"] = legacy_path
+        record["legacy_conflict"] = True
     if not _within(root, directory):
         record["error"] = "workflow directory escapes the workspace root"
         return record
@@ -462,9 +511,10 @@ def _location(entry):
 
 
 def _public(entry):
-    return {
+    item = {
         "id": entry["id"],
         "source": entry["source"],
+        "origin": entry["origin"],
         "name": entry["name"],
         "alias_name": entry["alias_name"],
         "description": entry["description"],
@@ -479,6 +529,10 @@ def _public(entry):
         "verify_steps": len(entry["verify_steps"]),
         "warnings": entry["warnings"],
     }
+    if entry.get("legacy_conflict"):
+        item["legacy_path"] = entry["legacy_path"]
+        item["legacy_conflict"] = True
+    return item
 
 
 def _tags(value):

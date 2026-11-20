@@ -55,6 +55,15 @@ python3 <skill>/scripts/wiki.py ingest --json   # 失败时 stdout 仍是一段 
 工作区里一个可写目录再跑，或请用户修权限。不要用 `--root` 指向工作区外来绕，那只会换成
 `E_PATH`。检查失败时命令没有写入任何东西，修好重跑即可。
 
+`.wiki` 已存在但建不了 `.wiki/lock` 时也走本节，`message` 形如
+`workspace is not writable: …/.wiki/lock`；修好 `.wiki` 的权限后重跑。
+
+## 工作区未初始化
+
+普通 `query` / `query --page` 只读账本，不会顺手创建 `.wiki/`。找不到 `.wiki/wiki.db`
+时返回 `E_STATE`，`message` 是 `workspace is not initialized`；先运行 `ingest`（或 `init`）
+建立账本再查。不要把 `--root` 指向空目录来试探，那只会得到同一个错误。
+
 ## 旧账本
 
 对应 `E_STATE`，`message` 形如 `ledger schema is older than this skill: sources, raws`。
@@ -119,7 +128,12 @@ workspace root`、`publish dir … resolves outside the workspace root`。
 ## 工作区被占用
 
 对应 `E_BUSY`：另一个 wiki 进程正在这个工作区写账本。等它结束再重试；只有确认它已经崩溃
-（进程不存在、`.wiki/lock` 超过十分钟没动）才删 `.wiki/lock`，不要为了抢跑直接删锁。
+（进程不存在、`.wiki/lock` 超过三十分钟没动）才删 `.wiki/lock`，不要为了抢跑直接删锁。
+
+锁路径本身损坏时也落到本节：`.wiki/lock` 是目录、FIFO 等非普通文件，或陈旧锁因权限、
+只读挂载删不掉，返回 `E_STATE`。先确认没有 wiki 进程在跑，再删除或修复 `.wiki/lock`；
+不要 `cat`、读文本或往 FIFO 里写数据。`.wiki` 本身不可写导致建不了锁时是 `E_HEALTH`，
+按「工作区不可写」处理。
 
 ## 队列被别的会话占用
 

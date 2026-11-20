@@ -40,14 +40,14 @@
 收进账本；只同步正文用 `sync --body-only`，元数据也改过的改用 `page import`。`<view>/raw`
 由摄入维护：手改会在下一次 `ingest` 按整份正文被采纳为账本事实，共享它的来源一起换摘要、
 文件不改名；`<view>/README.md` 每次推送重写。
-`topics/`、`workflows/` 首次投放后归用户。
+`<view>/workflows/`、`<view>/topics/`、`<view>/runs/` 是项目内容，引擎不覆盖、不删除。
 
 ## 工作流是可执行能力，不是页面
 
 知识页回答"是什么"，工作流回答"怎么做"，而且是 agent（或人）能照着执行的做法。工作流放在
-`<root>/workflows/<id>/`，由 `WORKFLOW.md`、`scripts/`、`references/` 组成；普通 `query`
+`<view>/workflows/<id>/`，由 `WORKFLOW.md`、`scripts/`、`references/` 组成；普通 `query`
 会带回最多 5 个候选，但只有 `workflow load` 才返回主流程、分好类型的步骤和资源清单。项目
-工作流只从 `<root>/workflows/` 读取。
+工作流只从 `<view>/workflows/` 读取，旧根 `<root>/workflows/` 只作兼容兜底。
 
 工作流不摄入、不进账本，理由有三点：
 
@@ -76,7 +76,7 @@ warning，0.6.0 起没有类型判无效。
 
 ## 话题是 wiki 的探索层
 
-话题属于 wiki 内容，放在 `<root>/topics/<主题>.md`，与 `workflows/` 同级，记录一次探索的主题、结论、
+话题属于 wiki 内容，放在 `<view>/topics/<主题>.md`，与 `<view>/workflows/` 同级，记录一次探索的主题、结论、
 依据、未决问题、下一步和能力候选。它不是正式知识页：页面回答“是什么”且必须能回到 raw
 引文；话题记录“查到了什么、还缺什么”，允许保留未验证的线索和下一步计划。
 

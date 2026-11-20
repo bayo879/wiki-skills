@@ -3,6 +3,53 @@
 本文件记录用户已确认的方向与关键取舍。新决策由用户拍板后追加；未确认的候选方案写进
 `docs/issues/`，不要写在这里。
 
+## 2026-11-20：普通 query 按只读快照处理，不参与工作区锁
+
+用户原话："对于常规非task的query，原则上不应该加锁，现状怎么样搜到给什么，哪怕搜完下一秒就变化了，逻辑上也是没问题，搜索是个快照场景"。
+
+- 普通 `query`（文本检索与 `query --page`）只读账本和观看区文件，不写账本、不推观看区。
+  它接受读到某一时刻的状态，不为此加锁，也不靠长读事务保证一致性：SQLite 默认 rollback
+  journal，长读事务会挡住写命令。
+- 因此普通 `query` 不再走整命令工作区锁，打开时也不能执行 `ensure(push=True)`：不建
+  `.wiki`、不补 schema、不跑 `sync_view`、不创建 `.wiki/lock`。已落地（2026-11-20）：
+  `Wiki.open_readonly` 用 `mode=ro` + `query_only` 打开；`.wiki/wiki.db` 不存在或 schema
+  缺列时明确报 `E_STATE`，next 要求先 `ingest`，不静默返回空结果。
+- `query --task` 仍写 `<task_dir>/queries.jsonl` 并做配额读改写，保留锁或等价的短临界区；
+  它是拆分任务树的写入路径，不在本条豁免内。
+- 本条只改写 2026-11-17「任务目录化、单页单任务与工作区文件锁」中 `query` 的锁归属。
+  `ingest`、`next`、`submit`、`release`、`sync`、`doctor`、`page import/restore/link`
+  等写命令仍按整命令文件锁排队，直到锁分层落地。
+- 锁的长期方向是分层：任务归属用硬租约（进程身份、心跳、epoch fencing），互斥粒度按任务
+  树和共享资源而不是整条命令，观看区推送收敛为单写者。普通 query 的只读免锁已在
+  2026-11-20 落地，其余方向尚未实现；实施项与验收见
+  `docs/issues/2026-11-20-P2-lock-file-hang.md`。`docs/readme/cli.md` 与
+  `skills/llm-wiki/SKILL.md` 已同步 query 只读行为。
+
+## 2026-11-19：工作流与话题定义收进观看区
+
+用户确认实际知识库会提交 `wiki/`，工作流定义和话题不应再裸露在观看区外；产物也要和定义
+分层，避免任务目录挡住定义。此决策取代 2026-11-16 观看区设计里 `topics/`/`workflows/` 的
+“首次投放后归用户”模型。
+
+- 项目工作流定义放 `<view>/workflows/<id>/`，话题放 `<view>/topics/`，任务产物放
+  `<view>/runs/workflows/<id>/<task>/`。`runs/` 不叫 `cache/`，因为其中的 `output/` 是最终
+  交付物，叫缓存会诱导清理。
+- 查找顺序：观看区 → 旧根 `<root>/workflows/`、`<root>/topics/`（只读兜底）→ 内置工作流。
+  同 id 观看区优先；旧根与观看区 `WORKFLOW.md` 不同时只给 `legacy_conflict` 警告，加载仍用
+  观看区版。旧根兜底保留一个发布版本，不自动搬迁。
+- 新增 `origin`（`view`/`legacy`/`builtin`）；`source` 仍是 `project`/`builtin`，不合并两个
+  语义。`workflow list` 的 `roots` 列出观看区与旧根中实际存在的目录，观看区在前。
+- 删除 `view._seed_view_topics`、`view._seed_view_workflows` 与 `publish.topics`、
+  `publish.workflows`；`publish` 只留 `dir`/`enabled`。`ensure_publish` 建
+  `<view>/workflows`、`<view>/topics`，`enabled:false` 也建；`runs/` 在第一次产物时创建。
+- 新增只读 `ledger.view_dir(root)`，供不打开账本的 `workflow` 命令解析 `publish.dir`；
+  `query` 直接用已打开账本的 `publish_dir`。
+- `SKILL.md` 必须自包含目录树、所有权、查找顺序、产物路径与 `publish.dir` 语义，技能单独
+  拿出去也能落地。
+- 本仓库根 `workflows/` 是示例/开发用定义，和 `skills/` 一样是可选产物，不是观看区定义；
+  旧根兜底仍会把它们列为 `legacy` 项，迁移到观看区后应删除。本仓库不迁移、不改
+  `.gitignore`、不在根跑写状态命令。
+
 ## 2026-11-19：页面证据与 raw 来源用标准 Markdown 链接
 
 用户要求“先完成图谱的三层链接”，并指出有明确路径的信息应可用超链接标定图谱关系、在其他
@@ -12,8 +59,9 @@ Markdown 软件里也有效果。
   链接文字仍显示 raw 路径，括号里保留机器 key，引文校验与 `sources` 并集都不变。
 - raw 副本末尾由引擎追加 `<!-- llm-wiki:provenance -->` + `## 原文来源`，每行链回一个挂载
   来源；读者从页面可点到 raw，从 raw 可点到原始文件，形成 page → raw → source 的可点击链。
-- page ↔ page 继续用 `[[id]]` + 页面 `aliases`：Obsidian 的图谱边依赖它，且改标题不断链；
-  标准 Markdown 链接只用于跨软件也能打开的溯源边。
+- page ↔ page 也改成标准 Markdown 链接 `[目标页标题](相对路径)`：账本 `meta.links` 仍只存
+  page id，标题和路径由渲染层按当前观看区/导出目录现算；Obsidian 仍能建立图谱边，其他
+  Markdown 软件也能点开。`[[id]]` 只作为找不到目标时的降级输出，正常页面不再出现。
 - 链接目标按发布位置现算，不写进账本正文；空格、括号、`#`、`?`、`%` 做 percent-encode。
   `render_page` 的 `view_path` 是仓库相对路径，`view_repo_path` 负责把发布相对路径换过来。
 - raw 的来源段不是正文：`split_provenance` 在 `body_digest` 前剥掉它，给旧文件补链接不会让
@@ -442,6 +490,8 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
   翻转后判 invalid；仓库内两份（内置 `topic-exploration`、`workflows/ppt_creator`）当次补标记。
 - **观看区随目录收口。** 只投放 `workflows/`；`publish.workflows` 为新键，旧
   `publish.scenarios` 的迁移兼容同日移除，遗留键按未知键忽略。
+  > 该条已被 2026-11-19「工作流与话题定义收进观看区」取代：不再投放，
+  > `publish.workflows` 已移除。
 - **0.5.0 一次装完，0.6.0 只收紧。** 没有为旧目录设移除窗口，旧目录支持在改名当天删掉。
 - 代码把 `scenarios.py` 改为 `workflows.py`，`SCENARIO_DIRS`→`WORKFLOW_DIRS`，
   `E_SCENARIO_INVALID`→`E_WORKFLOW_INVALID`；内置目录改 `skills/llm-wiki/workflows/`；
@@ -538,3 +588,11 @@ workflow 一个概念、场景相关的一切都移除。
   取值；`view.py` 的投放目标本来就是 `<view>/topics/`，不用改。
 - 不做旧目录兼容：该功能上线两天、各工作区都没有存量 `话题/` 文件，直接改名比长期维护
   双目录读取简单。
+
+## 2026-11-20：关系以话题依据为落点
+
+用户确认：不在页面之间新增关联边，改用话题的「依据」节承载素材之间的关系，并由引擎解析、
+校验与反查。话题依据里的四类引用（页面 / 原文 / 话题 / 工作流）解析成 `refs`，普通文本 `query` 命中页
+时反向给 `citing_topics`；解析成功但目标不存在的引用只告警、进 `missing`，格式坏的行只告警，
+都不阻断检索。建页时 2–5 出链的规则不变；页边方向呈现（「延伸 / 被引用」两段）作为独立改动
+跟进，不在本次范围。

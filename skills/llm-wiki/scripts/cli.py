@@ -28,7 +28,7 @@ from ingest import (
     raw_facts,
     read_bytes,
 )
-from ledger import CONFIG_NAME, Wiki
+from ledger import CONFIG_NAME, Wiki, view_dir
 from pages import normalize_links, render_page
 from tasks import task_dir_relative
 from util import (
@@ -52,7 +52,7 @@ from workspace import (
 )
 
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 # 领取任务的会话身份：显式参数 > 用户导出 > 宿主注入的会话 id。
@@ -115,7 +115,7 @@ def fail(cmd, root, error):
             sys.stderr.write(f"next: {error.next_step}\n")
     return error.exit_code
 
-def open_wiki(require_sources=False, dry_run=False, push=True):
+def open_wiki(require_sources=False, dry_run=False, push=True, readonly=False):
     # The workspace is the directory the command runs in. A wiki may live in a
     # subdirectory, but nothing may point above the workspace.
     workspace = Path.cwd().resolve()
@@ -127,6 +127,8 @@ def open_wiki(require_sources=False, dry_run=False, push=True):
             "run the command from the workspace, or pass a subdirectory inside it",
             2,
         )
+    if readonly:
+        return Wiki(root).open_readonly(), []
     if dry_run and not (root / WIKI_DIR / CONFIG_NAME).exists():
         # A dry run must not create `.wiki/` in a directory the user is only
         # inspecting, so plan against a throwaway store under `.wiki/tmp/`.
@@ -1014,13 +1016,127 @@ def query_task(wiki, words):
     return 0
 
 
+TOPIC_REF_LIMIT = 20
+TOPIC_REF_WARNINGS = 3
+
+
+def resolve_topic_refs(wiki, entries):
+    """Validate parsed topic refs; return ({topic: refs}, warnings)."""
+    names = {entry["name"] for entry in entries}
+    pages = wiki.page_ids()
+    workflows_seen = {
+        item["id"] for item in workflows.scan(
+            wiki.root, view_root=wiki.publish_dir / workflows.WORKFLOW_DIR)
+    }
+    raw_base = wiki.publish_raw_dir
+    try:
+        raw_prefix = raw_base.relative_to(wiki.root).as_posix()
+    except ValueError:
+        raw_prefix = ""
+    kind_order = (("pages", "page"), ("raws", "raw"),
+                  ("topics", "topic"), ("workflows", "workflow"))
+    resolved, warnings = {}, []
+    for entry in entries:
+        if not entry["valid"]:
+            # `_entry` only parses refs for a topic that has a body.
+            continue
+        parsed = entry["refs"]
+        refs = {"pages": [], "raws": [], "topics": [], "workflows": [], "missing": []}
+        notes = [
+            f"warning: topic {entry['name']} malformed ref: {line.strip()}"
+            for line in parsed["malformed"]
+        ]
+        ordered = [
+            (key, kind, value)
+            for key, kind in kind_order
+            for value in parsed[key]
+        ]
+        dropped = len(ordered) > TOPIC_REF_LIMIT
+        for key, kind, value in ordered[:TOPIC_REF_LIMIT]:
+            if kind == "raw":
+                known = _raw_ref_ok(raw_base, value, raw_prefix)
+            elif kind == "page":
+                known = value in pages
+            elif kind == "topic":
+                known = value in names
+            else:
+                known = value in workflows_seen
+            if known:
+                refs[key].append(value)
+            else:
+                refs["missing"].append({"kind": kind, "target": value})
+                notes.append(
+                    f"warning: topic {entry['name']} cites unknown {kind} {value}")
+        if parsed["sections"] > 1:
+            notes.append(
+                f"warning: topic {entry['name']} has {parsed['sections']} 依据 sections")
+        if dropped:
+            notes.append(
+                f"warning: topic {entry['name']} refs truncated to {TOPIC_REF_LIMIT}")
+        resolved[entry["name"]] = refs
+        warnings.extend(notes[:TOPIC_REF_WARNINGS])
+    return resolved, warnings
+
+
+def _raw_ref_ok(raw_base, value, raw_prefix=""):
+    """A raw ref must stay inside the published raw tree and exist.
+
+    `query --page` prints `sources[].raw` as a workspace-relative path
+    (`wiki/raw/x.md`); accept that form as well as the bare `raw/` one.
+    """
+    text = value
+    if raw_prefix and (text == raw_prefix or text.startswith(raw_prefix + "/")):
+        text = text[len(raw_prefix):].lstrip("/")
+    path = Path(text)
+    if not text or path.is_absolute() or ".." in path.parts:
+        return False
+    try:
+        return (raw_base / path).is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def citing_topics_index(refs_by_topic):
+    """{page id: sorted topic names} from validated page refs only."""
+    index = {}
+    for name, refs in refs_by_topic.items():
+        for page_id in refs["pages"]:
+            index.setdefault(page_id, []).append(name)
+    return {page_id: sorted(names) for page_id, names in index.items()}
+
+
+def ref_topics_line(names):
+    """`甲, 乙, 丙, +2`; empty list renders as an empty string."""
+    if not names:
+        return ""
+    shown = ", ".join(names[:3])
+    if len(names) > 3:
+        shown += f", +{len(names) - 3}"
+    return shown
+
+
 def command_query():
-    wiki, _ = open_wiki()
+    words = [
+        word
+        for chunk in (ARGS.text or [])
+        for word in re.split(r"\s+", chunk.strip())
+        if word
+    ]
+    if ARGS.task and not ARGS.page:
+        wiki, _ = open_wiki()
+        return query_task(wiki, words)
+    wiki, _ = open_wiki(readonly=True)
     if ARGS.page:
         record = wiki.page_record(ARGS.page)
         if not record:
             raise WikiError("E_NOT_FOUND", f"no page {ARGS.page}", "search with `query <text>` first", 3)
         outgoing, incoming = wiki.links_for(ARGS.page)
+        entries = topics.scan(wiki.root, view_root=wiki.publish_dir / topics.TOPIC_DIR)
+        refs_by_topic, ref_warnings = resolve_topic_refs(wiki, entries)
+        for line in ref_warnings:
+            sys.stderr.write(line + "\n")
+        cited = citing_topics_index(refs_by_topic).get(ARGS.page, [])
+        citing_line = ref_topics_line(cited)
         # 源文件路径是账本事实：来源只存 key，副本路径按 raw_id 查 raws 表渲染出来，
         # 调用方（agent）不用再按来源名猜文件名。
         sources = []
@@ -1035,6 +1151,7 @@ def command_query():
             "sources": sources,
             "outgoing": outgoing,
             "incoming": incoming,
+            "citing_topics": cited,
             "body": record["body"],
         }
         emit(
@@ -1043,28 +1160,31 @@ def command_query():
             data,
             [f"outgoing: {', '.join(outgoing) or '(none)'}",
              f"incoming: {', '.join(incoming) or '(none)'}",
+             *([f"citing topics: {citing_line}"] if citing_line else []),
              f"raw: {', '.join(item['raw'] for item in sources if item['raw']) or '(none)'}",
              "",
              record["body"]],
         )
         wiki.close()
         return 0
-    words = [
-        word
-        for chunk in (ARGS.text or [])
-        for word in re.split(r"\s+", chunk.strip())
-        if word
-    ]
-    if ARGS.task:
-        return query_task(wiki, words)
     terms = words
     if not terms:
         raise WikiError("E_USAGE", "query needs text, --page or --task",
                         "example: query 反诈 复机", 2)
     limit = ARGS.limit or 8
     scored, results = search.search_pages(wiki, terms, limit)
-    topic_hits = topics.match(wiki.root, terms, limit)
-    workflow_hits = workflows.match(wiki.root, terms, 5)
+    entries = topics.scan(wiki.root, view_root=wiki.publish_dir / topics.TOPIC_DIR)
+    topic_hits = topics.rank(entries, terms, limit)
+    refs_by_topic, ref_warnings = resolve_topic_refs(wiki, entries)
+    for line in ref_warnings:
+        sys.stderr.write(line + "\n")
+    for item in topic_hits:
+        item["refs"] = refs_by_topic[item["name"]]
+    workflow_hits = workflows.match(
+        wiki.root, terms, 5, view_root=wiki.publish_dir / workflows.WORKFLOW_DIR)
+    cited = citing_topics_index(refs_by_topic)
+    for item in results:
+        item["citing_topics"] = cited.get(item["id"], [])
     data = {
         "query": " ".join(terms),
         "matches": len(scored),
@@ -1085,10 +1205,16 @@ def command_query():
             block.append(f"    applies: {item['applies'] or '(none)'}")
             block.append(f"    load: {item['load']}")
         sections.append(block)
-    pages = [
-        f"{item['id']}  [{item['type']}/{item['status']}]  {item['title']}\n    {item['snippet']}"
-        for item in results
-    ]
+    pages = []
+    for item in results:
+        entry = (
+            f"{item['id']}  [{item['type']}/{item['status']}]  "
+            f"{item['title']}\n    {item['snippet']}"
+        )
+        cite = ref_topics_line(item.get("citing_topics") or [])
+        if cite:
+            entry += f"\n    citing topics: {cite}"
+        pages.append(entry)
     if pages:
         sections.append(pages)
     if topic_hits:
@@ -1096,6 +1222,16 @@ def command_query():
         for item in topic_hits:
             block.append(f"{item['name']}  [{item['status'] or 'open'}]  {item['description']}")
             block.append(f"    path: {item['path']}")
+            refs = item["refs"]
+            packed = [f"page:{value}" for value in refs["pages"]]
+            packed += [f"raw:{value}" for value in refs["raws"]]
+            packed += [f"topic:{value}" for value in refs["topics"]]
+            packed += [f"workflow:{value}" for value in refs["workflows"]]
+            if packed:
+                block.append(f"    refs: {', '.join(packed)}")
+            if refs["missing"]:
+                block.append("    missing: " + ", ".join(
+                    f"{miss['kind']}:{miss['target']}" for miss in refs["missing"]))
         sections.append(block)
     lines = []
     for block in sections:
@@ -1120,6 +1256,7 @@ def command_workflow():
             "E_PATH", "workflow root escapes the workspace",
             "run from the workspace, or pass --root inside it", 2,
         )
+    view_root = view_dir(root) / workflows.WORKFLOW_DIR
     if ARGS.workflow_command == "search":
         terms = [term.strip() for term in ARGS.text if term.strip()]
         if not terms:
@@ -1128,7 +1265,7 @@ def command_workflow():
                 'example: workflow search "开户"', 2,
             )
         limit = min(5, max(1, ARGS.limit))
-        hits = workflows.match(root, terms, limit)
+        hits = workflows.match(root, terms, limit, view_root=view_root)
         data = {"query": " ".join(terms), "matches": len(hits), "workflows": hits}
         if not hits:
             data["message"] = "无可用workflow"
@@ -1140,6 +1277,7 @@ def command_workflow():
                 f"skill_path: {item['skill_path']}"
                 if item["source"] == "builtin"
                 else f"path: {item['path']}"
+                + ("  [legacy]" if item["origin"] == "legacy" else "")
             )
             lines.append(
                 f"    {where}  tools: {item['tools']}"
@@ -1151,7 +1289,7 @@ def command_workflow():
         emit("workflow search", root, f"{len(hits)} matching workflows", data, lines)
         return 0
     if ARGS.workflow_command == "list":
-        data = workflows.inventory(root)
+        data = workflows.inventory(root, view_root=view_root)
         summary = f"{data['valid']} valid, {data['count'] - data['valid']} invalid workflows"
         if data["warned"]:
             summary += f", {data['warned']} with warnings"
@@ -1164,6 +1302,7 @@ def command_workflow():
                 f"skill_path: {item['skill_path']}"
                 if item["source"] == "builtin"
                 else f"path: {item['path']}"
+                + ("  [legacy]" if item["origin"] == "legacy" else "")
             )
             detail = (
                 f"    {where}  resources: {len(item['resources'])}"
@@ -1175,9 +1314,13 @@ def command_workflow():
             for warning in item["warnings"]:
                 where = f"line {warning['line']}: " if warning["line"] else ""
                 lines.append(f"    ! {where}{warning['message']}")
+            if item.get("legacy_conflict"):
+                lines.append(
+                    f"    ! 观看区版本生效，旧根目录版本未加载：{item['legacy_path']}"
+                )
         emit("workflow list", root, summary, data, lines)
         return 0
-    data = workflows.load(root, ARGS.id)
+    data = workflows.load(root, ARGS.id, view_root=view_root)
     record = data["workflow"]
     emit(
         "workflow load", root,
@@ -1189,6 +1332,7 @@ def command_workflow():
                 f"skill_path: {data['skill_path']}"
                 if record["source"] == "builtin"
                 else f"path: {data['path']}"
+                + ("  [legacy]" if record["origin"] == "legacy" else "")
             ),
             f"description: {record['description']}",
             f"steps: {len(data['tools'])} tool, {len(data['human_steps'])} human, "
@@ -1507,14 +1651,26 @@ def command_export():
         "export into a directory inside the workspace, e.g. .wiki/export",
     )
     written = []
-    for record in wiki.all_pages():
+    records = wiki.all_pages()
+    page_of = {
+        record["id"]: (
+            record["meta"].get("title") or record["id"],
+            f"{record['meta']['type']}/{record['id']}.md",
+        )
+        for record in records
+    }
+    for record in records:
         meta = dict(record["meta"])
         meta["status"] = wiki.computed_status(meta)
-        destination = target / meta["type"] / f"{record['id']}.md"
+        relative = f"{meta['type']}/{record['id']}.md"
+        destination = target / relative
         outgoing, incoming = wiki.links_for(record["id"])
         write_atomic(
             destination,
-            render_page(meta, record["body"], links=sorted(set(outgoing) | set(incoming))),
+            render_page(
+                meta, record["body"], links=sorted(set(outgoing) | set(incoming)),
+                view_path=relative, page_of=page_of,
+            ),
         )
         written.append(norm_key(destination.relative_to(target)))
     emit(
@@ -1702,7 +1858,11 @@ def main(argv=None):
     try:
         # 试运行不得创建 `.wiki/`，此时也没有可争用的写入目标，直接跳过排队。
         dry_only = command == "ingest" and ARGS.dry_run and not (root / WIKI_DIR).exists()
-        if command in LOCKED_COMMANDS and not dry_only:
+        locked = command in LOCKED_COMMANDS and not dry_only
+        # A plain query is a snapshot read; only `--task` writes the ledger.
+        if command == "query" and (not ARGS.task or ARGS.page):
+            locked = False
+        if locked:
             with workspace_lock(root):
                 return handler()
         return handler()

@@ -18,10 +18,13 @@
   epoch/lease、修订与渲染、观看区推送、错误码约定与单文件规模边界。
 - **改话题探索或沉淀流程**：读 [话题沉淀](docs/readme/topics.md) 与内置工作流
   `skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md`，查 query 的 `workflows` 候选与
-  `workflow search` 的显式检索、`query` 的 `topics` 字段与 `ingest` 跳过 `topics/` 的约束。
+  `workflow search` 的显式检索、`query` 的 `topics` 字段与 `ingest` 跳过观看区及旧根
+  `topics/` 的约束。
 - **改工作流目录、步骤契约或命令**：读 [可执行工作流](docs/readme/workflows.md) 与
-  [引擎内部](docs/agent/engine.md)，查三目录优先级、`WORKFLOW.md` 回退、四类步骤标记、
-  `workflow list/search/load` 与 query 工作流候选的输出字段（含 `applies`）。
+  [引擎内部](docs/agent/engine.md)，查观看区优先、旧根只读兜底、四类步骤标记、
+  `workflow list/search/load` 与 query 工作流候选的输出字段（含 `origin`、`legacy_conflict`、
+  `applies`）。本仓库根 `workflows/` 是示例，不是观看区定义；旧根兜底仍会把它们列为
+  `legacy` 项，迁移到观看区后应删除。
 - **改技能文字、命令契约或输出格式**：读 [技能与契约维护](docs/agent/maintenance.md)，
   查 SKILL.md 与 references 的同步范围、`tests/selftest.py` 守卫、文档编辑的核验要求。
 - **改文档或准备提交**：读 [技能与契约维护](docs/agent/maintenance.md)；
@@ -37,7 +40,7 @@
 
 - **wiki 正式层**：`.wiki/` 的账本，加上观看区（默认 `wiki/`）里的 `raw/`、`pages/`，
   由 `ingest`/`next`/`submit` 维护；页面必须能回到 raw 引文。
-- **话题（wiki 探索层）**：`topics/<主题>.md`，记录一次探索的主题、结论、依据、未决问题
+- **话题（wiki 探索层）**：`<view>/topics/<主题>.md`，记录一次探索的主题、结论、依据、未决问题
   与下一步，`query` 可直接检索。它属于 wiki 内容，不是正式知识页；不参与 `ingest`、
   不进账本、不要求逐字引文。
 - **开发文档**：`README.md`、`docs/readme/`、`docs/agent/`、`docs/issues/`，记录

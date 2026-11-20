@@ -10,6 +10,22 @@ description: 当用户以 `wiki:` 或 `workflow:` 开头下达任务，或要把
 观看区（`publish.dir`，默认 `wiki/`）里，`pages/` 由引擎按账本推送，手改不会被覆盖、只会
 告警，只有人工 `sync` 才能收进账本；`raw/` 是原文副本，`README.md` 每次推送重写，都不要手改。
 
+```text
+<view>/
+  pages/      引擎维护：账本页面
+  raw/        引擎维护：原文副本
+  README.md   引擎维护：目录说明与统计
+  workflows/  项目内容：工作流定义，<id>/WORKFLOW.md
+  topics/     项目内容：话题，<主题>.md
+  runs/       项目内容：工作流产物，workflows/<id>/<task>/
+```
+
+项目工作流与话题都以观看区为准：`workflow` / `query` 先读 `<view>/workflows/`、
+`<view>/topics/`，再读旧根 `<root>/workflows/`、`<root>/topics/` 作只读兜底，最后是技能
+内置工作流。同 id 时观看区优先；旧根版与观看区版 `WORKFLOW.md` 不同时，`workflow list` 给
+`legacy_conflict` 警告，加载仍用观看区版。`publish` 段只有 `dir` 与 `enabled` 两个键；
+`enabled:false` 只停推送，观看区与 `raw/`、`workflows/`、`topics/` 仍会创建。
+
 ## 入口：`wiki:` 与 `workflow:` 前缀
 
 用户消息以 `wiki:` 或 `workflow:` 开头（也接受全角冒号、前导空白、大小写）时，这次就明确走
@@ -188,6 +204,9 @@ id；终端会话用 `--owner <id>` 或 `export LLM_WIKI_OWNER=<id>` 固定一�
 python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 python3 <skill>/scripts/wiki.py query "关键词" --json
 python3 <skill>/scripts/wiki.py query --page <page-id> --json
+
+普通 `query` / `query --page` 是只读快照：不取工作区锁、不创建 `.wiki/`、不补 schema、
+不推观看区；未初始化会报 `E_STATE`，先 `ingest`。`query --task` 仍写任务目录，按写命令排队。
 ```
 
 `query` 会带回最多 5 个工作流候选：`workflows` 是候选列表，`workflow_matches` 是数量，每条
@@ -203,16 +222,20 @@ python3 <skill>/scripts/wiki.py query --page <page-id> --json
 ## 观看区
 
 命令会在根目录维护一份给人看的产出 `<view>/`（默认 `wiki/`，由 `.wiki/wiki.json` 的
-`publish.dir` 指定；`publish` 段另有 `enabled`、`topics`、`workflows`，默认都为 `true`，
-一般不需要动）：
+`publish.dir` 指定；`publish` 段只有 `dir` 与 `enabled`，一般不需要动）。目录与所有权：
 
 - `pages/`：按账本推送的知识页，按 `<type>/<标题>.md` 命名；手改不会覆盖，只会告警。
   证据段每行是标准 Markdown 链接：先链到 raw 副本，括号里保留来源 key。
 - `raw/`：摄入时写入的原文副本，用于核对引文；不要手改。末尾的 `## 原文来源` 段由引擎
   生成，链回挂载它的原始文件。
 - `README.md`：目录说明与统计，每次推送重写。
-- `topics/`、`workflows/`：首次推送时从 `<root>/topics/`、`<root>/workflows/` 各投放一份；
-  之后归用户。
+- `workflows/`：项目工作流定义，一个子目录一个 `<id>/WORKFLOW.md`；引擎不覆盖、不删除。
+- `topics/`：项目话题，一个主题一份 `<主题>.md`；引擎不覆盖、不删除。
+- `runs/`：工作流产物，按 `workflows/<id>/<task>/` 分目录；引擎不覆盖、不删除。
+
+`workflow list` 的 `origin` 标出项目条目来自 `view` 还是 `legacy`；`path` 是工作区相对路径，
+观看区版以 `wiki/` 开头，旧根兜底以 `workflows/` 开头。`publish.dir` 改名等于换观看区，
+定义、话题和产物不会自动搬迁，先手动移动再改配置；整目录删除会连这些项目内容一起丢。
 
 不需要为了交付结果去动观看区；`next`/`submit` 正常跑完，下一次命令会自动推送。只有用户
 要求把观看区里的手改收回时，才运行 `sync`（先确认再跑；它只回收、不推送）：
@@ -224,8 +247,9 @@ python3 <skill>/scripts/wiki.py sync --body-only --json
 
 ## 按工作流执行
 
-项目可以把一类可执行任务的流程写成工作流，放在 `<root>/workflows/<工作流>/`：`WORKFLOW.md`
-是主流程，`scripts/` 和 `references/` 是配套脚本与说明。技能自带 `topic-exploration`、
+项目可以把一类可执行任务的流程写成工作流，放在 `<view>/workflows/<工作流>/`：`WORKFLOW.md`
+是主流程，`scripts/` 和 `references/` 是配套脚本与说明。旧根 `<root>/workflows/` 只作一个
+发布版本的只读兜底，观看区优先。技能自带 `topic-exploration`、
 `workflow-review`、`workflow-create` 内置工作流；项目放同名工作流即可覆盖它。内置项不给根目录
 相对的 `path`，只给 `skill_path`（技能目录相对，如 `workflows/<id>/WORKFLOW.md`），
 `resources` 恒为空：正文直接用 `workflow load` 返回的 `content`，不要按工作区去找这个文件。
@@ -274,15 +298,17 @@ python3 <skill>/scripts/wiki.py workflow load "<工作流>" --json
 
 ## 沉淀话题
 
-话题探索收尾时默认问用户是否沉淀；用户要求把一次讨论或调研留给下次时，写到**当前工作区
-根目录**的 `topics/<主题>.md`，一个主题一份。话题是 wiki 的探索层，不是正式知识页：不运行
-`ingest`，不写 `.wiki/`，不建页面、不排任务；写入后报告“未执行摄入”。观看区的 `topics/`
-只是首次推送时的副本，之后归用户；改话题仍以根目录 `topics/` 为准。
+话题探索收尾时默认问用户是否沉淀；用户要求把一次讨论或调研留给下次时，写到**当前观看区**
+的 `topics/<主题>.md`，一个主题一份。话题是 wiki 的探索层，不是正式知识页：不运行
+`ingest`，不写 `.wiki/`，不建页面、不排任务；写入后报告“未执行摄入”。旧根
+`<root>/topics/` 只作一个发布版本的只读兜底，观看区优先；改话题以观看区为准。
 
 - 话题文件的 frontmatter、固定六节、归属判断、授权与完成标准，见内置工作流
   `workflow load "topic-exploration"` 的“话题文件”与“沉淀前的归属判断”两节。
-- 流程稳定、可重复执行时，同时给出 `workflows/<id>/WORKFLOW.md` 的工作流候选草稿，用户确认
-  后再建；资料不足时列出待摄入来源与下一轮要查的关键词。
+- 依据按四类前缀写、目标用反引号包起来，写完用 `query <主题词>` 复核 `refs` 与 `missing`，
+  坏链当轮修掉。
+- 流程稳定、可重复执行时，同时给出 `<view>/workflows/<id>/WORKFLOW.md` 的工作流候选草稿，
+  用户确认后再建；资料不足时列出待摄入来源与下一轮要查的关键词。
 - 项目事实归产品文档，强制规则归指导文档，未决问题归 issues；只有可复用的方法、经验、
   踩坑、方案取舍和探索结论写话题。凭据不落盘。
 
@@ -295,7 +321,9 @@ python3 <skill>/scripts/wiki.py workflow load "<工作流>" --json
 - 返回 `E_INGEST_BUSY`（`next`、`ingest`）表示别的会话正在摄入并占着队列：立刻停止，不要重试、不要等待。
 - 返回 `E_TASK_FOREIGN` 表示任务记在别的会话名下：不要提交，也不要抢过来，交给领取它的会话。
 - 返回 `E_BUSY` 表示另一个 wiki 进程正在这个工作区写账本：等它结束再重试，不要删
-  `.wiki/lock` 抢跑（只有确认它已崩溃时才删）。
+  `.wiki/lock` 抢跑（只有确认它已崩溃时才删）。返回 `E_STATE` 表示 `.wiki/lock` 不是
+  普通文件或陈旧锁删不掉：不要读这个路径，先确认没有进程在跑，再按 `error.next` 删除或
+  修权限。
 - 不要绕过校验，也不要直接改 `.wiki/` 下的文件来“修好”它。
 
 ## 不做

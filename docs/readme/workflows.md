@@ -1,9 +1,12 @@
 # 可执行工作流
 
-可执行工作流把一类任务的执行流程写成可检索、可加载的文件，放在项目根目录的
-`workflows/` 下。它借用 skill 的组织方式：一个主流程文件，加上按需读取的脚本和说明。
-和知识页不同，工作流描述“怎么做”，而且每一步都要标明由谁执行；它不进入账本，也不参与
-页面引用。
+可执行工作流把一类任务的执行流程写成可检索、可加载的文件，放在观看区
+`<view>/workflows/<id>/` 下（`publish.dir`，默认 `wiki/`）。它借用 skill 的组织方式：
+一个主流程文件，加上按需读取的脚本和说明。和知识页不同，工作流描述“怎么做”，而且每一步
+都要标明由谁执行；它不进入账本，也不参与页面引用。
+
+工作流定义属于知识库内容，和知识页、话题一起管理。旧根目录 `<root>/workflows/` 只作为
+一个发布版本的兼容兜底：观看区优先，旧根只读；迁移见下文「迁移旧目录」。
 
 技能自带三个内置工作流：`topic-exploration`（回答知识问题时的默认流程）、`workflow-review`
 （评审一个工作流）、`workflow-create`（新建工作流，建前先过评审前提）；项目放同名工作流
@@ -12,7 +15,7 @@
 ## 目录结构
 
 ```text
-<root>/workflows/
+<view>/workflows/
 └── intake-backlog/
     ├── WORKFLOW.md         主流程，必需
     ├── scripts/
@@ -21,7 +24,8 @@
         └── error-codes.md
 ```
 
-- `workflows/` 只扫描一级子目录，每个子目录是一个工作流；隐藏目录和普通文件忽略。
+- 观看区 `<view>/workflows/` 只扫描一级子目录，每个子目录是一个工作流；隐藏目录和普通
+  文件忽略。旧根 `<root>/workflows/` 只有在观看区没有同名工作流时才参与。
 - 工作流 id 就是子目录名，用英文与下划线，不要把中文写进路径。
 - `WORKFLOW.md` 是唯一入口，文件名固定；缺它、缺 `description`、正文为空或步骤契约不满足
   都视为不合法。
@@ -40,16 +44,19 @@ skills/llm-wiki/workflows/
 ```
 
 - `workflow list` 把项目工作流和内置工作流列在一起，每项带 `source`（`project` 或
-  `builtin`）；同 id 时项目版优先，内置版不重复列出。
+  `builtin`）和 `origin`（`view`、`legacy` 或 `builtin`）。同 id 时观看区优先，旧根其次，
+  内置最后，只列一次。
 - `workflow load "<内置 id>"` 返回内置流程；它不给根目录相对的 `path`/`main`，而是给
   `skill_path`（技能目录相对，形如 `workflows/<id>/WORKFLOW.md`），`resources` 恒为空
   （内置流程自包含）。项目工作流反过来只给 `path`（目录）与 `main`（主文件），两者都以
-  工作区根目录为基准。
+  工作区根目录为基准；`origin` 是 `view` 时来自观看区，是 `legacy` 时来自旧根兜底。
+- 同 id 的观看区版与旧根版 `WORKFLOW.md` 不同时，条目带 `legacy_conflict: true` 和
+  `legacy_path`；`workflow list` 打印警告，加载仍用观看区版。
 - 内置工作流也会进入 `query` 候选和显式 `workflow search`，`source` 为 `builtin`。项目覆盖后
-  `source` 变为 `project`。
-- 内置工作流只读，改流程请复制到 `workflows/<id>/` 再改，不要改技能安装目录。新增或改动内置
-  工作流要同步 `skills/llm-wiki/scripts/health.py` 的 `BUILTIN_WORKFLOWS`，否则 `doctor`
-  不检查它。
+  `source` 变为 `project`，`origin` 变为 `view` 或 `legacy`。
+- 内置工作流只读，改流程请复制到 `<view>/workflows/<id>/` 再改，不要改技能安装目录。新增或
+  改动内置工作流要同步 `skills/llm-wiki/scripts/health.py` 的 `BUILTIN_WORKFLOWS`，否则
+  `doctor` 不检查它。
 
 ## WORKFLOW.md
 
@@ -143,29 +150,45 @@ frontmatter 字段：
 
 ## 任务产物
 
-工作流执行时若需要保存中间结果和最终交付物，统一落在观看区内该工作流的任务目录：
+工作流执行时若需要保存中间结果和最终交付物，统一落在观看区的 `runs/` 下，不和工作流
+定义混放：
 
 ```text
-<view>/workflows/<工作流 id>/<任务名>/
+<view>/runs/workflows/<工作流 id>/<任务名>/
 ├── cache/    中间结果：检索命令与命中、原文摘录、拆解草稿
 └── output/   最终交付给用户的那份文件
 ```
 
 - `view` 是观看区目录（`publish.dir`，默认 `wiki/`）；任务名按主题起，如
   `2026-11-19-周会`。同一主题再次执行另起任务名，不覆盖上一轮产物。
+- 定义放 `<view>/workflows/<id>/`，产物放 `<view>/runs/workflows/<id>/`，两者分层，任务目录
+  不会挡住定义。
 - 观看区整目录在 `scan_files` 的扫描根就被跳过（`skills/llm-wiki/scripts/ledger.py:394-404`），
   所以这里建目录、写文件都不会排队来源，也不会卡住 `next`。
 - 不落根目录：根目录非隐藏文件会被 `ingest` 当来源排队，未提交任务以
   `E_TASK_UNSUBMITTED` 卡住后续 `next`（`skills/llm-wiki/scripts/cli.py:510-521`）。
-- 不写 `<root>/workflows/<id>/`：那是工作流定义，会随流程改动一起提交，产物不该混进去。
-  `<view>/workflows/<id>/` 只是首次投放的副本，和任务目录同层，不混用。
-- **先让投放副本落位，再建任务目录**：投放见目录已存在就跳过（`skills/llm-wiki/scripts/view.py:254`），
-  任务目录先占了这个位置，副本就再也不会出现。首次执行前跑一次会推送观看区的命令
-  （`status` 即可）确认 `WORKFLOW.md` 已投放。
+- `runs/` 属于项目内容，引擎不覆盖、不删除；默认建议不提交，重要交付物由用户自己留底。
+
+## 迁移旧目录
+
+旧库可能同时有 `<root>/workflows/<id>/` 和 `<view>/workflows/<id>/`。引擎不改动旧根目录，
+只按观看区优先读取；同 id 两边不同时给 `legacy_conflict` 警告。迁移由用户手动做：
+
+1. 逐个比较 `<view>/workflows/<id>/WORKFLOW.md` 与 `<root>/workflows/<id>/WORKFLOW.md`，
+   确认哪边是当前版本；观看区版已经生效。
+2. 把旧根独有的工作流移到 `<view>/workflows/`；旧根里已被观看区覆盖的版本不要覆盖回去。
+3. 确认无引用后删除 `<root>/workflows/`。删除前先备份；旧根定义不会再被加载。
+4. 把旧任务目录 `<view>/workflows/<id>/<任务>/` 移到
+   `<view>/runs/workflows/<id>/<任务>/`，保留 `cache/` 与 `output/`。
+5. 用户库若要提交观看区，自行在 `.gitignore` 里放行 `<view>/workflows/`、`<view>/topics/`，
+   继续忽略 `pages/`、`raw/`、`runs/`、`README.md`；不改本仓库的 `.gitignore`。
+
+`publish.dir` 改名不会自动搬迁任何定义或产物；改名等于换了一个观看区，旧目录会变成普通
+来源。需要保留工作时先手动移动，再改配置。
 
 ## 检索与加载
 
-工作流不经过 `ingest`，`workflows/` 在摄入时整目录跳过，因此改流程不需要重建知识库。
+工作流不经过 `ingest`，观看区与旧根 `workflows/` 在摄入时整目录跳过，因此改流程不需要重建知识库。
 普通 `query` 会在页面、话题之外带回最多 5 个工作流候选（每条带 `applies`），但不自动加载；
 要按流程办事时再看候选或显式检索：
 
@@ -190,7 +213,7 @@ python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 本文不复制。
 
 话题探索流程依次做：定主题、找现成能力、找已有话题、多轮查页面、补原始依据、判断收敛、
-总结，最后问用户是否沉淀到 `topics/<主题>.md`。`query` 的 `topics` 是已知话题，相关的先读
+总结，最后问用户是否沉淀到 `<view>/topics/<主题>.md`。`query` 的 `topics` 是已知话题，相关的先读
 再探索，避免重复劳动；话题格式见 [话题沉淀](topics.md)。
 
 ## 边界
@@ -203,7 +226,9 @@ python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 - 没有系统权限、只能由经办人完成的流程（开户、审批、现场检查这类）不是工作流：它们属于
   知识页里的 `process` 知识，按页引用；纯人工流程也没有 `tool:` 步骤，会被判为不合法。
 - `workflow list` / `workflow load` 只读，不要求先 `init`，也不会创建 `.wiki/`。
-- 话题探索的沉淀物是 `topics/`，不是工作流；只有流程稳定、可重复执行时才另建工作流。
-- 观看区 `publish.workflows` 控制是否把项目工作流首次投放到 `workflows/`。
+- 话题探索的沉淀物是 `<view>/topics/`，不是工作流；只有流程稳定、可重复执行时才另建工作流。
+- 观看区的 `workflows/`、`topics/`、`runs/` 属于项目内容，引擎不覆盖、不删除；`<view>/`
+  与 `raw/`、`workflows/`、`topics/` 在任何配置下都会创建，`pages/` 推送时创建，`runs/`
+  首次写产物时创建。
 
 完整命令字段与错误码见 [CLI 契约](cli.md#workflow)。

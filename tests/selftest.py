@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -30,7 +31,9 @@ sys.path.insert(0, str(SCRIPT.parent))
 from runtime import require_python
 
 require_python()
+import cli  # noqa: E402  (query output helpers)
 import ledger  # noqa: E402  (config migration)
+import topics  # noqa: E402  (view/legacy topic resolution)
 import workflows  # noqa: E402  (frontmatter normalisation, for tag checks)
 import wiki  # noqa: E402  (the engine itself, for table-level checks)
 from ingest import raw_body_digest  # noqa: E402
@@ -46,10 +49,10 @@ def check(results, name, condition, detail=""):
         raise AssertionError(f"{name}: {detail}")
 
 
-def run(root, *args, expect=0, stdin=None):
+def run(root, *args, expect=0, stdin=None, timeout=None):
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), *args, "--json"],
-        cwd=root, capture_output=True, text=True, input=stdin,
+        cwd=root, capture_output=True, text=True, input=stdin, timeout=timeout,
     )
     payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
     allowed = expect if isinstance(expect, tuple) else (expect,)
@@ -58,6 +61,12 @@ def run(root, *args, expect=0, stdin=None):
             f"{' '.join(args)} exited {proc.returncode}, expected {expect}: {proc.stderr or proc.stdout}"
         )
     return payload
+
+
+def run_text(root, *args):
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        cwd=root, capture_output=True, text=True)
 
 
 def payload_file(root, name, data):
@@ -82,6 +91,446 @@ def body_file(root):
         encoding="utf-8",
     )
     return path
+
+
+def view_dir_checks(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-viewdir-"))
+    try:
+        (root / ".wiki").mkdir()
+        (root / ".wiki/wiki.json").write_text(
+            json.dumps({"publish": {"dir": "kb"}}), encoding="utf-8")
+        check(results, "view_dir reads publish.dir",
+              ledger.view_dir(root) == root / "kb" and not (root / "kb").exists())
+        (root / ".wiki/wiki.json").write_text("{}", encoding="utf-8")
+        check(results, "view_dir defaults to wiki",
+              ledger.view_dir(root) == root / "wiki")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-viewdir-off-"))
+    try:
+        (root / ".wiki").mkdir()
+        (root / ".wiki/wiki.json").write_text(
+            json.dumps({"publish": {"enabled": False}}), encoding="utf-8")
+        run(root, "status")
+        check(results, "disabled publish still creates content dirs",
+              (root / "wiki/workflows").is_dir() and (root / "wiki/topics").is_dir())
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def write_workflow(base, name, description, body="## 步骤\n\n1. tool: **运行**\n"):
+    directory = base / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "WORKFLOW.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n"
+        "## 步骤\n\n1. tool: **运行**\n\n"
+        f"{body}",
+        encoding="utf-8")
+    return directory
+
+
+def workflow_view_checks(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-viewwf-"))
+    try:
+        view = root / "wiki/workflows"
+        legacy = root / "workflows"
+        write_workflow(view, "account-opening", "观看区开户", "观看区版本")
+        write_workflow(legacy, "account-opening", "旧根开户", "旧版本")
+        write_workflow(legacy, "legacy-only", "旧根流程")
+
+        roots = [p.relative_to(root).as_posix()
+                 for p in workflows.workflow_roots(root, view_root=view)]
+        check(results, "workflow_roots puts view first",
+              roots == ["wiki/workflows", "workflows"], roots)
+
+        entries = workflows.scan(root, builtin=False, view_root=view)
+        by_id = {item["id"]: item for item in entries}
+        check(results, "view workflow wins over legacy",
+              by_id["account-opening"]["origin"] == "view"
+              and by_id["account-opening"]["path"] == "wiki/workflows/account-opening"
+              and by_id["account-opening"]["main"]
+              == "wiki/workflows/account-opening/WORKFLOW.md")
+        check(results, "legacy conflict is marked",
+              by_id["account-opening"]["legacy_conflict"] is True
+              and by_id["account-opening"]["legacy_path"] == "workflows/account-opening/WORKFLOW.md")
+        check(results, "legacy-only workflow keeps legacy origin",
+              by_id["legacy-only"]["origin"] == "legacy")
+
+        inv = workflows.inventory(root, view_root=view)
+        check(results, "inventory reports relative roots",
+              inv["root"] == "wiki/workflows"
+              and inv["roots"] == ["wiki/workflows", "workflows"], inv)
+
+        loaded = workflows.load(root, "account-opening", view_root=view)
+        check(results, "load reads view workflow",
+              loaded["workflow"]["main"] == "wiki/workflows/account-opening/WORKFLOW.md"
+              and loaded["workflow"]["origin"] == "view", loaded["workflow"])
+
+        matched = workflows.match(root, ["观看区"], 5, view_root=view)
+        check(results, "workflow search finds view workflow",
+              matched and matched[0]["id"] == "account-opening"
+              and matched[0]["origin"] == "view", matched)
+
+        write_workflow(view, "workflow-create", "观看区覆盖内置")
+        shadowed = workflows.load(root, "workflow-create", view_root=view)
+        check(results, "view workflow shadows builtin",
+              shadowed["workflow"]["origin"] == "view", shadowed["workflow"])
+
+        builtin = workflows.load(root, "topic-exploration", view_root=view)
+        check(results, "builtin workflow keeps builtin origin",
+              builtin["workflow"]["origin"] == "builtin", builtin["workflow"])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def write_topic(base, name, title, description, body=None):
+    base.mkdir(parents=True, exist_ok=True)
+    text = body if body is not None else f"## 结论\n\n{description}\n"
+    (base / name).write_text(
+        f"---\ntitle: {title}\ndescription: {description}\nstatus: open\n---\n\n"
+        f"{text}",
+        encoding="utf-8")
+
+
+def topics_view_checks(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-viewtopic-"))
+    try:
+        view = root / "wiki/topics"
+        legacy = root / "topics"
+        write_topic(view, "观看区话题.md", "观看区话题", "观看区版本")
+        write_topic(legacy, "观看区话题.md", "旧话题", "旧版本")
+        write_topic(legacy, "旧话题.md", "旧话题", "旧版本")
+
+        entries = topics.scan(root, view_root=view)
+        by_name = {item["name"]: item for item in entries}
+        check(results, "view topic wins over legacy",
+              by_name["观看区话题"]["origin"] == "view"
+              and by_name["观看区话题"]["path"] == "wiki/topics/观看区话题.md")
+        check(results, "legacy-only topic keeps legacy origin",
+              by_name["旧话题"]["origin"] == "legacy"
+              and by_name["旧话题"]["path"] == "topics/旧话题.md")
+
+        matched = topics.match(root, ["观看区"], 5, view_root=view)
+        check(results, "topic search finds view topic",
+              matched and matched[0]["name"] == "观看区话题"
+              and matched[0]["origin"] == "view", matched)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def topic_refs_checks(results):
+    body = (
+        "## 依据\n\n"
+        "- 页面：`anti-fraud-restore` — 复机路径\n"
+        "- 页面: `anti-fraud-restore`\n"
+        "- 原文：`raw:docs/a.md`\n"
+        "- 话题：`复机办理`\n"
+        "- 工作流：`Topic-Exploration`\n"
+        "- 页面：见下文\n"
+        "- 页面`refund-policy`\n"
+        "- 页面已重建\n"
+        "- 原文 缺失\n"
+        "\n## 结论\n\n- 页面：`in-conclusion`\n"
+    )
+    parsed = topics.parse_refs(body)
+    check(results, "topic refs parse four kinds",
+          parsed["pages"] == ["anti-fraud-restore"]
+          and parsed["raws"] == ["docs/a.md"]
+          and parsed["topics"] == ["复机办理"]
+          and parsed["workflows"] == ["topic-exploration"], parsed)
+    check(results, "topic refs record malformed lines only for ref-shaped rows",
+          parsed["malformed"] == ["- 页面：见下文", "- 页面`refund-policy`"], parsed)
+    check(results, "topic refs ignore prose and other sections",
+          "in-conclusion" not in parsed["pages"]
+          and parsed["sections"] == 1, parsed)
+    two = topics.parse_refs("## 依据\n\n- 页面：`a`\n\n## 依据\n\n- 页面：`b`\n")
+    check(results, "second 依据 section still parses",
+          two["sections"] == 2 and two["pages"] == ["a", "b"], two)
+    fenced = topics.parse_refs(
+        "## 依据\n\n- 页面：`real`\n\n```\n- 页面：`fake`\n## 依据\n```\n")
+    check(results, "topic refs skip fenced code blocks",
+          fenced["pages"] == ["real"] and fenced["sections"] == 1
+          and not fenced["malformed"], fenced)
+    tildes = topics.parse_refs(
+        "## 依据\n\n- 页面：`real`\n\n~~~\n- 页面：`fake`\n## 依据\n~~~\n")
+    check(results, "topic refs skip tilde fenced code blocks",
+          tildes["pages"] == ["real"] and not tildes["malformed"]
+          and tildes["sections"] == 1, tildes)
+    nfd = unicodedata.normalize("NFD", "café")
+    nfc = unicodedata.normalize("NFC", "café")
+    precomposed = topics.parse_refs(f"## 依据\n\n- 话题：`{nfd}`\n")
+    check(results, "topic ref tokens normalize to NFC",
+          precomposed["topics"] == [nfc], precomposed)
+    invalid = Path(tempfile.mkdtemp(prefix="llm-wiki-topicblank-"))
+    try:
+        write_topic(invalid / "wiki/topics", "空话题.md", "空话题", "无正文",
+                    body="")
+        blank = topics.scan(invalid, view_root=invalid / "wiki/topics")[0]
+        check(results, "invalid topic entry keeps an empty refs record",
+              blank["valid"] is False and blank["refs"]["sections"] == 0
+              and not any(blank["refs"][key] for key in (
+                  "pages", "raws", "topics", "workflows", "malformed")),
+              blank)
+    finally:
+        shutil.rmtree(invalid, ignore_errors=True)
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-topicrank-"))
+    try:
+        write_topic(root / "wiki/topics", "复机办理.md", "复机办理", "复机路径",
+                    body="## 依据\n\n- 页面：`page-a`\n\n## 结论\n\n复机需本人到厅。\n")
+        matched = topics.match(root, ["复机"], 5, view_root=root / "wiki/topics")
+        check(results, "topic match carries parsed refs",
+              matched and matched[0]["refs"]["pages"] == ["page-a"], matched)
+        write_topic(root / "wiki/topics", nfd + ".md", nfc, "分解形式", body=body)
+        write_topic(root / "topics", nfc + ".md", nfc, "旧根同名", body=body)
+        scanned = topics.scan(root, view_root=root / "wiki/topics")
+        decomposed = [item for item in scanned if item["name"] == nfc]
+        check(results, "topic names normalize to NFC",
+              len(decomposed) == 1 and decomposed[0]["origin"] == "view", scanned)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def view_definition_suite(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-view-defs-"))
+    try:
+        (root / "source.md").write_text("# 观看区流程\n\n内容\n", encoding="utf-8")
+        write_workflow(root / "workflows", "legacy-only", "旧根目录流程")
+        run(root, "ingest")
+        check(results, "view creates content dirs", (root / "wiki/workflows").is_dir())
+
+        write_workflow(root / "wiki/workflows", "account-opening", "观看区开户", "观看区版本")
+        write_workflow(root / "workflows", "account-opening", "旧根开户", "旧版本")
+        listing = run(root, "workflow", "list")["data"]
+        by_id = {item["id"]: item for item in listing["workflows"]}
+        check(results, "workflow list reports view first",
+              listing["root"] == "wiki/workflows"
+              and listing["roots"] == ["wiki/workflows", "workflows"], listing)
+        check(results, "workflow list marks view origin and legacy conflict",
+              by_id["account-opening"]["origin"] == "view"
+              and by_id["account-opening"]["legacy_conflict"] is True
+              and by_id["account-opening"]["legacy_path"]
+              == "workflows/account-opening/WORKFLOW.md")
+        check(results, "workflow list keeps legacy-only",
+              by_id["legacy-only"]["origin"] == "legacy")
+        check(results, "workflow id appears once",
+              [item["id"] for item in listing["workflows"]].count("account-opening") == 1)
+
+        loaded = run(root, "workflow", "load", "account-opening")["data"]
+        check(results, "workflow load reads view",
+              loaded["path"] == "wiki/workflows/account-opening/WORKFLOW.md"
+              and loaded["workflow"]["origin"] == "view", loaded)
+        legacy = run(root, "workflow", "load", "legacy-only")["data"]
+        check(results, "workflow load falls back to legacy",
+              legacy["path"] == "workflows/legacy-only/WORKFLOW.md"
+              and legacy["workflow"]["origin"] == "legacy", legacy)
+
+        proc = run_text(root, "workflow", "list")
+        check(results, "workflow list warns about legacy conflict",
+              proc.returncode == 0 and "观看区版本生效" in proc.stdout, proc.stdout)
+
+        write_topic(root / "wiki/topics", "观看区话题.md", "观看区话题", "观看区版本")
+        write_topic(root / "topics", "观看区话题.md", "旧话题", "旧版本")
+        query = run(root, "query", "观看区")["data"]
+        topic_hits = [item for item in query["topics"] if item["name"] == "观看区话题"]
+        check(results, "query reads view topic once",
+              len(topic_hits) == 1
+              and topic_hits[0]["path"] == "wiki/topics/观看区话题.md"
+              and topic_hits[0]["origin"] == "view", topic_hits)
+        check(results, "query reads view workflow",
+              any(item["id"] == "account-opening" and item["origin"] == "view"
+                  for item in query["workflows"]), query["workflows"])
+
+        before = (root / "wiki/workflows/account-opening/WORKFLOW.md").read_text(encoding="utf-8")
+        run(root, "status")
+        after = (root / "wiki/workflows/account-opening/WORKFLOW.md").read_text(encoding="utf-8")
+        check(results, "sync does not overwrite view workflow", before == after)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    custom = Path(tempfile.mkdtemp(prefix="llm-wiki-view-custom-"))
+    try:
+        (custom / ".wiki").mkdir()
+        (custom / ".wiki/wiki.json").write_text(
+            json.dumps({"publish": {"dir": "kb"}}), encoding="utf-8")
+        write_workflow(custom / "wiki/workflows", "old-flow", "旧观看区")
+        write_workflow(custom / "kb/workflows", "new-flow", "新观看区")
+        data = run(custom, "workflow", "list")["data"]
+        ids = [item["id"] for item in data["workflows"]]
+        check(results, "workflow list uses custom publish.dir",
+              data["root"] == "kb/workflows" and "new-flow" in ids and "old-flow" not in ids,
+              data)
+    finally:
+        shutil.rmtree(custom, ignore_errors=True)
+
+
+def topic_refs_flow(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-topicrefs-"))
+    try:
+        (root / "shared.md").write_text(
+            "# 共享来源\n\n复机与停机都靠这份规则。\n", encoding="utf-8")
+        run(root, "ingest")
+        route = run(root, "next", "--kind", "route")["data"]["tasks"][0]
+        route_query(root, route, "复机")
+        key = route["work"]["sources"][0]["key"]
+        run(root, "submit", route["id"], "--payload", payload_file(
+            root, "topicrefs-route.json",
+            {"decisions": [{"source": key, "action": "new", "page": "page-a",
+                            "title": "甲页", "type": "concept", "reason": "甲"}]},
+        ))
+        task = run(root, "next", "--kind", "page")["data"]["tasks"][0]
+        draft = root / ".wiki/drafts/page-a.md"
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_text(
+            "## 结论\n\n复机需本人到厅。\n\n## 要点\n\n- 复机需本人到厅。\n",
+            encoding="utf-8")
+        run(root, "submit", task["id"], "--payload", payload_file(
+            root, "topicrefs-page.json",
+            {"page": "page-a", "title": "甲页", "type": "concept",
+             "summary": "复机需本人到厅。", "links": [],
+             "body_file": str(draft.relative_to(root)),
+             "evidence": [{"source": key, "quote": "复机与停机都靠这份规则。"}],
+             "boundaries": {"covered": "甲页", "not_covered": "其他"}},
+        ))
+        raw_rel = run(root, "query", "--page", "page-a")["data"]["sources"][0]["raw"]
+        raw_token = raw_rel.split("raw/", 1)[1]
+
+        write_topic(root / "wiki/topics", "复机旁证.md", "复机旁证", "旁证")
+        write_topic(
+            root / "wiki/topics", "复机办理.md", "复机办理", "复机路径",
+            body="## 依据\n\n"
+                 "- 页面：`page-a` — 甲页\n"
+                 "- 页面：`ghost-page`\n"
+                 f"- 原文：`raw:{raw_token}`\n"
+                 "- 话题：`复机旁证`\n"
+                 "- 工作流：`topic-exploration`\n"
+                 "- 页面：见下文\n"
+                 "\n## 结论\n\n复机需本人到厅。\n")
+        write_topic(root / "topics", "旧库话题.md", "旧库话题", "旧库复机",
+                    body="## 依据\n\n- 页面：`page-a`\n\n## 结论\n\n复机旧记录。\n")
+        legacy = [item for item in run(root, "query", "旧库")["data"]["topics"]
+                  if item["name"] == "旧库话题"][0]
+        check(results, "legacy topic refs parse too",
+              legacy["origin"] == "legacy" and legacy["refs"]["pages"] == ["page-a"],
+              legacy)
+        query = run(root, "query", "复机")["data"]
+        hit = [item for item in query["topics"] if item["name"] == "复机办理"][0]
+        refs = hit["refs"]
+        check(results, "query topic refs keep validated kinds",
+              refs["pages"] == ["page-a"] and refs["raws"] == [raw_token]
+              and refs["topics"] == ["复机旁证"]
+              and refs["workflows"] == ["topic-exploration"], refs)
+        check(results, "query topic refs put unknown targets in missing",
+              refs["missing"] == [{"kind": "page", "target": "ghost-page"}], refs)
+        listing = [item for item in query["results"] if item["id"] == "page-a"]
+        check(results, "query results cite topics that reference the page",
+              listing and listing[0]["citing_topics"] == ["复机办理", "旧库话题"], listing)
+        detail = run(root, "query", "--page", "page-a")["data"]
+        check(results, "query page cites topics",
+              detail["citing_topics"] == ["复机办理", "旧库话题"], detail)
+        page_text = run_text(root, "query", "--page", "page-a")
+        check(results, "query page prints citing topics line",
+              "citing topics: 复机办理, 旧库话题" in page_text.stdout, page_text.stdout)
+        cite_index = cli.citing_topics_index({
+            "旧库话题": {"pages": ["page-a"], "missing": []},
+            "复机办理": {"pages": ["page-a"],
+                         "missing": [{"kind": "page", "target": "ghost-page"}]},
+            "空引用": {"pages": [], "missing": [
+                {"kind": "page", "target": "ghost-page"}]},
+        })
+        check(results, "citing topics index sorts and ignores missing",
+              cite_index == {"page-a": ["复机办理", "旧库话题"]}, cite_index)
+        check(results, "citing topics line caps at three names plus +N",
+              cli.ref_topics_line(["甲", "乙", "丙", "丁", "戊"]) == "甲, 乙, 丙, +2"
+              and cli.ref_topics_line(["甲", "乙", "丙"]) == "甲, 乙, 丙"
+              and cli.ref_topics_line([]) == "", "ref_topics_line")
+        proc = run_text(root, "query", "复机")
+        check(results, "query warns about broken refs without failing",
+              proc.returncode == 0
+              and "cites unknown page ghost-page" in proc.stderr
+              and "malformed ref" in proc.stderr, proc.stderr)
+
+        many = "\n".join(f"- 页面：`ghost-{index}`" for index in range(21))
+        write_topic(root / "wiki/topics", "坏链话题.md", "坏链话题", "大量坏链",
+                    body="## 依据\n\n" + many + "\n")
+        capped = run(root, "query", "坏链")["data"]["topics"][0]["refs"]
+        check(results, "missing refs cap at 20",
+              len(capped["missing"]) == 20, len(capped["missing"]))
+
+        raw_dir = (root / raw_rel).parent
+        for index in range(21):
+            (raw_dir / f"extra-{index}.md").write_text("# 补充\n\n说明。\n", encoding="utf-8")
+        extra = "\n".join(f"- 原文：`raw:extra-{index}.md`" for index in range(21))
+        write_topic(root / "wiki/topics", "超量话题.md", "超量话题", "超量原文",
+                    body="## 依据\n\n" + extra + "\n")
+        capped = run(root, "query", "超量")["data"]["topics"][0]["refs"]
+        check(results, "valid refs cap at 20", len(capped["raws"]) == 20, len(capped["raws"]))
+
+        many_pages = "\n".join(
+            ["- 页面：`page-a`"]
+            + [f"- 页面：`ghost-{index}`" for index in range(24)]
+            + [f"- 原文：`raw:extra-{index}.md`" for index in range(5)])
+        write_topic(root / "wiki/topics", "混合话题.md", "混合话题", "混合引用",
+                    body="## 依据\n\n" + many_pages + "\n")
+        capped = run(root, "query", "混合")["data"]["topics"][0]["refs"]
+        check(results, "kept refs cap at 20 across kinds",
+              capped["pages"] == ["page-a"] and capped["raws"] == []
+              and [item["target"] for item in capped["missing"]]
+              == [f"ghost-{index}" for index in range(19)]
+              and sum(len(capped[key]) for key in
+                      ("pages", "raws", "topics", "workflows"))
+              + len(capped["missing"]) == 20, capped)
+
+        for index in range(25):
+            write_topic(root / "wiki/topics", f"引用-{index:02d}.md",
+                        f"引用{index:02d}", "引用材料")
+        ref_lines = "\n".join(
+            [f"- 原文：`raw:extra-{index}.md`" for index in range(10)]
+            + [f"- 话题：`引用-{index:02d}`" for index in range(25)])
+        write_topic(root / "wiki/topics", "封顶话题.md", "封顶话题", "封顶引用",
+                    body="## 依据\n\n" + ref_lines + "\n")
+        capped = run(root, "query", "封顶")["data"]["topics"][0]["refs"]
+        check(results, "valid refs cap at 20 in total",
+              sum(len(capped[key]) for key in
+                  ("pages", "raws", "topics", "workflows")) == 20
+              and len(capped["raws"]) == 10
+              and capped["topics"] == [f"引用-{index:02d}" for index in range(10)]
+              and capped["missing"] == [], capped)
+        capped_text = run_text(root, "query", "封顶")
+        capped_warnings = [line for line in capped_text.stderr.splitlines()
+                           if "封顶话题" in line]
+        check(results, "truncating refs warns once on stderr",
+              len(capped_warnings) == 1
+              and "refs truncated to 20" in capped_warnings[0], capped_text.stderr)
+
+        write_topic(root / "wiki/topics", "越界话题.md", "越界话题", "越界原文",
+                    body="## 依据\n\n- 原文：`raw:/etc/passwd`\n"
+                         "- 原文：`raw:../ok.md`\n\n## 结论\n\n复机越界来源。\n")
+        escaped = run(root, "query", "越界")["data"]["topics"][0]["refs"]
+        check(results, "raw refs cannot escape the raw dir",
+              escaped["raws"] == []
+              and escaped["missing"] == [
+                  {"kind": "raw", "target": "/etc/passwd"},
+                  {"kind": "raw", "target": "../ok.md"}], escaped)
+
+        write_topic(root / "wiki/topics", "根相对话题.md", "根相对话题", "根相对原文",
+                    body="## 依据\n\n"
+                         f"- 原文：`raw:{raw_rel}`\n"
+                         f"- 原文：`{raw_rel}`\n")
+        relative = run(root, "query", "根相对")["data"]["topics"][0]["refs"]
+        check(results, "raw refs accept the workspace-relative sources path",
+              relative["raws"] == [raw_rel] and relative["missing"] == [],
+              relative)
+
+        write_topic(root / "wiki/topics", "坏字节话题.md", "坏字节话题", "坏字节原文",
+                    body="## 依据\n\n- 原文：`raw:bad\x00name.md`\n")
+        broken_byte = run(root, "query", "坏字节")["data"]["topics"][0]["refs"]
+        check(results, "a NUL byte in a raw ref goes to missing",
+              broken_byte["raws"] == []
+              and broken_byte["missing"] == [
+                  {"kind": "raw", "target": "bad\x00name.md"}], broken_byte)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def workflow_files(root):
@@ -212,7 +661,7 @@ def repair_flow(results):
         view_a = (root / page_a["path"]).read_text(encoding="utf-8")
         view_b = (root / page_b["path"]).read_text(encoding="utf-8")
         check(results, "a repaired edge renders on both sides of the view",
-              "[[page-b]]" in view_a and "[[page-a]]" in view_b, (view_a, view_b))
+              "[乙页](乙页.md)" in view_a and "[甲页](甲页.md)" in view_b, (view_a, view_b))
 
         again = run(root, "page", "link", "--repair")["data"]
         check(results, "link repair is idempotent",
@@ -275,8 +724,8 @@ def links_flow(results):
                   "## 关联" not in page_a["body"] and "## 关联" not in page_b["body"],
                   (page_a["body"], page_b["body"]))
             check(results, "the view renders outgoing and incoming edges together",
-                  "- [[page-b]]" in engine.view_text(page_a)
-                  and "- [[page-a]]" in engine.view_text(page_b),
+                  "[乙页](乙页.md)" in engine.view_text(page_a)
+                  and "[甲页](甲页.md)" in engine.view_text(page_b),
                   engine.view_text(page_a))
             check(results, "the view has exactly one relation section",
                   engine.view_text(page_b).count("## 关联") == 1,
@@ -361,7 +810,7 @@ def links_flow(results):
             check(results, "a body relation section is stripped on submit",
                   "## 关联" not in record["body"], record["body"])
             check(results, "the merge-added edge is rendered",
-                  "- [[page-b]]" in engine.view_text(record), engine.view_text(record))
+                  "[乙页](乙页.md)" in engine.view_text(record), engine.view_text(record))
         finally:
             engine.close()
 
@@ -408,7 +857,7 @@ def links_flow(results):
             record = engine.page_record("page-s2")
             sibling_text = (root / "wiki" / engine.view_relpath(record)).read_text(encoding="utf-8")
             check(results, "the sibling view shows its edge",
-                  "- [[page-s1]]" in sibling_text, sibling_text)
+                  "[兄弟一](兄弟一.md)" in sibling_text, sibling_text)
         finally:
             engine.close()
 
@@ -703,10 +1152,16 @@ def main(argv=None):
             config_file = legacy_config / ".wiki" / "wiki.json"
             config_file.write_text('{"publish": {"scenarios": false}}', encoding="utf-8")
             migrated = ledger.load_config(config_file)["publish"]
-            check(results, "a leftover publish.scenarios key is ignored",
-                  migrated["workflows"] is True and migrated["topics"] is True, migrated)
+            check(results, "publish drops seed switches",
+                  "topics" not in migrated and "workflows" not in migrated, migrated)
         finally:
             shutil.rmtree(legacy_config, ignore_errors=True)
+        view_dir_checks(results)
+        workflow_view_checks(results)
+        topics_view_checks(results)
+        topic_refs_checks(results)
+        view_definition_suite(results)
+        topic_refs_flow(results)
         parsed, has_section = workflows.parse_steps(
             "## 步骤\n\n1. TOOL：**a**\n2. Human: **b**\n   - tool: 子项\n"
             "3. 没标\n\n## 其他\n\n- tool: 不算\n")
@@ -846,6 +1301,8 @@ def main(argv=None):
         check(results, "init creates .wiki", (root / ".wiki/wiki.db").exists() and data["sources"] == 0, data)
         check(results, "init creates the publish directory",
               (root / "wiki").is_dir() and not (root / ".wiki/raw").exists(), data)
+        check(results, "init creates workflow/topic content dirs",
+              (root / "wiki/workflows").is_dir() and (root / "wiki/topics").is_dir())
         check(results, "publish README is written", (root / "wiki/README.md").exists())
 
         data = run(root, "check")["data"]
@@ -1259,38 +1716,23 @@ def main(argv=None):
               and (root / "wiki/raw/用户笔记.md").exists())
 
         readme = (root / "wiki/README.md").read_text(encoding="utf-8")
-        check(results, "view readme lists the directories",
-              all(word in readme for word in ("pages", "raw", "topics", "workflows")), readme)
-        check(results, "view readme names who owns what",
-              "由引擎维护" in readme and "归你" in readme and "sync" in readme, readme)
+        check(results, "view readme lists directories and ownership",
+              all(name in readme for name in ("pages/", "raw/", "workflows/", "topics/", "runs/"))
+              and "由引擎维护" in readme and "项目内容" in readme
+              and "首次投放" not in readme
+              and "工作流副本" not in readme and "话题副本" not in readme,
+              readme)
         (root / "wiki/README.md").unlink()
         run(root, "status")
         check(results, "view readme is rewritten on every push",
               (root / "wiki/README.md").exists())
 
-        check(results, "topics are seeded into the view dir",
-              (root / "wiki/topics/复机办理.md").exists())
-        check(results, "workflows are seeded into the view dir",
-              (root / "wiki/workflows/account-opening/WORKFLOW.md").exists()
-              and (root / "wiki/workflows/account-opening/scripts/check.sh").exists())
-        deck = root / "wiki/workflows/deck-flow/WORKFLOW.md"
-        check(results, "the workflow copy follows the workflows/ directory",
-              deck.exists() and "Deck flow" in deck.read_text(encoding="utf-8"))
-        config_path = root / ".wiki/wiki.json"
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        config["publish"]["workflows"] = False
-        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
-        shutil.rmtree(root / "wiki/workflows")
-        run(root, "status")
-        check(results, "publish.workflows=false stops seeding new copies",
-              not (root / "wiki/workflows").exists())
-        config["publish"]["workflows"] = True
-        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
-        run(root, "status")
-        (root / "wiki/topics/复机办理.md").write_text("我改过的话题\n", encoding="utf-8")
-        run(root, "status")
-        check(results, "user owned topic copies are never overwritten",
-              (root / "wiki/topics/复机办理.md").read_text(encoding="utf-8") == "我改过的话题\n")
+        check(results, "view content dirs exist",
+              (root / "wiki/workflows").is_dir() and (root / "wiki/topics").is_dir())
+        check(results, "view does not seed root workflows",
+              not (root / "wiki/workflows/account-opening").exists())
+        check(results, "view does not seed root topics",
+              not (root / "wiki/topics/复机办理.md").exists())
 
         page_file.unlink()  # 手改件留在树上会持续告警，也会干扰后面的漂移检查
         run(root, "status")
@@ -1382,7 +1824,7 @@ def main(argv=None):
               linked_page["outgoing"] == ["machine-room-inspection"], linked_page["outgoing"])
         linked_view = (root / "wiki/pages/process/反诈复机.md").read_text(encoding="utf-8")
         check(results, "page link pushes the relation section to the view",
-              "## 关联" in linked_view and "[[machine-room-inspection]]" in linked_view,
+              "## 关联" in linked_view and "[机房巡检](../concept/机房巡检.md)" in linked_view,
               linked_view)
         missing_link = run(root, "page", "link", "anti-fraud-restore",
                            "no-such-page", expect=2)
@@ -1402,6 +1844,10 @@ def main(argv=None):
 
         exported = run(root, "export", str(root / ".wiki/export"))["data"]["files"]
         check(results, "export writes rendered pages", exported, exported)
+        exported_page = (root / ".wiki/export/process/anti-fraud-restore.md").read_text(
+            encoding="utf-8")
+        check(results, "export renders real page links",
+              "[机房巡检](../concept/machine-room-inspection.md)" in exported_page, exported_page)
         escaped = run(root, "export", str(root.parent / "wiki-export"), expect=2)
         check(results, "export outside workspace rejected", escaped["error"]["code"] == "E_PATH", escaped)
 
@@ -1641,6 +2087,8 @@ def main(argv=None):
               split_provenance(hand_written) == (hand_written, []))
 
         room_view = root / "view/pages/concept/机房巡检.md"
+        # query 现在是只读快照，不再顺带推送观看区；先显式推一次再验证 sync 的幂等性。
+        run(root, "sync")
         room_text = room_view.read_text(encoding="utf-8")
         synced = run(root, "sync")["data"]
         check(results, "sync leaves an untouched view alone",
@@ -1849,7 +2297,7 @@ def main(argv=None):
               "anti-fraud-restore" in imported_page["outgoing"], imported_page["outgoing"])
         imported_view = new_path.read_text(encoding="utf-8")
         check(results, "imported links reach the view after the next push",
-              "[[anti-fraud-restore]]" in imported_view, imported_view)
+              "[反诈复机](../process/反诈复机.md)" in imported_view, imported_view)
 
         bad_link = root / ".wiki/drafts/bad-link.md"
         bad_link.write_text(
@@ -2471,6 +2919,125 @@ def main(argv=None):
             taken = run(task_root, "status")
             check(results, "a stale lock is taken over",
                   taken["ok"] and not lock.exists(), (taken, lock))
+
+            # 异常锁文件不能让加锁命令挂住：目录、FIFO、不可删的陈旧锁都要快速报 E_STATE。
+            def abnormal_lock(name, prepare):
+                case = Path(tempfile.mkdtemp(prefix="llm-wiki-lock-"))
+                try:
+                    (case / ".wiki").mkdir()
+                    prepare(case / ".wiki" / "lock")
+                    started = time.monotonic()
+                    try:
+                        denied = run(case, "status", expect=3, timeout=10)
+                    except subprocess.TimeoutExpired:
+                        check(results, name, False, "command did not return within 10s")
+                    elapsed = time.monotonic() - started
+                    check(results, name,
+                          elapsed < 8 and denied.get("error", {}).get("code") == "E_STATE",
+                          (elapsed, denied))
+                finally:
+                    shutil.rmtree(case, ignore_errors=True)
+
+            abnormal_lock("a directory lock fails with E_STATE instead of hanging",
+                          lambda path: path.mkdir())
+            if hasattr(os, "mkfifo"):
+                abnormal_lock("a FIFO lock fails with E_STATE instead of blocking",
+                              lambda path: os.mkfifo(path))
+
+            # 锁文件本身不可删：同样要报错，不能反复判陈旧后 continue。
+            unremovable = Path(tempfile.mkdtemp(prefix="llm-wiki-lock-ro-"))
+            try:
+                (unremovable / ".wiki").mkdir()
+                (unremovable / ".wiki" / "lock").write_text("999999", encoding="utf-8")
+                (unremovable / ".wiki").chmod(0o555)
+                if not os.access(unremovable / ".wiki", os.W_OK):
+                    denied = run(unremovable, "status", expect=3, timeout=10)
+                    check(results, "an unremovable stale lock fails with E_STATE",
+                          denied.get("error", {}).get("code") == "E_STATE", denied)
+            finally:
+                (unremovable / ".wiki").chmod(0o755)
+                shutil.rmtree(unremovable, ignore_errors=True)
+
+            # `.wiki` 存在但不可写：创建锁失败也要变成 E_HEALTH，而不是 traceback。
+            unwritable = Path(tempfile.mkdtemp(prefix="llm-wiki-wiki-ro-"))
+            try:
+                (unwritable / ".wiki").mkdir()
+                (unwritable / ".wiki").chmod(0o555)
+                if not os.access(unwritable / ".wiki", os.W_OK):
+                    denied = run(unwritable, "status", expect=1, timeout=10)
+                    check(results, "an unwritable .wiki fails with E_HEALTH",
+                          denied.get("error", {}).get("code") == "E_HEALTH", denied)
+            finally:
+                (unwritable / ".wiki").chmod(0o755)
+                shutil.rmtree(unwritable, ignore_errors=True)
+
+            # 普通 query 是只读快照：不取锁、不建目录、不推观看区。
+            lock.mkdir()
+            try:
+                found = run(task_root, "query", "测试")
+                check(results, "a plain query ignores the workspace lock",
+                      found["ok"] and lock.is_dir(), (found, lock))
+            finally:
+                lock.rmdir()
+
+            lock.mkdir()
+            try:
+                denied = run(task_root, "query", "--task", "t_missing", expect=3, timeout=10)
+                check(results, "query --task still takes the workspace lock",
+                      denied.get("error", {}).get("code") == "E_STATE", denied)
+            finally:
+                lock.rmdir()
+
+            empty = Path(tempfile.mkdtemp(prefix="llm-wiki-query-empty-"))
+            try:
+                denied = run(empty, "query", "hello", expect=3)
+                check(results, "query on an uninitialized workspace reports E_STATE",
+                      denied.get("error", {}).get("code") == "E_STATE"
+                      and not (empty / ".wiki").exists(), denied)
+            finally:
+                shutil.rmtree(empty, ignore_errors=True)
+
+            legacy = Path(tempfile.mkdtemp(prefix="llm-wiki-query-legacy-"))
+            try:
+                (legacy / ".wiki").mkdir()
+                conn = sqlite3.connect(legacy / ".wiki" / "wiki.db")
+                conn.execute(
+                    "CREATE TABLE page_revs (page TEXT, rev INTEGER, meta TEXT, "
+                    "body TEXT, digest TEXT, render_digest TEXT, origin TEXT, "
+                    "accepted_at TEXT)"
+                )
+                conn.commit()
+                conn.close()
+                denied = run(legacy, "query", "hello", expect=3)
+                check(results, "query refuses a ledger it cannot migrate read-only",
+                      denied.get("error", {}).get("code") == "E_STATE", denied)
+            finally:
+                shutil.rmtree(legacy, ignore_errors=True)
+
+            snapshot = Path(tempfile.mkdtemp(prefix="llm-wiki-query-snapshot-"))
+            try:
+                run(snapshot, "init")
+                readme = snapshot / "wiki" / "README.md"
+                readme.parent.mkdir(parents=True, exist_ok=True)
+                readme.write_text("hand edited\n", encoding="utf-8")
+                found = run(snapshot, "query", "hello")
+                check(results, "query does not sync the view",
+                      found["ok"] and readme.read_text(encoding="utf-8") == "hand edited\n",
+                      (found, readme))
+            finally:
+                shutil.rmtree(snapshot, ignore_errors=True)
+
+            readonly = Path(tempfile.mkdtemp(prefix="llm-wiki-query-ro-"))
+            try:
+                run(readonly, "init")
+                (readonly / ".wiki").chmod(0o555)
+                if not os.access(readonly / ".wiki", os.W_OK):
+                    found = run(readonly, "query", "hello", timeout=10)
+                    check(results, "query reads a read-only workspace",
+                          found["ok"], found)
+            finally:
+                (readonly / ".wiki").chmod(0o755)
+                shutil.rmtree(readonly, ignore_errors=True)
         finally:
             shutil.rmtree(task_root, ignore_errors=True)
 
