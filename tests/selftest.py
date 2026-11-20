@@ -182,11 +182,12 @@ def workflow_view_checks(results):
         shutil.rmtree(root, ignore_errors=True)
 
 
-def write_topic(base, name, title, description):
+def write_topic(base, name, title, description, body=None):
     base.mkdir(parents=True, exist_ok=True)
+    text = body if body is not None else f"## 结论\n\n{description}\n"
     (base / name).write_text(
         f"---\ntitle: {title}\ndescription: {description}\nstatus: open\n---\n\n"
-        f"## 结论\n\n{description}\n",
+        f"{text}",
         encoding="utf-8")
 
 
@@ -249,6 +250,27 @@ def topic_refs_checks(results):
     check(results, "topic refs skip fenced code blocks",
           fenced["pages"] == ["real"] and fenced["sections"] == 1
           and not fenced["malformed"], fenced)
+    invalid = Path(tempfile.mkdtemp(prefix="llm-wiki-topicblank-"))
+    try:
+        write_topic(invalid / "wiki/topics", "空话题.md", "空话题", "无正文",
+                    body="")
+        blank = topics.scan(invalid, view_root=invalid / "wiki/topics")[0]
+        check(results, "invalid topic entry keeps an empty refs record",
+              blank["valid"] is False and blank["refs"]["sections"] == 0
+              and not any(blank["refs"][key] for key in (
+                  "pages", "raws", "topics", "workflows", "malformed")),
+              blank)
+    finally:
+        shutil.rmtree(invalid, ignore_errors=True)
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-topicrank-"))
+    try:
+        write_topic(root / "wiki/topics", "复机办理.md", "复机办理", "复机路径",
+                    body="## 依据\n\n- 页面：`page-a`\n\n## 结论\n\n复机需本人到厅。\n")
+        matched = topics.match(root, ["复机"], 5, view_root=root / "wiki/topics")
+        check(results, "topic match carries parsed refs",
+              matched and matched[0]["refs"]["pages"] == ["page-a"], matched)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def view_definition_suite(results):

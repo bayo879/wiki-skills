@@ -77,6 +77,11 @@ def parse_refs(body):
     }
 
 
+def _blank_refs():
+    """Empty ``refs`` for an entry whose body never got parsed."""
+    return parse_refs("")
+
+
 def _append_ref(target, key, token):
     value = unicodedata.normalize("NFC", token.strip())
     if key == "pages" or key == "workflows":
@@ -122,11 +127,16 @@ def scan(root, view_root=None):
 
 def match(root, terms, limit, view_root=None):
     """Rank valid topics against query terms; reads files, writes nothing."""
+    return rank(scan(root, view_root=view_root), terms, limit)
+
+
+def rank(entries, terms, limit):
+    """Score scanned topics; each hit carries its parsed ``refs``."""
     terms = [term for term in terms if term]
     if not terms:
         return []
     scored = []
-    for entry in scan(root, view_root=view_root):
+    for entry in entries:
         if not entry["valid"]:
             continue
         haystack = f"{entry['title']}\n{entry['description']}\n{entry['body']}"
@@ -148,6 +158,7 @@ def match(root, terms, limit, view_root=None):
                 "origin": entry["origin"],
                 "score": score,
                 "snippet": snippet(entry["body"], terms[0]),
+                "refs": entry["refs"],
             }
         )
     scored.sort(key=lambda item: (-item["score"], item["name"]))
@@ -179,6 +190,7 @@ def _entry(root, path, origin="view"):
         "valid": False,
         "error": "",
         "body": "",
+        "refs": _blank_refs(),
     }
     if path.is_symlink() and not _within(root, path):
         record["error"] = "topic file escapes the workspace root"
@@ -205,6 +217,7 @@ def _entry(root, path, origin="view"):
             "updated": str(meta.get("updated") or "").strip(),
             "body": body,
             "valid": bool(body),
+            "refs": parse_refs(body),
         }
     )
     if not body:
