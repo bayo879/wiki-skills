@@ -11,6 +11,8 @@ topic can be updated without re-ingesting.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from pathlib import Path
 
 from frontmatter import split_frontmatter
@@ -18,6 +20,73 @@ from frontmatter import split_frontmatter
 TOPIC_DIR = "topics"
 TOPIC_SUFFIX = ".md"
 MAX_TOPIC_CHARS = 200_000
+REF_SECTION = "## 依据"
+# (依据里的前缀词, 结果键, 告警/JSON 用的 kind)
+REF_KINDS = (
+    ("页面", "pages", "page"),
+    ("原文", "raws", "raw"),
+    ("话题", "topics", "topic"),
+    ("工作流", "workflows", "workflow"),
+)
+REF_TOKEN_RE = re.compile(r"`([^`]+)`")
+
+
+def parse_refs(body):
+    """Parse the ``## 依据`` sections into four ref groups; pure, no I/O."""
+    groups = {key: [] for _, key, _ in REF_KINDS}
+    malformed = []
+    sections = 0
+    in_section = False
+    fence = False
+    for line in body.split("\n"):
+        if line.lstrip().startswith("```"):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        if line.startswith("## "):
+            in_section = line.strip() == REF_SECTION
+            if in_section:
+                sections += 1
+            continue
+        if not in_section or not line.startswith("- "):
+            continue
+        item = line[2:].strip()
+        for word, key, _ in REF_KINDS:
+            if not item.startswith(word):
+                continue
+            rest = item[len(word):]
+            if not rest[:1]:
+                continue
+            if rest[0] in "：:":
+                match = REF_TOKEN_RE.search(rest)
+                if match:
+                    _append_ref(groups[key], key, match.group(1))
+                else:
+                    malformed.append(line)
+            elif rest[0] == "`":
+                malformed.append(line)
+            break
+    return {
+        "pages": groups["pages"],
+        "raws": groups["raws"],
+        "topics": groups["topics"],
+        "workflows": groups["workflows"],
+        "malformed": malformed,
+        "sections": sections,
+    }
+
+
+def _append_ref(target, key, token):
+    value = unicodedata.normalize("NFC", token.strip())
+    if key == "pages" or key == "workflows":
+        value = value.lower()
+    elif key == "raws":
+        if value.startswith("raw:"):
+            value = value[len("raw:"):]
+        value = value[2:] if value.startswith("./") else value
+    if value and value not in target:
+        target.append(value)
 
 
 def topic_root(root, view_root=None):

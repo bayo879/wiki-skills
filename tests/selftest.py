@@ -216,6 +216,41 @@ def topics_view_checks(results):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def topic_refs_checks(results):
+    body = (
+        "## 依据\n\n"
+        "- 页面：`anti-fraud-restore` — 复机路径\n"
+        "- 页面: `anti-fraud-restore`\n"
+        "- 原文：`raw:docs/a.md`\n"
+        "- 话题：`复机办理`\n"
+        "- 工作流：`Topic-Exploration`\n"
+        "- 页面：见下文\n"
+        "- 页面`refund-policy`\n"
+        "- 页面已重建\n"
+        "- 原文 缺失\n"
+        "\n## 结论\n\n- 页面：`in-conclusion`\n"
+    )
+    parsed = topics.parse_refs(body)
+    check(results, "topic refs parse four kinds",
+          parsed["pages"] == ["anti-fraud-restore"]
+          and parsed["raws"] == ["docs/a.md"]
+          and parsed["topics"] == ["复机办理"]
+          and parsed["workflows"] == ["topic-exploration"], parsed)
+    check(results, "topic refs record malformed lines only for ref-shaped rows",
+          parsed["malformed"] == ["- 页面：见下文", "- 页面`refund-policy`"], parsed)
+    check(results, "topic refs ignore prose and other sections",
+          "in-conclusion" not in parsed["pages"]
+          and parsed["sections"] == 1, parsed)
+    two = topics.parse_refs("## 依据\n\n- 页面：`a`\n\n## 依据\n\n- 页面：`b`\n")
+    check(results, "second 依据 section still parses",
+          two["sections"] == 2 and two["pages"] == ["a", "b"], two)
+    fenced = topics.parse_refs(
+        "## 依据\n\n- 页面：`real`\n\n```\n- 页面：`fake`\n## 依据\n```\n")
+    check(results, "topic refs skip fenced code blocks",
+          fenced["pages"] == ["real"] and fenced["sections"] == 1
+          and not fenced["malformed"], fenced)
+
+
 def view_definition_suite(results):
     root = Path(tempfile.mkdtemp(prefix="llm-wiki-view-defs-"))
     try:
@@ -915,6 +950,7 @@ def main(argv=None):
         view_dir_checks(results)
         workflow_view_checks(results)
         topics_view_checks(results)
+        topic_refs_checks(results)
         view_definition_suite(results)
         parsed, has_section = workflows.parse_steps(
             "## 步骤\n\n1. TOOL：**a**\n2. Human: **b**\n   - tool: 子项\n"
