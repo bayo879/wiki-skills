@@ -30,6 +30,7 @@ sys.path.insert(0, str(SCRIPT.parent))
 from runtime import require_python
 
 require_python()
+import cli  # noqa: E402  (query output helpers)
 import ledger  # noqa: E402  (config migration)
 import topics  # noqa: E402  (view/legacy topic resolution)
 import workflows  # noqa: E402  (frontmatter normalisation, for tag checks)
@@ -388,6 +389,13 @@ def topic_refs_flow(results):
                  "- 工作流：`topic-exploration`\n"
                  "- 页面：见下文\n"
                  "\n## 结论\n\n复机需本人到厅。\n")
+        write_topic(root / "topics", "旧库话题.md", "旧库话题", "旧库复机",
+                    body="## 依据\n\n- 页面：`page-a`\n\n## 结论\n\n复机旧记录。\n")
+        legacy = [item for item in run(root, "query", "旧库")["data"]["topics"]
+                  if item["name"] == "旧库话题"][0]
+        check(results, "legacy topic refs parse too",
+              legacy["origin"] == "legacy" and legacy["refs"]["pages"] == ["page-a"],
+              legacy)
         query = run(root, "query", "复机")["data"]
         hit = [item for item in query["topics"] if item["name"] == "复机办理"][0]
         refs = hit["refs"]
@@ -397,6 +405,28 @@ def topic_refs_flow(results):
               and refs["workflows"] == ["topic-exploration"], refs)
         check(results, "query topic refs put unknown targets in missing",
               refs["missing"] == [{"kind": "page", "target": "ghost-page"}], refs)
+        listing = [item for item in query["results"] if item["id"] == "page-a"]
+        check(results, "query results cite topics that reference the page",
+              listing and listing[0]["citing_topics"] == ["复机办理", "旧库话题"], listing)
+        detail = run(root, "query", "--page", "page-a")["data"]
+        check(results, "query page cites topics",
+              detail["citing_topics"] == ["复机办理", "旧库话题"], detail)
+        page_text = run_text(root, "query", "--page", "page-a")
+        check(results, "query page prints citing topics line",
+              "citing topics: 复机办理, 旧库话题" in page_text.stdout, page_text.stdout)
+        cite_index = cli.citing_topics_index({
+            "旧库话题": {"pages": ["page-a"], "missing": []},
+            "复机办理": {"pages": ["page-a"],
+                         "missing": [{"kind": "page", "target": "ghost-page"}]},
+            "空引用": {"pages": [], "missing": [
+                {"kind": "page", "target": "ghost-page"}]},
+        })
+        check(results, "citing topics index sorts and ignores missing",
+              cite_index == {"page-a": ["复机办理", "旧库话题"]}, cite_index)
+        check(results, "citing topics line caps at three names plus +N",
+              cli.ref_topics_line(["甲", "乙", "丙", "丁", "戊"]) == "甲, 乙, 丙, +2"
+              and cli.ref_topics_line(["甲", "乙", "丙"]) == "甲, 乙, 丙"
+              and cli.ref_topics_line([]) == "", "ref_topics_line")
         proc = run_text(root, "query", "复机")
         check(results, "query warns about broken refs without failing",
               proc.returncode == 0
@@ -473,14 +503,6 @@ def topic_refs_flow(results):
               broken_byte["raws"] == []
               and broken_byte["missing"] == [
                   {"kind": "raw", "target": "bad\x00name.md"}], broken_byte)
-
-        write_topic(root / "topics", "旧库话题.md", "旧库话题", "旧库复机",
-                    body="## 依据\n\n- 页面：`page-a`\n\n## 结论\n\n复机旧记录。\n")
-        legacy = [item for item in run(root, "query", "旧库")["data"]["topics"]
-                  if item["name"] == "旧库话题"][0]
-        check(results, "legacy topic refs parse too",
-              legacy["origin"] == "legacy" and legacy["refs"]["pages"] == ["page-a"],
-              legacy)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

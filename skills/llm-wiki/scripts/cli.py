@@ -1085,6 +1085,25 @@ def _raw_ref_ok(raw_base, value):
         return False
 
 
+def citing_topics_index(refs_by_topic):
+    """{page id: sorted topic names} from validated page refs only."""
+    index = {}
+    for name, refs in refs_by_topic.items():
+        for page_id in refs["pages"]:
+            index.setdefault(page_id, []).append(name)
+    return {page_id: sorted(names) for page_id, names in index.items()}
+
+
+def ref_topics_line(names):
+    """`甲, 乙, 丙, +2`; empty list renders as an empty string."""
+    if not names:
+        return ""
+    shown = ", ".join(names[:3])
+    if len(names) > 3:
+        shown += f", +{len(names) - 3}"
+    return shown
+
+
 def command_query():
     words = [
         word
@@ -1101,6 +1120,12 @@ def command_query():
         if not record:
             raise WikiError("E_NOT_FOUND", f"no page {ARGS.page}", "search with `query <text>` first", 3)
         outgoing, incoming = wiki.links_for(ARGS.page)
+        entries = topics.scan(wiki.root, view_root=wiki.publish_dir / topics.TOPIC_DIR)
+        refs_by_topic, ref_warnings = resolve_topic_refs(wiki, entries)
+        for line in ref_warnings:
+            sys.stderr.write(line + "\n")
+        cited = citing_topics_index(refs_by_topic).get(ARGS.page, [])
+        citing_line = ref_topics_line(cited)
         # 源文件路径是账本事实：来源只存 key，副本路径按 raw_id 查 raws 表渲染出来，
         # 调用方（agent）不用再按来源名猜文件名。
         sources = []
@@ -1115,6 +1140,7 @@ def command_query():
             "sources": sources,
             "outgoing": outgoing,
             "incoming": incoming,
+            "citing_topics": cited,
             "body": record["body"],
         }
         emit(
@@ -1123,6 +1149,7 @@ def command_query():
             data,
             [f"outgoing: {', '.join(outgoing) or '(none)'}",
              f"incoming: {', '.join(incoming) or '(none)'}",
+             *([f"citing topics: {citing_line}"] if citing_line else []),
              f"raw: {', '.join(item['raw'] for item in sources if item['raw']) or '(none)'}",
              "",
              record["body"]],
@@ -1144,6 +1171,9 @@ def command_query():
         item["refs"] = refs_by_topic[item["name"]]
     workflow_hits = workflows.match(
         wiki.root, terms, 5, view_root=wiki.publish_dir / workflows.WORKFLOW_DIR)
+    cited = citing_topics_index(refs_by_topic)
+    for item in results:
+        item["citing_topics"] = cited.get(item["id"], [])
     data = {
         "query": " ".join(terms),
         "matches": len(scored),
@@ -1164,10 +1194,16 @@ def command_query():
             block.append(f"    applies: {item['applies'] or '(none)'}")
             block.append(f"    load: {item['load']}")
         sections.append(block)
-    pages = [
-        f"{item['id']}  [{item['type']}/{item['status']}]  {item['title']}\n    {item['snippet']}"
-        for item in results
-    ]
+    pages = []
+    for item in results:
+        entry = (
+            f"{item['id']}  [{item['type']}/{item['status']}]  "
+            f"{item['title']}\n    {item['snippet']}"
+        )
+        cite = ref_topics_line(item.get("citing_topics") or [])
+        if cite:
+            entry += f"\n    citing topics: {cite}"
+        pages.append(entry)
     if pages:
         sections.append(pages)
     if topic_hits:
