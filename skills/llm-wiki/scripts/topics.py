@@ -37,10 +37,14 @@ def parse_refs(body):
     malformed = []
     sections = 0
     in_section = False
-    fence = False
+    fence = ""
     for line in body.split("\n"):
-        if line.lstrip().startswith("```"):
-            fence = not fence
+        marker = line.lstrip()[:3]
+        if marker in ("```", "~~~"):
+            if not fence:
+                fence = marker
+            elif fence == marker:
+                fence = ""
             continue
         if fence:
             continue
@@ -82,8 +86,13 @@ def _blank_refs():
     return parse_refs("")
 
 
+def _nfc(text):
+    """Normalize to NFC so a name and the token referring to it compare equal."""
+    return unicodedata.normalize("NFC", text)
+
+
 def _append_ref(target, key, token):
-    value = unicodedata.normalize("NFC", token.strip())
+    value = _nfc(token.strip())
     if key == "pages" or key == "workflows":
         value = value.lower()
     elif key == "raws":
@@ -180,9 +189,9 @@ def snippet(body, term):
 def _entry(root, path, origin="view"):
     root = Path(root)
     record = {
-        "name": path.stem,
+        "name": _nfc(path.stem),
         "origin": origin,
-        "title": path.stem,
+        "title": _nfc(path.stem),
         "description": "",
         "status": "",
         "updated": "",

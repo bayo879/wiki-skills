@@ -1029,6 +1029,10 @@ def resolve_topic_refs(wiki, entries):
             wiki.root, view_root=wiki.publish_dir / workflows.WORKFLOW_DIR)
     }
     raw_base = wiki.publish_raw_dir
+    try:
+        raw_prefix = raw_base.relative_to(wiki.root).as_posix()
+    except ValueError:
+        raw_prefix = ""
     kind_order = (("pages", "page"), ("raws", "raw"),
                   ("topics", "topic"), ("workflows", "workflow"))
     resolved, warnings = {}, []
@@ -1050,7 +1054,7 @@ def resolve_topic_refs(wiki, entries):
         dropped = len(ordered) > TOPIC_REF_LIMIT
         for key, kind, value in ordered[:TOPIC_REF_LIMIT]:
             if kind == "raw":
-                known = _raw_ref_ok(raw_base, value)
+                known = _raw_ref_ok(raw_base, value, raw_prefix)
             elif kind == "page":
                 known = value in pages
             elif kind == "topic":
@@ -1074,10 +1078,17 @@ def resolve_topic_refs(wiki, entries):
     return resolved, warnings
 
 
-def _raw_ref_ok(raw_base, value):
-    """A raw ref must stay inside the published raw tree and exist."""
-    path = Path(value)
-    if not value or path.is_absolute() or ".." in path.parts:
+def _raw_ref_ok(raw_base, value, raw_prefix=""):
+    """A raw ref must stay inside the published raw tree and exist.
+
+    `query --page` prints `sources[].raw` as a workspace-relative path
+    (`wiki/raw/x.md`); accept that form as well as the bare `raw/` one.
+    """
+    text = value
+    if raw_prefix and (text == raw_prefix or text.startswith(raw_prefix + "/")):
+        text = text[len(raw_prefix):].lstrip("/")
+    path = Path(text)
+    if not text or path.is_absolute() or ".." in path.parts:
         return False
     try:
         return (raw_base / path).is_file()

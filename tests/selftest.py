@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -251,6 +252,15 @@ def topic_refs_checks(results):
     check(results, "topic refs skip fenced code blocks",
           fenced["pages"] == ["real"] and fenced["sections"] == 1
           and not fenced["malformed"], fenced)
+    tildes = topics.parse_refs(
+        "## 依据\n\n- 页面：`real`\n\n~~~\n- 页面：`fake`\n~~~\n")
+    check(results, "topic refs skip tilde fenced code blocks",
+          tildes["pages"] == ["real"] and not tildes["malformed"], tildes)
+    nfd = unicodedata.normalize("NFD", "café")
+    nfc = unicodedata.normalize("NFC", "café")
+    precomposed = topics.parse_refs(f"## 依据\n\n- 话题：`{nfc}`\n")
+    check(results, "topic ref tokens normalize to NFC",
+          precomposed["topics"] == [nfc], precomposed)
     invalid = Path(tempfile.mkdtemp(prefix="llm-wiki-topicblank-"))
     try:
         write_topic(invalid / "wiki/topics", "空话题.md", "空话题", "无正文",
@@ -270,6 +280,12 @@ def topic_refs_checks(results):
         matched = topics.match(root, ["复机"], 5, view_root=root / "wiki/topics")
         check(results, "topic match carries parsed refs",
               matched and matched[0]["refs"]["pages"] == ["page-a"], matched)
+        write_topic(root / "wiki/topics", nfd + ".md", nfc, "分解形式", body=body)
+        decomposed = [item for item in topics.scan(root, view_root=root / "wiki/topics")
+                      if item["name"] == nfc]
+        check(results, "topic names normalize to NFC",
+              len(decomposed) == 1, [item["name"] for item in topics.scan(
+                  root, view_root=root / "wiki/topics")])
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -495,6 +511,15 @@ def topic_refs_flow(results):
               and escaped["missing"] == [
                   {"kind": "raw", "target": "/etc/passwd"},
                   {"kind": "raw", "target": "../ok.md"}], escaped)
+
+        write_topic(root / "wiki/topics", "根相对话题.md", "根相对话题", "根相对原文",
+                    body="## 依据\n\n"
+                         f"- 原文：`raw:{raw_rel}`\n"
+                         f"- 原文：`{raw_rel}`\n")
+        relative = run(root, "query", "根相对")["data"]["topics"][0]["refs"]
+        check(results, "raw refs accept the workspace-relative sources path",
+              relative["raws"] == [raw_rel] and relative["missing"] == [],
+              relative)
 
         write_topic(root / "wiki/topics", "坏字节话题.md", "坏字节话题", "坏字节原文",
                     body="## 依据\n\n- 原文：`raw:bad\x00name.md`\n")
