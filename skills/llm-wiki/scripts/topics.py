@@ -126,10 +126,11 @@ def scan(root, view_root=None):
         except OSError:
             continue
         for child in children:
+            key = _nfc(child.name)
             if (not child.is_file() or child.suffix != TOPIC_SUFFIX
-                    or child.name.startswith(".") or child.name in seen):
+                    or child.name.startswith(".") or key in seen):
                 continue
-            seen.add(child.name)
+            seen.add(key)
             entries.append(_entry(root, child, origin=origin))
     return entries
 
@@ -214,7 +215,8 @@ def _entry(root, path, origin="view"):
         return record
     meta, body = split_frontmatter(text)
     body = body.strip()
-    title = str(meta.get("name") or meta.get("title") or path.stem).strip() or path.stem
+    title = _nfc(str(meta.get("name") or meta.get("title") or path.stem).strip()
+                 or path.stem)
     description = str(meta.get("description") or "").strip()
     if not description:
         description = _first_line(body)

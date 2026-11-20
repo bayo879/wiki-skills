@@ -253,12 +253,13 @@ def topic_refs_checks(results):
           fenced["pages"] == ["real"] and fenced["sections"] == 1
           and not fenced["malformed"], fenced)
     tildes = topics.parse_refs(
-        "## 依据\n\n- 页面：`real`\n\n~~~\n- 页面：`fake`\n~~~\n")
+        "## 依据\n\n- 页面：`real`\n\n~~~\n- 页面：`fake`\n## 依据\n~~~\n")
     check(results, "topic refs skip tilde fenced code blocks",
-          tildes["pages"] == ["real"] and not tildes["malformed"], tildes)
+          tildes["pages"] == ["real"] and not tildes["malformed"]
+          and tildes["sections"] == 1, tildes)
     nfd = unicodedata.normalize("NFD", "café")
     nfc = unicodedata.normalize("NFC", "café")
-    precomposed = topics.parse_refs(f"## 依据\n\n- 话题：`{nfc}`\n")
+    precomposed = topics.parse_refs(f"## 依据\n\n- 话题：`{nfd}`\n")
     check(results, "topic ref tokens normalize to NFC",
           precomposed["topics"] == [nfc], precomposed)
     invalid = Path(tempfile.mkdtemp(prefix="llm-wiki-topicblank-"))
@@ -281,11 +282,11 @@ def topic_refs_checks(results):
         check(results, "topic match carries parsed refs",
               matched and matched[0]["refs"]["pages"] == ["page-a"], matched)
         write_topic(root / "wiki/topics", nfd + ".md", nfc, "分解形式", body=body)
-        decomposed = [item for item in topics.scan(root, view_root=root / "wiki/topics")
-                      if item["name"] == nfc]
+        write_topic(root / "topics", nfc + ".md", nfc, "旧根同名", body=body)
+        scanned = topics.scan(root, view_root=root / "wiki/topics")
+        decomposed = [item for item in scanned if item["name"] == nfc]
         check(results, "topic names normalize to NFC",
-              len(decomposed) == 1, [item["name"] for item in topics.scan(
-                  root, view_root=root / "wiki/topics")])
+              len(decomposed) == 1 and decomposed[0]["origin"] == "view", scanned)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
