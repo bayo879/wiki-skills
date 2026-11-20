@@ -24,6 +24,13 @@ from runtime import MINIMUM, MINIMUM_TEXT
 SCRIPT_FILES = (
     "wiki.py",
     "cli.py",
+    "cli_common.py",
+    "cli_ingest.py",
+    "cli_submit.py",
+    "cli_workspace.py",
+    "cli_query.py",
+    "cli_page.py",
+    "cli_workflow.py",
     "ledger.py",
     "pages.py",
     "view.py",

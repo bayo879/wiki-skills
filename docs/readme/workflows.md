@@ -166,7 +166,7 @@ frontmatter 字段：
 - 观看区整目录在 `scan_files` 的扫描根就被跳过（`skills/llm-wiki/scripts/ledger.py:394-404`），
   所以这里建目录、写文件都不会排队来源，也不会卡住 `next`。
 - 不落根目录：根目录非隐藏文件会被 `ingest` 当来源排队，未提交任务以
-  `E_TASK_UNSUBMITTED` 卡住后续 `next`（`skills/llm-wiki/scripts/cli.py:510-521`）。
+  `E_TASK_UNSUBMITTED` 卡住后续 `next`（`skills/llm-wiki/scripts/cli_workspace.py:142-149`）。
 - `runs/` 属于项目内容，引擎不覆盖、不删除；默认建议不提交，重要交付物由用户自己留底。
 
 ## 迁移旧目录

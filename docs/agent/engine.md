@@ -1,7 +1,8 @@
 # 引擎内部
 
 对象：`skills/llm-wiki/scripts/`。`wiki.py` 只是入口（命令行转发与兼容再导出），命令层在
-`cli.py`，账本表结构与 `Wiki` 组合根在 `ledger.py`，其余按职责分在 `pages.py`、`view.py`、
+`cli.py` 与 `cli_*.py`（共用层 `cli_common.py`，按命令族分文件），账本表结构与 `Wiki` 组合根在
+`ledger.py`，其余按职责分在 `pages.py`、`view.py`、
 `task_store.py`、`ingest.py`、`util.py`；单文件都不超过 2000 行。公共错误在 `errors.py`，
 frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行工作流在
 `workflows.py`，话题沉淀在 `topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，
@@ -13,9 +14,10 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 区段 | 位置 | 说明 |
 | --- | --- | --- |
 | 入口与兼容面 | `wiki.py` | 调 `runtime.require_python()`、`__main__` 转发到 `cli.main()`；再导出 `tests/selftest.py` 用到的函数，不承载逻辑 |
-| 命令层 | `cli.py` 的 `command_*`、`submit_route`、`submit_page` | 只做参数解析、调用 `Wiki`、组装输出；`main`、`COMMANDS`、`build_parser` 也在这里 |
+| 命令层 | `cli.py`；`cli_ingest.py`、`cli_submit.py`、`cli_workspace.py`、`cli_query.py`、`cli_page.py`、`cli_workflow.py` | 各文件装一族的 `command_*`；只做参数解析、调用 `Wiki`、组装输出。`cli.py` 只留 `main`、`COMMANDS`、`build_parser` 与再导出；跨文件共享的只有 `cli_common.py` |
+| 命令共用层 | `cli_common.py` 的 `ARGS`、`emit`、`fail`、`open_wiki`、`require_install` | `ARGS` 是一个共享的 `Namespace` 对象，`main` 只更新它的属性，命令模块 import 到的是同一个对象 |
 | 常量与配置 | `ledger.py` 的目录常量、`DEFAULT_CONFIG`、`load_config` | `TASK_LEASE_SECONDS=900` 在 `task_store.py`；正文/摘要上限在 `validation.py` |
-| 错误与输出 | `errors.py` 的 `WikiError`；`emit`、`fail` 在 `cli.py` | 错误码 + `next` + 退出码；所有命令走同一信封 |
+| 错误与输出 | `errors.py` 的 `WikiError`；`emit`、`fail` 在 `cli_common.py` | 错误码 + `next` + 退出码；所有命令走同一信封 |
 | 工具 | `util.py` | `norm_key`、`digest_bytes`/`digest_text`、`same_stamp`、`now_iso`/`parse_iso`、`dump_meta`、`write_atomic` |
 | 工作区边界 | `workspace.py` | `WIKI_DIR`、`window_safe`、`inside_root`、`dry_store`；文件参数一律先过 `inside_root` |
 | 摄入与解析 | `ingest.py` | `extract_text`/`pdf_to_text`/`docx_to_text`/`html_to_text`、`decode_bytes`、`raw_facts`、`raw_body_digest`、`ingest_decision`；纯函数，不碰数据库；超限在 `read_bytes` 抛 |
@@ -23,7 +25,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 页面层 | `pages.py` 的 `PagesMixin` | `page_record`、`write_rev`、`rebuild_links`、`links_for`、`view_text`、`page_ids` |
 | 页面渲染 | `pages.py` 的 `render_page` | 依赖 `frontmatter.yaml_scalar`；`view_path`/`raw_of` 只在写观看区时传入，证据行链到 raw、raw 末尾追加原文来源段；改动一侧要同步另一侧 |
 | 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
-| 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`workflows/`、`topics/`、`runs/` 是项目内容，引擎不覆盖、不删除；手改只告警，`sync` 回收 |
+| 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli_workspace.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`workflows/`、`topics/`、`runs/` 是项目内容，引擎不覆盖、不删除；手改只告警，`sync` 回收 |
 | 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；租约归属（`task_leases`、`sweep_leases`、`lease_owner`）；并发走同一条 CAS 约定 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；先扫 `<view>/workflows/`，再扫旧根 `workflows/` 兜底，最后合并技能内置工作流；条目带 `origin`（`view`/`legacy`/`builtin`）与 `legacy_conflict`；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
@@ -127,7 +129,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     正文为空或文件超过 200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的
     `topic_matches` 与页面 `matches` 分开计数；命中页面时 `query` 反向给 `citing_topics`；
     话题文件由 agent 直接写，不经账本。
-    `parse_refs` 是纯函数，只认 `## 依据` 节的 `- ` 列表项；校验在 `cli.py` 的
+    `parse_refs` 是纯函数，只认 `## 依据` 节的 `- ` 列表项；校验在 `cli_query.py` 的
     `resolve_topic_refs` 里做，`topics.py` 不依赖账本。
 14. **观看区目录由 `publish` 配置决定。** `publish_dir_name` 要求 `dir` 是单个目录名，拒绝
     `.wiki`、`topics`、`workflows`；`ensure()` 在开关判断之前调用它，非法值即使

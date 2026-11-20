@@ -77,8 +77,8 @@ Markdown 文档同样超限（按 1.2 万字符口径，行数均未超 1000）�
 - [ ] 决定拆分顺序（建议 A → B → C）与是否先做 A
 - [ ] 拆分后每个文件都在上限以内（代码 1000 行 / 2 万字符；Markdown 1000 行 / 1.2 万字符），且职责可用一句话说明
 - [x] `tests/selftest.py` 仍可一条命令跑全量，输出与现在一致（`N/N checks passed`）
-- [ ] 新增脚本文件同步到 `health.py` 的 `SCRIPT_FILES`，`health` 自测不报缺失
-- [ ] `docs/agent/engine.md` 的模块地图与 `cli.py` 入口约定同步更新
+- [x] 新增脚本文件同步到 `health.py` 的 `SCRIPT_FILES`，`health` 自测不报缺失
+- [x] `docs/agent/engine.md` 的模块地图与 `cli.py` 入口约定同步更新
 - [ ] 每次拆分单独提交，提交信息说明拆分边界，不改运行行为
 
 ## 进展
@@ -87,5 +87,10 @@ Markdown 文档同样超限（按 1.2 万字符口径，行数均未超 1000）�
   （120 行 / 4621 字符）+ `support.py`、`fixtures.py` 与 18 个 `checks_*.py`；最大单文件
   300 行 / 15588 字符。`python3 tests/selftest.py` 仍是一条命令跑全量，368/368 通过、退出码 0，
   输出与拆分前逐字节一致（`--json` 汇总同样不变）。
-- 2026-11-20：B（`cli.py`）、C（`ledger.py` / `task_store.py`）、D（超限 Markdown）未开工；
-  这些文件当前体积见上方表格，B 是下一个候选。
+- 2026-11-20：方案 B 已完成。`cli.py` 从 1872 行 / 77913 字符拆成入口（164 行 / 7812 字符）
+  + `cli_common.py`（156 行 / 5251 字符）+ 6 个按命令族分的 `cli_*.py`，最大
+  `cli_submit.py` 356 行 / 15692 字符。分两步提交：先抽共用层（`da37e74`），再按族搬命令。
+  `python3 tests/selftest.py` 368/368、输出与拆分前逐字节一致；`ARGS` 改成共享
+  `Namespace` 对象，`main` 只更新属性，78 处使用点与所有命令输出不变。
+- 2026-11-20：C（`ledger.py` / `task_store.py`）、D（超限 Markdown）未开工；
+  这些文件当前体积见上方表格，C 是下一个候选。
