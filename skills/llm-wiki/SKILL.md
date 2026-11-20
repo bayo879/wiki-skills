@@ -204,6 +204,9 @@ id；终端会话用 `--owner <id>` 或 `export LLM_WIKI_OWNER=<id>` 固定一�
 python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
 python3 <skill>/scripts/wiki.py query "关键词" --json
 python3 <skill>/scripts/wiki.py query --page <page-id> --json
+
+普通 `query` / `query --page` 是只读快照：不取工作区锁、不创建 `.wiki/`、不补 schema、
+不推观看区；未初始化会报 `E_STATE`，先 `ingest`。`query --task` 仍写任务目录，按写命令排队。
 ```
 
 `query` 会带回最多 5 个工作流候选：`workflows` 是候选列表，`workflow_matches` 是数量，每条

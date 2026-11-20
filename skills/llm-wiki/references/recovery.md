@@ -58,6 +58,12 @@ python3 <skill>/scripts/wiki.py ingest --json   # 失败时 stdout 仍是一段 
 `.wiki` 已存在但建不了 `.wiki/lock` 时也走本节，`message` 形如
 `workspace is not writable: …/.wiki/lock`；修好 `.wiki` 的权限后重跑。
 
+## 工作区未初始化
+
+普通 `query` / `query --page` 只读账本，不会顺手创建 `.wiki/`。找不到 `.wiki/wiki.db`
+时返回 `E_STATE`，`message` 是 `workspace is not initialized`；先运行 `ingest`（或 `init`）
+建立账本再查。不要把 `--root` 指向空目录来试探，那只会得到同一个错误。
+
 ## 旧账本
 
 对应 `E_STATE`，`message` 形如 `ledger schema is older than this skill: sources, raws`。

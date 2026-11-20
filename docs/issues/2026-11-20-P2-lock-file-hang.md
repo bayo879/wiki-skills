@@ -1,19 +1,19 @@
 # 异常 `.wiki/lock` 会让加锁命令静默无限卡住
 
-**状态：锁卡死已修（2026-11-20）；issue 保留跟踪普通 query 只读免锁与残余锁加固。**
+**状态：锁卡死已修（2026-11-20）；普通 query / --page 只读免锁已落地（2026-11-20）；issue 保留跟踪残余锁加固。**
 
-## 2026-11-20 更新：普通 query 改走只读免锁
+## 2026-11-20 更新：普通 query 只读免锁（已落地）
 
 用户确认：常规非 task 的 `query` 按只读快照处理，原则上不加锁——搜到当下结果即可，下一秒
 变化不影响判断。这条会消掉本 issue 里 `query` 的卡死症状，但不解决写命令的锁问题，issue
 保留。
 
 - 普通 `query` / `query --page`：只读打开账本，不跑 `ensure(push=True)`/`sync_view`，不建
-  `.wiki` 目录、不补 schema、不创建 `.wiki/lock`；空工作区如何提示待定（建议明确报错
-  要求先 `init`）。
+  `.wiki` 目录、不补 schema、不创建 `.wiki/lock`；`.wiki/wiki.db` 不存在或 schema 缺列
+  时报 `E_STATE`，`next` 要求先 `ingest`。
 - `query --task` 仍写 `queries.jsonl` 并做配额读改写，保留锁。
-- 锁卡死修复后，下面三种异常锁不再让 `query` 卡住，会快速返回 `E_STATE`/`E_HEALTH`；
-  但普通 `query` 仍走整命令锁，正常竞争时最多等 5 秒，只读免锁尚未实现。
+- 普通 `query` 已免锁：`.wiki/lock` 是目录/FIFO/不可删时仍能返回结果，也不创建锁；
+  `query --task` 仍走整命令锁，异常锁时快速返回 `E_STATE`。
 - 锁的长期分层（硬租约、树级互斥、观看区单写者）见 `docs/agent/development-decisions.md`，
   不在本 issue 的验收范围内。
 
@@ -22,9 +22,12 @@
 - `workspace_lock` 先判 deadline，再判/删陈旧锁；只接受普通文件，非普通文件直接报
   `E_STATE`；pid 用非阻塞、限长读取；陈旧锁 `unlink` 失败报 `E_STATE`；创建锁失败报
   `E_HEALTH`。
-- `tests/selftest.py` 新增目录锁、FIFO、不可删陈旧锁、不可写 `.wiki` 四个用例，
-  `python3 tests/selftest.py` 332/332 通过。
-- 普通 `query` 只读免锁尚未实现，相关验收项仍未完成。
+- 普通 `query` 只读免锁已落地：`Wiki.open_readonly`（`mode=ro`/`query_only`，缺库或旧
+  schema 报 `E_STATE`）+ `open_wiki(readonly=True)` + `command_query` 分流 + `main` 跳过锁；
+  `query --task` 仍加锁。
+- `tests/selftest.py` 新增目录锁、FIFO、不可删陈旧锁、不可写 `.wiki` 四个异常锁用例，
+  以及六个 query 只读用例（普通 query 忽略锁、`--task` 仍锁、空库 `E_STATE`、旧 schema
+  `E_STATE`、query 不 sync、只读工作区可查）；`python3 tests/selftest.py` 338/338 通过。
 
 ## 问题
 
@@ -70,8 +73,9 @@ cd "$tmp" && python3 <repo>/skills/llm-wiki/scripts/wiki.py query 测试 --json
   只是“query 没反应”。
 
 以上卡死已在 2026-11-20 修复：目录/FIFO/不可删锁在 0.1 秒内报 `E_STATE`，`.wiki` 不可写
-报 `E_HEALTH`。普通 `query` 仍会拿整命令锁，正常竞争时最多等 5 秒；只读免锁是另一项。
-- 排查文档的口径曾与代码不一致：[recovery.md:124](../../skills/llm-wiki/references/recovery.md#L124-L125)
+报 `E_HEALTH`。普通 `query` 已不再拿整命令锁；`query --task` 仍会拿锁，正常竞争时最多等
+5 秒。
+- 排查文档的口径曾与代码不一致：[recovery.md:130](../../skills/llm-wiki/references/recovery.md#L130-L131)
   原让用户在锁“超过十分钟没动”时删除，而代码的陈旧阈值是 30 分钟
   （[workspace.py:19](../../skills/llm-wiki/scripts/workspace.py#L19)、[cli.md:59](../../docs/readme/cli.md#L59)、
   [engine.md:157](../../docs/agent/engine.md#L157)），人工处置时容易误判；2026-11-20 已统一为三十分钟。
@@ -89,7 +93,7 @@ cd "$tmp" && python3 <repo>/skills/llm-wiki/scripts/wiki.py query 测试 --json
 
 ## 候选方案
 
-第 1-4、6 项已落地（见上方「已落地」）；第 5 项与 query 只读仍待定。目标不变：**任何分支
+第 1-4、6 项与 query 只读已落地（见上方「已落地」）；第 5 项仍待定。目标不变：**任何分支
 都必须在时限内给出结果**，异常锁文件不能变成静默等待或空转。
 
 1. 把 deadline 判断移到 `FileExistsError` 分支开头，先判超时，再判/删陈旧锁；保证 5 秒后
@@ -111,12 +115,12 @@ cd "$tmp" && python3 <repo>/skills/llm-wiki/scripts/wiki.py query 测试 --json
 - [x] `.wiki/lock` 为 FIFO 时在 5 秒内报错，不阻塞在 `read_text`
 - [x] 正常的崩溃锁（pid 已死、目录可写）仍被接管，现有 selftest 保持通过
 - [x] 正常竞争仍是 5 秒后 `E_BUSY`
-- [ ] 普通 `query` 在 `.wiki/lock` 为目录/FIFO/不可删时不被阻塞，也不创建 `.wiki/lock`
-- [ ] 普通 `query` 不执行 `ensure(push=True)`/`sync_view`，不写观看区
-- [ ] 普通 `query` 可在只读工作区返回结果，或按定案给出明确错误
-- [ ] `query --task` 仍按写路径加锁，配额校验不变
+- [x] 普通 `query` 在 `.wiki/lock` 为目录/FIFO/不可删时不被阻塞，也不创建 `.wiki/lock`
+- [x] 普通 `query` 不执行 `ensure(push=True)`/`sync_view`，不写观看区
+- [x] 普通 `query` 可在只读工作区返回结果，或按定案给出明确错误
+- [x] `query --task` 仍按写路径加锁，配额校验不变
 - [x] `tests/selftest.py` 新增异常锁用例；`python3 -m py_compile skills/llm-wiki/scripts/*.py`
       与 `python3 tests/selftest.py` 通过
-- [ ] `tests/selftest.py` 新增 query 只读用例，并保持 selftest 通过
+- [x] `tests/selftest.py` 新增 query 只读用例，并保持 selftest 通过
 - [x] `cli.md`、`engine.md`、`recovery.md`、`SKILL.md` 的锁说明与当前实现一致
-- [ ] query 只读落地后，同步 `cli.md`、`SKILL.md`、`engine.md` 的 query 锁说明
+- [x] query 只读落地后，同步 `cli.md`、`SKILL.md`、`engine.md` 的 query 锁说明

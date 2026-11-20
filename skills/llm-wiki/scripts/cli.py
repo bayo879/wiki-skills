@@ -115,7 +115,7 @@ def fail(cmd, root, error):
             sys.stderr.write(f"next: {error.next_step}\n")
     return error.exit_code
 
-def open_wiki(require_sources=False, dry_run=False, push=True):
+def open_wiki(require_sources=False, dry_run=False, push=True, readonly=False):
     # The workspace is the directory the command runs in. A wiki may live in a
     # subdirectory, but nothing may point above the workspace.
     workspace = Path.cwd().resolve()
@@ -127,6 +127,8 @@ def open_wiki(require_sources=False, dry_run=False, push=True):
             "run the command from the workspace, or pass a subdirectory inside it",
             2,
         )
+    if readonly:
+        return Wiki(root).open_readonly(), []
     if dry_run and not (root / WIKI_DIR / CONFIG_NAME).exists():
         # A dry run must not create `.wiki/` in a directory the user is only
         # inspecting, so plan against a throwaway store under `.wiki/tmp/`.
@@ -1015,7 +1017,16 @@ def query_task(wiki, words):
 
 
 def command_query():
-    wiki, _ = open_wiki()
+    words = [
+        word
+        for chunk in (ARGS.text or [])
+        for word in re.split(r"\s+", chunk.strip())
+        if word
+    ]
+    if ARGS.task and not ARGS.page:
+        wiki, _ = open_wiki()
+        return query_task(wiki, words)
+    wiki, _ = open_wiki(readonly=True)
     if ARGS.page:
         record = wiki.page_record(ARGS.page)
         if not record:
@@ -1049,14 +1060,6 @@ def command_query():
         )
         wiki.close()
         return 0
-    words = [
-        word
-        for chunk in (ARGS.text or [])
-        for word in re.split(r"\s+", chunk.strip())
-        if word
-    ]
-    if ARGS.task:
-        return query_task(wiki, words)
     terms = words
     if not terms:
         raise WikiError("E_USAGE", "query needs text, --page or --task",
@@ -1724,7 +1727,11 @@ def main(argv=None):
     try:
         # 试运行不得创建 `.wiki/`，此时也没有可争用的写入目标，直接跳过排队。
         dry_only = command == "ingest" and ARGS.dry_run and not (root / WIKI_DIR).exists()
-        if command in LOCKED_COMMANDS and not dry_only:
+        locked = command in LOCKED_COMMANDS and not dry_only
+        # A plain query is a snapshot read; only `--task` writes the ledger.
+        if command == "query" and (not ARGS.task or ARGS.page):
+            locked = False
+        if locked:
             with workspace_lock(root):
                 return handler()
         return handler()

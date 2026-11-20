@@ -1841,6 +1841,8 @@ def main(argv=None):
               split_provenance(hand_written) == (hand_written, []))
 
         room_view = root / "view/pages/concept/机房巡检.md"
+        # query 现在是只读快照，不再顺带推送观看区；先显式推一次再验证 sync 的幂等性。
+        run(root, "sync")
         room_text = room_view.read_text(encoding="utf-8")
         synced = run(root, "sync")["data"]
         check(results, "sync leaves an untouched view alone",
@@ -2722,6 +2724,74 @@ def main(argv=None):
             finally:
                 (unwritable / ".wiki").chmod(0o755)
                 shutil.rmtree(unwritable, ignore_errors=True)
+
+            # 普通 query 是只读快照：不取锁、不建目录、不推观看区。
+            lock.mkdir()
+            try:
+                found = run(task_root, "query", "测试")
+                check(results, "a plain query ignores the workspace lock",
+                      found["ok"] and lock.is_dir(), (found, lock))
+            finally:
+                lock.rmdir()
+
+            lock.mkdir()
+            try:
+                denied = run(task_root, "query", "--task", "t_missing", expect=3, timeout=10)
+                check(results, "query --task still takes the workspace lock",
+                      denied.get("error", {}).get("code") == "E_STATE", denied)
+            finally:
+                lock.rmdir()
+
+            empty = Path(tempfile.mkdtemp(prefix="llm-wiki-query-empty-"))
+            try:
+                denied = run(empty, "query", "hello", expect=3)
+                check(results, "query on an uninitialized workspace reports E_STATE",
+                      denied.get("error", {}).get("code") == "E_STATE"
+                      and not (empty / ".wiki").exists(), denied)
+            finally:
+                shutil.rmtree(empty, ignore_errors=True)
+
+            legacy = Path(tempfile.mkdtemp(prefix="llm-wiki-query-legacy-"))
+            try:
+                (legacy / ".wiki").mkdir()
+                conn = sqlite3.connect(legacy / ".wiki" / "wiki.db")
+                conn.execute(
+                    "CREATE TABLE page_revs (page TEXT, rev INTEGER, meta TEXT, "
+                    "body TEXT, digest TEXT, render_digest TEXT, origin TEXT, "
+                    "accepted_at TEXT)"
+                )
+                conn.commit()
+                conn.close()
+                denied = run(legacy, "query", "hello", expect=3)
+                check(results, "query refuses a ledger it cannot migrate read-only",
+                      denied.get("error", {}).get("code") == "E_STATE", denied)
+            finally:
+                shutil.rmtree(legacy, ignore_errors=True)
+
+            snapshot = Path(tempfile.mkdtemp(prefix="llm-wiki-query-snapshot-"))
+            try:
+                run(snapshot, "init")
+                readme = snapshot / "wiki" / "README.md"
+                readme.parent.mkdir(parents=True, exist_ok=True)
+                readme.write_text("hand edited\n", encoding="utf-8")
+                found = run(snapshot, "query", "hello")
+                check(results, "query does not sync the view",
+                      found["ok"] and readme.read_text(encoding="utf-8") == "hand edited\n",
+                      (found, readme))
+            finally:
+                shutil.rmtree(snapshot, ignore_errors=True)
+
+            readonly = Path(tempfile.mkdtemp(prefix="llm-wiki-query-ro-"))
+            try:
+                run(readonly, "init")
+                (readonly / ".wiki").chmod(0o555)
+                if not os.access(readonly / ".wiki", os.W_OK):
+                    found = run(readonly, "query", "hello", timeout=10)
+                    check(results, "query reads a read-only workspace",
+                          found["ok"], found)
+            finally:
+                (readonly / ".wiki").chmod(0o755)
+                shutil.rmtree(readonly, ignore_errors=True)
         finally:
             shutil.rmtree(task_root, ignore_errors=True)
 

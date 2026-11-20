@@ -315,6 +315,66 @@ class LedgerMixin:
     def publish_raw_dir(self):
         return self.publish_dir / RAW_SUBDIR
 
+    def open_readonly(self):
+        """Open an existing ledger without creating, migrating or publishing.
+
+        `query` is a snapshot read: it must not create `.wiki/`, repair the
+        schema or push the view. Requiring an existing database also keeps a
+        misspelled `--root` from silently looking like an empty wiki.
+        """
+        if not self.db_path.is_file():
+            raise WikiError(
+                "E_STATE",
+                "workspace is not initialized",
+                "run `ingest` first; query only reads an existing ledger",
+                3,
+                section="工作区未初始化",
+            )
+        self.config = load_config(self.config_path)
+        publish_dir_name(self.config)
+        self.raw_dir = self.publish_raw_dir
+        try:
+            self.conn = sqlite3.connect(f"{self.db_path.as_uri()}?mode=ro", uri=True)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA query_only = ON")
+            self.conn.execute("PRAGMA busy_timeout = 5000")
+            missing = set()
+            for table, columns in REQUIRED_COLUMNS:
+                present = {
+                    row[1]
+                    for row in self.conn.execute(f"PRAGMA table_info({table})")
+                }
+                missing.update(
+                    f"{table}.{column}" for column in columns if column not in present
+                )
+            for table in ("sources", "page_revs", "links"):
+                if self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table,),
+                ).fetchone() is None:
+                    missing.add(table)
+        except sqlite3.DatabaseError as error:
+            conn, self.conn = self.conn, None
+            if conn is not None:
+                conn.close()
+            raise WikiError(
+                "E_DB",
+                f"ledger cannot be opened: {error}",
+                "run `status` or `ingest` to repair the ledger, or restore it from backup",
+                3,
+            ) from error
+        if missing:
+            self.conn.close()
+            self.conn = None
+            raise WikiError(
+                "E_STATE",
+                f"ledger schema is out of date: missing {', '.join(sorted(missing))}",
+                "run `status` or `ingest` to migrate the ledger",
+                3,
+                section="旧账本",
+            )
+        return self
+
     def ensure(self, push=True):
         created = []
         for directory in (self.wiki_dir, self.tasks_dir, self.draft_dir):

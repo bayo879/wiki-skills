@@ -11,17 +11,19 @@
   它接受读到某一时刻的状态，不为此加锁，也不靠长读事务保证一致性：SQLite 默认 rollback
   journal，长读事务会挡住写命令。
 - 因此普通 `query` 不再走整命令工作区锁，打开时也不能执行 `ensure(push=True)`：不建
-  `.wiki`、不补 schema、不跑 `sync_view`、不创建 `.wiki/lock`。未初始化工作区如何提示
-  （明确报错要求先 `init`，还是返回空结果）在 issue 中定案，不写成现有行为。
+  `.wiki`、不补 schema、不跑 `sync_view`、不创建 `.wiki/lock`。已落地（2026-11-20）：
+  `Wiki.open_readonly` 用 `mode=ro` + `query_only` 打开；`.wiki/wiki.db` 不存在或 schema
+  缺列时明确报 `E_STATE`，next 要求先 `ingest`，不静默返回空结果。
 - `query --task` 仍写 `<task_dir>/queries.jsonl` 并做配额读改写，保留锁或等价的短临界区；
   它是拆分任务树的写入路径，不在本条豁免内。
 - 本条只改写 2026-11-17「任务目录化、单页单任务与工作区文件锁」中 `query` 的锁归属。
   `ingest`、`next`、`submit`、`release`、`sync`、`doctor`、`page import/restore/link`
   等写命令仍按整命令文件锁排队，直到锁分层落地。
 - 锁的长期方向是分层：任务归属用硬租约（进程身份、心跳、epoch fencing），互斥粒度按任务
-  树和共享资源而不是整条命令，观看区推送收敛为单写者。该方向尚未实现；实施项与验收见
-  `docs/issues/2026-11-20-P2-lock-file-hang.md`。代码落地前，`docs/readme/cli.md` 与
-  `skills/llm-wiki/SKILL.md` 仍按当前行为描述。
+  树和共享资源而不是整条命令，观看区推送收敛为单写者。普通 query 的只读免锁已在
+  2026-11-20 落地，其余方向尚未实现；实施项与验收见
+  `docs/issues/2026-11-20-P2-lock-file-hang.md`。`docs/readme/cli.md` 与
+  `skills/llm-wiki/SKILL.md` 已同步 query 只读行为。
 
 ## 2026-11-19：工作流与话题定义收进观看区
 

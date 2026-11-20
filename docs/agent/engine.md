@@ -154,7 +154,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     `task_sources`）。`enqueue_task` 撞 `IntegrityError` 时回查已有任务并复用；`submit_route`
     命中已领走的 page 任务仍报 `E_STATE`，不另开第二条。route 任务与来源自己的转换任务
     不计入这条约束。
-18. **写命令按工作区排队。** 会写账本或观看区的命令在 `main()` 里用
+18. **写命令按工作区排队。** 会写账本或观看区的命令（含 `query --task`）在 `main()` 里用
     `workspace.workspace_lock` 抢 `<root>/.wiki/lock`（`O_CREAT|O_EXCL` 写入 pid），等待
     5 秒仍拿不到抛 `E_BUSY`（exit 4）；非 posix 平台不按 pid 判活，只按 30 分钟陈旧阈值
     接管，posix 用 `os.kill(pid, 0)` 判断持有者是否还在。锁路径不是普通文件或陈旧锁无法
@@ -162,14 +162,16 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     deadline，任何分支都不会绕过 5 秒上限。`--dry-run` 且没有 `.wiki/` 时不加锁，避免
     试运行留下目录。
 
-## 锁的调整方向（未实现）
+## 锁的分层现状（2026-11-20）
 
-普通 `query`（文本检索、`--page`）只读账本，按快照语义返回当下结果，不进入第 18 条的整
-命令工作区锁：只读打开账本，不执行 `ensure(push=True)`/`sync_view`，也不创建
-`.wiki/lock`；`query --task` 仍因写 `queries.jsonl` 保留锁。更长线的方向是任务租约带进程
-身份、心跳与 epoch fencing，互斥粒度缩到任务树/共享资源，观看区推送收敛为单写者。代码
-落地前，第 18 条仍是实际行为；决策见 `docs/agent/development-decisions.md`，实施项见
-`docs/issues/2026-11-20-P2-lock-file-hang.md`。
+普通 `query`（文本检索、`--page`）已按只读快照落地：`Wiki.open_readonly` 用
+`mode=ro` + `query_only` 打开账本，不执行 `ensure(push=True)`/`sync_view`，不创建
+`.wiki/lock`，也不创建 `.wiki/`；`.wiki/wiki.db` 不存在或 schema 缺列时报 `E_STATE`。
+它不进入第 18 条的整命令工作区锁；`query --task` 仍因写 `queries.jsonl` 保留锁。
+
+更长期的方向尚未实现：任务租约带进程身份、心跳与 epoch fencing，互斥粒度缩到任务树/
+共享资源，观看区推送收敛为单写者。第 18 条仍是写命令的实际行为；决策见
+`docs/agent/development-decisions.md`，实施项见 `docs/issues/2026-11-20-P2-lock-file-hang.md`。
 
 ## 数据方向
 

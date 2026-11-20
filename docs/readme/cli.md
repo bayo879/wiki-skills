@@ -56,9 +56,11 @@
 - 草稿、任务目录、导出与临时文件放 `<root>/.wiki/` 下（`.wiki/drafts/`、
   `.wiki/tasks/<id>/`、`.wiki/export`、`.wiki/tmp/`）。`--dry-run` 的临时库在 `.wiki/tmp/`，
   退出时清理。
-- 会写账本或观看区的命令（`init`、`ingest`、`next`、`submit`、`release`、`query`、
-  `export`、`status`、`sync`、`doctor`、`page import`、`page restore`、`page link`）持有一把工作区文件锁
-  `.wiki/lock`；锁被另一个存活进程占着时排队等待 5 秒，仍拿不到返回 `E_BUSY`（退出码 4）。
+- 会写账本或观看区的命令（`init`、`ingest`、`next`、`submit`、`release`、`export`、
+  `status`、`sync`、`doctor`、`page import`、`page restore`、`page link`，以及
+  `query --task`）持有一把工作区文件锁 `.wiki/lock`；普通 `query` / `query --page`
+  只读账本，不取锁、不创建 `.wiki/lock`。锁被另一个存活进程占着时排队等待 5 秒，
+  仍拿不到返回 `E_BUSY`（退出码 4）。
   进程崩溃留下的锁（记录 pid 已不存在，或超过 30 分钟）会被下一个命令接管；锁路径不是
   普通文件、陈旧锁删不掉时快速返回 `E_STATE`（退出码 3），`.wiki` 不可写时返回
   `E_HEALTH`（退出码 1），不会无限等待。
@@ -236,6 +238,10 @@ decision 的 `links` 声明这页与哪些页面相关；写页前应逐条判�
 `path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`sources`（`[{key, raw}]`，`raw`
 是账本渲染的观看区副本路径，源缺失时为 `null`）、`outgoing`、`incoming`、`body`，不查话题。
 
+普通 `query` / `query --page` 是只读快照：不取工作区锁，不创建 `.wiki/`，不补 schema，
+不推送观看区。`.wiki/wiki.db` 不存在或 schema 缺列时报 `E_STATE`（退出码 3），先 `ingest`
+或 `init`。`query --task` 会写任务目录，仍按写命令加锁。
+
 `data`: `{query, matches, returned, results, topic_matches, topics, workflow_matches, workflows,
 boundary}`。`matches` 只数页面，`topic_matches` 只数话题，`workflow_matches` 只数工作流；
 `topics[]` 为 `{name, title, description, status, updated, path, origin, score, snippet}`，
@@ -393,7 +399,7 @@ fixed, healthy}`；有 `fail` 级问题时退出码 1。`doctor` 不检查观看
 | `E_TASK_STALE` | 任务已关闭或租约过期 | 重新 `next`，丢弃旧载荷；来源变化导致的过期是 `E_SOURCE_DRIFT` |
 | `E_TASK_SCOPE` | 载荷引用了任务范围外的来源 | 只用任务 `work.sources` 里的 key |
 | `E_TASK_CONFLICT` | 来源已属于另一棵未关闭的页面任务树（同一次 route 拆页除外） | 先完成或关闭那个页面任务；拆页请放在同一次 route 提交里 |
-| `E_STATE` | 状态不满足：旧账本（有数据的旧结构）、观看区路径不是目录、页面正被其他任务写 | 旧库按恢复手册「旧账本」：备份后删 `.wiki/` 重新 `ingest`；其余按 message 处理，不要手改账本 |
+| `E_STATE` | 状态不满足：未初始化（`query` 只读）、旧账本（有数据的旧结构）、观看区路径不是目录、页面正被其他任务写 | 未初始化先 `ingest`；旧库按恢复手册「旧账本」：备份后删 `.wiki/` 重新 `ingest`；其余按 message 处理，不要手改账本 |
 | `E_META_CHANGED` | `sync` 时观看区页面的 `title`/`type`/`summary`/`sources` 与账本不一致 | 只收正文加 `--body-only`；确实要改元数据用 `page import`（手改未收割时改名会被冻结） |
 | `E_DUPLICATE` | `sync` 时同一页面 id 在观看区出现两次 | 删掉重复文件后重跑 |
 | `E_PAGE_CONFLICT` | 页面已存在（new）或版本已变（update） | 重新领任务，基于当前 rev 重写 |
