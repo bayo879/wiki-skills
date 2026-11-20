@@ -346,6 +346,90 @@ def view_definition_suite(results):
         shutil.rmtree(custom, ignore_errors=True)
 
 
+def topic_refs_flow(results):
+    root = Path(tempfile.mkdtemp(prefix="llm-wiki-topicrefs-"))
+    try:
+        (root / "shared.md").write_text(
+            "# 共享来源\n\n复机与停机都靠这份规则。\n", encoding="utf-8")
+        run(root, "ingest")
+        route = run(root, "next", "--kind", "route")["data"]["tasks"][0]
+        route_query(root, route, "复机")
+        key = route["work"]["sources"][0]["key"]
+        run(root, "submit", route["id"], "--payload", payload_file(
+            root, "topicrefs-route.json",
+            {"decisions": [{"source": key, "action": "new", "page": "page-a",
+                            "title": "甲页", "type": "concept", "reason": "甲"}]},
+        ))
+        task = run(root, "next", "--kind", "page")["data"]["tasks"][0]
+        draft = root / ".wiki/drafts/page-a.md"
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_text(
+            "## 结论\n\n复机需本人到厅。\n\n## 要点\n\n- 复机需本人到厅。\n",
+            encoding="utf-8")
+        run(root, "submit", task["id"], "--payload", payload_file(
+            root, "topicrefs-page.json",
+            {"page": "page-a", "title": "甲页", "type": "concept",
+             "summary": "复机需本人到厅。", "links": [],
+             "body_file": str(draft.relative_to(root)),
+             "evidence": [{"source": key, "quote": "复机与停机都靠这份规则。"}],
+             "boundaries": {"covered": "甲页", "not_covered": "其他"}},
+        ))
+        raw_rel = run(root, "query", "--page", "page-a")["data"]["sources"][0]["raw"]
+        raw_token = raw_rel.split("raw/", 1)[1]
+
+        write_topic(root / "wiki/topics", "复机旁证.md", "复机旁证", "旁证")
+        write_topic(
+            root / "wiki/topics", "复机办理.md", "复机办理", "复机路径",
+            body="## 依据\n\n"
+                 "- 页面：`page-a` — 甲页\n"
+                 "- 页面：`ghost-page`\n"
+                 f"- 原文：`raw:{raw_token}`\n"
+                 "- 话题：`复机旁证`\n"
+                 "- 工作流：`topic-exploration`\n"
+                 "- 页面：见下文\n"
+                 "\n## 结论\n\n复机需本人到厅。\n")
+        query = run(root, "query", "复机")["data"]
+        hit = [item for item in query["topics"] if item["name"] == "复机办理"][0]
+        refs = hit["refs"]
+        check(results, "query topic refs keep validated kinds",
+              refs["pages"] == ["page-a"] and refs["raws"] == [raw_token]
+              and refs["topics"] == ["复机旁证"]
+              and refs["workflows"] == ["topic-exploration"], refs)
+        check(results, "query topic refs put unknown targets in missing",
+              refs["missing"] == [{"kind": "page", "target": "ghost-page"}], refs)
+        proc = run_text(root, "query", "复机")
+        check(results, "query warns about broken refs without failing",
+              proc.returncode == 0
+              and "cites unknown page ghost-page" in proc.stderr
+              and "malformed ref" in proc.stderr, proc.stderr)
+
+        many = "\n".join(f"- 页面：`ghost-{index}`" for index in range(21))
+        write_topic(root / "wiki/topics", "坏链话题.md", "坏链话题", "大量坏链",
+                    body="## 依据\n\n" + many + "\n")
+        capped = run(root, "query", "坏链")["data"]["topics"][0]["refs"]
+        check(results, "missing refs cap at 20",
+              len(capped["missing"]) == 20, len(capped["missing"]))
+
+        raw_dir = (root / raw_rel).parent
+        for index in range(21):
+            (raw_dir / f"extra-{index}.md").write_text("# 补充\n\n说明。\n", encoding="utf-8")
+        extra = "\n".join(f"- 原文：`raw:extra-{index}.md`" for index in range(21))
+        write_topic(root / "wiki/topics", "超量话题.md", "超量话题", "超量原文",
+                    body="## 依据\n\n" + extra + "\n")
+        capped = run(root, "query", "超量")["data"]["topics"][0]["refs"]
+        check(results, "valid refs cap at 20", len(capped["raws"]) == 20, len(capped["raws"]))
+
+        write_topic(root / "topics", "旧库话题.md", "旧库话题", "旧库复机",
+                    body="## 依据\n\n- 页面：`page-a`\n\n## 结论\n\n复机旧记录。\n")
+        legacy = [item for item in run(root, "query", "旧库")["data"]["topics"]
+                  if item["name"] == "旧库话题"][0]
+        check(results, "legacy topic refs parse too",
+              legacy["origin"] == "legacy" and legacy["refs"]["pages"] == ["page-a"],
+              legacy)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def workflow_files(root):
     base = Path(root) / "workflows"
     good = base / "account-opening"
@@ -974,6 +1058,7 @@ def main(argv=None):
         topics_view_checks(results)
         topic_refs_checks(results)
         view_definition_suite(results)
+        topic_refs_flow(results)
         parsed, has_section = workflows.parse_steps(
             "## 步骤\n\n1. TOOL：**a**\n2. Human: **b**\n   - tool: 子项\n"
             "3. 没标\n\n## 其他\n\n- tool: 不算\n")

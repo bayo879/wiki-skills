@@ -1016,6 +1016,76 @@ def query_task(wiki, words):
     return 0
 
 
+TOPIC_REF_LIMIT = 20
+TOPIC_REF_WARNINGS = 3
+
+
+def resolve_topic_refs(wiki, entries):
+    """Validate parsed topic refs; return ({topic: refs}, warnings)."""
+    names = {entry["name"] for entry in entries}
+    pages = wiki.page_ids()
+    workflows_seen = {
+        item["id"] for item in workflows.scan(
+            wiki.root, view_root=wiki.publish_dir / workflows.WORKFLOW_DIR)
+    }
+    raw_base = wiki.publish_raw_dir
+    resolved, warnings = {}, []
+    for entry in entries:
+        if not entry.get("refs"):
+            # Invalid topics never carry refs; nothing to validate.
+            continue
+        parsed = entry["refs"]
+        refs = {"pages": [], "raws": [], "topics": [], "workflows": [], "missing": []}
+        notes = []
+        for line in parsed["malformed"]:
+            notes.append(f"warning: topic {entry['name']} malformed ref: {line.strip()}")
+        ordered = (
+            ("pages", "page", parsed["pages"], pages),
+            ("topics", "topic", parsed["topics"], names),
+            ("workflows", "workflow", parsed["workflows"], workflows_seen),
+        )
+        for key, kind, values, known in ordered:
+            for value in values:
+                if value in known:
+                    refs[key].append(value)
+                else:
+                    refs["missing"].append({"kind": kind, "target": value})
+                    notes.append(
+                        f"warning: topic {entry['name']} cites unknown {kind} {value}")
+        for value in parsed["raws"]:
+            if _raw_ref_ok(raw_base, wiki.root, value):
+                refs["raws"].append(value)
+            else:
+                refs["missing"].append({"kind": "raw", "target": value})
+                notes.append(
+                    f"warning: topic {entry['name']} cites unknown raw {value}")
+        if parsed["sections"] > 1:
+            notes.append(
+                f"warning: topic {entry['name']} has {parsed['sections']} 依据 sections")
+        dropped = False
+        for key in ("pages", "raws", "topics", "workflows"):
+            if len(refs[key]) > TOPIC_REF_LIMIT:
+                refs[key] = refs[key][:TOPIC_REF_LIMIT]
+                dropped = True
+        if len(refs["missing"]) > TOPIC_REF_LIMIT:
+            refs["missing"] = refs["missing"][:TOPIC_REF_LIMIT]
+            dropped = True
+        if dropped:
+            notes.append(
+                f"warning: topic {entry['name']} refs truncated to {TOPIC_REF_LIMIT}")
+        resolved[entry["name"]] = refs
+        warnings.extend(notes[:TOPIC_REF_WARNINGS])
+    return resolved, warnings
+
+
+def _raw_ref_ok(raw_base, root, value):
+    """A raw ref must stay inside the published raw tree and exist."""
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in path.parts:
+        return False
+    return (raw_base / path).is_file()
+
+
 def command_query():
     words = [
         word
@@ -1066,8 +1136,13 @@ def command_query():
                         "example: query 反诈 复机", 2)
     limit = ARGS.limit or 8
     scored, results = search.search_pages(wiki, terms, limit)
-    topic_hits = topics.match(
-        wiki.root, terms, limit, view_root=wiki.publish_dir / topics.TOPIC_DIR)
+    entries = topics.scan(wiki.root, view_root=wiki.publish_dir / topics.TOPIC_DIR)
+    topic_hits = topics.rank(entries, terms, limit)
+    refs_by_topic, ref_warnings = resolve_topic_refs(wiki, entries)
+    for line in ref_warnings:
+        sys.stderr.write(line + "\n")
+    for item in topic_hits:
+        item["refs"] = refs_by_topic[item["name"]]
     workflow_hits = workflows.match(
         wiki.root, terms, 5, view_root=wiki.publish_dir / workflows.WORKFLOW_DIR)
     data = {
@@ -1101,6 +1176,16 @@ def command_query():
         for item in topic_hits:
             block.append(f"{item['name']}  [{item['status'] or 'open'}]  {item['description']}")
             block.append(f"    path: {item['path']}")
+            refs = item["refs"]
+            packed = [f"page:{value}" for value in refs["pages"]]
+            packed += [f"raw:{value}" for value in refs["raws"]]
+            packed += [f"topic:{value}" for value in refs["topics"]]
+            packed += [f"workflow:{value}" for value in refs["workflows"]]
+            if packed:
+                block.append(f"    refs: {', '.join(packed)}")
+            if refs["missing"]:
+                block.append("    missing: " + ", ".join(
+                    f"{miss['kind']}:{miss['target']}" for miss in refs["missing"]))
         sections.append(block)
     lines = []
     for block in sections:
