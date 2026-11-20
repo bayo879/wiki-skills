@@ -236,16 +236,22 @@ decision 的 `links` 声明这页与哪些页面相关；写页前应逐条判�
 是否按流程办事由调用方核对后显式 `workflow load`。
 `query --page <id>`：`data.page` 是账本元数据，同层返回 `rev`、
 `path`（观看区路径；发布关闭时退回 `page:<id>` 引用）、`sources`（`[{key, raw}]`，`raw`
-是账本渲染的观看区副本路径，源缺失时为 `null`）、`outgoing`、`incoming`、`body`，不查话题。
+是账本渲染的观看区副本路径，源缺失时为 `null`）、`outgoing`、`incoming`、`body`，以及
+`citing_topics`（引用了该页的话题名，按名字排序；有引用时文本里在 `incoming:` 之后多一行
+`citing topics:`）。`query --page` 会顺带解析话题依据，坏引用只告警，不影响这次输出。
 
 普通 `query` / `query --page` 是只读快照：不取工作区锁，不创建 `.wiki/`，不补 schema，
 不推送观看区。`.wiki/wiki.db` 不存在或 schema 缺列时报 `E_STATE`（退出码 3），先 `ingest`
 或 `init`。`query --task` 会写任务目录，仍按写命令加锁。
 
-`data`: `{query, matches, returned, results, topic_matches, topics, workflow_matches, workflows,
-boundary}`。`matches` 只数页面，`topic_matches` 只数话题，`workflow_matches` 只数工作流；
-`topics[]` 为 `{name, title, description, status, updated, path, origin, score, snippet}`，
-`origin` 为 `view` 或 `legacy`，按 `path` 直接打开文件；`workflows[]` 的字段与
+`data`: `{query, matches, returned, results, topic_matches, topics,
+workflow_matches, workflows, boundary}`；`query --page` 的同层数据另带
+`citing_topics`。`matches` 只数页面，`topic_matches` 只数话题，`workflow_matches` 只数工作流；
+`topics[]` 为 `{name, title, description, status, updated, path, origin, score, snippet,
+refs}`，`refs`（`pages`/`raws`/`topics`/`workflows`/`missing`）；
+`origin` 为 `view` 或 `legacy`，按 `path` 直接打开文件；`--page` 与普通文本 `query`（不含
+`query --task`）的每页结果都带 `citing_topics`（按名字排序，文本只列前 3 条，其余折算成
+`+N`）。`refs.missing` 的元素是 `{kind, target}`，前四组是字符串数组。`workflows[]` 的字段与
 `workflow search` 的候选相同。
 
 `query --task <id> 词1 词2 ...`：把这次检索登记到任务上，route 任务提交前必须至少登记一次，
