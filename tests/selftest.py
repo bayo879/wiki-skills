@@ -419,6 +419,61 @@ def topic_refs_flow(results):
         capped = run(root, "query", "超量")["data"]["topics"][0]["refs"]
         check(results, "valid refs cap at 20", len(capped["raws"]) == 20, len(capped["raws"]))
 
+        many_pages = "\n".join(
+            ["- 页面：`page-a`"]
+            + [f"- 页面：`ghost-{index}`" for index in range(24)]
+            + [f"- 原文：`raw:extra-{index}.md`" for index in range(5)])
+        write_topic(root / "wiki/topics", "混合话题.md", "混合话题", "混合引用",
+                    body="## 依据\n\n" + many_pages + "\n")
+        capped = run(root, "query", "混合")["data"]["topics"][0]["refs"]
+        check(results, "kept refs cap at 20 across kinds",
+              capped["pages"] == ["page-a"] and capped["raws"] == []
+              and [item["target"] for item in capped["missing"]]
+              == [f"ghost-{index}" for index in range(19)]
+              and sum(len(capped[key]) for key in
+                      ("pages", "raws", "topics", "workflows"))
+              + len(capped["missing"]) == 20, capped)
+
+        for index in range(25):
+            write_topic(root / "wiki/topics", f"引用-{index:02d}.md",
+                        f"引用{index:02d}", "引用材料")
+        ref_lines = "\n".join(
+            [f"- 原文：`raw:extra-{index}.md`" for index in range(10)]
+            + [f"- 话题：`引用-{index:02d}`" for index in range(25)])
+        write_topic(root / "wiki/topics", "封顶话题.md", "封顶话题", "封顶引用",
+                    body="## 依据\n\n" + ref_lines + "\n")
+        capped = run(root, "query", "封顶")["data"]["topics"][0]["refs"]
+        check(results, "valid refs cap at 20 in total",
+              sum(len(capped[key]) for key in
+                  ("pages", "raws", "topics", "workflows")) == 20
+              and len(capped["raws"]) == 10
+              and capped["topics"] == [f"引用-{index:02d}" for index in range(10)]
+              and capped["missing"] == [], capped)
+        capped_text = run_text(root, "query", "封顶")
+        capped_warnings = [line for line in capped_text.stderr.splitlines()
+                           if "封顶话题" in line]
+        check(results, "truncating refs warns once on stderr",
+              len(capped_warnings) == 1
+              and "refs truncated to 20" in capped_warnings[0], capped_text.stderr)
+
+        write_topic(root / "wiki/topics", "越界话题.md", "越界话题", "越界原文",
+                    body="## 依据\n\n- 原文：`raw:/etc/passwd`\n"
+                         "- 原文：`raw:../ok.md`\n\n## 结论\n\n复机越界来源。\n")
+        escaped = run(root, "query", "越界")["data"]["topics"][0]["refs"]
+        check(results, "raw refs cannot escape the raw dir",
+              escaped["raws"] == []
+              and escaped["missing"] == [
+                  {"kind": "raw", "target": "/etc/passwd"},
+                  {"kind": "raw", "target": "../ok.md"}], escaped)
+
+        write_topic(root / "wiki/topics", "坏字节话题.md", "坏字节话题", "坏字节原文",
+                    body="## 依据\n\n- 原文：`raw:bad\x00name.md`\n")
+        broken_byte = run(root, "query", "坏字节")["data"]["topics"][0]["refs"]
+        check(results, "a NUL byte in a raw ref goes to missing",
+              broken_byte["raws"] == []
+              and broken_byte["missing"] == [
+                  {"kind": "raw", "target": "bad\x00name.md"}], broken_byte)
+
         write_topic(root / "topics", "旧库话题.md", "旧库话题", "旧库复机",
                     body="## 依据\n\n- 页面：`page-a`\n\n## 结论\n\n复机旧记录。\n")
         legacy = [item for item in run(root, "query", "旧库")["data"]["topics"]

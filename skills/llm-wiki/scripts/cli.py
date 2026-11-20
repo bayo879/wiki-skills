@@ -1029,47 +1029,43 @@ def resolve_topic_refs(wiki, entries):
             wiki.root, view_root=wiki.publish_dir / workflows.WORKFLOW_DIR)
     }
     raw_base = wiki.publish_raw_dir
+    kind_order = (("pages", "page"), ("raws", "raw"),
+                  ("topics", "topic"), ("workflows", "workflow"))
     resolved, warnings = {}, []
     for entry in entries:
-        if not entry.get("refs"):
-            # Invalid topics never carry refs; nothing to validate.
+        if not entry["valid"]:
+            # `_entry` only parses refs for a topic that has a body.
             continue
         parsed = entry["refs"]
         refs = {"pages": [], "raws": [], "topics": [], "workflows": [], "missing": []}
-        notes = []
-        for line in parsed["malformed"]:
-            notes.append(f"warning: topic {entry['name']} malformed ref: {line.strip()}")
-        ordered = (
-            ("pages", "page", parsed["pages"], pages),
-            ("topics", "topic", parsed["topics"], names),
-            ("workflows", "workflow", parsed["workflows"], workflows_seen),
-        )
-        for key, kind, values, known in ordered:
-            for value in values:
-                if value in known:
-                    refs[key].append(value)
-                else:
-                    refs["missing"].append({"kind": kind, "target": value})
-                    notes.append(
-                        f"warning: topic {entry['name']} cites unknown {kind} {value}")
-        for value in parsed["raws"]:
-            if _raw_ref_ok(raw_base, wiki.root, value):
-                refs["raws"].append(value)
+        notes = [
+            f"warning: topic {entry['name']} malformed ref: {line.strip()}"
+            for line in parsed["malformed"]
+        ]
+        ordered = [
+            (key, kind, value)
+            for key, kind in kind_order
+            for value in parsed[key]
+        ]
+        dropped = len(ordered) > TOPIC_REF_LIMIT
+        for key, kind, value in ordered[:TOPIC_REF_LIMIT]:
+            if kind == "raw":
+                known = _raw_ref_ok(raw_base, value)
+            elif kind == "page":
+                known = value in pages
+            elif kind == "topic":
+                known = value in names
             else:
-                refs["missing"].append({"kind": "raw", "target": value})
+                known = value in workflows_seen
+            if known:
+                refs[key].append(value)
+            else:
+                refs["missing"].append({"kind": kind, "target": value})
                 notes.append(
-                    f"warning: topic {entry['name']} cites unknown raw {value}")
+                    f"warning: topic {entry['name']} cites unknown {kind} {value}")
         if parsed["sections"] > 1:
             notes.append(
                 f"warning: topic {entry['name']} has {parsed['sections']} 依据 sections")
-        dropped = False
-        for key in ("pages", "raws", "topics", "workflows"):
-            if len(refs[key]) > TOPIC_REF_LIMIT:
-                refs[key] = refs[key][:TOPIC_REF_LIMIT]
-                dropped = True
-        if len(refs["missing"]) > TOPIC_REF_LIMIT:
-            refs["missing"] = refs["missing"][:TOPIC_REF_LIMIT]
-            dropped = True
         if dropped:
             notes.append(
                 f"warning: topic {entry['name']} refs truncated to {TOPIC_REF_LIMIT}")
@@ -1078,12 +1074,15 @@ def resolve_topic_refs(wiki, entries):
     return resolved, warnings
 
 
-def _raw_ref_ok(raw_base, root, value):
+def _raw_ref_ok(raw_base, value):
     """A raw ref must stay inside the published raw tree and exist."""
     path = Path(value)
     if not value or path.is_absolute() or ".." in path.parts:
         return False
-    return (raw_base / path).is_file()
+    try:
+        return (raw_base / path).is_file()
+    except (OSError, ValueError):
+        return False
 
 
 def command_query():
