@@ -245,8 +245,7 @@ decision 的 `links` 声明这页与哪些页面相关；写页前应逐条判�
 或 `init`。`query --task` 会写任务目录，仍按写命令加锁。
 
 `data`: `{query, matches, returned, results, topic_matches, topics,
-workflow_matches, workflows, boundary}`；`query --page` 的同层数据另带
-`citing_topics`。`matches` 只数页面，`topic_matches` 只数话题，`workflow_matches` 只数工作流；
+workflow_matches, workflows, boundary}`；`query --page` 的 `data` 另带 `citing_topics`。`matches` 只数页面，`topic_matches` 只数话题，`workflow_matches` 只数工作流；
 `topics[]` 为 `{name, title, description, status, updated, path, origin, score, snippet,
 refs}`，`refs`（`pages`/`raws`/`topics`/`workflows`/`missing`）；
 `origin` 为 `view` 或 `legacy`，按 `path` 直接打开文件；`--page` 与普通文本 `query`（不含
