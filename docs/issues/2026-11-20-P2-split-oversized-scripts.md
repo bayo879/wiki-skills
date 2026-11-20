@@ -76,7 +76,16 @@ Markdown 文档同样超限（按 1.2 万字符口径，行数均未超 1000）�
 
 - [ ] 决定拆分顺序（建议 A → B → C）与是否先做 A
 - [ ] 拆分后每个文件都在上限以内（代码 1000 行 / 2 万字符；Markdown 1000 行 / 1.2 万字符），且职责可用一句话说明
-- [ ] `tests/selftest.py` 仍可一条命令跑全量，输出与现在一致（`N/N checks passed`）
+- [x] `tests/selftest.py` 仍可一条命令跑全量，输出与现在一致（`N/N checks passed`）
 - [ ] 新增脚本文件同步到 `health.py` 的 `SCRIPT_FILES`，`health` 自测不报缺失
 - [ ] `docs/agent/engine.md` 的模块地图与 `cli.py` 入口约定同步更新
 - [ ] 每次拆分单独提交，提交信息说明拆分边界，不改运行行为
+
+## 进展
+
+- 2026-11-20：方案 A 已完成。`tests/selftest.py` 从 3187 行 / 179195 字符拆成薄入口
+  （120 行 / 4621 字符）+ `support.py`、`fixtures.py` 与 18 个 `checks_*.py`；最大单文件
+  300 行 / 15588 字符。`python3 tests/selftest.py` 仍是一条命令跑全量，368/368 通过、退出码 0，
+  输出与拆分前逐字节一致（`--json` 汇总同样不变）。
+- 2026-11-20：B（`cli.py`）、C（`ledger.py` / `task_store.py`）、D（超限 Markdown）未开工；
+  这些文件当前体积见上方表格，B 是下一个候选。

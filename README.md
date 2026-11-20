@@ -167,7 +167,7 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 tests/selftest.py
 ```
 
-`tests/selftest.py` 在临时目录跑 258 项端到端检查，不接触真实数据；它和 `tests/` 留在
+`tests/selftest.py` 在临时目录跑 368 项端到端检查，不接触真实数据；它和 `tests/` 留在
 仓库、由开发/CI 执行，不复制进安装后的技能目录。验证记录（含真实 PDF 语料结果）见
 [docs/agent/verification.md](docs/agent/verification.md)。工作流目录、步骤契约与写法见
 [docs/readme/workflows.md](docs/readme/workflows.md)，话题沉淀格式见

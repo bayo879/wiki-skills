@@ -51,7 +51,7 @@
 - 反例（联网取数、OCR、写代码、排版渲染）留在 `SKILL.md` 正文的“需求超出 wiki”一条，
   不进 `description`：触发后读到再退出，代价小于让负条款压低触发率。
 - 上限沿用 Anthropic 规范的 1024 字符（`.dsh/skills/writing-skills/references/anthropic-best-practices.md:150`），
-  `tests/selftest.py` 有对应守卫；这条守卫只拦失控，正常改动仍按上面两条判。
+  `tests/checks_repo.py` 有对应守卫；这条守卫只拦失控，正常改动仍按上面两条判。
 
 ## 机器守卫
 
@@ -61,8 +61,10 @@ python3 -m py_compile skills/llm-wiki/scripts/*.py
 python3 tests/selftest.py
 ```
 
-`tests/selftest.py` 是端到端契约测试，覆盖 next 任务包、route/page 提交、工作区越界、观看区推送、
-import/restore、超限与 dry-run。改引擎行为时先补一个检查再改实现；它同时被 CI 调用，不允许跳过或
+`tests/selftest.py` 是端到端契约测试的入口：它建临时工作区，然后按固定顺序调用 `tests/checks_*.py`
+里的检查组（`support.py` 放路径、子进程 helper 与跨组状态 `Ctx`，`fixtures.py` 放工作流/话题样例）；
+覆盖 next 任务包、route/page 提交、工作区越界、观看区推送、import/restore、超限与 dry-run。改引擎行为
+时先补一个检查再改实现，新检查加进对应主题的 `checks_*.py`；入口同时被 CI 调用，不允许跳过或
 `--keep` 写入仓库。
 
 新增行为若无法在临时目录验证（真实 PDF、OCR、并发），写进 `verification.md` 的
