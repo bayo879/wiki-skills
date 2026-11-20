@@ -1,24 +1,33 @@
-"""llm-wiki 命令行：参数解析、输出格式与各命令的实现。
+"""llm-wiki 命令行：参数解析、命令分发与锁。
 
-命令只通过 Wiki 的公开方法读写账本；输出契约见 docs/readme/cli.md，
-进度与错误码见 docs/agent/engine.md。
-"""
+各命令实现在 cli_*.py，共用的小工具在 cli_common.py；输出契约见
+docs/readme/cli.md，进度与错误码见 docs/agent/engine.md。"""
 
 from __future__ import annotations
 
 import argparse
+import health
 import json
-import os
 import re
+import search
 import sqlite3
 import sys
+import topics
+import workflows
 from datetime import datetime, timezone
 from pathlib import Path
 
-import health
-import workflows
-import search
-import topics
+from cli_common import (
+    ARGS,
+    ID_RE,
+    VERSION,
+    emit,
+    fail,
+    open_wiki,
+    read_payload,
+    require_install,
+    session_owner,
+)
 from errors import WikiError
 from frontmatter import split_frontmatter
 from ingest import (
@@ -28,9 +37,8 @@ from ingest import (
     raw_facts,
     read_bytes,
 )
-from ledger import CONFIG_NAME, Wiki, view_dir
+from ledger import view_dir
 from pages import normalize_links, render_page
-from tasks import task_dir_relative
 from util import (
     digest_bytes,
     digest_text,
@@ -43,111 +51,8 @@ from util import (
 )
 from validation import check_links, validate_page_payload
 from view import sync_view_file
-from workspace import (
-    WIKI_DIR,
-    dry_store,
-    inside_root,
-    window_safe,
-    workspace_lock,
-)
+from workspace import WIKI_DIR, inside_root, window_safe, workspace_lock
 
-
-VERSION = "0.5.3"
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-
-# 领取任务的会话身份：显式参数 > 用户导出 > 宿主注入的会话 id。
-OWNER_ENV = ("LLM_WIKI_OWNER", "DSH_SESSION_ID")
-
-
-def session_owner():
-    """Which session a claim belongs to.
-
-    DSH exports `DSH_SESSION_ID` for every session, so a subagent is a
-    different owner without any setup; a plain terminal exports
-    `LLM_WIKI_OWNER` once or passes `--owner` on each command. An empty
-    result means "unattributed": the claim still works, but the queue cannot
-    tell this session from another one, so `next` keeps the old wording
-    instead of guessing.
-    """
-    candidates = [getattr(ARGS, "owner", "")] + [os.environ.get(name) for name in OWNER_ENV]
-    for value in candidates:
-        value = (value or "").strip()
-        if value:
-            return value
-    return ""
-
-# 当前命令打开账本时补齐的东西；emit 把它作为 repaired 输出。
-REPAIRED = []
-
-
-def emit(cmd, root, summary, data, human_lines, ok=True):
-    if ARGS.json:
-        if REPAIRED:
-            data = dict(data, repaired=list(REPAIRED))
-        payload = {
-            "ok": ok,
-            "cmd": cmd,
-            "version": VERSION,
-            "root": str(root),
-            "summary": summary,
-            "data": data,
-        }
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        return
-    if summary:
-        sys.stdout.write(summary + "\n")
-    for line in human_lines:
-        sys.stdout.write(line + "\n")
-
-def fail(cmd, root, error):
-    if ARGS.json:
-        payload = {
-            "ok": False,
-            "cmd": cmd,
-            "version": VERSION,
-            "root": str(root),
-            "error": error.as_dict(),
-        }
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    else:
-        sys.stderr.write(f"[{error.code}] {error.message}\n")
-        if error.next_step:
-            sys.stderr.write(f"next: {error.next_step}\n")
-    return error.exit_code
-
-def open_wiki(require_sources=False, dry_run=False, push=True, readonly=False):
-    # The workspace is the directory the command runs in. A wiki may live in a
-    # subdirectory, but nothing may point above the workspace.
-    workspace = Path.cwd().resolve()
-    root = Path(ARGS.root).resolve() if ARGS.root else workspace
-    if not window_safe(workspace, root):
-        raise WikiError(
-            "E_PATH",
-            f"wiki root {root} is outside the workspace {workspace}",
-            "run the command from the workspace, or pass a subdirectory inside it",
-            2,
-        )
-    if readonly:
-        return Wiki(root).open_readonly(), []
-    if dry_run and not (root / WIKI_DIR / CONFIG_NAME).exists():
-        # A dry run must not create `.wiki/` in a directory the user is only
-        # inspecting, so plan against a throwaway store under `.wiki/tmp/`.
-        wiki = Wiki(dry_store(root), scan_root=root)
-    else:
-        wiki = Wiki(root)
-    created = wiki.ensure(push=push)
-    REPAIRED[:] = created
-    if require_sources and not wiki.all_sources():
-        raise WikiError(
-            "E_EMPTY",
-            "no sources have been ingested yet",
-            "run `ingest` first so the engine has raw material to work from",
-            3,
-        )
-    return wiki, created
-
-def require_install():
-    health.require_install(Path(__file__).resolve().parent, Path.cwd())
 
 def command_check():
     report = health.check_installation(Path(__file__).resolve().parent, Path.cwd())
@@ -163,6 +68,7 @@ def command_check():
         ok=report["ok"],
     )
     return 0 if report["ok"] else 1
+
 
 def command_init():
     require_install()
@@ -183,6 +89,7 @@ def command_init():
     )
     wiki.close()
     return 0
+
 
 def command_ingest():
     require_install()
@@ -437,8 +344,10 @@ def command_ingest():
     wiki.close()
     return 1 if (failed or oversize) else 0
 
+
 def _cites(wiki, key):
     return any(key in record["meta"].get("sources", []) for record in wiki.all_pages())
+
 
 def command_status():
     wiki, created = open_wiki()
@@ -494,6 +403,7 @@ def command_status():
     wiki.close()
     return 0
 
+
 def command_next():
     require_install()
     wiki, _ = open_wiki()
@@ -544,35 +454,6 @@ def command_next():
     wiki.close()
     return 0
 
-def read_payload(wiki, row):
-    """Read the submit payload: the task folder by default, an explicit path, or stdin."""
-    if ARGS.payload == "-":
-        raw = sys.stdin.read()
-    else:
-        if ARGS.payload:
-            candidate = inside_root(
-                wiki.root, ARGS.payload, "payload",
-                "put payloads inside the workspace, or pass - for stdin",
-            )
-        else:
-            candidate = wiki.task_dir(row["id"]) / "payload.json"
-            if not candidate.exists():
-                # 目录丢失（旧任务或被手工删除）时按当前任务重建，再读回骨架。
-                wiki.materialize_task(row)
-        try:
-            raw = candidate.read_text(encoding="utf-8")
-        except OSError as error:
-            raise WikiError(
-                "E_PAYLOAD", f"cannot read payload: {error}",
-                f"fill {task_dir_relative(row['id'])}/payload.json, or pass --payload", 2,
-            )
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise WikiError(
-            "E_PAYLOAD", f"payload is not valid JSON: {error}",
-            f"edit {task_dir_relative(row['id'])}/payload.json; `next --json` also returns the template", 2,
-        )
 
 def command_submit():
     require_install()
@@ -639,6 +520,7 @@ def command_submit():
     )
     wiki.close()
     return 0
+
 
 def _raw_mounts(sources):
     """Group task sources by raw: one decision covers every path of the same body."""
@@ -853,6 +735,7 @@ def submit_route(wiki, row, payload):
         "lines": [f"page task: {task_id}" for task_id in sorted(set(page_tasks))],
     }
 
+
 def submit_page(wiki, row, payload):
     inputs = json.loads(row["inputs"])
     reason = wiki.task_drift(row)
@@ -907,6 +790,7 @@ def submit_page(wiki, row, payload):
         "lines": [f"page: {page_id} rev {rev}"],
     }
 
+
 def command_release():
     wiki, _ = open_wiki()
     row = wiki.task_row(ARGS.id)
@@ -921,6 +805,7 @@ def command_release():
     emit("release", wiki.root, summary, {"task": ARGS.id, "owner": held_by}, [])
     wiki.close()
     return 0
+
 
 def query_task(wiki, words):
     """Register one search per topic word on a task, then show the hits.
@@ -1017,6 +902,8 @@ def query_task(wiki, words):
 
 
 TOPIC_REF_LIMIT = 20
+
+
 TOPIC_REF_WARNINGS = 3
 
 
@@ -1248,6 +1135,7 @@ def command_query():
     wiki.close()
     return 0
 
+
 def command_workflow():
     workspace = Path.cwd().resolve()
     root = Path(ARGS.root).resolve() if ARGS.root else workspace
@@ -1395,6 +1283,7 @@ def command_page_import():
     wiki.close()
     return 0
 
+
 def command_page_restore():
     wiki, _ = open_wiki()
     page_id = ARGS.id.strip().lower()
@@ -1414,6 +1303,7 @@ def command_page_restore():
     )
     wiki.close()
     return 0
+
 
 def command_page_link():
     """Add edges to existing pages; the ledger stays add-only."""
@@ -1644,6 +1534,7 @@ def command_sync():
     wiki.close()
     return 1 if failed else 0
 
+
 def command_export():
     wiki, _ = open_wiki()
     target = inside_root(
@@ -1681,6 +1572,7 @@ def command_export():
     )
     wiki.close()
     return 0
+
 
 def command_doctor():
     wiki, _ = open_wiki()
@@ -1736,9 +1628,11 @@ def command_doctor():
     wiki.close()
     return 1 if any(item["severity"] == "fail" for item in issues) else 0
 
+
 def command_version():
     print(f"llm-wiki {VERSION}")
     return 0
+
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
@@ -1812,7 +1706,6 @@ def build_parser():
     sub.add_parser("version", parents=[common], help="print the engine version")
     return parser
 
-ARGS = None
 
 COMMANDS = {
     "check": command_check,
@@ -1829,15 +1722,17 @@ COMMANDS = {
     "version": command_version,
 }
 
+
 LOCKED_COMMANDS = frozenset({
     "init", "ingest", "next", "submit", "release", "query",
     "export", "status", "sync", "doctor", "page import", "page restore", "page link",
 })
 
+
 def main(argv=None):
-    global ARGS
     parser = build_parser()
-    ARGS = parser.parse_args(argv)
+    # 各命令模块 import 的是同一个 ARGS 对象，这里只更新属性、不重新绑定名字。
+    ARGS.__dict__.update(vars(parser.parse_args(argv)))
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
