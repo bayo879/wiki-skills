@@ -27,7 +27,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 任务层 | `task_store.py` 的 `TaskStoreMixin` | 任务行、目录、领取/释放/过期；`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`；租约归属（`task_leases`、`sweep_leases`、`lease_owner`）；并发走同一条 CAS 约定 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
 | 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；先扫 `<view>/workflows/`，再扫旧根 `workflows/` 兜底，最后合并技能内置工作流；条目带 `origin`（`view`/`legacy`/`builtin`）与 `legacy_conflict`；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
-| 话题沉淀 | `topics.py` | `scan`/`match`；先扫 `<view>/topics/*.md`，再扫旧根 `topics/` 兜底；条目带 `origin`；只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
+| 话题沉淀 | `topics.py` | `scan`/`match`/`rank`/`parse_refs`（`match` 是 `rank(scan(...))` 的薄包装）；先扫 `<view>/topics/*.md`，再扫旧根 `topics/` 兜底；条目带 `origin`；只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留并复核；纯函数，只读 `Wiki` |
 | 账本结构 | `ledger.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用 |
 | 账本 | `ledger.py` 的 `LedgerMixin` | `__init__`/`ensure`/`close`、来源与 raw、推送入口；`Wiki` 在文件末尾由四个 mixin 组合 |
@@ -125,7 +125,10 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     来源。`topics.py` 先读 `<view>/topics/*.md`，再读旧根 `topics/`，按文件名去重；取
     frontmatter 的 `name/description/status/updated`，条目带 `origin`（`view`/`legacy`）；
     正文为空或文件超过 200000 字符记为非法，但不进 `query` 的 `topics`。`query` 的
-    `topic_matches` 与页面 `matches` 分开计数；话题文件由 agent 直接写，不经账本。
+    `topic_matches` 与页面 `matches` 分开计数；命中页面时 `query` 反向给 `citing_topics`；
+    话题文件由 agent 直接写，不经账本。
+    `parse_refs` 是纯函数，只认 `## 依据` 节的 `- ` 列表项；校验在 `cli.py` 的
+    `resolve_topic_refs` 里做，`topics.py` 不依赖账本。
 14. **观看区目录由 `publish` 配置决定。** `publish_dir_name` 要求 `dir` 是单个目录名，拒绝
     `.wiki`、`topics`、`workflows`；`ensure()` 在开关判断之前调用它，非法值即使
     `enabled:false` 也报 `E_CONFIG`。`ensure_publish` 始终创建 `<view>/`、`<view>/raw/`、

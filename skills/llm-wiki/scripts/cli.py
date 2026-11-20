@@ -1016,6 +1016,105 @@ def query_task(wiki, words):
     return 0
 
 
+TOPIC_REF_LIMIT = 20
+TOPIC_REF_WARNINGS = 3
+
+
+def resolve_topic_refs(wiki, entries):
+    """Validate parsed topic refs; return ({topic: refs}, warnings)."""
+    names = {entry["name"] for entry in entries}
+    pages = wiki.page_ids()
+    workflows_seen = {
+        item["id"] for item in workflows.scan(
+            wiki.root, view_root=wiki.publish_dir / workflows.WORKFLOW_DIR)
+    }
+    raw_base = wiki.publish_raw_dir
+    try:
+        raw_prefix = raw_base.relative_to(wiki.root).as_posix()
+    except ValueError:
+        raw_prefix = ""
+    kind_order = (("pages", "page"), ("raws", "raw"),
+                  ("topics", "topic"), ("workflows", "workflow"))
+    resolved, warnings = {}, []
+    for entry in entries:
+        if not entry["valid"]:
+            # `_entry` only parses refs for a topic that has a body.
+            continue
+        parsed = entry["refs"]
+        refs = {"pages": [], "raws": [], "topics": [], "workflows": [], "missing": []}
+        notes = [
+            f"warning: topic {entry['name']} malformed ref: {line.strip()}"
+            for line in parsed["malformed"]
+        ]
+        ordered = [
+            (key, kind, value)
+            for key, kind in kind_order
+            for value in parsed[key]
+        ]
+        dropped = len(ordered) > TOPIC_REF_LIMIT
+        for key, kind, value in ordered[:TOPIC_REF_LIMIT]:
+            if kind == "raw":
+                known = _raw_ref_ok(raw_base, value, raw_prefix)
+            elif kind == "page":
+                known = value in pages
+            elif kind == "topic":
+                known = value in names
+            else:
+                known = value in workflows_seen
+            if known:
+                refs[key].append(value)
+            else:
+                refs["missing"].append({"kind": kind, "target": value})
+                notes.append(
+                    f"warning: topic {entry['name']} cites unknown {kind} {value}")
+        if parsed["sections"] > 1:
+            notes.append(
+                f"warning: topic {entry['name']} has {parsed['sections']} 依据 sections")
+        if dropped:
+            notes.append(
+                f"warning: topic {entry['name']} refs truncated to {TOPIC_REF_LIMIT}")
+        resolved[entry["name"]] = refs
+        warnings.extend(notes[:TOPIC_REF_WARNINGS])
+    return resolved, warnings
+
+
+def _raw_ref_ok(raw_base, value, raw_prefix=""):
+    """A raw ref must stay inside the published raw tree and exist.
+
+    `query --page` prints `sources[].raw` as a workspace-relative path
+    (`wiki/raw/x.md`); accept that form as well as the bare `raw/` one.
+    """
+    text = value
+    if raw_prefix and (text == raw_prefix or text.startswith(raw_prefix + "/")):
+        text = text[len(raw_prefix):].lstrip("/")
+    path = Path(text)
+    if not text or path.is_absolute() or ".." in path.parts:
+        return False
+    try:
+        return (raw_base / path).is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def citing_topics_index(refs_by_topic):
+    """{page id: sorted topic names} from validated page refs only."""
+    index = {}
+    for name, refs in refs_by_topic.items():
+        for page_id in refs["pages"]:
+            index.setdefault(page_id, []).append(name)
+    return {page_id: sorted(names) for page_id, names in index.items()}
+
+
+def ref_topics_line(names):
+    """`甲, 乙, 丙, +2`; empty list renders as an empty string."""
+    if not names:
+        return ""
+    shown = ", ".join(names[:3])
+    if len(names) > 3:
+        shown += f", +{len(names) - 3}"
+    return shown
+
+
 def command_query():
     words = [
         word
@@ -1032,6 +1131,12 @@ def command_query():
         if not record:
             raise WikiError("E_NOT_FOUND", f"no page {ARGS.page}", "search with `query <text>` first", 3)
         outgoing, incoming = wiki.links_for(ARGS.page)
+        entries = topics.scan(wiki.root, view_root=wiki.publish_dir / topics.TOPIC_DIR)
+        refs_by_topic, ref_warnings = resolve_topic_refs(wiki, entries)
+        for line in ref_warnings:
+            sys.stderr.write(line + "\n")
+        cited = citing_topics_index(refs_by_topic).get(ARGS.page, [])
+        citing_line = ref_topics_line(cited)
         # 源文件路径是账本事实：来源只存 key，副本路径按 raw_id 查 raws 表渲染出来，
         # 调用方（agent）不用再按来源名猜文件名。
         sources = []
@@ -1046,6 +1151,7 @@ def command_query():
             "sources": sources,
             "outgoing": outgoing,
             "incoming": incoming,
+            "citing_topics": cited,
             "body": record["body"],
         }
         emit(
@@ -1054,6 +1160,7 @@ def command_query():
             data,
             [f"outgoing: {', '.join(outgoing) or '(none)'}",
              f"incoming: {', '.join(incoming) or '(none)'}",
+             *([f"citing topics: {citing_line}"] if citing_line else []),
              f"raw: {', '.join(item['raw'] for item in sources if item['raw']) or '(none)'}",
              "",
              record["body"]],
@@ -1066,10 +1173,18 @@ def command_query():
                         "example: query 反诈 复机", 2)
     limit = ARGS.limit or 8
     scored, results = search.search_pages(wiki, terms, limit)
-    topic_hits = topics.match(
-        wiki.root, terms, limit, view_root=wiki.publish_dir / topics.TOPIC_DIR)
+    entries = topics.scan(wiki.root, view_root=wiki.publish_dir / topics.TOPIC_DIR)
+    topic_hits = topics.rank(entries, terms, limit)
+    refs_by_topic, ref_warnings = resolve_topic_refs(wiki, entries)
+    for line in ref_warnings:
+        sys.stderr.write(line + "\n")
+    for item in topic_hits:
+        item["refs"] = refs_by_topic[item["name"]]
     workflow_hits = workflows.match(
         wiki.root, terms, 5, view_root=wiki.publish_dir / workflows.WORKFLOW_DIR)
+    cited = citing_topics_index(refs_by_topic)
+    for item in results:
+        item["citing_topics"] = cited.get(item["id"], [])
     data = {
         "query": " ".join(terms),
         "matches": len(scored),
@@ -1090,10 +1205,16 @@ def command_query():
             block.append(f"    applies: {item['applies'] or '(none)'}")
             block.append(f"    load: {item['load']}")
         sections.append(block)
-    pages = [
-        f"{item['id']}  [{item['type']}/{item['status']}]  {item['title']}\n    {item['snippet']}"
-        for item in results
-    ]
+    pages = []
+    for item in results:
+        entry = (
+            f"{item['id']}  [{item['type']}/{item['status']}]  "
+            f"{item['title']}\n    {item['snippet']}"
+        )
+        cite = ref_topics_line(item.get("citing_topics") or [])
+        if cite:
+            entry += f"\n    citing topics: {cite}"
+        pages.append(entry)
     if pages:
         sections.append(pages)
     if topic_hits:
@@ -1101,6 +1222,16 @@ def command_query():
         for item in topic_hits:
             block.append(f"{item['name']}  [{item['status'] or 'open'}]  {item['description']}")
             block.append(f"    path: {item['path']}")
+            refs = item["refs"]
+            packed = [f"page:{value}" for value in refs["pages"]]
+            packed += [f"raw:{value}" for value in refs["raws"]]
+            packed += [f"topic:{value}" for value in refs["topics"]]
+            packed += [f"workflow:{value}" for value in refs["workflows"]]
+            if packed:
+                block.append(f"    refs: {', '.join(packed)}")
+            if refs["missing"]:
+                block.append("    missing: " + ", ".join(
+                    f"{miss['kind']}:{miss['target']}" for miss in refs["missing"]))
         sections.append(block)
     lines = []
     for block in sections:

@@ -11,6 +11,8 @@ topic can be updated without re-ingesting.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from pathlib import Path
 
 from frontmatter import split_frontmatter
@@ -18,6 +20,87 @@ from frontmatter import split_frontmatter
 TOPIC_DIR = "topics"
 TOPIC_SUFFIX = ".md"
 MAX_TOPIC_CHARS = 200_000
+REF_SECTION = "## 依据"
+# (依据里的前缀词, 结果键, 告警/JSON 用的 kind)
+REF_KINDS = (
+    ("页面", "pages", "page"),
+    ("原文", "raws", "raw"),
+    ("话题", "topics", "topic"),
+    ("工作流", "workflows", "workflow"),
+)
+REF_TOKEN_RE = re.compile(r"`([^`]+)`")
+
+
+def parse_refs(body):
+    """Parse the ``## 依据`` sections into four ref groups; pure, no I/O."""
+    groups = {key: [] for _, key, _ in REF_KINDS}
+    malformed = []
+    sections = 0
+    in_section = False
+    fence = ""
+    for line in body.split("\n"):
+        marker = line.lstrip()[:3]
+        if marker in ("```", "~~~"):
+            if not fence:
+                fence = marker
+            elif fence == marker:
+                fence = ""
+            continue
+        if fence:
+            continue
+        if line.startswith("## "):
+            in_section = line.strip() == REF_SECTION
+            if in_section:
+                sections += 1
+            continue
+        if not in_section or not line.startswith("- "):
+            continue
+        item = line[2:].strip()
+        for word, key, _ in REF_KINDS:
+            if not item.startswith(word):
+                continue
+            rest = item[len(word):]
+            if not rest[:1]:
+                continue
+            if rest[0] in "：:":
+                match = REF_TOKEN_RE.search(rest)
+                if match:
+                    _append_ref(groups[key], key, match.group(1))
+                else:
+                    malformed.append(line)
+            elif rest[0] == "`":
+                malformed.append(line)
+            break
+    return {
+        "pages": groups["pages"],
+        "raws": groups["raws"],
+        "topics": groups["topics"],
+        "workflows": groups["workflows"],
+        "malformed": malformed,
+        "sections": sections,
+    }
+
+
+def _blank_refs():
+    """Empty ``refs`` for an entry whose body never got parsed."""
+    return parse_refs("")
+
+
+def _nfc(text):
+    """Normalize to NFC so a name and the token referring to it compare equal."""
+    return unicodedata.normalize("NFC", text)
+
+
+def _append_ref(target, key, token):
+    value = _nfc(token.strip())
+    if key == "pages" or key == "workflows":
+        value = value.lower()
+    elif key == "raws":
+        if value.startswith("raw:"):
+            value = value[len("raw:"):]
+        value = value[2:] if value.startswith("./") else value
+    if value and value not in target:
+        target.append(value)
 
 
 def topic_root(root, view_root=None):
@@ -43,21 +126,27 @@ def scan(root, view_root=None):
         except OSError:
             continue
         for child in children:
+            key = _nfc(child.name)
             if (not child.is_file() or child.suffix != TOPIC_SUFFIX
-                    or child.name.startswith(".") or child.name in seen):
+                    or child.name.startswith(".") or key in seen):
                 continue
-            seen.add(child.name)
+            seen.add(key)
             entries.append(_entry(root, child, origin=origin))
     return entries
 
 
 def match(root, terms, limit, view_root=None):
     """Rank valid topics against query terms; reads files, writes nothing."""
+    return rank(scan(root, view_root=view_root), terms, limit)
+
+
+def rank(entries, terms, limit):
+    """Score scanned topics; each hit carries its parsed ``refs``."""
     terms = [term for term in terms if term]
     if not terms:
         return []
     scored = []
-    for entry in scan(root, view_root=view_root):
+    for entry in entries:
         if not entry["valid"]:
             continue
         haystack = f"{entry['title']}\n{entry['description']}\n{entry['body']}"
@@ -79,6 +168,7 @@ def match(root, terms, limit, view_root=None):
                 "origin": entry["origin"],
                 "score": score,
                 "snippet": snippet(entry["body"], terms[0]),
+                "refs": entry["refs"],
             }
         )
     scored.sort(key=lambda item: (-item["score"], item["name"]))
@@ -100,9 +190,9 @@ def snippet(body, term):
 def _entry(root, path, origin="view"):
     root = Path(root)
     record = {
-        "name": path.stem,
+        "name": _nfc(path.stem),
         "origin": origin,
-        "title": path.stem,
+        "title": _nfc(path.stem),
         "description": "",
         "status": "",
         "updated": "",
@@ -110,6 +200,7 @@ def _entry(root, path, origin="view"):
         "valid": False,
         "error": "",
         "body": "",
+        "refs": _blank_refs(),
     }
     if path.is_symlink() and not _within(root, path):
         record["error"] = "topic file escapes the workspace root"
@@ -124,7 +215,8 @@ def _entry(root, path, origin="view"):
         return record
     meta, body = split_frontmatter(text)
     body = body.strip()
-    title = str(meta.get("name") or meta.get("title") or path.stem).strip() or path.stem
+    title = _nfc(str(meta.get("name") or meta.get("title") or path.stem).strip()
+                 or path.stem)
     description = str(meta.get("description") or "").strip()
     if not description:
         description = _first_line(body)
@@ -136,6 +228,7 @@ def _entry(root, path, origin="view"):
             "updated": str(meta.get("updated") or "").strip(),
             "body": body,
             "valid": bool(body),
+            "refs": parse_refs(body),
         }
     )
     if not body:

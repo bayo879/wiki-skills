@@ -305,6 +305,8 @@ python3 <skill>/scripts/wiki.py workflow load "<工作流>" --json
 
 - 话题文件的 frontmatter、固定六节、归属判断、授权与完成标准，见内置工作流
   `workflow load "topic-exploration"` 的“话题文件”与“沉淀前的归属判断”两节。
+- 依据按四类前缀写、目标用反引号包起来，写完用 `query <主题词>` 复核 `refs` 与 `missing`，
+  坏链当轮修掉。
 - 流程稳定、可重复执行时，同时给出 `<view>/workflows/<id>/WORKFLOW.md` 的工作流候选草稿，
   用户确认后再建；资料不足时列出待摄入来源与下一轮要查的关键词。
 - 项目事实归产品文档，强制规则归指导文档，未决问题归 issues；只有可复用的方法、经验、
