@@ -2,8 +2,8 @@
 
 ## 问题
 
-用户全局指导（2026-11-20 更新）新增硬约束：**单文件上限 1000 行、2 万字符，代码与文档一律适用**。
-本仓库现有文件已超出，且集中在改引擎与测试时最常触及的几个文件：
+用户全局指导（2026-11-20 更新）新增硬约束：**代码与配置单文件上限 1000 行 / 2 万字符，
+Markdown 文档 1000 行 / 1.2 万字符**。本仓库现有文件已超出，且集中在改引擎与测试时最常触及的几个文件：
 
 | 文件 | 行数 | 字符数 | 超限维度 |
 | --- | --- | --- | --- |
@@ -28,6 +28,18 @@ $ wc -l -m skills/llm-wiki/scripts/cli.py skills/llm-wiki/scripts/ledger.py \
 `cli.py` 里共有 16 个 `command_*` 入口函数，共用一套 `ARGS` / `emit` / `open_wiki` 约定；
 `tests/selftest.py` 里的 suite 已按主题命名（`repair_flow`、`links_flow`、`topics_view_checks`
 等），但全部堆在同一个文件里，`main` 逐条登记。
+
+Markdown 文档同样超限（按 1.2 万字符口径，行数均未超 1000）：
+
+| 文档 | 行数 | 字符数 |
+| --- | --- | --- |
+| `docs/agent/development-decisions.md` | 590 | 44753 |
+| `docs/readme/cli.md` | 442 | 31524 |
+| `docs/agent/verification.md` | 367 | 22671 |
+| `docs/agent/engine.md` | 247 | 22367 |
+| `skills/llm-wiki/SKILL.md` | 331 | 21627 |
+| `docs/readme/workflows.md` | 234 | 13753 |
+| `workflows/personal-style-writing/WORKFLOW.md` | 150 | 12593 |
 
 ## 影响
 
@@ -55,12 +67,15 @@ $ wc -l -m skills/llm-wiki/scripts/cli.py skills/llm-wiki/scripts/ledger.py \
   `engine.md` 的模块地图；共享的 `ARGS` / `emit` / `open_wiki` 要放进独立的小模块，避免循环导入。
 - **C：拆 `ledger.py` 与 `task_store.py`。** 按"schema 与迁移 / config / 状态读写 / 任务状态机"分文件。
   最贴近数据层，风险集中在事务与迁移路径，建议在 A 之后做。
-- 三者都按"一次一个文件、每步跑 `tests/selftest.py`"推进，不合并成一次大改。
+- **D：拆超限 Markdown。** `docs/agent/development-decisions.md` 按决策主题分页并留索引；
+  `docs/readme/cli.md` 按命令族拆；`SKILL.md` 只留索引，细则移入 `references/`。
+  文档拆分不改行为，可与代码拆分并行。
+- 各方案都按"一次一个文件、每步跑 `tests/selftest.py`"推进，不合并成一次大改。
 
 ## 待确认与验收条件
 
 - [ ] 决定拆分顺序（建议 A → B → C）与是否先做 A
-- [ ] 拆分后每个文件都在 1000 行 / 2 万字符以内，且职责可用一句话说明
+- [ ] 拆分后每个文件都在上限以内（代码 1000 行 / 2 万字符；Markdown 1000 行 / 1.2 万字符），且职责可用一句话说明
 - [ ] `tests/selftest.py` 仍可一条命令跑全量，输出与现在一致（`N/N checks passed`）
 - [ ] 新增脚本文件同步到 `health.py` 的 `SCRIPT_FILES`，`health` 自测不报缺失
 - [ ] `docs/agent/engine.md` 的模块地图与 `cli.py` 入口约定同步更新
