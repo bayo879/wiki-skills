@@ -316,7 +316,9 @@ python3 <skill>/scripts/wiki.py workflow load "<工作流>" --json
 - 返回 `E_INGEST_BUSY`（`next`、`ingest`）表示别的会话正在摄入并占着队列：立刻停止，不要重试、不要等待。
 - 返回 `E_TASK_FOREIGN` 表示任务记在别的会话名下：不要提交，也不要抢过来，交给领取它的会话。
 - 返回 `E_BUSY` 表示另一个 wiki 进程正在这个工作区写账本：等它结束再重试，不要删
-  `.wiki/lock` 抢跑（只有确认它已崩溃时才删）。
+  `.wiki/lock` 抢跑（只有确认它已崩溃时才删）。返回 `E_STATE` 表示 `.wiki/lock` 不是
+  普通文件或陈旧锁删不掉：不要读这个路径，先确认没有进程在跑，再按 `error.next` 删除或
+  修权限。
 - 不要绕过校验，也不要直接改 `.wiki/` 下的文件来“修好”它。
 
 ## 不做

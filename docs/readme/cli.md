@@ -59,7 +59,9 @@
 - 会写账本或观看区的命令（`init`、`ingest`、`next`、`submit`、`release`、`query`、
   `export`、`status`、`sync`、`doctor`、`page import`、`page restore`、`page link`）持有一把工作区文件锁
   `.wiki/lock`；锁被另一个存活进程占着时排队等待 5 秒，仍拿不到返回 `E_BUSY`（退出码 4）。
-  进程崩溃留下的锁（记录 pid 已不存在，或超过 30 分钟）会被下一个命令接管。
+  进程崩溃留下的锁（记录 pid 已不存在，或超过 30 分钟）会被下一个命令接管；锁路径不是
+  普通文件、陈旧锁删不掉时快速返回 `E_STATE`（退出码 3），`.wiki` 不可写时返回
+  `E_HEALTH`（退出码 1），不会无限等待。
 
 ## 命令
 

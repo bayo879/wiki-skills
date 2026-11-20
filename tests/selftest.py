@@ -47,10 +47,10 @@ def check(results, name, condition, detail=""):
         raise AssertionError(f"{name}: {detail}")
 
 
-def run(root, *args, expect=0, stdin=None):
+def run(root, *args, expect=0, stdin=None, timeout=None):
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), *args, "--json"],
-        cwd=root, capture_output=True, text=True, input=stdin,
+        cwd=root, capture_output=True, text=True, input=stdin, timeout=timeout,
     )
     payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
     allowed = expect if isinstance(expect, tuple) else (expect,)
@@ -2671,6 +2671,57 @@ def main(argv=None):
             taken = run(task_root, "status")
             check(results, "a stale lock is taken over",
                   taken["ok"] and not lock.exists(), (taken, lock))
+
+            # 异常锁文件不能让加锁命令挂住：目录、FIFO、不可删的陈旧锁都要快速报 E_STATE。
+            def abnormal_lock(name, prepare):
+                case = Path(tempfile.mkdtemp(prefix="llm-wiki-lock-"))
+                try:
+                    (case / ".wiki").mkdir()
+                    prepare(case / ".wiki" / "lock")
+                    started = time.monotonic()
+                    try:
+                        denied = run(case, "status", expect=3, timeout=10)
+                    except subprocess.TimeoutExpired:
+                        check(results, name, False, "command did not return within 10s")
+                    elapsed = time.monotonic() - started
+                    check(results, name,
+                          elapsed < 8 and denied.get("error", {}).get("code") == "E_STATE",
+                          (elapsed, denied))
+                finally:
+                    shutil.rmtree(case, ignore_errors=True)
+
+            abnormal_lock("a directory lock fails with E_STATE instead of hanging",
+                          lambda path: path.mkdir())
+            if hasattr(os, "mkfifo"):
+                abnormal_lock("a FIFO lock fails with E_STATE instead of blocking",
+                              lambda path: os.mkfifo(path))
+
+            # 锁文件本身不可删：同样要报错，不能反复判陈旧后 continue。
+            unremovable = Path(tempfile.mkdtemp(prefix="llm-wiki-lock-ro-"))
+            try:
+                (unremovable / ".wiki").mkdir()
+                (unremovable / ".wiki" / "lock").write_text("999999", encoding="utf-8")
+                (unremovable / ".wiki").chmod(0o555)
+                if not os.access(unremovable / ".wiki", os.W_OK):
+                    denied = run(unremovable, "status", expect=3, timeout=10)
+                    check(results, "an unremovable stale lock fails with E_STATE",
+                          denied.get("error", {}).get("code") == "E_STATE", denied)
+            finally:
+                (unremovable / ".wiki").chmod(0o755)
+                shutil.rmtree(unremovable, ignore_errors=True)
+
+            # `.wiki` 存在但不可写：创建锁失败也要变成 E_HEALTH，而不是 traceback。
+            unwritable = Path(tempfile.mkdtemp(prefix="llm-wiki-wiki-ro-"))
+            try:
+                (unwritable / ".wiki").mkdir()
+                (unwritable / ".wiki").chmod(0o555)
+                if not os.access(unwritable / ".wiki", os.W_OK):
+                    denied = run(unwritable, "status", expect=1, timeout=10)
+                    check(results, "an unwritable .wiki fails with E_HEALTH",
+                          denied.get("error", {}).get("code") == "E_HEALTH", denied)
+            finally:
+                (unwritable / ".wiki").chmod(0o755)
+                shutil.rmtree(unwritable, ignore_errors=True)
         finally:
             shutil.rmtree(task_root, ignore_errors=True)
 
