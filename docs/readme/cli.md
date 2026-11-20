@@ -60,7 +60,8 @@
   `status`、`sync`、`doctor`、`page import`、`page restore`、`page link`，以及
   `query --task`）持有一把工作区文件锁 `.wiki/lock`；普通 `query` / `query --page`
   只读账本，不取锁、不创建 `.wiki/lock`。锁被另一个存活进程占着时排队等待 5 秒，
-  仍拿不到返回 `E_BUSY`（退出码 4）。
+  仍拿不到返回 `E_BUSY`（退出码 4）。锁文件由临时名写入持有者 pid 后用 `os.link` 原子
+  发布，出现时即带 pid；读不出 pid 的锁先排队 10 秒再按陈旧处理。
   进程崩溃留下的锁（记录 pid 已不存在，或超过 30 分钟）会被下一个命令接管；锁路径不是
   普通文件、陈旧锁删不掉时快速返回 `E_STATE`（退出码 3），`.wiki` 不可写时返回
   `E_HEALTH`（退出码 1），不会无限等待。

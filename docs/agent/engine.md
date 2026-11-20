@@ -158,12 +158,15 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     命中已领走的 page 任务仍报 `E_STATE`，不另开第二条。route 任务与来源自己的转换任务
     不计入这条约束。
 18. **写命令按工作区排队。** 会写账本或观看区的命令（含 `query --task`）在 `main()` 里用
-    `workspace.workspace_lock` 抢 `<root>/.wiki/lock`（`O_CREAT|O_EXCL` 写入 pid），等待
-    5 秒仍拿不到抛 `E_BUSY`（exit 4）；非 posix 平台不按 pid 判活，只按 30 分钟陈旧阈值
-    接管，posix 用 `os.kill(pid, 0)` 判断持有者是否还在。锁路径不是普通文件或陈旧锁无法
+    `workspace.workspace_lock` 抢 `<root>/.wiki/lock`：持有者记录先写进
+    `lock.<pid>.<rand>` 临时名，再用 `os.link` 原子发布，锁文件一出现就带 pid，不存在
+    “存在但为空”的中间态，`link` 撞名即抢锁失败。等待 5 秒仍拿不到抛 `E_BUSY`（exit 4）；
+    非 posix 平台不按 pid 判活，只按 30 分钟陈旧阈值接管，posix 用 `os.kill(pid, 0)`
+    判断持有者是否还在；读不出 pid 的锁（旧版本遗留空锁、没有硬链接的文件系统退回独占
+    创建）先按占用处理，超过 10 秒宽限期才认作陈旧。锁路径不是普通文件或陈旧锁无法
     删除时快速抛 `E_STATE`（exit 3），创建锁失败抛 `E_HEALTH`（exit 1）；判陈旧前先检查
-    deadline，任何分支都不会绕过 5 秒上限。`--dry-run` 且没有 `.wiki/` 时不加锁，避免
-    试运行留下目录。
+    deadline，任何分支都不会绕过 5 秒上限。崩溃残留的 `lock.<pid>.<rand>` 由下一次加锁
+    清扫（只删超过 30 分钟的）。`--dry-run` 且没有 `.wiki/` 时不加锁，避免试运行留下目录。
 
 ## 锁的分层现状（2026-11-20）
 
@@ -175,10 +178,6 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 更长期的方向尚未实现：任务租约带进程身份、心跳与 epoch fencing，互斥粒度缩到任务树/
 共享资源，观看区推送收敛为单写者。第 18 条仍是写命令的实际行为，决策见
 `docs/agent/development-decisions.md`。
-
-第 18 条当前的创建方式还有一个已知窗口：`O_EXCL` 建出空文件到写入 pid 之间，并发写者
-会把空锁判成陈旧并接管。缺陷记录与候选方案见
-`docs/issues/2026-11-20-P2-lock-create-race.md`，未修。
 
 ## 数据方向
 

@@ -35,6 +35,7 @@ import cli  # noqa: E402  (query output helpers)
 import ledger  # noqa: E402  (config migration)
 import topics  # noqa: E402  (view/legacy topic resolution)
 import workflows  # noqa: E402  (frontmatter normalisation, for tag checks)
+import workspace  # noqa: E402  (lock record bookkeeping)
 import wiki  # noqa: E402  (the engine itself, for table-level checks)
 from ingest import raw_body_digest  # noqa: E402
 from util import split_provenance  # noqa: E402
@@ -2919,6 +2920,30 @@ def main(argv=None):
             taken = run(task_root, "status")
             check(results, "a stale lock is taken over",
                   taken["ok"] and not lock.exists(), (taken, lock))
+
+            # 空内容的新鲜锁不等于陈旧锁：创建即带 pid，但旧版本或没有硬链接的
+            # 文件系统可能留下空锁，宽限期内必须排队，不能删掉别人的锁。
+            lock.write_bytes(b"")
+            started = time.monotonic()
+            empty_busy = run(task_root, "status", expect=4, timeout=20)
+            check(results, "an empty fresh lock returns E_BUSY instead of being taken over",
+                  empty_busy.get("error", {}).get("code") == "E_BUSY"
+                  and lock.exists() and time.monotonic() - started >= 4.5,
+                  (empty_busy, lock.exists()))
+            # 过了宽限期还是空锁：按陈旧接管，不能把工作区永久卡住。
+            aged = time.time() - (workspace.LOCK_EMPTY_GRACE_SECONDS + 5)
+            os.utime(lock, (aged, aged))
+            aged_taken = run(task_root, "status")
+            check(results, "an empty lock past the grace period is taken over",
+                  aged_taken["ok"] and not lock.exists(), (aged_taken, lock.exists()))
+
+            # 锁出现时已带持有者记录：持锁期间内容就是自己的 pid，也不留临时名。
+            with workspace.workspace_lock(task_root):
+                owner = lock.read_text(encoding="utf-8").split()
+                residue = [p.name for p in lock.parent.glob("lock.*")]
+            check(results, "a fresh lock carries its owner pid and leaves no temp name",
+                  owner and owner[0] == str(os.getpid()) and not residue,
+                  (owner, residue))
 
             # 异常锁文件不能让加锁命令挂住：目录、FIFO、不可删的陈旧锁都要快速报 E_STATE。
             def abnormal_lock(name, prepare):
