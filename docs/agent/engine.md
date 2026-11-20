@@ -173,8 +173,12 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 它不进入第 18 条的整命令工作区锁；`query --task` 仍因写 `queries.jsonl` 保留锁。
 
 更长期的方向尚未实现：任务租约带进程身份、心跳与 epoch fencing，互斥粒度缩到任务树/
-共享资源，观看区推送收敛为单写者。第 18 条仍是写命令的实际行为；决策见
-`docs/agent/development-decisions.md`，实施项见 `docs/issues/2026-11-20-P2-lock-file-hang.md`。
+共享资源，观看区推送收敛为单写者。第 18 条仍是写命令的实际行为，决策见
+`docs/agent/development-decisions.md`。
+
+第 18 条当前的创建方式还有一个已知窗口：`O_EXCL` 建出空文件到写入 pid 之间，并发写者
+会把空锁判成陈旧并接管。缺陷记录与候选方案见
+`docs/issues/2026-11-20-P2-lock-create-race.md`，未修。
 
 ## 数据方向
 

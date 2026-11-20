@@ -21,8 +21,8 @@
   等写命令仍按整命令文件锁排队，直到锁分层落地。
 - 锁的长期方向是分层：任务归属用硬租约（进程身份、心跳、epoch fencing），互斥粒度按任务
   树和共享资源而不是整条命令，观看区推送收敛为单写者。普通 query 的只读免锁已在
-  2026-11-20 落地，其余方向尚未实现；实施项与验收见
-  `docs/issues/2026-11-20-P2-lock-file-hang.md`。`docs/readme/cli.md` 与
+  2026-11-20 落地，其余方向尚未实现；锁创建窗口的已知缺陷见
+  `docs/issues/2026-11-20-P2-lock-create-race.md`。`docs/readme/cli.md` 与
   `skills/llm-wiki/SKILL.md` 已同步 query 只读行为。
 
 ## 2026-11-19：工作流与话题定义收进观看区
