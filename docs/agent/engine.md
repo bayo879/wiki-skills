@@ -25,7 +25,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | frontmatter | `frontmatter.py` | `split_frontmatter`、`unquote_scalar`、`yaml_scalar`；页面渲染与工作流加载共用一套语法 |
 | 页面层 | `pages.py` 的 `PagesMixin` | `page_record`、`write_rev`、`rebuild_links`、`links_for`、`view_text`、`page_ids` |
 | 页面渲染 | `pages.py` 的 `render_page` | 依赖 `frontmatter.yaml_scalar`；`view_path`/`raw_of` 只在写观看区时传入，证据行链到 raw、raw 末尾追加原文来源段；改动一侧要同步另一侧 |
-| 页面检索 | `search.py` | `search_pages`、`rank_key`、`snippet`；只读 `Wiki`，不碰命令状态 |
+| 页面检索 | `search.py` | `search_pages`、`search_pages_grouped`、`rank_key`、`snippet`；直读最新版行，只为返回项解析 links/status；只读 `Wiki`，不碰命令状态 |
 | 观看区与发布 | `view.py` 的 `sync_view`、`sync_view_file`、`render_view_readme`；`command_sync` 在 `cli/workspace.py` | 账本 → `<view>/pages`；`raw/` 由摄入维护；`workflows/`、`topics/`、`runs/` 是项目内容，引擎不覆盖、不删除；手改只告警，`sync` 回收 |
 | 任务行 | `task/store.py` 的 `TaskStoreMixin` | 任务行、任务目录与 payload、查询预算与视图面；任务常量（`TASK_OPEN_STATES`、`TASK_LEASE_SECONDS`、`QUERY_*`）住在这个文件，其他任务模块从这里取 |
 | 任务排队 | `task/queue.py` 的 `TaskQueueMixin` | 入队、来源归属、链接预填、来源漂移判定与原文固定 |

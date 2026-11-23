@@ -17,9 +17,10 @@ from util import dump_meta
 def query_task(wiki, words):
     """Register one search per topic word on a task, then show the hits.
 
-    Words are searched one by one on purpose: pooling them ranks a page that
+    Words keep separate rankings on purpose: pooling them ranks a page that
     repeats a common word above the page that answers one specific word, and
-    the agent reads the grouped output to judge similarity itself.
+    the agent reads the grouped output to judge similarity itself. The ledger is
+    still read only once, so the per-word groups cost one scan in total.
     """
     row = wiki.task_row(ARGS.task)
     if not row:
@@ -62,11 +63,11 @@ def query_task(wiki, words):
     limit = ARGS.limit or 5
     groups = []
     hits = {}
-    for word in words:
-        scored, results = search.search_pages(wiki, [word], limit)
+    for word, (matches, results) in zip(
+            words, search.search_pages_grouped(wiki, words, limit)):
         groups.append({
             "word": word,
-            "matches": len(scored),
+            "matches": matches,
             "returned": len(results),
             "results": results,
         })
