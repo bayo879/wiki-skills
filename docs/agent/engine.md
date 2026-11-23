@@ -6,7 +6,7 @@
 `task/`（`store.py`、`queue.py`、`lease.py`）；其余按职责分在 `pages.py`、`view.py`、
 `ingest.py`、`util.py` 等根级文件；单文件都不超过 1000 行 / 2 万字符。公共错误在 `errors.py`，
 frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行工作流在
-`workflows.py`，话题沉淀在 `topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，
+`workflows.py` 与 `workflow_steps.py`，话题沉淀在 `topics.py`，运行时基线在 `runtime.py`，安装自检在 `health.py`，
 工作区边界在 `workspace.py`，任务信息面在 `tasks.py`，页面载荷校验在 `validation.py`。
 本文件只记录改代码时容易踩的内部约定，命令与字段以 `docs/readme/cli.md` 为准。
 
@@ -31,7 +31,8 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
 | 任务排队 | `task/queue.py` 的 `TaskQueueMixin` | 入队、来源归属、链接预填、来源漂移判定与原文固定 |
 | 任务领取与租约 | `task/lease.py` 的 `TaskLeaseMixin` | 领取、租约归属（`task_leases`、`sweep_leases`、`lease_owner`）、树与批的排序、释放/过期/关闭；并发走同一条 CAS 约定 |
 | 任务信息面 | `tasks.py` | `brief`（做什么/怎么做/提交后的影响）、`template`（固定骨架）、章节骨架；不读写数据库 |
-| 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load`；先扫 `<view>/workflows/`，再扫旧根 `workflows/` 兜底，最后合并技能内置工作流；条目带 `origin`（`view`/`legacy`/`builtin`）与 `legacy_conflict`；`parse_steps`/`_contract` 解析四类步骤与判定；只读文件，不写 `.wiki/`，不生成任务 |
+| 工作流能力 | `workflows.py` | `scan`/`inventory`/`match`/`load` 与条目组装（`_entry`/`_public`/`_resources`/`_tags`）；先扫 `<view>/workflows/`，再扫旧根 `workflows/` 兜底，最后合并技能内置工作流；条目带 `origin`（`view`/`legacy`/`builtin`）与 `legacy_conflict`；只读文件，不写 `.wiki/`，不生成任务 |
+| 步骤契约 | `workflow_steps.py` | `parse_steps`/`_contract`/`_applies` 解析 `## 步骤`、`## 适用` 与四类标记判定；纯文本函数，不碰文件与账本；`UNTYPED_ALLOWED` 也在这里 |
 | 话题沉淀 | `topics.py` | `scan`/`match`/`rank`/`parse_refs`（`match` 是 `rank(scan(...))` 的薄包装）；先扫 `<view>/topics/*.md`，再扫旧根 `topics/` 兜底；条目带 `origin`；只读文件，不写 `.wiki/`、不排任务；检索打分同 `search.py` |
 | 页面校验 | `validation.py` | 页载荷字段、章节、evidence 逐字校验、来源并集与旧证据保留并复核；纯函数，只读 `Wiki` |
 | 账本结构 | `ledger/schema.py` | `SCHEMA_SQL`、`create_schema`、`ensure_columns`、`ensure_open_page_index`；表与索引契约只在这里定义，`Wiki.ensure` 调用。叶子模块，不 import 任何 mixin |
@@ -123,7 +124,7 @@ frontmatter 解析在 `frontmatter.py`，页面检索在 `search.py`，可执行
     `error`，`roots` 只列实际扫描到的目录（观看区在前，旧根兜底），并汇总带 warning 的项数。
     `workflow load` 的 id 必须是该目录的一级目录名或内置工作流 id，拒绝 `.`、`..`、路径分隔符
     和区外符号链接。工作流文件是活文件，不做缓存或 digest。
-    步骤契约在 `parse_steps` / `_contract`：只取第一个 `## 步骤` 到下一个二级标题之间的顶层
+    步骤契约在 `workflow_steps.py` 的 `parse_steps` / `_contract`：只取第一个 `## 步骤` 到下一个二级标题之间的顶层
     列表项（缩进最浅一层），代码块、缩进子项和其他节不算；`tool:`/`human:`/`agent:`/`verify:`
     接受全角冒号与大小写变体，输出统一小写。部分步骤未标给 `W_STEP_UNTYPED`、标记后无内容给
     `W_STEP_EMPTY`；整份零标记、无 `## 步骤` 或该节无列表项在 `UNTYPED_ALLOWED` 为真
@@ -247,7 +248,8 @@ page 载荷 / page link / page import / page link --repair → 校验 → page_r
   `skills/llm-wiki/scripts/health.py` 的 `SCRIPT_FILES` 与 `BUILTIN_WORKFLOWS`、
   `tests/selftest.py`；保持 query 只返回候选、显式 `workflow search` 与 query 共用 `match()`、
   `load` 只读、内置可覆盖。
-  改进步骤契约时同时改 `parse_steps`、`_contract`、selftest 与 `workflows.md` 的判定表。
+  改进步骤契约时同时改 `workflow_steps.py` 的 `parse_steps`、`_contract`、selftest 与
+  `workflows.md` 的判定表。
 - 改话题：同步 `docs/readme/cli.md`、`docs/readme/topics.md`、`SKILL.md`、
   `skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md`、`scripts/health.py` 的
   `SCRIPT_FILES`、`tests/selftest.py`；保持 `ingest` 跳过 `topics/`、`query` 只带话题。

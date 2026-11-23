@@ -47,6 +47,7 @@ SCRIPT_FILES = (
     "frontmatter.py",
     "search.py",
     "workflows.py",
+    "workflow_steps.py",
     "topics.py",
     "tasks.py",
     "validation.py",

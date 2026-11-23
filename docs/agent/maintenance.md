@@ -23,10 +23,10 @@
 改命令、载荷、错误码时，至少同时检查：`docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
 `skills/llm-wiki/scripts/validation.py`、`skills/llm-wiki/scripts/health.py`、`SKILL.md`、
 `skills/llm-wiki/references/recovery.md`、`tests/selftest.py`、`README.md` 中的示例。
-改工作流行为时，同时检查 `docs/readme/workflows.md`、`skills/llm-wiki/scripts/workflows.py`
-与 `query`/`workflow` 的输出断言。`workflows.WORKFLOW_DIRS` 改动时还要同步 `ingest` 的根级
+改工作流行为时，同时检查 `docs/readme/workflows.md`、`skills/llm-wiki/scripts/workflows.py`、
+`skills/llm-wiki/scripts/workflow_steps.py` 与 `query`/`workflow` 的输出断言。`workflows.WORKFLOW_DIRS` 改动时还要同步 `ingest` 的根级
 跳过、`publish.dir` 的保留名、观看区投放目录与 `docs/readme/cli.md`。改步骤契约
-（`parse_steps`、`_contract`、`UNTYPED_ALLOWED`）时，同步 `workflows.md` 的判定表、
+（`workflow_steps.py` 的 `parse_steps`、`_contract`、`UNTYPED_ALLOWED`）时，同步 `workflows.md` 的判定表、
 `SKILL.md` 的四类标记段、`health.py` 的 `BUILTIN_WORKFLOWS` 与 selftest 的夹具。
 改话题流程时，同时检查 `SKILL.md` 的触发描述、`docs/readme/topics.md` 与内置工作流
 `skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md` 的归属、授权与格式约束。
