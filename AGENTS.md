@@ -14,8 +14,10 @@
 
 - **确认开发边界或方向**：读 [开发方向与决策](docs/agent/development-decisions.md)。
   记录 skills-only 转型、账本为唯一事实源、删除页面镜像、不引入 OCR/联网等已定决策。
-- **改引擎（`scripts/wiki.py`）**：读 [引擎内部](docs/agent/engine.md)，查任务状态机、
-  epoch/lease、修订与渲染、观看区推送、错误码约定与单文件规模边界。
+- **改引擎（`scripts/wiki.py`）**：读 [引擎内部](docs/agent/engine.md) 的布局、
+  数据方向与改动检查表，任务状态机、epoch/lease、修订与渲染、观看区推送、锁分层等
+  存储与并发约定在 [引擎不变量](docs/agent/engine-invariants.md)；错误码见
+  [CLI 契约](docs/readme/cli.md)。
 - **改话题探索或沉淀流程**：读 [话题沉淀](docs/readme/topics.md) 与内置工作流
   `skills/llm-wiki/workflows/topic-exploration/WORKFLOW.md`，查 query 的 `workflows` 候选与
   `workflow search` 的显式检索、`query` 的 `topics` 字段与 `ingest` 跳过观看区及旧根

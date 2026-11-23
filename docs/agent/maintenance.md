@@ -17,7 +17,7 @@
 | 工作流目录、frontmatter、步骤契约与写法 | `docs/readme/workflows.md` | `SKILL.md` 只给加载与执行约束 |
 | 故障与恢复 | `skills/llm-wiki/references/recovery.md`（随技能安装，按错误码分节） | `docs/readme/recovery.md` 只留原则与入口 |
 | 实测结果与未覆盖项 | `docs/agent/verification.md` | — |
-| 内部实现约定 | `docs/agent/engine.md` | — |
+| 内部实现约定 | `docs/agent/engine.md`、`docs/agent/engine-invariants.md` | 布局与检查表在前者，存储/并发不变量在后者 |
 | 已定方向 | `docs/agent/development-decisions.md` | — |
 
 改命令、载荷、错误码时，至少同时检查：`docs/readme/cli.md`、`skills/llm-wiki/scripts/tasks.py`、
