@@ -1,7 +1,7 @@
 """任务行的持久化：任务行、目录与 payload、查询预算与视图面。
 
 账本里的 tasks/task_sources 是唯一事实源；本模块只做读写与状态迁移，不关心命令怎么排版输出。
-`Wiki` 的组合来源之一；排队见 task_queue，领取与租约见 task_lease。"""
+`Wiki` 的组合来源之一；排队见 queue.py，领取与租约见 lease.py。"""
 
 from __future__ import annotations
 

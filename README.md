@@ -163,7 +163,7 @@ Rust 实现已于 2026-11-13 停止维护，归档在 Git tag `rust-archive-2026
 ## 开发
 
 ```bash
-python3 -m py_compile skills/llm-wiki/scripts/*.py
+python3 -m py_compile skills/llm-wiki/scripts/*.py skills/llm-wiki/scripts/*/*.py
 python3 tests/selftest.py
 ```
 

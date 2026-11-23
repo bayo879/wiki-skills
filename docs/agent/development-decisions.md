@@ -383,10 +383,10 @@ skill 的主 Markdown + 关联脚本/说明。确认的取舍：
 关闭 `docs/issues/2026-11-16-P2-split-wiki-engine.md`：`wiki.py` 长到 2868 行，命令、账本、
 观看区与任务混在一个文件里，超过单文件 2000 行的可维护边界。
 
-- 落地：命令层进 `cli.py`；`ledger.py` 收拢 DDL、`LedgerMixin` 与组合根 `Wiki`；页面、
-  观看区、任务、摄入分别进 `pages.py`、`view.py`、`task_store.py`、`ingest.py`；纯函数公共
-  部分进 `util.py`。`wiki.py` 只保留 `python3 wiki.py <cmd>` 入口与 `tests/selftest.py`
-  用到的再导出。
+- 落地：命令层进 `cli/`（`__init__.py` 入口，其余按命令族分）；`ledger/` 收拢 DDL、
+  `LedgerMixin` 与组合根 `Wiki`；页面、观看区、任务、摄入分别进 `pages.py`、`view.py`、
+  `task/`、`ingest.py`；纯函数公共部分进 `util.py`。`wiki.py` 只保留 `python3 wiki.py <cmd>`
+  入口与 `tests/selftest.py` 用到的再导出。
 - 取舍：`Wiki` 仍是唯一持有连接的对象，四个 mixin 组合成一个类，拆分只「按职责搬方法」，
   不改命令输出、错误码、`docs/readme/cli.md` 契约与 `.wiki/` 布局；新增 `util.py` 是为了
   让页面与观看区不反向依赖账本模块。

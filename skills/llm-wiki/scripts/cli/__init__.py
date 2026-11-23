@@ -1,6 +1,7 @@
 """llm-wiki 命令行：参数解析、命令分发与锁。
 
-各命令实现在 cli_*.py，共用的小工具在 cli_common.py；输出契约见
+各命令实现在同目录的模块（ingest/submit/workspace/query/page/workflow），共用的小工具在
+common.py；输出契约见
 docs/readme/cli.md，进度与错误码见 docs/agent/engine.md。"""
 
 from __future__ import annotations
@@ -9,14 +10,14 @@ import argparse
 import sys
 from pathlib import Path
 
-from cli_common import ARGS, VERSION, fail
-from cli_ingest import command_ingest
-from cli_page import command_page_import, command_page_link, command_page_restore
+from cli.common import ARGS, VERSION, fail
+from cli.ingest import command_ingest
+from cli.page import command_page_import, command_page_link, command_page_restore
 # tests/selftest.py 直接调用这两个纯函数，保持在入口模块的再导出面。
-from cli_query import citing_topics_index, command_query, ref_topics_line
-from cli_submit import command_submit
-from cli_workflow import command_workflow
-from cli_workspace import (
+from cli.query import citing_topics_index, command_query, ref_topics_line
+from cli.submit import command_submit
+from cli.workflow import command_workflow
+from cli.workspace import (
     command_check,
     command_doctor,
     command_export,

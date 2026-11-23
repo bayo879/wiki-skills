@@ -103,5 +103,12 @@ Markdown 文档同样超限（按 1.2 万字符口径，行数均未超 1000）�
   组合八个 mixin，方法名、参数与返回不变，外部四个文件的 import 点（`cli_common`、`wiki`、`health`、
   `cli_workflow`）零改动。`python3 tests/selftest.py` 368/368、输出与拆分前逐字节一致；另用
   git worktree 对拆前版本跑同一组 24 条命令做差分，除 `check` 多出 6 行新文件清单外输出一致。
+- 2026-11-23：`scripts/` 目录整合（只改布局，不改体积与行为）。成族的模块收进三个包：
+  `cli/`（`__init__.py` + `common/ingest/submit/workspace/query/page/workflow`）、`ledger/`
+  （`__init__.py` + `schema/core/sources/raws`）、`task/`（`store/queue/lease`）；根级从 32 个
+  `.py` 降到 16 个文件 + 3 个目录。包内导入统一成 `from cli.common import ...` 这类绝对包路径；
+  `scripts/wiki.py` 仍是唯一入口，`cli.common.SCRIPTS_DIR` 修正了包内 `__file__` 的上溯层级。
+  `health.py` 的 `SCRIPT_FILES` 改用相对路径（`cli/common.py` 等），检查逻辑不变。
+  `python3 tests/selftest.py` 368/368、输出与拆分前逐字节一致；命令行差分只剩 `check` 的文件清单行。
 - 2026-11-23：剩余未开工——`workflows.py`（627 行 / 20938 字符，仍超 2 万字符）与方案 D
   的超限 Markdown；体积口径见上方表格，两者都会随基线变化。

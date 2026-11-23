@@ -1,7 +1,7 @@
 """各命令共用的小工具：参数信封（ARGS）、输出（emit/fail）、开账本与安装校验。
 
-命令实现在 cli_ingest/cli_submit/cli_workspace/cli_query/cli_page/cli_workflow，
-参数解析与分发在 cli.py。"""
+命令实现在同目录的 ingest/submit/workspace/query/page/workflow，参数解析与分发在
+`cli/__init__.py`。"""
 
 from __future__ import annotations
 
@@ -121,8 +121,12 @@ def open_wiki(require_sources=False, dry_run=False, push=True, readonly=False):
     return wiki, created
 
 
+# 本文件在 cli/ 里，上一级才是脚本目录（health 按它逐个查文件）。
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+
+
 def require_install():
-    health.require_install(Path(__file__).resolve().parent, Path.cwd())
+    health.require_install(SCRIPTS_DIR, Path.cwd())
 
 
 def read_payload(wiki, row):

@@ -325,7 +325,7 @@ status --brief: 5 sources (0 pending, 0 unsupported, 1 oversize), 1 pages (0 sta
 
 ## 2026-11-18 话题目录改名后复跑
 
-根目录 `话题/` 改名 `topics/`，同步 `topics.TOPIC_DIR`；`ledger_sources.py` 的扫描跳过与
+根目录 `话题/` 改名 `topics/`，同步 `topics.TOPIC_DIR`；`ledger/sources.py` 的扫描跳过与
 `publish.dir` 保留名校验从该常量取值，`view.py` 投放目标不变。复跑
 `python3 -m py_compile skills/llm-wiki/scripts/*.py` 通过；`python3 tests/selftest.py`：
 290/290 通过，退出码 0。检查点：

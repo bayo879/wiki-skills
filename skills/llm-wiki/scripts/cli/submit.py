@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from cli_common import (
+from cli.common import (
     ARGS,
     ID_RE,
     emit,

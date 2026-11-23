@@ -1,6 +1,6 @@
 """账本连接与目录布局：打开/只读打开、建表与发布目录、关闭。
 
-`Wiki` 的组合来源之一；来源行与原文读写分别在 ledger_sources 与 ledger_raws。"""
+`Wiki` 的组合来源之一；来源行与原文读写分别在 sources.py 与 raws.py。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import topics
 from errors import WikiError
-from ledger_schema import (
+from ledger.schema import (
     CONFIG_NAME,
     DB_NAME,
     DEFAULT_CONFIG,

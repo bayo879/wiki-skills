@@ -9,7 +9,7 @@ import topics
 import workflows
 from pathlib import Path
 
-from cli_common import ARGS, emit, open_wiki, session_owner
+from cli.common import ARGS, emit, open_wiki, session_owner
 from errors import WikiError
 from util import dump_meta
 

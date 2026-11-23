@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """llm-wiki 的入口与导入面。
 
-命令实现在 cli.py，Wiki 类在 ledger.py 里由四个 mixin 组合。本模块保留
+命令实现在 cli/ 里按命令族分文件，Wiki 类在 ledger/__init__.py 里由八个 mixin 组合。本模块保留
 `python3 wiki.py <command>` 这个调用方式，并再导出 tests/selftest.py
 在表一级检查用到的那几个名字；其他代码应直接 import 对应模块。
 """

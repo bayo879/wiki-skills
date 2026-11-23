@@ -6,8 +6,9 @@ import health
 import sqlite3
 from pathlib import Path
 
-from cli_common import (
+from cli.common import (
     ARGS,
+    SCRIPTS_DIR,
     VERSION,
     emit,
     open_wiki,
@@ -23,7 +24,7 @@ from workspace import WIKI_DIR, inside_root, window_safe
 
 
 def command_check():
-    report = health.check_installation(Path(__file__).resolve().parent, Path.cwd())
+    report = health.check_installation(SCRIPTS_DIR, Path.cwd())
     lines = [
         f"{'ok  ' if item['ok'] else 'fail'} {item['name']}: {item['detail']}"
         for item in report["checks"]

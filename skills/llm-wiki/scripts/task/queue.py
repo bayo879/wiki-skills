@@ -1,6 +1,6 @@
 """任务排队：入队、来源归属、链接预填与来源漂移拦截。
 
-`Wiki` 的组合来源之一；任务行与租约生命周期在 task_store 与 task_lease。"""
+`Wiki` 的组合来源之一；任务行与租约生命周期在 store.py 与 lease.py。"""
 
 from __future__ import annotations
 

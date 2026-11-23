@@ -57,7 +57,7 @@
 
 ```bash
 # 需要 Python 3.12+
-python3 -m py_compile skills/llm-wiki/scripts/*.py
+python3 -m py_compile skills/llm-wiki/scripts/*.py skills/llm-wiki/scripts/*/*.py
 python3 tests/selftest.py
 ```
 

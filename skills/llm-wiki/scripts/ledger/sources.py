@@ -1,6 +1,6 @@
 """来源行的读写：扫描来源、来源快照、写入与状态更新。
 
-`Wiki` 的组合来源之一；原文（raw）读写见 ledger_raws。"""
+`Wiki` 的组合来源之一；原文（raw）读写见 raws.py。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import workflows
 from errors import WikiError
 from frontmatter import split_frontmatter
 from ingest import raw_facts
-from ledger_schema import publish_dir_name
+from ledger.schema import publish_dir_name
 from util import norm_key
 from workspace import window_safe
 

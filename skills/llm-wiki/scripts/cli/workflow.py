@@ -5,7 +5,7 @@ from __future__ import annotations
 import workflows
 from pathlib import Path
 
-from cli_common import ARGS, emit
+from cli.common import ARGS, emit
 from errors import WikiError
 from ledger import view_dir
 from workspace import window_safe

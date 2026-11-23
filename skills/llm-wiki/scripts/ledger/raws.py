@@ -1,6 +1,6 @@
 """原文（raw）读写：命名、挂载、手改采纳与来源脚注刷新。
 
-`Wiki` 的组合来源之一；来源行读写见 ledger_sources。"""
+`Wiki` 的组合来源之一；来源行读写见 sources.py。"""
 
 from __future__ import annotations
 

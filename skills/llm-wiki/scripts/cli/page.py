@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 
-from cli_common import ARGS, emit, open_wiki
+from cli.common import ARGS, emit, open_wiki
 from errors import WikiError
 from frontmatter import split_frontmatter
 from pages import normalize_links

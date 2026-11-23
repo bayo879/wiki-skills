@@ -1,6 +1,6 @@
 """任务领取与租约：领取、租约清扫、批与树的排序、释放与关闭。
 
-`Wiki` 的组合来源之一；入队见 task_queue。"""
+`Wiki` 的组合来源之一；入队见 queue.py。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 
 from errors import WikiError
-from task_store import TASK_LEASE_SECONDS
+from task.store import TASK_LEASE_SECONDS
 from util import now_iso
 
 

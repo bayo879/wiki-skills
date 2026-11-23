@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cli_common import (
+from cli.common import (
     ARGS,
     emit,
     open_wiki,

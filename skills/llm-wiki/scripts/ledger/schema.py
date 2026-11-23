@@ -1,7 +1,7 @@
 """账本表结构、迁移与配置：SCHEMA_SQL、建库函数、`.wiki` 目录常量与 publish 配置。
 
 `Wiki.ensure` 打开连接后调用这里的建库函数，命令代码从不自己建表；
-本模块是叶子，不 import 任何账本 mixin，供 ledger_core/sources/raws 共用。"""
+本模块是叶子，不 import 任何账本 mixin，供 core/sources/raws 共用。"""
 
 from __future__ import annotations
 
