@@ -67,8 +67,8 @@ python3 tests/selftest.py
 时先补一个检查再改实现，新检查加进对应主题的 `checks_*.py`；入口同时被 CI 调用，不允许跳过或
 `--keep` 写入仓库。
 
-新增行为若无法在临时目录验证（真实 PDF、OCR、并发），写进 `verification.md` 的
-"未覆盖"，不要写成已验证。
+新增行为若无法在临时目录验证（真实 PDF、OCR、并发），写进 `docs/agent/verification.md`
+的"未覆盖"（当前在 `verification/2026-11-18-19.md`），不要写成已验证。
 
 - 不拿开发目录当 wiki 测试场：仓库自身带 `.wiki/` 与观看区，但所有验证都在
   `tests/selftest.py` 的临时工作区（`tempfile.mkdtemp`）或另起的临时目录里跑；会在仓库根生成
