@@ -1,5 +1,6 @@
 ---
-name: llm-wiki
+name: zj-llm-wiki
+name_cn: 浙江-知识库wiki
 description: 当用户以 `wiki:` 或 `workflow:` 开头下达任务，或要把工作区里的本地文档整理成可检索、可追溯的 Markdown 知识库时使用：建库与增量摄入、检索已有知识、梳理某个主题、按点名的工作流办事、把这次调研沉淀成话题。
 ---
 
