@@ -585,7 +585,7 @@ workflow 一个概念、场景相关的一切都移除。
   处理编码。
 - 只改目录名，话题文件名仍用中文主题词；`ingest` 仍整目录跳过，`query` 的 `topics` 字段、
   六节格式、内置工作流都不变。
-- `topics.TOPIC_DIR` 是唯一事实源：`ledger.py` 的扫描跳过与 `publish.dir` 保留名校验都从它
+- `topics.TOPIC_DIR` 是唯一事实源：`ledger_sources.py` 的扫描跳过与 `publish.dir` 保留名校验都从它
   取值；`view.py` 的投放目标本来就是 `<view>/topics/`，不用改。
 - 不做旧目录兼容：该功能上线两天、各工作区都没有存量 `话题/` 文件，直接改名比长期维护
   双目录读取简单。

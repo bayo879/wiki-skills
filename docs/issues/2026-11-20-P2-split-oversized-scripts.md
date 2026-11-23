@@ -74,12 +74,12 @@ Markdown 文档同样超限（按 1.2 万字符口径，行数均未超 1000）�
 
 ## 待确认与验收条件
 
-- [ ] 决定拆分顺序（建议 A → B → C）与是否先做 A
+- [x] 决定拆分顺序（A → B → C；D 的范围另定）
 - [ ] 拆分后每个文件都在上限以内（代码 1000 行 / 2 万字符；Markdown 1000 行 / 1.2 万字符），且职责可用一句话说明
 - [x] `tests/selftest.py` 仍可一条命令跑全量，输出与现在一致（`N/N checks passed`）
 - [x] 新增脚本文件同步到 `health.py` 的 `SCRIPT_FILES`，`health` 自测不报缺失
 - [x] `docs/agent/engine.md` 的模块地图与 `cli.py` 入口约定同步更新
-- [ ] 每次拆分单独提交，提交信息说明拆分边界，不改运行行为
+- [x] 每次拆分单独提交，提交信息说明拆分边界，不改运行行为
 
 ## 进展
 
@@ -92,5 +92,16 @@ Markdown 文档同样超限（按 1.2 万字符口径，行数均未超 1000）�
   `cli_submit.py` 356 行 / 15692 字符。分两步提交：先抽共用层（`da37e74`），再按族搬命令。
   `python3 tests/selftest.py` 368/368、输出与拆分前逐字节一致；`ARGS` 改成共享
   `Namespace` 对象，`main` 只更新属性，78 处使用点与所有命令输出不变。
-- 2026-11-20：C（`ledger.py` / `task_store.py`）、D（超限 Markdown）未开工；
-  这些文件当前体积见上方表格，C 是下一个候选。
+- 2026-11-23：方案 C 已完成。`ledger.py` 从 810 行 / 30883 字符拆成组合根（36 行 / 1022 字符）
+  + `ledger_schema.py`（264 行 / 8648 字符，叶子：DDL、迁移、配置）
+  + `ledger_core.py`（205 行 / 7902 字符，`LedgerMixin`：连接、建表、发布目录）
+  + `ledger_sources.py`（131 行 / 4964 字符，`SourceMixin`：来源行）
+  + `ledger_raws.py`（250 行 / 10244 字符，`RawMixin`：raw 读写），最大 250 行 / 10244 字符。
+  `task_store.py` 从 631 行 / 25811 字符拆成 253 行 / 9384 字符（常量 + `TaskStoreMixin`：任务行、
+  查询预算与视图面）+ `task_queue.py`（177 行 / 7622 字符，`TaskQueueMixin`）+ `task_lease.py`
+  （228 行 / 9391 字符，`TaskLeaseMixin`）。鸭子类型拆分：拆出的仍是 mixin，`Wiki` 在 `ledger.py`
+  组合八个 mixin，方法名、参数与返回不变，外部四个文件的 import 点（`cli_common`、`wiki`、`health`、
+  `cli_workflow`）零改动。`python3 tests/selftest.py` 368/368、输出与拆分前逐字节一致；另用
+  git worktree 对拆前版本跑同一组 24 条命令做差分，除 `check` 多出 6 行新文件清单外输出一致。
+- 2026-11-23：剩余未开工——`workflows.py`（627 行 / 20938 字符，仍超 2 万字符）与方案 D
+  的超限 Markdown；体积口径见上方表格，两者都会随基线变化。

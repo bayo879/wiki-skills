@@ -163,7 +163,7 @@ frontmatter 字段：
   `2026-11-19-周会`。同一主题再次执行另起任务名，不覆盖上一轮产物。
 - 定义放 `<view>/workflows/<id>/`，产物放 `<view>/runs/workflows/<id>/`，两者分层，任务目录
   不会挡住定义。
-- 观看区整目录在 `scan_files` 的扫描根就被跳过（`skills/llm-wiki/scripts/ledger.py:394-404`），
+- 观看区整目录在 `scan_files` 的扫描根就被跳过（`skills/llm-wiki/scripts/ledger_sources.py:24-42`），
   所以这里建目录、写文件都不会排队来源，也不会卡住 `next`。
 - 不落根目录：根目录非隐藏文件会被 `ingest` 当来源排队，未提交任务以
   `E_TASK_UNSUBMITTED` 卡住后续 `next`（`skills/llm-wiki/scripts/cli_workspace.py:142-149`）。
