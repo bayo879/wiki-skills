@@ -36,7 +36,7 @@
 
 产品说明与使用从 [README](README.md) 进入；设计原则见
 [docs/readme/design-principles.md](docs/readme/design-principles.md)；未决设计统一放
-[docs/issues/](docs/issues/)，不能把候选方案写成已实现事实。
+`docs/issues/`（有未决问题时才建目录），不能把候选方案写成已实现事实。
 
 ## 概念边界：wiki、话题、开发文档
 

@@ -81,6 +81,9 @@ python3 tests/selftest.py
   检索核实新内容，再报告。
 - 不要把候选方案写进 README 或 `docs/readme/` 当作已实现能力。
 - 纯文档提交在提交信息里说明原因。
+- 体积按字符核对：本机 shell 没有 UTF-8 locale 时 `wc -m` 等同 `wc -c` 数字节，中文文档
+  会虚高六成左右，用 `python3 -c "print(len(open(p).read()))"` 或 `wc -l` 之外的字符计数
+  方式确认是否超过 1000 行 / 1.2 万字符。
 
 ## 提交
 
