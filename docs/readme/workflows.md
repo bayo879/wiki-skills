@@ -231,4 +231,4 @@ python3 <skill>/scripts/wiki.py workflow load "topic-exploration" --json
   与 `raw/`、`workflows/`、`topics/` 在任何配置下都会创建，`pages/` 推送时创建，`runs/`
   首次写产物时创建。
 
-完整命令字段与错误码见 [CLI 契约](cli.md#workflow)。
+完整命令字段与错误码见 [CLI 契约](cli/content.md#workflow)。

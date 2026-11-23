@@ -140,7 +140,7 @@ python3 <skill>/scripts/wiki.py sync --body-only --json  # 只取正文与证据
 ```
 
 `sync` 只回收、不推送；下一条会启动引擎的命令启动时才把账本推回观看区。字段与失败码见
-[CLI 契约的 sync 段](docs/readme/cli.md#sync)。
+[CLI 契约的 sync 段](docs/readme/cli/workspace.md#sync)。
 
 ## 仓库结构
 
